@@ -68,7 +68,7 @@ class AudioProcessor(MediaStreamTrack):
             # Enter the context manager to get the actual connection object
             self.dg_connection = self.dg_context.__enter__()
             
-            # Set up event handl ers (closures that capture self)
+            # Set up event handl   ers (closures that capture self)
             def on_open(*args, **kwargs):
                 print("✅ Deepgram connection opened")
                 self.connection_open = True
