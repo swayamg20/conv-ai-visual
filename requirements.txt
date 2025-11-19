@@ -1,0 +1,10 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+websockets==12.0
+aiortc==1.6.0
+av==11.0.0
+numpy==1.24.3
+deepgram-sdk==3.2.7
+aiohttp==3.9.1
+python-dotenv==1.0.0
+

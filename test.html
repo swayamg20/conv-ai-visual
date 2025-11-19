@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Audio RTC Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        #status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            background: #f0f0f0;
+        }
+        #status.connected {
+            background: #d4edda;
+            color: #155724;
+        }
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            background: #007bff;
+            color: white;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #messages {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+            min-height: 100px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+        .audio-visualizer {
+            width: 100%;
+            height: 100px;
+            background: #000;
+            border-radius: 8px;
+            margin: 20px 0;
+        }
+        #transcript {
+            margin: 20px 0;
+            padding: 20px;
+            background: #fff;
+            border: 2px solid #007bff;
+            border-radius: 8px;
+            min-height: 100px;
+            font-size: 16px;
+        }
+        #transcript h3 {
+            margin-top: 0;
+            color: #007bff;
+        }
+        .transcript-text {
+            color: #333;
+            line-height: 1.6;
+        }
+        .interim {
+            color: #888;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+    <h1>Audio WebRTC Client</h1>
+    <div id="status">Disconnected</div>
+    
+    <div>
+        <button onclick="startConnection()">Start Audio Connection</button>
+        <button id="stopBtn" onclick="stopConnection()" disabled>Stop</button>
+    </div>
+    
+    <canvas id="visualizer" class="audio-visualizer"></canvas>
+    
+    <div id="transcript">
+        <h3>Live Transcript</h3>
+        <div id="transcriptText" class="transcript-text">Waiting for speech...</div>
+    </div>
+    
+    <div id="messages"></div>
+    
+    <script>
+        let ws = null;
+        let localStream = null;
+        let peerConnection = null;
+        let audioContext = null;
+        let analyser = null;
+        
+        const configuration = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }
+            ]
+        };
+        
+        async function startConnection() {
+            try {
+                // Debug logging
+                console.log('navigator.mediaDevices:', navigator.mediaDevices);
+                console.log('Location:', window.location.href);
+                console.log('Protocol:', window.location.protocol);
+                
+                // Check if getUserMedia is supported - try different methods
+                const getUserMedia = navigator.mediaDevices?.getUserMedia || 
+                                   navigator.getUserMedia || 
+                                   navigator.webkitGetUserMedia || 
+                                   navigator.mozGetUserMedia;
+                
+                if (!getUserMedia) {
+                    throw new Error('getUserMedia is not supported. Browser: ' + navigator.userAgent);
+                }
+                
+                // Get audio only
+                addMessage('Requesting microphone access...');
+                
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    localStream = await navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: false
+                    });
+                } else {
+                    // Fallback for older browsers
+                    localStream = await new Promise((resolve, reject) => {
+                        getUserMedia.call(navigator, { audio: true, video: false }, resolve, reject);
+                    });
+                }
+                
+                addMessage('Microphone access granted!');
+                
+                // Setup audio visualizer
+                setupVisualizer();
+                
+                // Connect WebSocket
+                ws = new WebSocket('ws://localhost:8000/ws');
+                
+                ws.onopen = async () => {
+                    updateStatus('Connected', true);
+                    addMessage('WebSocket connected!');
+                    
+                    // Create peer connection immediately
+                    await createPeerConnection();
+                };
+                
+                ws.onmessage = async (event) => {
+                    const message = JSON.parse(event.data);
+                    console.log('WebSocket message received:', message);
+                    
+                    if (message.type === 'answer' && peerConnection) {
+                        addMessage('Received answer from server');
+                        await peerConnection.setRemoteDescription(
+                            new RTCSessionDescription(message.sdp)
+                        );
+                        addMessage('Remote description set - connection established!');
+                    } else if (message.type === 'transcript') {
+                        console.log('Transcript received:', message.text, 'is_final:', message.is_final);
+                        // Display transcript
+                        const transcriptDiv = document.getElementById('transcriptText');
+                        const className = message.is_final ? 'transcript-text' : 'interim';
+                        
+                        if (message.is_final) {
+                            // Append final transcript
+                            transcriptDiv.innerHTML += `<div class="${className}">${message.text}</div>`;
+                            addMessage('📝 FINAL: ' + message.text);
+                        } else {
+                            // Show interim result in a separate line
+                            const interimDiv = document.getElementById('interim') || (() => {
+                                const div = document.createElement('div');
+                                div.id = 'interim';
+                                div.className = 'interim';
+                                transcriptDiv.appendChild(div);
+                                return div;
+                            })();
+                            interimDiv.textContent = '💭 ' + message.text;
+                            addMessage('💭 interim: ' + message.text);
+                        }
+                    } else {
+                        addMessage('Received: ' + message.type);
+                    }
+                };
+                
+                ws.onclose = () => {
+                    updateStatus('Disconnected', false);
+                    addMessage('WebSocket closed');
+                };
+                
+                ws.onerror = (error) => {
+                    addMessage('WebSocket error: ' + error);
+                };
+                
+                document.getElementById('stopBtn').disabled = false;
+                
+            } catch (error) {
+                addMessage('Error: ' + error.message);
+                console.error('Error:', error);
+            }
+        }
+        
+        async function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(configuration);
+            addMessage('RTCPeerConnection created');
+            
+            // Add audio track
+            localStream.getAudioTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+                addMessage('Added audio track to peer connection');
+            });
+            
+            // Handle ICE candidates
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    addMessage('ICE candidate generated');
+                    ws.send(JSON.stringify({
+                        type: 'ice_candidate',
+                        candidate: event.candidate
+                    }));
+                }
+            };
+            
+            peerConnection.oniceconnectionstatechange = () => {
+                addMessage(`ICE state: ${peerConnection.iceConnectionState}`);
+            };
+            
+            peerConnection.onconnectionstatechange = () => {
+                addMessage(`Connection state: ${peerConnection.connectionState}`);
+            };
+            
+            // Create and send offer
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            addMessage('Created offer, sending to server...');
+            
+            ws.send(JSON.stringify({
+                type: 'offer',
+                sdp: {
+                    sdp: offer.sdp,
+                    type: offer.type
+                }
+            }));
+        }
+        
+        function setupVisualizer() {
+            const canvas = document.getElementById('visualizer');
+            const canvasCtx = canvas.getContext('2d');
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            const source = audioContext.createMediaStreamSource(localStream);
+            source.connect(analyser);
+            
+            analyser.fftSize = 256;
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+            
+            function draw() {
+                requestAnimationFrame(draw);
+                
+                analyser.getByteFrequencyData(dataArray);
+                
+                canvasCtx.fillStyle = 'rgb(0, 0, 0)';
+                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                const barWidth = (canvas.width / bufferLength) * 2.5;
+                let x = 0;
+                
+                for (let i = 0; i < bufferLength; i++) {
+                    const barHeight = (dataArray[i] / 255) * canvas.height;
+                    
+                    canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
+                    canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
+                    
+                    x += barWidth + 1;
+                }
+            }
+            
+            draw();
+        }
+        
+        function stopConnection() {
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+            
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            updateStatus('Disconnected', false);
+            addMessage('Connection stopped');
+            document.getElementById('stopBtn').disabled = true;
+        }
+        
+        function updateStatus(text, connected) {
+            const status = document.getElementById('status');
+            status.textContent = text;
+            if (connected) {
+                status.classList.add('connected');
+            } else {
+                status.classList.remove('connected');
+            }
+        }
+        
+        function addMessage(msg) {
+            const messages = document.getElementById('messages');
+            const time = new Date().toLocaleTimeString();
+            messages.innerHTML += `<div>[${time}] ${msg}</div>`;
+            messages.scrollTop = messages.scrollHeight;
+        }
+    </script>
+</body>
+</html>
