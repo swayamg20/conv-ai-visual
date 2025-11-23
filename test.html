@@ -1,334 +1,384 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Audio RTC Client</title>
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Simple WebRTC ↔ FastAPI (aiortc) Test</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 50px auto;
-            padding: 20px;
-        }
-        #status {
-            padding: 10px;
-            margin: 10px 0;
-            border-radius: 4px;
-            background: #f0f0f0;
-        }
-        #status.connected {
-            background: #d4edda;
-            color: #155724;
-        }
-        button {
-            padding: 10px 20px;
-            margin: 5px;
-            cursor: pointer;
-            border: none;
-            border-radius: 4px;
-            background: #007bff;
-            color: white;
-        }
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-        #messages {
-            margin-top: 20px;
-            padding: 10px;
-            background: #f8f9fa;
-            border-radius: 4px;
-            min-height: 100px;
-            max-height: 300px;
-            overflow-y: auto;
-            font-size: 12px;
-        }
-        .audio-visualizer {
-            width: 100%;
-            height: 100px;
-            background: #000;
-            border-radius: 8px;
-            margin: 20px 0;
-        }
-        #transcript {
-            margin: 20px 0;
-            padding: 20px;
-            background: #fff;
-            border: 2px solid #007bff;
-            border-radius: 8px;
-            min-height: 100px;
-            font-size: 16px;
-        }
-        #transcript h3 {
-            margin-top: 0;
-            color: #007bff;
-        }
-        .transcript-text {
-            color: #333;
-            line-height: 1.6;
-        }
-        .interim {
-            color: #888;
-            font-style: italic;
-        }
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #f5f4f1;
+        color: #1f2933;
+      }
+
+      .card {
+        max-width: 780px;
+        width: 100%;
+        margin: 24px;
+        padding: 28px 32px;
+        border-radius: 24px;
+        background: #ffffff;
+        box-shadow: 0 16px 40px rgba(15, 23, 42, 0.06);
+        border: 1px solid rgba(148, 163, 184, 0.25);
+      }
+
+      h1 {
+        font-size: 24px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        font-weight: 500;
+        margin: 0 0 4px;
+      }
+
+      p {
+        line-height: 1.5;
+      }
+
+      button {
+        padding: 8px 18px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.8);
+        cursor: pointer;
+        background: #f8fafc;
+        color: #1f2933;
+        font-weight: 500;
+        margin-right: 8px;
+        transition: background 0.15s ease, border-color 0.15s ease,
+          transform 0.1s ease;
+      }
+
+      button:hover:not(:disabled) {
+        background: #e2f3ee;
+        border-color: #5bb89a;
+        transform: translateY(-1px);
+      }
+
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 80px;
+        margin-top: 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        padding: 10px 12px;
+        resize: vertical;
+        background: #f9fafb;
+        color: #111827;
+        font-size: 14px;
+      }
+
+      textarea:focus {
+        outline: none;
+        border-color: #5bb89a;
+        box-shadow: 0 0 0 1px rgba(91, 184, 154, 0.15);
+      }
+
+      pre {
+        background: #f9fafb;
+        border-radius: 14px;
+        padding: 10px 12px;
+        font-size: 12px;
+        max-height: 220px;
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        color: #111827;
+        white-space: pre-wrap;
+      }
+
+      .badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        background: #eef6f3;
+        border: 1px solid rgba(148, 163, 184, 0.5);
+        color: #5bb89a;
+        margin-bottom: 14px;
+      }
+
+      .section-label {
+        margin-top: 16px;
+        font-size: 13px;
+        color: #6b7280;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+
+      code {
+        background: #f3f4f6;
+        padding: 2px 6px;
+        border-radius: 6px;
+        font-size: 12px;
+      }
     </style>
-</head>
-<body>
-    <h1>Audio WebRTC Client</h1>
-    <div id="status">Disconnected</div>
-    
-    <div>
-        <button onclick="startConnection()">Start Audio Connection</button>
-        <button id="stopBtn" onclick="stopConnection()" disabled>Stop</button>
+  </head>
+  <body>
+    <div class="card">
+      <div class="badge">WebRTC datachannel ↔ FastAPI /offer</div>
+      <h1>FastAPI WebRTC Test</h1>
+      <p style="margin: 0 0 16px; color: #6b7280;">
+        1. Start the backend:
+        <code>uvicorn main:app --reload</code>
+        <br />
+        2. Click "Connect", then send a message. You should see an echo from the
+        server.
+      </p>
+
+      <div style="margin-bottom: 8px">
+        <button id="connect">Connect</button>
+        <button id="disconnect" disabled>Stop</button>
+        <button id="send" disabled>Send message</button>
+        <span id="status" style="margin-left: 8px; font-size: 13px; color: #a5b4fc;">
+          idle
+        </span>
+      </div>
+      <div class="section-label">Transcripts</div>
+      <pre id="transcripts"></pre>
+
+      <label for="outgoing" class="section-label">
+        Outgoing message
+      </label>
+      <textarea id="outgoing">hello from browser</textarea>
+
+      <div class="section-label">Log</div>
+      <pre id="log"></pre>
     </div>
-    
-    <canvas id="visualizer" class="audio-visualizer"></canvas>
-    
-    <div id="transcript">
-        <h3>Live Transcript</h3>
-        <div id="transcriptText" class="transcript-text">Waiting for speech...</div>
-    </div>
-    
-    <div id="messages"></div>
-    
+
     <script>
-        let ws = null;
-        let localStream = null;
-        let peerConnection = null;
-        let audioContext = null;
-        let analyser = null;
-        
-        const configuration = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' }
-            ]
-        };
-        
-        async function startConnection() {
+      const connectBtn = document.getElementById("connect");
+      const disconnectBtn = document.getElementById("disconnect");
+      const sendBtn = document.getElementById("send");
+      const statusEl = document.getElementById("status");
+      const logEl = document.getElementById("log");
+      const outgoingEl = document.getElementById("outgoing");
+
+      let pc = null;
+      let channel = null;
+      let localStream = null;
+
+      function log(message) {
+        const now = new Date().toISOString().slice(11, 19);
+        logEl.textContent += `[${now}] ${message}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+        console.log(message);
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function connect() {
+        if (pc) {
+          log("Already have a peerconnection");
+          return;
+        }
+
+        setStatus("creating RTCPeerConnection…");
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+
+        // Capture microphone audio and add it to the PeerConnection
+        try {
+          setStatus("requesting microphone…");
+          localStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              channelCount: 1,
+              sampleRate: 48000,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+          localStream.getAudioTracks().forEach((track) => {
+            pc.addTrack(track, localStream);
+          });
+          log("attached microphone audio track to PeerConnection");
+        } catch (err) {
+          log(`getUserMedia error: ${err.name || err}`);
+        }
+
+        pc.addEventListener("iceconnectionstatechange", () => {
+          log(`iceConnectionState: ${pc.iceConnectionState}`);
+        });
+
+        pc.addEventListener("icegatheringstatechange", () => {
+          log(`iceGatheringState: ${pc.iceGatheringState}`);
+        });
+
+        channel = pc.createDataChannel("chat");
+        channel.addEventListener("open", () => {
+          log("datachannel open");
+          setStatus("connected");
+          sendBtn.disabled = false;
+        });
+
+        channel.addEventListener("close", () => {
+          log("datachannel closed");
+          setStatus("closed");
+          sendBtn.disabled = true;
+        });
+
+        const transcriptsEl = document.getElementById("transcripts");
+
+channel.addEventListener("message", (event) => {
+  // try to parse JSON payloads from the server (we send JSON for transcripts)
+  try {
+    const data = JSON.parse(event.data);
+    if (data && data.type === "transcript") {
+      const ts = new Date().toLocaleTimeString();
+      const finalFlag = data.is_final ? " (final)" : " (interim)";
+      const line = `[${ts}]${finalFlag} ${data.text}\n`;
+      transcriptsEl.textContent += line;
+      transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
+      // also log a short notice
+      log(`transcript${finalFlag}: ${data.text.slice(0, 80)}`);
+      return;
+    }
+  } catch (e) {
+    // not JSON — fall through to plain echo display
+  }
+  // fallback: raw message
+  log(`from server: ${event.data}`);
+});
+
+        setStatus("creating offer…");
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        // Wait for ICE gathering to finish so SDP contains candidates
+        await new Promise((resolve) => {
+          if (pc.iceGatheringState === "complete") {
+            resolve();
+            return;
+          }
+          const checkState = () => {
+            if (pc.iceGatheringState === "complete") {
+              pc.removeEventListener("icegatheringstatechange", checkState);
+              resolve();
+            }
+          };
+          pc.addEventListener("icegatheringstatechange", checkState);
+
+          // Fallback timeout
+          setTimeout(resolve, 2000);
+        });
+
+        const localDesc = pc.localDescription;
+        log("sending offer to backend /offer");
+
+        const res = await fetch("http://localhost:8000/offer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sdp: localDesc.sdp,
+            type: localDesc.type,
+          }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text();
+          log(`backend error ${res.status}: ${text}`);
+          setStatus("error");
+          return;
+        }
+
+        const data = await res.json();
+        log("received answer from backend");
+        await pc.setRemoteDescription(data);
+        setStatus("waiting for datachannel…");
+      }
+
+      function stopConnection() {
+        if (!pc && !channel && !localStream) {
+          log("no active connection to stop");
+          return;
+        }
+
+        log("stopping connection");
+
+        // Close datachannel
+        if (channel && channel.readyState !== "closed") {
+          try {
+            channel.close();
+          } catch (e) {
+            console.warn("error closing datachannel", e);
+          }
+        }
+
+        // Stop tracks from getUserMedia
+        if (localStream) {
+          localStream.getTracks().forEach((t) => {
             try {
-                // Debug logging
-                console.log('navigator.mediaDevices:', navigator.mediaDevices);
-                console.log('Location:', window.location.href);
-                console.log('Protocol:', window.location.protocol);
-                
-                // Check if getUserMedia is supported - try different methods
-                const getUserMedia = navigator.mediaDevices?.getUserMedia || 
-                                   navigator.getUserMedia || 
-                                   navigator.webkitGetUserMedia || 
-                                   navigator.mozGetUserMedia;
-                
-                if (!getUserMedia) {
-                    throw new Error('getUserMedia is not supported. Browser: ' + navigator.userAgent);
-                }
-                
-                // Get audio only
-                addMessage('Requesting microphone access...');
-                
-                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    localStream = await navigator.mediaDevices.getUserMedia({
-                        audio: true,
-                        video: false
-                    });
-                } else {
-                    // Fallback for older browsers
-                    localStream = await new Promise((resolve, reject) => {
-                        getUserMedia.call(navigator, { audio: true, video: false }, resolve, reject);
-                    });
-                }
-                
-                addMessage('Microphone access granted!');
-                
-                // Setup audio visualizer
-                setupVisualizer();
-                
-                // Connect WebSocket
-                ws = new WebSocket('ws://localhost:8000/ws');
-                
-                ws.onopen = async () => {
-                    updateStatus('Connected', true);
-                    addMessage('WebSocket connected!');
-                    
-                    // Create peer connection immediately
-                    await createPeerConnection();
-                };
-                
-                ws.onmessage = async (event) => {
-                    const message = JSON.parse(event.data);
-                    console.log('WebSocket message received:', message);
-                    
-                    if (message.type === 'answer' && peerConnection) {
-                        addMessage('Received answer from server');
-                        await peerConnection.setRemoteDescription(
-                            new RTCSessionDescription(message.sdp)
-                        );
-                        addMessage('Remote description set - connection established!');
-                    } else if (message.type === 'transcript') {
-                        console.log('Transcript received:', message.text, 'is_final:', message.is_final);
-                        // Display transcript
-                        const transcriptDiv = document.getElementById('transcriptText');
-                        const className = message.is_final ? 'transcript-text' : 'interim';
-                        
-                        if (message.is_final) {
-                            // Append final transcript
-                            transcriptDiv.innerHTML += `<div class="${className}">${message.text}</div>`;
-                            addMessage('📝 FINAL: ' + message.text);
-                        } else {
-                            // Show interim result in a separate line
-                            const interimDiv = document.getElementById('interim') || (() => {
-                                const div = document.createElement('div');
-                                div.id = 'interim';
-                                div.className = 'interim';
-                                transcriptDiv.appendChild(div);
-                                return div;
-                            })();
-                            interimDiv.textContent = '💭 ' + message.text;
-                            addMessage('💭 interim: ' + message.text);
-                        }
-                    } else {
-                        addMessage('Received: ' + message.type);
-                    }
-                };
-                
-                ws.onclose = () => {
-                    updateStatus('Disconnected', false);
-                    addMessage('WebSocket closed');
-                };
-                
-                ws.onerror = (error) => {
-                    addMessage('WebSocket error: ' + error);
-                };
-                
-                document.getElementById('stopBtn').disabled = false;
-                
-            } catch (error) {
-                addMessage('Error: ' + error.message);
-                console.error('Error:', error);
-            }
+              t.stop();
+            } catch (e) {}
+          });
+          localStream = null;
         }
-        
-        async function createPeerConnection() {
-            peerConnection = new RTCPeerConnection(configuration);
-            addMessage('RTCPeerConnection created');
-            
-            // Add audio track
-            localStream.getAudioTracks().forEach(track => {
-                peerConnection.addTrack(track, localStream);
-                addMessage('Added audio track to peer connection');
+
+        // Close peer connection
+        if (pc) {
+          try {
+            pc.getSenders().forEach((s) => {
+              if (s.track) {
+                try {
+                  s.track.stop();
+                } catch (e) {}
+              }
             });
-            
-            // Handle ICE candidates
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    addMessage('ICE candidate generated');
-                    ws.send(JSON.stringify({
-                        type: 'ice_candidate',
-                        candidate: event.candidate
-                    }));
-                }
-            };
-            
-            peerConnection.oniceconnectionstatechange = () => {
-                addMessage(`ICE state: ${peerConnection.iceConnectionState}`);
-            };
-            
-            peerConnection.onconnectionstatechange = () => {
-                addMessage(`Connection state: ${peerConnection.connectionState}`);
-            };
-            
-            // Create and send offer
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            addMessage('Created offer, sending to server...');
-            
-            ws.send(JSON.stringify({
-                type: 'offer',
-                sdp: {
-                    sdp: offer.sdp,
-                    type: offer.type
-                }
-            }));
+          } catch (e) {}
+
+          try {
+            pc.close();
+          } catch (e) {
+            console.warn("error closing peerconnection", e);
+          }
         }
-        
-        function setupVisualizer() {
-            const canvas = document.getElementById('visualizer');
-            const canvasCtx = canvas.getContext('2d');
-            canvas.width = canvas.offsetWidth;
-            canvas.height = canvas.offsetHeight;
-            
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioContext.createAnalyser();
-            const source = audioContext.createMediaStreamSource(localStream);
-            source.connect(analyser);
-            
-            analyser.fftSize = 256;
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            
-            function draw() {
-                requestAnimationFrame(draw);
-                
-                analyser.getByteFrequencyData(dataArray);
-                
-                canvasCtx.fillStyle = 'rgb(0, 0, 0)';
-                canvasCtx.fillRect(0, 0, canvas.width, canvas.height);
-                
-                const barWidth = (canvas.width / bufferLength) * 2.5;
-                let x = 0;
-                
-                for (let i = 0; i < bufferLength; i++) {
-                    const barHeight = (dataArray[i] / 255) * canvas.height;
-                    
-                    canvasCtx.fillStyle = `rgb(${barHeight + 100}, 50, 50)`;
-                    canvasCtx.fillRect(x, canvas.height - barHeight, barWidth, barHeight);
-                    
-                    x += barWidth + 1;
-                }
-            }
-            
-            draw();
+
+        pc = null;
+        channel = null;
+
+        sendBtn.disabled = true;
+        disconnectBtn.disabled = true;
+        connectBtn.disabled = false;
+        setStatus("disconnected");
+      }
+
+      function sendMessage() {
+        if (!channel || channel.readyState !== "open") {
+          log("datachannel not open");
+          return;
         }
-        
-        function stopConnection() {
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
-            
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-            
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
-            
-            if (audioContext) {
-                audioContext.close();
-                audioContext = null;
-            }
-            
-            updateStatus('Disconnected', false);
-            addMessage('Connection stopped');
-            document.getElementById('stopBtn').disabled = true;
-        }
-        
-        function updateStatus(text, connected) {
-            const status = document.getElementById('status');
-            status.textContent = text;
-            if (connected) {
-                status.classList.add('connected');
-            } else {
-                status.classList.remove('connected');
-            }
-        }
-        
-        function addMessage(msg) {
-            const messages = document.getElementById('messages');
-            const time = new Date().toLocaleTimeString();
-            messages.innerHTML += `<div>[${time}] ${msg}</div>`;
-            messages.scrollTop = messages.scrollHeight;
-        }
+        const msg = outgoingEl.value || "";
+        channel.send(msg);
+        log(`sent: ${msg}`);
+      }
+
+      connectBtn.addEventListener("click", () => {
+        connect().catch((err) => {
+          console.error(err);
+          log(`connect error: ${err.message || err}`);
+          setStatus("error");
+        });
+      });
+
+      disconnectBtn.addEventListener("click", stopConnection);
+
+      sendBtn.addEventListener("click", sendMessage);
     </script>
-</body>
+  </body>
 </html>
+

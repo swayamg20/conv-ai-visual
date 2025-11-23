@@ -1,5 +1,5 @@
 `uvicorn main:app --reload`
-
+`uvicorn main:app --host localhost --port 3000 --reload`
 webrtc based realtime pipeline:
 
 STT -> Turn Detection (VAD) -> LLM -> TTS

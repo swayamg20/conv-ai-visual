@@ -1,21 +1,24 @@
-from fastapi import FastAPI, WebSocket
-from fastapi.responses import FileResponse
-from fastapi.websockets import WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
-import json
 import asyncio
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
-from av import AudioFrame
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+import json
+from typing import Any, Dict, Optional
+
 import numpy as np
-import os
-from deepgram import DeepgramClient
-from deepgram.core.events import EventType
-from deepgram.extensions.types.sockets import ListenV1SocketClientResponse
-import threading
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc.mediastreams import AudioFrame
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+import logging
+import websockets
+
+from aiortc.contrib.media import MediaBlackhole
 
 app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("webrtc-deepgram")
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -24,330 +27,279 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Get Deepgram API key from environment
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY", "dea381e9d217d2451a3ef550b95b2735e58f101b")
+class Offer(BaseModel):
+    sdp: str
+    type: str
 
-class AudioProcessor(MediaStreamTrack):
+DEEPGRAM_KEY = "dea381e9d217d2451a3ef550b95b2735e58f101b"
+
+pcs = set[Any]()
+datachannels: Dict[str, Any] = {}
+
+
+def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
-    Custom audio track to process incoming audio with Deepgram STT
+    Convert aiortc.AudioFrame to interleaved 16-bit PCM bytes.
+    Handles frames where to_ndarray() returns either (samples, channels) OR (channels, samples).
     """
-    kind = "audio"
-    
-    def __init__(self, track, websocket, loop):
-        super().__init__()
-        self.track = track
-        self.websocket = websocket
-        self.loop = loop  # Store the asyncio event loop
-        self.deepgram_client = None
-        self.dg_connection = None
-        self.dg_context = None  # Store the context manager
-        self.lock_exit = threading.Lock()
-        self.exit = False
-        self.connection_open = False
-        self.frame_count = 0
-        self.setup_deepgram()
-        
-    def setup_deepgram(self):
-        """Initialize Deepgram connection"""
-        try:
-            # Create Deepgram client
-            self.deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
-            
-            # Create websocket connection context manager - use keyword arguments, not dict
-            self.dg_context = self.deepgram_client.listen.v1.connect(
-                model="nova-2",
-                language="en-US",
-                smart_format=True,
-                encoding="linear16",
-                sample_rate=48000,
-                channels=1,
-                interim_results=True,
-                punctuate=True
-            )
-            
-            # Enter the context manager to get the actual connection object
-            self.dg_connection = self.dg_context.__enter__()
-            
-            # Set up event handl   ers (closures that capture self)
-            def on_open(*args, **kwargs):
-                print("✅ Deepgram connection opened")
-                self.connection_open = True
-            
-            def on_message(*args, **kwargs):
-                try:
-                    # Get the message from args
-                    message = args[0] if args else kwargs.get('result')
-                    
-                    # Debug: always log that we got a message
-                    print(f"📨 Deepgram message received: {type(message)}")
-                    
-                    if message and hasattr(message, 'channel') and hasattr(message.channel, 'alternatives'):
-                        transcript = message.channel.alternatives[0].transcript
-                        print(f"   Transcript length: {len(transcript)}")
-                        if len(transcript) > 0:
-                            is_final = getattr(message, 'is_final', True)
-                            speech_final = getattr(message, 'speech_final', False)
-                            print(f"🎤 Transcript ({'FINAL' if is_final else 'interim'}): {transcript}")
-                            
-                            # Send to frontend - schedule in the asyncio event loop from thread
-                            asyncio.run_coroutine_threadsafe(
-                                self.websocket.send_text(json.dumps({
-                                    "type": "transcript",
-                                    "text": transcript,
-                                    "is_final": is_final,
-                                    "speech_final": speech_final
-                                })),
-                                self.loop
-                            )
-                        else:
-                            print(f"   Empty transcript (silence)")
-                    else:
-                        print(f"   Message structure unexpected: {message}")
-                        
-                except Exception as e:
-                    print(f"❌ Error in on_message: {e}")
-                    import traceback
-                    traceback.print_exc()
-            
-            def on_error(*args, **kwargs):
-                error = args[0] if args else kwargs.get('error', 'Unknown error')
-                print(f"❌ Deepgram error: {error}")
-                self.connection_open = False
-            
-            def on_close(*args, **kwargs):
-                print("🔴 Deepgram connection closed")
-                self.connection_open = False
-            
-            self.dg_connection.on(EventType.OPEN, on_open)
-            self.dg_connection.on(EventType.MESSAGE, on_message)
-            self.dg_connection.on(EventType.ERROR, on_error)
-            self.dg_connection.on(EventType.CLOSE, on_close)
-            
-            # Start listening thread (required per official docs)
-            def listening_thread():
-                try:
-                    self.dg_connection.start_listening()
-                except Exception as e:
-                    print(f"❌ Error in listening thread: {e}")
-            
-            listen_thread = threading.Thread(target=listening_thread, daemon=True)
-            listen_thread.start()
-            
-            print("⏳ Deepgram connection created, waiting for open event...")
-            
-            # Wait for connection to open (with timeout)
-            import time
-            timeout = 5
-            start = time.time()
-            while not self.connection_open and (time.time() - start) < timeout:
-                time.sleep(0.1)
-            
-            if self.connection_open:
-                print("✅ Deepgram connection ready!")
-            else:
-                print("⚠️  Warning: Deepgram connection didn't open within timeout")
-            
-        except Exception as e:
-            print(f"❌ Deepgram setup error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-    async def recv(self):
-        frame = await self.track.recv()
-        
-        # Convert audio frame to bytes and send to Deepgram
-        try:
-            self.lock_exit.acquire()
-            should_exit = self.exit
-            self.lock_exit.release()
-            
-            if should_exit:
-                return frame
-            
-            if self.dg_connection and self.connection_open:
-                # Get audio data from frame
-                audio_array = frame.to_ndarray()
-                
-                # Debug: print format info and audio levels
-                if self.frame_count == 0:
-                    print(f"📊 Audio: dtype={audio_array.dtype}, shape={audio_array.shape}, rate={frame.sample_rate}Hz")
-                    print(f"   Audio levels - Min: {audio_array.min()}, Max: {audio_array.max()}, RMS: {np.sqrt(np.mean(audio_array**2)):.2f}")
-                    self.frame_count += 1
-                elif self.frame_count % 50 == 0:
-                    # Every 50 frames (~1 second), check audio levels
-                    rms = np.sqrt(np.mean(audio_array**2))
-                    print(f"📡 Frame {self.frame_count}: Audio RMS={rms:.2f}, Min={audio_array.min()}, Max={audio_array.max()}")
-                    if rms < 10:
-                        print(f"   ⚠️ AUDIO TOO QUIET! Mic may not be working or permission denied.")
-                
-                # Handle different audio formats
-                # WebRTC typically sends float32 in range [-1.0, 1.0] or int16
-                if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
-                    # Apply gain (amplification) - increase volume by 10x
-                    audio_array = audio_array * 10.0
-                    # Clip to [-1.0, 1.0] range and convert to int16
-                    audio_array = np.clip(audio_array, -1.0, 1.0)
-                    audio_array = (audio_array * 32767).astype(np.int16)
-                elif audio_array.dtype != np.int16:
-                    # Convert other types to int16
-                    audio_array = audio_array.astype(np.int16)
-                else:
-                    # Already int16, apply gain (amplify by 10x)
-                    audio_array = np.clip(audio_array.astype(np.float32) * 10.0, -32768, 32767).astype(np.int16)
-                
-                # Handle stereo -> mono conversion
-                if len(audio_array.shape) > 1:
-                    # Shape is (channels, samples) or (samples, channels)
-                    if audio_array.shape[0] < audio_array.shape[1]:
-                        # Shape is (channels, samples) - transpose or just take first channel
-                        if audio_array.shape[0] > 1:
-                            # Multiple channels - average them
-                            audio_array = audio_array.mean(axis=0).astype(np.int16)
-                        else:
-                            # Single channel - just flatten
-                            audio_array = audio_array.flatten()
-                    else:
-                        # Shape is (samples, channels) - take first channel or average
-                        if audio_array.shape[1] > 1:
-                            audio_array = audio_array.mean(axis=1).astype(np.int16)
-                        else:
-                            audio_array = audio_array.flatten()
-                
-                # Convert to bytes (little-endian 16-bit PCM)
-                audio_bytes = audio_array.tobytes()
-                
-                # Send to Deepgram - use send_media() per official docs
-                try:
-                    self.dg_connection.send_media(audio_bytes)
-                    self.frame_count += 1
-                except Exception as send_err:
-                    if "1011" not in str(send_err):  # Don't spam on known error
-                        print(f"❌ Error sending to Deepgram: {send_err}")
-                    self.connection_open = False
-                
-        except Exception as e:
-            print(f"❌ Error processing audio: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        return frame
-    
-    def cleanup(self):
-        """Cleanup Deepgram connection"""
-        try:
-            self.lock_exit.acquire()
-            self.exit = True
-            self.lock_exit.release()
-            
-            # Exit the context manager - this handles closing the connection
-            if self.dg_context:
-                try:
-                    self.dg_context.__exit__(None, None, None)
-                    print("✅ Deepgram connection closed")
-                except Exception as e:
-                    print(f"⚠️  Error closing Deepgram: {e}")
-                    
-        except Exception as e:
-            print(f"❌ Error in cleanup: {e}")
+    arr = frame.to_ndarray()
 
-# Store peer connections
-peer_connections = {}
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 1)
+    samples = getattr(frame, "samples", None)
+    if samples is not None:
 
-@app.get("/test")
-async def test():
-    return FileResponse("test.html", media_type="text/html")
+        if arr.shape[0] != samples and arr.shape[1] == samples:
+            arr = arr.T
+    if np.issubdtype(arr.dtype, np.floating):
+        arr = (arr * 32767).astype("int16")
+    elif arr.dtype != np.int16:
+        arr = arr.astype("int16")
 
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    
-    pc = RTCPeerConnection()
-    client_id = id(websocket)
-    peer_connections[client_id] = pc
-    audio_processor = None
-    
-    print(f"Client {client_id} connected")
-    
-    @pc.on("track")
-    async def on_track(track):
-        nonlocal audio_processor
-        print(f"Track received: {track.kind}")
-        
-        if track.kind == "audio":
-            print("Audio track received! Starting Deepgram processing...")
-            # Get the current event loop
-            loop = asyncio.get_event_loop()
-            audio_processor = AudioProcessor(track, websocket, loop)
-            
-            # Process audio frames
+    return arr.tobytes()
+
+async def deepgram_stream_ws_send_and_recv(
+    websocket_url: str,
+    auth_key: str,
+    sample_rate: int,
+    channel_count: int,
+    audio_queue: "asyncio.Queue[bytes]",
+    results_callback,
+    keepalive_interval: float = 5.0,
+):
+    """
+    """
+    headers = {"Authorization": f"Token {auth_key}"}
+    logger.info("Connecting to Deepgram at %s", websocket_url)
+    try:
+        async with websockets.connect(
+            websocket_url,
+            additional_headers=headers,
+            max_size=None,
+        ) as ws:
+            logger.info("Deepgram WS connected")
+
+            async def sender():
+                try:
+                    while True:
+                        pcm_bytes = await audio_queue.get()
+                        if pcm_bytes is None:
+                            logger.debug("sender got sentinel -> sending Finalize")
+                            await ws.send(json.dumps({"type": "Finalize"}))
+                            return
+                        await ws.send(pcm_bytes)
+                except asyncio.CancelledError:
+                    logger.info("sender cancelled")
+                    raise
+                except Exception as e:
+                    logger.exception("sender error: %s", e)
+                    raise
+
+            async def keepalive():
+                try:
+                    while True:
+                        await asyncio.sleep(keepalive_interval)
+                        try:
+                            await ws.send(json.dumps({"type": "KeepAlive"}))
+                        except Exception:
+                            return
+                except asyncio.CancelledError:
+                    return
+
+            send_task = asyncio.create_task(sender())
+            keep_task = asyncio.create_task(keepalive())
+
             try:
-                while True:
-                    frame = await audio_processor.recv()
-            except Exception as e:
-                print(f"Audio processing ended: {e}")
+                async for msg in ws:
+                    try:
+                        data = json.loads(msg)
+                        await results_callback(data)
+                    except json.JSONDecodeError:
+                        logger.debug("Received non-json message (binary?) of length %d", len(msg))
+            except websockets.ConnectionClosed as e:
+                logger.info("Deepgram WS closed: %s", e)
             finally:
-                if audio_processor:
-                    audio_processor.cleanup()
-        
-        @track.on("ended")
-        async def on_ended():
-            print(f"Track {track.kind} ended")
-            if audio_processor:
-                audio_processor.cleanup()
+                send_task.cancel()
+                keep_task.cancel()
+                try:
+                    await audio_queue.put(None)
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logger.exception("Failed to connect or stream to Deepgram: %s", e)
+
+async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
+    """
+    Read frames from incoming audio track, forward PCM bytes to Deepgram via WS,
+    and print transcription JSON results as they arrive.
+    """
+    logger.info("[%s] Started audio consumer for track id=%s", pc_id, getattr(track, "id", "?"))
+
+    audio_q: "asyncio.Queue[bytes]" = asyncio.Queue()
+
+    sample_rate = None
+    channel_count = None
+
+    base_listen = "wss://api.deepgram.com/v1/listen"
+    model = "nova"
+    websocket_url_template = f"{base_listen}?model={model}&encoding=linear16&interim_results=true"
+
+    async def on_deepgram_event(data: Dict):
+        t = data.get("type")
+        if t == "Results" or t == "results":
+            channel_obj = data.get("channel", {})
+            alts = channel_obj.get("alternatives", [])
+            if alts:
+                best = alts[0]
+                transcript = best.get("transcript", "")
+                is_final = data.get("is_final", False) or data.get("speech_final", False)
+                logger.info("[%s] Deepgram transcript (final=%s): %s", pc_id, is_final, transcript)
+                ch = datachannels.get(pc_id)
+                if ch and ch.readyState == "open":
+                    payload = json.dumps({"type": "transcript", "text": transcript, "is_final": is_final})
+                    try:
+                        ch.send(payload)
+                    except Exception:
+                        logger.exception("[%s] failed to send transcript over datachannel", pc_id)
+        else:
+            logger.debug("[%s] Deepgram event: %s", pc_id, data)
+
+    dg_stream_task: Optional[asyncio.Task] = None
+
+    try:
+        first_frame: AudioFrame = await track.recv()
+        sample_rate = getattr(first_frame, "sample_rate", 48000)
+        samples = getattr(first_frame, "samples", None)
+
+        channel_count = None
+        layout = getattr(first_frame, "layout", None)
+        if layout is not None:
+            channel_count = getattr(layout, "channels", None)
+        if channel_count is None:
+            channel_count = getattr(first_frame, "channels", None)
+
+        from collections.abc import Sequence
+
+        if isinstance(channel_count, Sequence) and not isinstance(channel_count, (str, bytes)):
+            channel_count = len(channel_count)
+
+        if channel_count is None or not isinstance(channel_count, int):
+            arr = first_frame.to_ndarray()
+            if arr.ndim == 1:
+                channel_count = 1
+            else:
+                channel_count = arr.shape[-1]
+
+        logger.info("[%s] first frame: sample_rate=%s channels=%s samples=%s", pc_id, sample_rate, channel_count, samples)
+
+        websocket_url = f"{websocket_url_template}&sample_rate={sample_rate}&channels={channel_count}"
+
+        dg_stream_task = asyncio.create_task(
+            deepgram_stream_ws_send_and_recv(
+                websocket_url,
+                DEEPGRAM_KEY,
+                sample_rate,
+                channel_count,
+                audio_q,
+                on_deepgram_event,
+            )
+        )
+
+        pcm_bytes = audioframe_to_pcm16_bytes(first_frame)
+        await audio_q.put(pcm_bytes)
+
+        while True:
+            frame = await track.recv()
+            pcm_bytes = audioframe_to_pcm16_bytes(frame)
+            await audio_q.put(pcm_bytes)
+            await asyncio.sleep(0)
+
+    except asyncio.CancelledError:
+        logger.info("[%s] consume_audio_track cancelled", pc_id)
+        raise
+    except Exception as e:
+        logger.exception("[%s] consume_audio_track stopped: %s", pc_id, e)
+    finally:
+        try:
+            await audio_q.put(None)
+        except Exception:
+            pass
+
+        if dg_stream_task:
+            try:
+                await asyncio.wait_for(dg_stream_task, timeout=2.0)
+            except Exception:
+                dg_stream_task.cancel()
+
+        logger.info("[%s] consumer finished and Deepgram stream closed", pc_id)
+
+@app.post("/offer")
+async def offer(request: Request):
+    data: Dict = await request.json()
+    offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+
+    pc = RTCPeerConnection()
+    pc_id = f"pc-{id(pc)}"
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        logger.info("[%s] DataChannel received: label=%s", pc_id, channel.label)
+        datachannels[pc_id] = channel
+        @channel.on("message")
+        def on_message(message):
+            logger.info("[%s] message from client: %s", pc_id, message)
+            try:
+                channel.send(f"echo: {message}")
+            except Exception:
+                pass
+        @channel.on("close")
+        def on_close():
+            logger.info("[%s] datachannel closed", pc_id)
+            datachannels.pop(pc_id, None)
+
     
+    pcs.add(pc)
+    logger.info("[%s] created for incoming offer", pc_id)
+
+    media_blackhole = MediaBlackhole()
+
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        print(f"Connection state: {pc.connectionState}")
-        if pc.connectionState == "failed" or pc.connectionState == "closed":
+        logger.info("[%s] Connection state => %s", pc_id, pc.connectionState)
+        if pc.connectionState in ("failed", "closed"):
             await pc.close()
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            message = json.loads(data)
-            msg_type = message.get('type')
-            
-            print(f"Received {msg_type}")
-            
-            if msg_type == 'offer':
-                # Receive offer from client
-                offer = RTCSessionDescription(
-                    sdp=message['sdp']['sdp'],
-                    type=message['sdp']['type']
-                )
-                
-                await pc.setRemoteDescription(offer)
-                print("Remote description set")
-                
-                # Create answer
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-                print("Local description set")
-                
-                # Send answer back to client
-                await websocket.send_text(json.dumps({
-                    "type": "answer",
-                    "sdp": {
-                        "sdp": pc.localDescription.sdp,
-                        "type": pc.localDescription.type
-                    }
-                }))
-                print("Answer sent")
-                
-            elif msg_type == 'ice_candidate':
-                candidate = message.get('candidate')
-                if candidate:
-                    print(f"Adding ICE candidate")
-                    
-    except WebSocketDisconnect:
-        print(f"Client {client_id} disconnected")
-    except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        if audio_processor:
-            audio_processor.cleanup()
-        await pc.close()
-        if client_id in peer_connections:
-            del peer_connections[client_id]
+            pcs.discard(pc)
+            logger.info("[%s] closed and removed", pc_id)
+
+    @pc.on("track")
+    def on_track(track):
+        logger.info("[%s] Track received: kind=%s id=%s", pc_id, track.kind, getattr(track, "id", "?"))
+        if track.kind == "audio":
+            task = asyncio.create_task(consume_audio_track(track, pc_id))
+
+            @track.on("ended")
+            def on_ended():
+                logger.info("[%s] Track ended", pc_id)
+                task.cancel()
+
+        else:
+            pc.addTrack(track)
+            asyncio.ensure_future(media_blackhole.start())
+
+    await pc.setRemoteDescription(offer)
+    answer = await pc.createAnswer()
+    await pc.setLocalDescription(answer)
+
+    logger.info("[%s] Answer created", pc_id)
+    return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    coros = [pc.close() for pc in pcs]
+    await asyncio.gather(*coros, return_exceptions=True)
+    pcs.clear()
+    logger.info("Server shutdown, pcs closed")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
