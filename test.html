@@ -166,12 +166,55 @@
       let pc = null;
       let channel = null;
       let localStream = null;
+      let audioContext = null;
+      let audioChunks = [];
+      let isReceivingAudio = false;
 
       function log(message) {
         const now = new Date().toISOString().slice(11, 19);
         logEl.textContent += `[${now}] ${message}\n`;
         logEl.scrollTop = logEl.scrollHeight;
         console.log(message);
+      }
+
+      // Initialize audio context on first user interaction
+      function initAudioContext() {
+        if (!audioContext) {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          log("audio context initialized");
+        }
+      }
+
+      // Convert PCM bytes to AudioBuffer and play
+      function playPCMAudio(pcmBytes, sampleRate = 16000) {
+        if (!audioContext) {
+          initAudioContext();
+        }
+
+        // Resume audio context if suspended (browser policy)
+        if (audioContext.state === 'suspended') {
+          audioContext.resume();
+        }
+
+        // Create AudioBuffer
+        const numSamples = pcmBytes.length / 2; // 16-bit = 2 bytes per sample
+        const audioBuffer = audioContext.createBuffer(1, numSamples, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+
+        // Convert 16-bit PCM to float32 [-1, 1]
+        const dataView = new DataView(pcmBytes.buffer);
+        for (let i = 0; i < numSamples; i++) {
+          const int16 = dataView.getInt16(i * 2, true); // little-endian
+          channelData[i] = int16 / 32768.0;
+        }
+
+        // Play
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(audioContext.destination);
+        source.start();
+
+        return source;
       }
 
       function setStatus(text) {
@@ -235,19 +278,80 @@
         const transcriptsEl = document.getElementById("transcripts");
 
 channel.addEventListener("message", (event) => {
-  // try to parse JSON payloads from the server (we send JSON for transcripts)
+  // try to parse JSON payloads from the server
   try {
     const data = JSON.parse(event.data);
+    
+    // Handle transcript messages
     if (data && data.type === "transcript") {
       const ts = new Date().toLocaleTimeString();
       const finalFlag = data.is_final ? " (final)" : " (interim)";
       const line = `[${ts}]${finalFlag} ${data.text}\n`;
       transcriptsEl.textContent += line;
       transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
-      // also log a short notice
       log(`transcript${finalFlag}: ${data.text.slice(0, 80)}`);
       return;
     }
+    
+    // Handle LLM text response
+    if (data && data.type === "llm_response") {
+      const ts = new Date().toLocaleTimeString();
+      const line = `[${ts}] [LLM] ${data.text}\n`;
+      transcriptsEl.textContent += line;
+      transcriptsEl.scrollTop = transcriptsEl.scrollHeight;
+      log(`LLM: ${data.text.slice(0, 80)}`);
+      return;
+    }
+    
+    // Handle TTS audio chunk
+    if (data && data.type === "tts_audio_chunk") {
+      if (!isReceivingAudio) {
+        isReceivingAudio = true;
+        audioChunks = [];
+        log(`receiving TTS audio chunks...`);
+      }
+      
+      // Decode base64 to bytes
+      const binaryString = atob(data.audio);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      audioChunks.push(bytes);
+      
+      console.log(`received audio chunk ${data.chunk_index}: ${bytes.length} bytes`);
+      return;
+    }
+    
+    // Handle TTS audio end
+    if (data && data.type === "tts_audio_end") {
+      isReceivingAudio = false;
+      log(`TTS complete: ${data.total_chunks} chunks, ${data.total_bytes} bytes`);
+      
+      // Combine all chunks
+      const totalLength = audioChunks.reduce((sum, arr) => sum + arr.length, 0);
+      const combined = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const chunk of audioChunks) {
+        combined.set(chunk, offset);
+        offset += chunk.length;
+      }
+      
+      // Play the audio
+      log(`playing TTS audio...`);
+      playPCMAudio(combined, 16000);
+      
+      // Reset for next audio
+      audioChunks = [];
+      return;
+    }
+    
+    // Handle errors
+    if (data && data.type === "error") {
+      log(`ERROR: ${data.message}`);
+      return;
+    }
+    
   } catch (e) {
     // not JSON — fall through to plain echo display
   }
@@ -368,6 +472,9 @@ channel.addEventListener("message", (event) => {
       }
 
       connectBtn.addEventListener("click", () => {
+        // Initialize audio context on user interaction (required by browsers)
+        initAudioContext();
+        
         connect().catch((err) => {
           console.error(err);
           log(`connect error: ${err.message || err}`);
