@@ -73,6 +73,9 @@ datachannels: Dict[str, Any] = {}
 # Store conversation context per peer connection
 conversation_contexts: Dict[str, list] = {}
 
+# Store VAD state per peer connection (tracks if speech was detected)
+vad_speech_detected: Dict[str, bool] = {}
+
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
@@ -206,9 +209,19 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     except Exception:
                         logger.exception("[%s] failed to send transcript over datachannel", pc_id)
                     
-                    # Process with LLM if final transcript and not empty
+                    # Process with LLM if final transcript, not empty, and VAD detected speech
+                    vad_detected = vad_speech_detected.get(pc_id, False)
+                    
                     if is_final and transcript.strip() and llm_pipeline:
-                        logger.info("[%s] Final transcript: %s", pc_id, transcript)
+                        if not vad_detected:
+                            logger.info("[%s] Skipping LLM - VAD did not detect speech: %s", pc_id, transcript)
+                            # Reset VAD state for next utterance
+                            vad_speech_detected[pc_id] = False
+                            return
+                        
+                        logger.info("[%s] Final transcript (VAD confirmed): %s", pc_id, transcript)
+                        # Reset VAD state for next utterance
+                        vad_speech_detected[pc_id] = False
                         try:
                             # Get or create conversation context for this peer
                             if pc_id not in conversation_contexts:
@@ -342,17 +355,26 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             )
         )
 
+        # Initialize VAD state for this peer
+        vad_speech_detected[pc_id] = False
+        
         pcm_bytes = audioframe_to_pcm16_bytes(first_frame)
-        # Run VAD in parallel, but always send audio to Deepgram for real‑time STT
+        # Run VAD and track if speech is detected
         if vad_gate is not None:
-            _ = vad_gate.should_send(pcm_bytes)
+            speech_detected = vad_gate.should_send(pcm_bytes)
+            if speech_detected:
+                vad_speech_detected[pc_id] = True
+                logger.info("[%s] VAD: Speech detected", pc_id)
         await audio_q.put(pcm_bytes)
 
         while True:
             frame = await track.recv()
             pcm_bytes = audioframe_to_pcm16_bytes(frame)
             if vad_gate is not None:
-                _ = vad_gate.should_send(pcm_bytes)
+                speech_detected = vad_gate.should_send(pcm_bytes)
+                if speech_detected and not vad_speech_detected[pc_id]:
+                    vad_speech_detected[pc_id] = True
+                    logger.info("[%s] VAD: Speech detected", pc_id)
             await audio_q.put(pcm_bytes)
             await asyncio.sleep(0)
 
@@ -372,6 +394,9 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 await asyncio.wait_for(dg_stream_task, timeout=2.0)
             except Exception:
                 dg_stream_task.cancel()
+        
+        # Cleanup VAD state
+        vad_speech_detected.pop(pc_id, None)
 
         logger.info("[%s] consumer finished and Deepgram stream closed", pc_id)
 
@@ -398,6 +423,7 @@ async def offer(request: Request):
             logger.info("[%s] datachannel closed", pc_id)
             datachannels.pop(pc_id, None)
             conversation_contexts.pop(pc_id, None)
+            vad_speech_detected.pop(pc_id, None)
 
     
     pcs.add(pc)
@@ -413,6 +439,7 @@ async def offer(request: Request):
             pcs.discard(pc)
             datachannels.pop(pc_id, None)
             conversation_contexts.pop(pc_id, None)
+            vad_speech_detected.pop(pc_id, None)
             logger.info("[%s] closed and removed", pc_id)
 
     @pc.on("track")
