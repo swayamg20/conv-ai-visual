@@ -2,8 +2,8 @@ import asyncio
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 import json
 from typing import Any, Dict, Optional
+import os
 
-import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.mediastreams import AudioFrame
 from fastapi import FastAPI, Request
@@ -12,12 +12,47 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import logging
 import websockets
-
+import numpy as np
 from aiortc.contrib.media import MediaBlackhole
+from funcs.vad_gate import SileroVADGate
+from funcs.llm_pipeline import LLMPipeline
+from funcs.tts_pipeline import TTSPipeline
+from funcs.config import config
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webrtc-deepgram")
+
+# Validate and initialize pipelines
+try:
+    config.validate()
+    
+    # Initialize LLM pipeline
+    llm_pipeline = LLMPipeline(
+        api_key=config.OPENAI_API_KEY,
+        model=config.OPENAI_MODEL,
+        system_prompt=config.LLM_SYSTEM_PROMPT,
+        max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES
+    )
+    logger.info("LLM pipeline initialized successfully")
+    
+    # Initialize TTS pipeline
+    tts_pipeline = TTSPipeline(
+        api_key=config.ELEVENLABS_API_KEY,
+        voice_id=config.ELEVENLABS_VOICE_ID,
+        model_id=config.ELEVENLABS_MODEL_ID,
+        stability=config.TTS_STABILITY,
+        similarity_boost=config.TTS_SIMILARITY_BOOST,
+        style=config.TTS_STYLE,
+        use_speaker_boost=config.TTS_USE_SPEAKER_BOOST
+    )
+    logger.info("TTS pipeline initialized successfully")
+    
+except Exception as e:
+    logger.error(f"Failed to initialize pipelines: {e}")
+    llm_pipeline = None
+    tts_pipeline = None
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -32,9 +67,11 @@ class Offer(BaseModel):
     type: str
 
 DEEPGRAM_KEY = "your-key"
-
 pcs = set[Any]()
 datachannels: Dict[str, Any] = {}
+
+# Store conversation context per peer connection
+conversation_contexts: Dict[str, list] = {}
 
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
@@ -78,6 +115,12 @@ async def deepgram_stream_ws_send_and_recv(
             max_size=None,
         ) as ws:
             logger.info("Deepgram WS connected")
+            async def on_message(msg):
+                data = json.loads(msg)
+                # print(data)
+                await results_callback(data)
+                
+            ws.onmessage = on_message
 
             async def sender():
                 try:
@@ -142,8 +185,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     channel_count = None
 
     base_listen = "wss://api.deepgram.com/v1/listen"
-    model = "nova"
-    websocket_url_template = f"{base_listen}?model={model}&encoding=linear16&interim_results=true"
+    websocket_url_template = f"{base_listen}?model={config.DEEPGRAM_MODEL}&encoding=linear16&interim_results=true&vad_events=true"
 
     async def on_deepgram_event(data: Dict):
         t = data.get("type")
@@ -154,14 +196,94 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 best = alts[0]
                 transcript = best.get("transcript", "")
                 is_final = data.get("is_final", False) or data.get("speech_final", False)
-                logger.info("[%s] Deepgram transcript (final=%s): %s", pc_id, is_final, transcript)
+                
                 ch = datachannels.get(pc_id)
                 if ch and ch.readyState == "open":
+                    # Send transcript to client
                     payload = json.dumps({"type": "transcript", "text": transcript, "is_final": is_final})
                     try:
                         ch.send(payload)
                     except Exception:
                         logger.exception("[%s] failed to send transcript over datachannel", pc_id)
+                    
+                    # Process with LLM if final transcript and not empty
+                    if is_final and transcript.strip() and llm_pipeline:
+                        logger.info("[%s] Final transcript: %s", pc_id, transcript)
+                        try:
+                            # Get or create conversation context for this peer
+                            if pc_id not in conversation_contexts:
+                                conversation_contexts[pc_id] = llm_pipeline.create_conversation_context()
+                            
+                            # Process through LLM
+                            context, llm_response = await llm_pipeline.process_user_input(
+                                conversation_contexts[pc_id],
+                                transcript,
+                                temperature=config.LLM_TEMPERATURE,
+                                max_tokens=config.LLM_MAX_TOKENS
+                            )
+                            conversation_contexts[pc_id] = context
+                            
+                            logger.info("[%s] LLM response: %s", pc_id, llm_response)
+                            
+                            # Send LLM response text to client
+                            llm_payload = json.dumps({
+                                "type": "llm_response",
+                                "text": llm_response
+                            })
+                            ch.send(llm_payload)
+                            
+                            # Generate TTS audio if TTS pipeline is available
+                            if tts_pipeline:
+                                try:
+                                    import base64
+                                    logger.info("[%s] Generating TTS audio (streaming)...", pc_id)
+                                    
+                                    chunk_count = 0
+                                    total_bytes = 0
+                                    
+                                    # Stream audio chunks as they're generated
+                                    async for audio_chunk in tts_pipeline.text_to_speech_stream(llm_response):
+                                        if ch and ch.readyState == "open":
+                                            # Encode chunk as base64
+                                            audio_b64 = base64.b64encode(audio_chunk).decode('utf-8')
+                                            
+                                            # Send chunk via datachannel
+                                            tts_payload = json.dumps({
+                                                "type": "tts_audio_chunk",
+                                                "audio": audio_b64,
+                                                "format": "pcm_16000",
+                                                "sample_rate": 16000,
+                                                "chunk_index": chunk_count
+                                            })
+                                            ch.send(tts_payload)
+                                            
+                                            chunk_count += 1
+                                            total_bytes += len(audio_chunk)
+                                    
+                                    # Send end marker
+                                    if ch and ch.readyState == "open":
+                                        end_payload = json.dumps({
+                                            "type": "tts_audio_end",
+                                            "total_chunks": chunk_count,
+                                            "total_bytes": total_bytes
+                                        })
+                                        ch.send(end_payload)
+                                    
+                                    logger.info("[%s] TTS audio sent: %d chunks, %d bytes", pc_id, chunk_count, total_bytes)
+                                    
+                                except Exception as tts_error:
+                                    logger.exception("[%s] Failed to generate TTS: %s", pc_id, tts_error)
+                            
+                        except Exception as e:
+                            logger.exception("[%s] Failed to process LLM: %s", pc_id, e)
+                            error_payload = json.dumps({
+                                "type": "error",
+                                "message": "Failed to process with LLM"
+                            })
+                            try:
+                                ch.send(error_payload)
+                            except Exception:
+                                pass
         else:
             logger.debug("[%s] Deepgram event: %s", pc_id, data)
 
@@ -193,12 +315,26 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
         logger.info("[%s] first frame: sample_rate=%s channels=%s samples=%s", pc_id, sample_rate, channel_count, samples)
 
+        try:
+            vad_gate = SileroVADGate(sample_rate=sample_rate, channels=channel_count)
+            # logger.info(
+            #     "[%s] Silero VAD gate init: sr=%s ch=%s thr=%.3f",
+            #     pc_id,
+            #     sample_rate,
+            #     channel_count,
+            #     vad_gate.threshold,
+            # )
+        except Exception as e:
+            logger.exception("[%s] Failed to initialize Silero VAD gate, bypassing VAD: %s", pc_id, e)
+            vad_gate = None
+
+
         websocket_url = f"{websocket_url_template}&sample_rate={sample_rate}&channels={channel_count}"
 
         dg_stream_task = asyncio.create_task(
             deepgram_stream_ws_send_and_recv(
                 websocket_url,
-                DEEPGRAM_KEY,
+                config.DEEPGRAM_KEY,
                 sample_rate,
                 channel_count,
                 audio_q,
@@ -207,11 +343,16 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         )
 
         pcm_bytes = audioframe_to_pcm16_bytes(first_frame)
+        # Run VAD in parallel, but always send audio to Deepgram for real‑time STT
+        if vad_gate is not None:
+            _ = vad_gate.should_send(pcm_bytes)
         await audio_q.put(pcm_bytes)
 
         while True:
             frame = await track.recv()
             pcm_bytes = audioframe_to_pcm16_bytes(frame)
+            if vad_gate is not None:
+                _ = vad_gate.should_send(pcm_bytes)
             await audio_q.put(pcm_bytes)
             await asyncio.sleep(0)
 
@@ -256,6 +397,7 @@ async def offer(request: Request):
         def on_close():
             logger.info("[%s] datachannel closed", pc_id)
             datachannels.pop(pc_id, None)
+            conversation_contexts.pop(pc_id, None)
 
     
     pcs.add(pc)
@@ -269,6 +411,8 @@ async def offer(request: Request):
         if pc.connectionState in ("failed", "closed"):
             await pc.close()
             pcs.discard(pc)
+            datachannels.pop(pc_id, None)
+            conversation_contexts.pop(pc_id, None)
             logger.info("[%s] closed and removed", pc_id)
 
     @pc.on("track")
@@ -302,4 +446,4 @@ async def on_shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=True)
