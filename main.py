@@ -18,6 +18,7 @@ from funcs.vad_gate import SileroVADGate
 from funcs.llm_pipeline import LLMPipeline
 from funcs.tts_pipeline import TTSPipeline
 from funcs.config import config
+from funcs.auth import get_current_user_id
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -66,17 +67,23 @@ class Offer(BaseModel):
 class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None  # Persistent user identifier for memory
 
-chat_contexts: Dict[str, list] = {}
+# Per-session LLM pipelines (each has its own memory context)
+chat_sessions: Dict[str, LLMPipeline] = {}
 
 DEEPGRAM_KEY = "your-key"
 pcs = set[Any]()
 datachannels: Dict[str, Any] = {}
 
-conversation_contexts: Dict[str, list] = {}
+# Per-peer LLM pipelines for voice (WebRTC)
+voice_sessions: Dict[str, LLMPipeline] = {}
 
 # Store VAD state per peer connection (tracks if speech was detected)
 vad_speech_detected: Dict[str, bool] = {}
+
+# Store user_id per peer connection (for memory)
+peer_user_ids: Dict[str, str] = {}
 
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
@@ -225,18 +232,26 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         # Reset VAD state for next utterance
                         vad_speech_detected[pc_id] = False
                         try:
-                            # Get or create conversation context for this peer
-                            if pc_id not in conversation_contexts:
-                                conversation_contexts[pc_id] = llm_pipeline.create_conversation_context()
+                            # Get or create voice session pipeline
+                            # user_id from peer_user_ids (set during /offer)
+                            if pc_id not in voice_sessions:
+                                user_id = peer_user_ids.get(pc_id, "default_user")
+                                voice_sessions[pc_id] = LLMPipeline(
+                                    api_key=config.OPENAI_API_KEY,
+                                    model=config.OPENAI_MODEL,
+                                    system_prompt=config.LLM_SYSTEM_PROMPT,
+                                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                                    user_id=user_id,
+                                    session_id=pc_id,
+                                    enable_memory=True
+                                )
                             
-                            # Process through LLM
-                            context, llm_response = await llm_pipeline.process_user_input(
-                                conversation_contexts[pc_id],
+                            # Process through LLM using new API
+                            llm_response = await voice_sessions[pc_id].chat(
                                 transcript,
                                 temperature=config.LLM_TEMPERATURE,
                                 max_tokens=config.LLM_MAX_TOKENS
                             )
-                            conversation_contexts[pc_id] = context
                             
                             logger.info("[%s] LLM response: %s", pc_id, llm_response)
                             
@@ -403,37 +418,49 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         logger.info("[%s] consumer finished and Deepgram stream closed", pc_id)
 
 @app.post("/chat")
-async def chat(chat_msg: ChatMessage):
+async def chat(chat_msg: ChatMessage, request: Request):
     """
-    Chat mode endpoint with SSE streaming - text directly to LLM.
-    Uses same llm_pipeline for future tool call compatibility.
+    Chat mode endpoint with SSE streaming.
+    Each session gets its own LLMPipeline with 4-layer memory.
     """
-    if not llm_pipeline:
-        return JSONResponse({"error": "LLM not initialized"}, status_code=500)
-    
     import uuid
     session_id = chat_msg.session_id or str(uuid.uuid4())
+    # user_id from middleware (auth) or request body
+    user_id = chat_msg.user_id or get_current_user_id(request)
     
-    # Get or create context
-    if session_id not in chat_contexts:
-        chat_contexts[session_id] = llm_pipeline.create_conversation_context()
+    # Get or create session pipeline with memory
+    if session_id not in chat_sessions:
+        try:
+            chat_sessions[session_id] = LLMPipeline(
+                api_key=config.OPENAI_API_KEY,
+                model=config.OPENAI_MODEL,
+                system_prompt=config.LLM_SYSTEM_PROMPT,
+                max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                user_id=user_id,
+                session_id=session_id,
+                enable_memory=True
+            )
+        except Exception as e:
+            logger.exception("Failed to create chat session: %s", e)
+            return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
+    
+    pipeline = chat_sessions[session_id]
     
     async def generate():
         try:
             # Send session_id first
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
             
-            async for chunk, is_done, context in llm_pipeline.process_user_input_stream(
-                chat_contexts[session_id],
+            # Stream response using new API
+            async for chunk in pipeline.chat_stream(
                 chat_msg.message,
                 temperature=config.LLM_TEMPERATURE,
                 max_tokens=config.LLM_MAX_TOKENS
             ):
-                if is_done:
-                    chat_contexts[session_id] = context
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                else:
-                    yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+            
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            
         except Exception as e:
             logger.exception("Chat stream error: %s", e)
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -443,8 +470,16 @@ async def chat(chat_msg: ChatMessage):
 
 @app.delete("/chat/{session_id}")
 async def clear_chat(session_id: str):
-    """Clear chat context for a session."""
-    chat_contexts.pop(session_id, None)
+    """Clear chat session and optionally save summary to episodic memory."""
+    pipeline = chat_sessions.pop(session_id, None)
+    if pipeline:
+        try:
+            # Generate and save session summary before clearing
+            summary = await pipeline.generate_session_summary()
+            if summary:
+                pipeline.end_session(summary)
+        except Exception as e:
+            logger.warning("Failed to save session summary: %s", e)
     return JSONResponse({"status": "cleared"})
 
 
@@ -455,6 +490,11 @@ async def offer(request: Request):
 
     pc = RTCPeerConnection()
     pc_id = f"pc-{id(pc)}"
+    
+    # Capture user_id for this peer connection
+    user_id = data.get("user_id") or get_current_user_id(request)
+    peer_user_ids[pc_id] = user_id
+    logger.info("[%s] User ID: %s", pc_id, user_id)
     @pc.on("datachannel")
     def on_datachannel(channel):
         logger.info("[%s] DataChannel received: label=%s", pc_id, channel.label)
@@ -470,8 +510,9 @@ async def offer(request: Request):
         def on_close():
             logger.info("[%s] datachannel closed", pc_id)
             datachannels.pop(pc_id, None)
-            conversation_contexts.pop(pc_id, None)
+            voice_sessions.pop(pc_id, None)
             vad_speech_detected.pop(pc_id, None)
+            peer_user_ids.pop(pc_id, None)
 
     
     pcs.add(pc)
@@ -486,8 +527,9 @@ async def offer(request: Request):
             await pc.close()
             pcs.discard(pc)
             datachannels.pop(pc_id, None)
-            conversation_contexts.pop(pc_id, None)
+            voice_sessions.pop(pc_id, None)
             vad_speech_detected.pop(pc_id, None)
+            peer_user_ids.pop(pc_id, None)
             logger.info("[%s] closed and removed", pc_id)
 
     @pc.on("track")
