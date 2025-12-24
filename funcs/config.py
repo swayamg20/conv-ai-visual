@@ -13,10 +13,11 @@ class Config:
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova")
     
     # OpenAI configuration
-
-    # add openai api key to the config constant value
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "your-key")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    
+    # Mem0 configuration
+    MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY", "your-key")
     
     # LLM settings
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
