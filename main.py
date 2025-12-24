@@ -8,7 +8,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.mediastreams import AudioFrame
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import logging
 import websockets
@@ -23,11 +23,9 @@ app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webrtc-deepgram")
 
-# Validate and initialize pipelines
 try:
     config.validate()
-    
-    # Initialize LLM pipeline
+        
     llm_pipeline = LLMPipeline(
         api_key=config.OPENAI_API_KEY,
         model=config.OPENAI_MODEL,
@@ -36,7 +34,6 @@ try:
     )
     logger.info("LLM pipeline initialized successfully")
     
-    # Initialize TTS pipeline
     tts_pipeline = TTSPipeline(
         api_key=config.ELEVENLABS_API_KEY,
         voice_id=config.ELEVENLABS_VOICE_ID,
@@ -66,11 +63,16 @@ class Offer(BaseModel):
     sdp: str
     type: str
 
+class ChatMessage(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+
+chat_contexts: Dict[str, list] = {}
+
 DEEPGRAM_KEY = "dea381e9d217d2451a3ef550b95b2735e58f101b"
 pcs = set[Any]()
 datachannels: Dict[str, Any] = {}
 
-# Store conversation context per peer connection
 conversation_contexts: Dict[str, list] = {}
 
 # Store VAD state per peer connection (tracks if speech was detected)
@@ -399,6 +401,52 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         vad_speech_detected.pop(pc_id, None)
 
         logger.info("[%s] consumer finished and Deepgram stream closed", pc_id)
+
+@app.post("/chat")
+async def chat(chat_msg: ChatMessage):
+    """
+    Chat mode endpoint with SSE streaming - text directly to LLM.
+    Uses same llm_pipeline for future tool call compatibility.
+    """
+    if not llm_pipeline:
+        return JSONResponse({"error": "LLM not initialized"}, status_code=500)
+    
+    import uuid
+    session_id = chat_msg.session_id or str(uuid.uuid4())
+    
+    # Get or create context
+    if session_id not in chat_contexts:
+        chat_contexts[session_id] = llm_pipeline.create_conversation_context()
+    
+    async def generate():
+        try:
+            # Send session_id first
+            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
+            
+            async for chunk, is_done, context in llm_pipeline.process_user_input_stream(
+                chat_contexts[session_id],
+                chat_msg.message,
+                temperature=config.LLM_TEMPERATURE,
+                max_tokens=config.LLM_MAX_TOKENS
+            ):
+                if is_done:
+                    chat_contexts[session_id] = context
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+        except Exception as e:
+            logger.exception("Chat stream error: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@app.delete("/chat/{session_id}")
+async def clear_chat(session_id: str):
+    """Clear chat context for a session."""
+    chat_contexts.pop(session_id, None)
+    return JSONResponse({"status": "cleared"})
+
 
 @app.post("/offer")
 async def offer(request: Request):
