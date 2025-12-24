@@ -219,7 +219,12 @@ class SemanticMemory:
             return []
         
         try:
-            results = self.client.search(query, user_id=self.user_id, limit=limit)
+            # Mem0 API requires filters dict with user_id
+            results = self.client.search(
+                query, 
+                filters={"user_id": self.user_id},
+                limit=limit
+            )
             # Handle both list and dict response formats
             if isinstance(results, list):
                 return results
@@ -244,7 +249,9 @@ class SemanticMemory:
     
     def get_context_string(self, query: str, limit: int = 5) -> str:
         """Get formatted semantic context for prompt injection."""
+        logger.info(f"Searching semantic memory for user={self.user_id}, query={query[:50]}...")
         memories = self.search(query, limit)
+        logger.info(f"Found {len(memories)} memories")
         if not memories:
             return ""
         

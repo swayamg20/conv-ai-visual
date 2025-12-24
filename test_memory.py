@@ -1,69 +1,91 @@
 """
-Test script for Mem0 Cloud memory integration.
-Requires MEM0_API_KEY environment variable.
+Test script for 4-layer memory architecture.
 """
 import asyncio
-import os
 from funcs import LLMPipeline
 
 async def test_memory():
-    # Check for API key
-    if not os.getenv("MEM0_API_KEY"):
-        print("ERROR: Set MEM0_API_KEY environment variable")
-        print("Get your key from: https://app.mem0.ai/")
-        return
+    print("=" * 60)
+    print("4-LAYER MEMORY ARCHITECTURE TEST")
+    print("=" * 60)
     
-    # Initialize with memory enabled
+    # Initialize pipeline with memory
     llm = LLMPipeline(
-        user_id="test_user_1",
+        user_id="swayam_test",
         enable_memory=True
     )
     
-    print("=== Testing Memory Integration ===\n")
-    
-    # First conversation - establish some facts
-    context = llm.create_conversation_context()
-    
-    print("User: My name is Swayam and I prefer dark mode interfaces")
-    context, response = await llm.process_user_input(
-        context, 
-        "My name is Swayam and I prefer dark mode interfaces"
+    # ========== Layer 4: User Profile (Canonical Identity) ==========
+    print("\n[Layer 4] Setting user profile...")
+    llm.set_user_profile(
+        name="Swayam",
+        timezone="IST"
     )
+    llm.add_user_preference("theme", "dark_mode")
+    llm.add_user_preference("verbosity", "concise")
+    llm.add_user_fact("occupation", "AI Engineer")
+    llm.add_user_fact("language", "Python")
+    
+    profile = llm.get_user_profile()
+    print(f"Profile: {profile}")
+    
+    # ========== Layer 1 + 3: Chat with Context + Semantic Memory ==========
+    print("\n[Layer 1 + 3] Starting conversation...")
+    
+    # First message - establishes facts
+    response = await llm.chat("Hi! I prefer using FastAPI for my APIs and I love async programming.")
+    print(f"User: Hi! I prefer using FastAPI for my APIs and I love async programming.")
     print(f"Assistant: {response}\n")
     
-    print("User: I work as a software engineer and I love Python")
-    context, response = await llm.process_user_input(
-        context,
-        "I work as a software engineer and I love Python"
-    )
+    # Second message - continues conversation
+    response = await llm.chat("What frameworks would you recommend for a real-time voice app?")
+    print(f"User: What frameworks would you recommend for a real-time voice app?")
     print(f"Assistant: {response}\n")
     
-    # Check what memories were stored
-    print("=== Stored Memories ===")
-    memories = llm.get_memories()
-    for mem in memories:
-        print(f"  - {mem}")
-    
-    # New conversation - should recall memories
-    print("\n=== New Conversation (should recall memories) ===\n")
-    
-    # Create fresh context
-    new_context = llm.create_conversation_context("What do you know about me?")
-    
-    print("User: What do you know about me?")
-    new_context, response = await llm.process_user_input(
-        new_context,
-        "What do you know about me?"
-    )
+    # Third message
+    response = await llm.chat("I'm building it with WebRTC for audio streaming.")
+    print(f"User: I'm building it with WebRTC for audio streaming.")
     print(f"Assistant: {response}\n")
     
-    # Search specific memories
-    print("=== Searching for 'programming' memories ===")
-    results = llm.get_memories(query="programming", limit=3)
-    for r in results:
-        print(f"  - {r}")
+    # ========== Layer 3: Check Semantic Memory ==========
+    print("\n[Layer 3] Searching semantic memories...")
+    memories = llm.search_memories("programming preferences")
+    for mem in memories[:5]:
+        print(f"  - {mem.get('memory', mem)}")
+    
+    # ========== Layer 2: Generate and Save Episodic Summary ==========
+    print("\n[Layer 2] Generating session summary...")
+    summary = await llm.generate_session_summary()
+    print(f"Summary: {summary}")
+    
+    # End session with summary
+    llm.end_session(summary)
+    print("Session ended and saved to episodic memory.")
+    
+    # ========== New Session - Test Memory Recall ==========
+    print("\n" + "=" * 60)
+    print("NEW SESSION - Testing Memory Recall")
+    print("=" * 60)
+    
+    # New pipeline instance (simulates new session)
+    llm2 = LLMPipeline(
+        user_id="swayam_test",  # Same user
+        enable_memory=True
+    )
+    
+    # This should recall from all memory layers
+    response = await llm2.chat("What do you remember about me and my project?")
+    print(f"\nUser: What do you remember about me and my project?")
+    print(f"Assistant: {response}")
+    
+    # Check episodic memory
+    print("\n[Layer 2] Past conversation summaries:")
+    summaries = llm2.get_conversation_summaries(limit=3)
+    for s in summaries:
+        print(f"  - [{s.get('created_at', '')[:10]}] {s.get('summary', '')}")
+    
+    print("\n✅ Memory test complete!")
+
 
 if __name__ == "__main__":
     asyncio.run(test_memory())
-
-
