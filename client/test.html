@@ -107,6 +107,120 @@
         margin-bottom: 14px;
       }
 
+      .mode-toggle {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 16px;
+        background: #f1f5f9;
+        padding: 4px;
+        border-radius: 999px;
+        width: fit-content;
+      }
+
+      .mode-toggle button {
+        margin: 0;
+        border: none;
+        background: transparent;
+        padding: 6px 16px;
+        font-size: 13px;
+      }
+
+      .mode-toggle button.active {
+        background: #fff;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        color: #5bb89a;
+      }
+
+      .chat-container {
+        display: none;
+      }
+
+      .chat-container.active {
+        display: block;
+      }
+
+      .voice-container {
+        display: block;
+      }
+
+      .voice-container.hidden {
+        display: none;
+      }
+
+      .chat-messages {
+        background: #f9fafb;
+        border-radius: 14px;
+        padding: 10px 12px;
+        font-size: 14px;
+        max-height: 300px;
+        overflow: auto;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        margin-bottom: 12px;
+        min-height: 100px;
+      }
+
+      .chat-messages .msg {
+        margin-bottom: 8px;
+        line-height: 1.4;
+      }
+
+      .chat-messages .msg.user {
+        color: #3b82f6;
+      }
+
+      .chat-messages .msg.assistant {
+        color: #10b981;
+      }
+
+      .chat-input-row {
+        display: flex;
+        gap: 8px;
+      }
+
+      .chat-input-row input {
+        flex: 1;
+        padding: 10px 14px;
+        border-radius: 999px;
+        border: 1px solid rgba(148, 163, 184, 0.45);
+        font-size: 14px;
+      }
+
+      .chat-input-row input:focus {
+        outline: none;
+        border-color: #5bb89a;
+      }
+
+      .chat-loading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #6b7280;
+        font-size: 13px;
+        margin-bottom: 8px;
+      }
+
+      .chat-loading .dots {
+        display: flex;
+        gap: 4px;
+      }
+
+      .chat-loading .dot {
+        width: 6px;
+        height: 6px;
+        background: #5bb89a;
+        border-radius: 50%;
+        animation: bounce 1.4s infinite ease-in-out both;
+      }
+
+      .chat-loading .dot:nth-child(1) { animation-delay: -0.32s; }
+      .chat-loading .dot:nth-child(2) { animation-delay: -0.16s; }
+      .chat-loading .dot:nth-child(3) { animation-delay: 0s; }
+
+      @keyframes bounce {
+        0%, 80%, 100% { transform: scale(0); }
+        40% { transform: scale(1); }
+      }
+
       .section-label {
         margin-top: 16px;
         font-size: 13px;
@@ -125,34 +239,56 @@
   </head>
   <body>
     <div class="card">
-      <div class="badge">WebRTC datachannel ↔ FastAPI /offer</div>
-      <h1>FastAPI WebRTC Test</h1>
-      <p style="margin: 0 0 16px; color: #6b7280;">
-        1. Start the backend:
-        <code>uvicorn main:app --reload</code>
-        <br />
-        2. Click "Connect", then send a message. You should see an echo from the
-        server.
-      </p>
+      <div class="badge">Voice AI Assistant</div>
+      <h1>FastAPI Voice/Chat</h1>
 
-      <div style="margin-bottom: 8px">
-        <button id="connect">Connect</button>
-        <button id="disconnect" disabled>Stop</button>
-        <button id="send" disabled>Send message</button>
-        <span id="status" style="margin-left: 8px; font-size: 13px; color: #a5b4fc;">
-          idle
-        </span>
+      <!-- Mode Toggle -->
+      <div class="mode-toggle">
+        <button id="voiceModeBtn" class="active">🎙️ Voice</button>
+        <button id="chatModeBtn">💬 Chat</button>
       </div>
-      <div class="section-label">Transcripts</div>
-      <pre id="transcripts"></pre>
 
-      <label for="outgoing" class="section-label">
-        Outgoing message
-      </label>
-      <textarea id="outgoing">hello from browser</textarea>
+      <!-- Voice Mode Container -->
+      <div class="voice-container" id="voiceContainer">
+        <p style="margin: 0 0 16px; color: #6b7280;">
+          Click "Connect" to start voice conversation with AI.
+        </p>
 
-      <div class="section-label">Log</div>
-      <pre id="log"></pre>
+        <div style="margin-bottom: 8px">
+          <button id="connect">Connect</button>
+          <button id="disconnect" disabled>Stop</button>
+          <button id="send" disabled>Send message</button>
+          <span id="status" style="margin-left: 8px; font-size: 13px; color: #a5b4fc;">
+            idle
+          </span>
+        </div>
+        <div class="section-label">Transcripts</div>
+        <pre id="transcripts"></pre>
+
+        <label for="outgoing" class="section-label">
+          Outgoing message
+        </label>
+        <textarea id="outgoing">hello from browser</textarea>
+
+        <div class="section-label">Log</div>
+        <pre id="log"></pre>
+      </div>
+
+      <!-- Chat Mode Container -->
+      <div class="chat-container" id="chatContainer">
+        <p style="margin: 0 0 16px; color: #6b7280;">
+          Type your message and press Enter or click Send.
+        </p>
+
+        <div class="chat-messages" id="chatMessages"></div>
+
+        <div class="chat-input-row">
+          <input type="text" id="chatInput" placeholder="Type a message..." />
+          <button id="chatSend">Send</button>
+        </div>
+
+        <button id="clearChat" style="margin-top: 12px; font-size: 12px;">Clear Chat</button>
+      </div>
     </div>
 
     <script>
@@ -485,6 +621,165 @@ channel.addEventListener("message", (event) => {
       disconnectBtn.addEventListener("click", stopConnection);
 
       sendBtn.addEventListener("click", sendMessage);
+
+      // ===== Chat Mode =====
+      const voiceModeBtn = document.getElementById("voiceModeBtn");
+      const chatModeBtn = document.getElementById("chatModeBtn");
+      const voiceContainer = document.getElementById("voiceContainer");
+      const chatContainer = document.getElementById("chatContainer");
+      const chatInput = document.getElementById("chatInput");
+      const chatSend = document.getElementById("chatSend");
+      const chatMessages = document.getElementById("chatMessages");
+      const clearChatBtn = document.getElementById("clearChat");
+
+      let chatSessionId = null;
+
+      function setMode(mode) {
+        if (mode === "voice") {
+          voiceModeBtn.classList.add("active");
+          chatModeBtn.classList.remove("active");
+          voiceContainer.classList.remove("hidden");
+          chatContainer.classList.remove("active");
+        } else {
+          chatModeBtn.classList.add("active");
+          voiceModeBtn.classList.remove("active");
+          voiceContainer.classList.add("hidden");
+          chatContainer.classList.add("active");
+        }
+      }
+
+      voiceModeBtn.addEventListener("click", () => setMode("voice"));
+      chatModeBtn.addEventListener("click", () => setMode("chat"));
+
+      function appendChatMessage(role, text) {
+        const div = document.createElement("div");
+        div.className = `msg ${role}`;
+        div.textContent = `${role === "user" ? "You" : "AI"}: ${text}`;
+        chatMessages.appendChild(div);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+
+      function showLoading() {
+        const loader = document.createElement("div");
+        loader.className = "chat-loading";
+        loader.id = "chatLoader";
+        loader.innerHTML = `
+          <div class="dots">
+            <div class="dot"></div>
+            <div class="dot"></div>
+            <div class="dot"></div>
+          </div>
+          <span>Thinking...</span>
+        `;
+        chatMessages.appendChild(loader);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+      }
+
+      function hideLoading() {
+        const loader = document.getElementById("chatLoader");
+        if (loader) loader.remove();
+      }
+
+      async function sendChatMessage() {
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        chatInput.value = "";
+        chatInput.disabled = true;
+        chatSend.disabled = true;
+
+        appendChatMessage("user", text);
+        showLoading();
+
+        // Create streaming message element
+        let streamingDiv = null;
+        let fullResponse = "";
+        let loadingHidden = false;
+
+        try {
+          const res = await fetch("http://localhost:8000/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              message: text,
+              session_id: chatSessionId
+            })
+          });
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const text = decoder.decode(value);
+            const lines = text.split("\n");
+
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                try {
+                  const data = JSON.parse(line.slice(6));
+
+                  if (data.type === "session") {
+                    chatSessionId = data.session_id;
+                  } else if (data.type === "chunk") {
+                    if (!loadingHidden) {
+                      hideLoading();
+                      loadingHidden = true;
+                    }
+                    if (!streamingDiv) {
+                      streamingDiv = document.createElement("div");
+                      streamingDiv.className = "msg assistant";
+                      streamingDiv.textContent = "AI: ";
+                      chatMessages.appendChild(streamingDiv);
+                    }
+                    fullResponse += data.text;
+                    streamingDiv.textContent = "AI: " + fullResponse;
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                  } else if (data.type === "error") {
+                    if (!loadingHidden) {
+                      hideLoading();
+                      loadingHidden = true;
+                    }
+                    if (!streamingDiv) {
+                      appendChatMessage("assistant", `Error: ${data.message}`);
+                    } else {
+                      streamingDiv.textContent += ` [Error: ${data.message}]`;
+                    }
+                  }
+                  // type === "done" - streaming complete, nothing to do
+                } catch (e) {
+                  // ignore parse errors
+                }
+              }
+            }
+          }
+        } catch (e) {
+          if (!loadingHidden) hideLoading();
+          appendChatMessage("assistant", `Error: ${e.message}`);
+        }
+
+        chatInput.disabled = false;
+        chatSend.disabled = false;
+        chatInput.focus();
+      }
+
+      chatSend.addEventListener("click", sendChatMessage);
+      chatInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendChatMessage();
+        }
+      });
+
+      clearChatBtn.addEventListener("click", async () => {
+        if (chatSessionId) {
+          await fetch(`http://localhost:8000/chat/${chatSessionId}`, { method: "DELETE" });
+        }
+        chatSessionId = null;
+        chatMessages.innerHTML = "";
+      });
     </script>
   </body>
 </html>
