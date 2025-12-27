@@ -5,6 +5,7 @@ from openai import AsyncOpenAI
 from funcs.memory import MemoryManager
 from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall
 from funcs.tool_executor import ToolExecutor, SandboxConfig, default_executor
+from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA
 
 logger = logging.getLogger("llm-pipeline")
 
@@ -28,7 +29,9 @@ class LLMPipeline:
         max_context_messages: int = 20,
         user_id: str = "default_user",
         session_id: Optional[str] = None,
-        enable_memory: bool = True
+        enable_memory: bool = True,
+        canvas_mode: bool = False,
+        canvas_system_prompt: Optional[str] = None
     ):
         """
         Initialize LLM pipeline with memory.
@@ -41,6 +44,8 @@ class LLMPipeline:
             user_id: User ID for memory isolation
             session_id: Session ID for episodic tracking
             enable_memory: Whether to enable memory layers
+            canvas_mode: Whether canvas visual mode is enabled (uses canvas for all responses)
+            canvas_system_prompt: Custom canvas mode prompt (uses default if not provided)
         """
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
@@ -50,6 +55,10 @@ class LLMPipeline:
         self.model = model
         self.user_id = user_id
         self.enable_memory = enable_memory
+        
+        # Canvas mode settings
+        self.canvas_mode = canvas_mode
+        self._canvas_system_prompt = canvas_system_prompt
         
         self.base_system_prompt = system_prompt or (
             "You are a helpful voice assistant. Provide concise, natural responses "
@@ -73,20 +82,77 @@ class LLMPipeline:
         self.tool_executor: ToolExecutor = default_executor
         self.adapter: ModelAdapter = OpenAIAdapter()
         
-        logger.info(f"LLM pipeline initialized: model={model}, memory={enable_memory}")
+        # Canvas support
+        self.session_id = session_id or "default"
+        self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
+        
+        logger.info(f"LLM pipeline initialized: model={model}, memory={enable_memory}, canvas_mode={canvas_mode}")
     
-    def get_context(self, current_query: Optional[str] = None) -> List[Dict[str, str]]:
+    @property
+    def active_system_prompt(self) -> str:
+        """Get the currently active system prompt based on canvas mode."""
+        if self.canvas_mode:
+            if self._canvas_system_prompt:
+                return self._canvas_system_prompt
+            # Default canvas prompt
+            return """You are an interactive visual tutor. You ALWAYS use the canvas to illustrate your explanations.
+
+CANVAS RULES:
+- Draw diagrams, flowcharts, and visual aids for EVERY explanation
+- Use clear colors: blue (#3b82f6) for main concepts, green (#10b981) for good/correct, red (#ef4444) for warnings/errors, orange (#f59e0b) for highlights
+- Label important elements for reference
+- Build diagrams incrementally as you explain
+- Use arrows to show relationships and flow
+- Position elements logically: left-to-right for sequences, top-to-bottom for hierarchies
+
+TEACHING STYLE:
+- Start with a visual overview, then explain while pointing to elements
+- Use the canvas as a whiteboard - sketch, annotate, highlight
+- Keep verbal explanations brief; let the visuals do the heavy lifting
+- Reference drawn elements: "As you can see in the diagram..."
+
+The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update for every response."""
+        return self.base_system_prompt
+    
+    def set_canvas_mode(self, enabled: bool, custom_prompt: Optional[str] = None):
+        """
+        Toggle canvas mode on/off.
+        
+        Args:
+            enabled: Whether to enable canvas mode
+            custom_prompt: Optional custom canvas prompt
+        """
+        self.canvas_mode = enabled
+        if custom_prompt:
+            self._canvas_system_prompt = custom_prompt
+        logger.info(f"Canvas mode {'enabled' if enabled else 'disabled'}")
+    
+    def get_context(self, current_query: Optional[str] = None, include_canvas: bool = True) -> List[Dict[str, str]]:
         """
         Get conversation context enriched with all memory layers.
         
         Args:
             current_query: Current user query for semantic search
+            include_canvas: Whether to include canvas state in context
         """
-        if self.memory and current_query:
-            return self.memory.build_context(current_query, self.base_system_prompt)
+        # Use canvas prompt when canvas mode is enabled
+        system_prompt = self.active_system_prompt
         
-        # Fallback: basic context without memory
-        return [{"role": "system", "content": self.base_system_prompt}]
+        if self.memory and current_query:
+            context = self.memory.build_context(current_query, system_prompt)
+        else:
+            # Fallback: basic context without memory
+            context = [{"role": "system", "content": system_prompt}]
+        
+        # Add canvas state to system prompt if elements exist
+        if include_canvas:
+            canvas_summary = self.get_canvas_context()
+            if canvas_summary and "empty" not in canvas_summary.lower():
+                # Append canvas state to system message
+                if context and context[0]["role"] == "system":
+                    context[0]["content"] += f"\n\n[Current Canvas State]\n{canvas_summary}"
+        
+        return context
     
     async def get_completion(
         self,
@@ -308,16 +374,46 @@ class LLMPipeline:
         """Set custom tool executor with sandbox config."""
         self.tool_executor = executor
     
-    def get_tools_schema(self) -> List[Dict]:
+    def set_canvas_callback(self, callback: Callable[[List[Dict]], Any]):
+        """
+        Set callback for canvas events.
+        Called whenever canvas_update tool is executed.
+        
+        Args:
+            callback: Function that receives list of canvas operations
+        """
+        self.canvas_callback = callback
+    
+    def get_canvas_context(self) -> str:
+        """Get current canvas state summary for LLM context."""
+        state = get_canvas_state(self.session_id)
+        return state.get_context_summary()
+    
+    def get_tools_schema(self, include_canvas: Optional[bool] = None) -> List[Dict]:
         """
         Get tools schema for LLM.
         Prefers DB tools, falls back to in-memory registry.
+        
+        Args:
+            include_canvas: Whether to include canvas tool. If None, uses canvas_mode setting.
         """
+        tools = []
+        
         if self.tool_store:
-            return self.tool_store.to_openai_format()
+            tools = self.tool_store.to_openai_format()
         elif self.tools.list_names():
-            return self.adapter.format_tools(self.tools)
-        return []
+            tools = self.adapter.format_tools(self.tools)
+        
+        # Include canvas tool based on mode or explicit parameter
+        should_include_canvas = include_canvas if include_canvas is not None else self.canvas_mode
+        
+        if should_include_canvas:
+            # Check if already in tools
+            has_canvas = any(t.get("function", {}).get("name") == "canvas_update" for t in tools)
+            if not has_canvas:
+                tools.append(CANVAS_TOOL_SCHEMA)
+        
+        return tools
     
     async def chat_with_tools(
         self,
@@ -383,8 +479,29 @@ class LLMPipeline:
             for tc in tool_calls:
                 logger.info(f"Executing tool: {tc.name} with args: {tc.arguments}")
                 
-                # Execute via executor (fetches from DB, runs in sandbox)
-                tool_result = await self.tool_executor.execute_tool_call(tc)
+                # Special handling for canvas_update - inject session_id and broadcast
+                if tc.name == "canvas_update":
+                    from funcs.canvas import canvas_update
+                    from funcs.tools import ToolResult
+                    operations = tc.arguments.get("operations", [])
+                    result = canvas_update(operations, session_id=self.session_id)
+                    
+                    # Broadcast to client via callback
+                    if self.canvas_callback and result.get("operations"):
+                        try:
+                            await self.canvas_callback(result["operations"])
+                        except TypeError:
+                            # Sync callback
+                            self.canvas_callback(result["operations"])
+                    
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=result.get("canvas_summary", "Canvas updated"),
+                        success=True
+                    )
+                else:
+                    # Execute via executor (fetches from DB, runs in sandbox)
+                    tool_result = await self.tool_executor.execute_tool_call(tc)
                 
                 logger.info(f"Tool {tc.name} result: {tool_result.content[:100]}...")
                 
@@ -440,8 +557,27 @@ class LLMPipeline:
             context.append(self.adapter.get_assistant_message(response))
             
             for tc in tool_calls:
-                # Execute via executor (fetches from DB, runs in sandbox)
-                tool_result = await self.tool_executor.execute_tool_call(tc)
+                # Special handling for canvas_update
+                if tc.name == "canvas_update":
+                    from funcs.canvas import canvas_update
+                    from funcs.tools import ToolResult
+                    operations = tc.arguments.get("operations", [])
+                    result = canvas_update(operations, session_id=self.session_id)
+                    
+                    if self.canvas_callback and result.get("operations"):
+                        try:
+                            await self.canvas_callback(result["operations"])
+                        except TypeError:
+                            self.canvas_callback(result["operations"])
+                    
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=result.get("canvas_summary", "Canvas updated"),
+                        success=True
+                    )
+                else:
+                    tool_result = await self.tool_executor.execute_tool_call(tc)
+                
                 context.append(self.adapter.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
         

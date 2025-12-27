@@ -68,9 +68,13 @@ class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
     user_id: Optional[str] = None  # Persistent user identifier for memory
+    canvas_mode: Optional[bool] = None  # Enable canvas visual mode for this message
 
 # Per-session LLM pipelines (each has its own memory context)
 chat_sessions: Dict[str, LLMPipeline] = {}
+
+# Per-peer canvas mode state for WebRTC voice sessions
+peer_canvas_modes: Dict[str, bool] = {}
 
 DEEPGRAM_KEY = "dea381e9d217d2451a3ef550b95b2735e58f101b"
 pcs = set[Any]()
@@ -233,9 +237,10 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         vad_speech_detected[pc_id] = False
                         try:
                             # Get or create voice session pipeline with tools
-                            # user_id from peer_user_ids (set during /offer)
+                            # user_id and canvas_mode from peer state (set during /offer)
                             if pc_id not in voice_sessions:
                                 user_id = peer_user_ids.get(pc_id, "default_user")
+                                canvas_mode = peer_canvas_modes.get(pc_id, False)
                                 voice_pipeline = LLMPipeline(
                                     api_key=config.OPENAI_API_KEY,
                                     model=config.OPENAI_MODEL,
@@ -243,12 +248,27 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                     max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
                                     user_id=user_id,
                                     session_id=pc_id,
-                                    enable_memory=True
+                                    enable_memory=True,
+                                    canvas_mode=canvas_mode,
+                                    canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
                                 )
                                 # Load tools from DB
                                 voice_pipeline.load_tools_from_db()
+                                
+                                # Set up canvas callback for real-time broadcasting
+                                async def canvas_broadcast(operations):
+                                    ch = datachannels.get(pc_id)
+                                    if ch and ch.readyState == "open":
+                                        payload = json.dumps({
+                                            "type": "canvas_update",
+                                            "operations": operations
+                                        })
+                                        ch.send(payload)
+                                        logger.info("[%s] Canvas broadcast: %d ops", pc_id, len(operations))
+                                
+                                voice_pipeline.set_canvas_callback(canvas_broadcast)
                                 voice_sessions[pc_id] = voice_pipeline
-                                logger.info("[%s] Voice session created with %d tools", pc_id, len(voice_pipeline.get_tools_schema()))
+                                logger.info("[%s] Voice session created with %d tools (canvas_mode=%s)", pc_id, len(voice_pipeline.get_tools_schema()), canvas_mode)
                             
                             # Process through LLM with tools support
                             llm_response = await voice_sessions[pc_id].chat_with_tools(
@@ -432,6 +452,9 @@ async def chat(chat_msg: ChatMessage, request: Request):
     # user_id from middleware (auth) or request body
     user_id = chat_msg.user_id or get_current_user_id(request)
     
+    # Queue for canvas events during this request
+    canvas_events = []
+    
     # Get or create session pipeline with memory and tools
     if session_id not in chat_sessions:
         try:
@@ -442,17 +465,28 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
                 user_id=user_id,
                 session_id=session_id,
-                enable_memory=True
+                enable_memory=True,
+                canvas_mode=chat_msg.canvas_mode or False,
+                canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
             )
             # Load tools from DB
             pipeline.load_tools_from_db()
             chat_sessions[session_id] = pipeline
-            logger.info("Created chat session %s with %d tools", session_id, len(pipeline.get_tools_schema()))
+            logger.info("Created chat session %s with %d tools (canvas_mode=%s)", session_id, len(pipeline.get_tools_schema()), pipeline.canvas_mode)
         except Exception as e:
             logger.exception("Failed to create chat session: %s", e)
             return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
     
     pipeline = chat_sessions[session_id]
+    
+    # Update canvas mode if specified in this request
+    if chat_msg.canvas_mode is not None:
+        pipeline.set_canvas_mode(chat_msg.canvas_mode)
+    
+    # Set canvas callback to queue events
+    def canvas_callback(operations):
+        canvas_events.append(operations)
+    pipeline.set_canvas_callback(canvas_callback)
     
     async def generate():
         try:
@@ -465,7 +499,17 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 temperature=config.LLM_TEMPERATURE,
                 max_tokens=config.LLM_MAX_TOKENS
             ):
+                # Check if we have pending canvas events to send
+                while canvas_events:
+                    ops = canvas_events.pop(0)
+                    yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
+                
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
+            
+            # Send any remaining canvas events
+            while canvas_events:
+                ops = canvas_events.pop(0)
+                yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
             
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             
@@ -491,6 +535,26 @@ async def clear_chat(session_id: str):
     return JSONResponse({"status": "cleared"})
 
 
+class CanvasModeRequest(BaseModel):
+    enabled: bool
+    custom_prompt: Optional[str] = None
+
+
+@app.post("/chat/{session_id}/canvas-mode")
+async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
+    """Toggle canvas mode for an existing chat session."""
+    pipeline = chat_sessions.get(session_id)
+    if not pipeline:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    
+    pipeline.set_canvas_mode(req.enabled, req.custom_prompt)
+    return JSONResponse({
+        "session_id": session_id,
+        "canvas_mode": pipeline.canvas_mode,
+        "tools_count": len(pipeline.get_tools_schema())
+    })
+
+
 @app.post("/offer")
 async def offer(request: Request):
     data: Dict = await request.json()
@@ -499,10 +563,12 @@ async def offer(request: Request):
     pc = RTCPeerConnection()
     pc_id = f"pc-{id(pc)}"
     
-    # Capture user_id for this peer connection
+    # Capture user_id and canvas_mode for this peer connection
     user_id = data.get("user_id") or get_current_user_id(request)
     peer_user_ids[pc_id] = user_id
-    logger.info("[%s] User ID: %s", pc_id, user_id)
+    canvas_mode = data.get("canvas_mode", False)
+    peer_canvas_modes[pc_id] = canvas_mode
+    logger.info("[%s] User ID: %s, Canvas Mode: %s", pc_id, user_id, canvas_mode)
     @pc.on("datachannel")
     def on_datachannel(channel):
         logger.info("[%s] DataChannel received: label=%s", pc_id, channel.label)
@@ -532,6 +598,7 @@ async def offer(request: Request):
             
             vad_speech_detected.pop(pc_id, None)
             peer_user_ids.pop(pc_id, None)
+            peer_canvas_modes.pop(pc_id, None)
 
     
     pcs.add(pc)
@@ -560,6 +627,7 @@ async def offer(request: Request):
             
             vad_speech_detected.pop(pc_id, None)
             peer_user_ids.pop(pc_id, None)
+            peer_canvas_modes.pop(pc_id, None)
             logger.info("[%s] closed and removed", pc_id)
 
     @pc.on("track")
