@@ -2,86 +2,25 @@
 4-Layer Memory Architecture for Voice AI Agent.
 
 Layer 1: Conversation Context (Short-Term) - sliding window, in-memory
-Layer 2: Episodic Memory - conversation summaries, SQLite
+Layer 2: Episodic Memory - conversation summaries, SQLite via SQLModel
 Layer 3: Semantic Memory - vector search via Mem0 Cloud
-Layer 4: User Profile - canonical facts, SQLite
+Layer 4: User Profile - canonical facts, SQLite via SQLModel
 """
-import os
 import json
-import sqlite3
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from mem0 import MemoryClient
 from funcs.config import config
+from funcs.models import (
+    EpisodicMemoryRepo,
+    UserProfileRepo,
+    DecisionMemoryRepo,
+    ToolRepo,
+    init_db,
+)
 
 logger = logging.getLogger("memory")
-
-# Database path
-MEMORY_DB_PATH = os.path.join(os.path.dirname(__file__), "..", "memory.db")
-
-
-def get_db_connection() -> sqlite3.Connection:
-    """Get SQLite connection with row factory."""
-    conn = sqlite3.connect(MEMORY_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def init_db():
-    """Initialize database tables."""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Episodic Memory - conversation summaries
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS episodic_memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            session_id TEXT,
-            summary TEXT NOT NULL,
-            turn_count INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            metadata TEXT
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_episodic_user ON episodic_memory(user_id)")
-    
-    # User Profile - canonical identity facts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS user_profile (
-            user_id TEXT PRIMARY KEY,
-            name TEXT,
-            timezone TEXT,
-            preferences TEXT,
-            facts TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    
-    # Decision Memory - for agentic loops
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS decision_memory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT NOT NULL,
-            session_id TEXT,
-            action TEXT NOT NULL,
-            tool_used TEXT,
-            success BOOLEAN,
-            context TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_decision_user ON decision_memory(user_id)")
-    
-    conn.commit()
-    conn.close()
-    logger.info("Memory database initialized")
-
-
-# Initialize DB on module load
-init_db()
 
 
 class ConversationContext:
@@ -138,36 +77,28 @@ class EpisodicMemory:
         metadata: Optional[Dict] = None
     ):
         """Save a conversation summary."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO episodic_memory (user_id, session_id, summary, turn_count, metadata)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            self.user_id, 
-            session_id, 
-            summary, 
-            turn_count,
-            json.dumps(metadata) if metadata else None
-        ))
-        conn.commit()
-        conn.close()
+        EpisodicMemoryRepo.save(
+            user_id=self.user_id,
+            summary=summary,
+            session_id=session_id,
+            turn_count=turn_count,
+            metadata=metadata
+        )
         logger.info(f"Saved episodic memory for user {self.user_id}")
     
     def get_recent(self, limit: int = 5) -> List[Dict]:
         """Get recent conversation summaries."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT summary, session_id, turn_count, created_at, metadata
-            FROM episodic_memory
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (self.user_id, limit))
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        records = EpisodicMemoryRepo.get_recent(self.user_id, limit)
+        return [
+            {
+                "summary": r.summary,
+                "session_id": r.session_id,
+                "turn_count": r.turn_count,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "metadata": r.get_meta()
+            }
+            for r in records
+        ]
     
     def get_context_string(self, limit: int = 3) -> str:
         """Get formatted episodic context for prompt injection."""
@@ -177,7 +108,7 @@ class EpisodicMemory:
         
         lines = ["Previous conversations:"]
         for ep in episodes:
-            date = ep.get("created_at", "")[:10]
+            date = ep.get("created_at", "")[:10] if ep.get("created_at") else ""
             lines.append(f"- [{date}] {ep['summary']}")
         return "\n".join(lines)
 
@@ -219,13 +150,11 @@ class SemanticMemory:
             return []
         
         try:
-            # Mem0 API requires filters dict with user_id
             results = self.client.search(
                 query, 
                 filters={"user_id": self.user_id},
                 limit=limit
             )
-            # Handle both list and dict response formats
             if isinstance(results, list):
                 return results
             return results.get("results", [])
@@ -274,57 +203,30 @@ class UserProfile:
     
     def _ensure_exists(self):
         """Create profile if doesn't exist."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT OR IGNORE INTO user_profile (user_id, preferences, facts)
-            VALUES (?, '{}', '{}')
-        """, (self.user_id,))
-        conn.commit()
-        conn.close()
+        UserProfileRepo.get_or_create(self.user_id)
     
     def get(self) -> Dict:
         """Get full user profile."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM user_profile WHERE user_id = ?", (self.user_id,))
-        row = cursor.fetchone()
-        conn.close()
-        
-        if row:
-            profile = dict(row)
-            profile["preferences"] = json.loads(profile.get("preferences") or "{}")
-            profile["facts"] = json.loads(profile.get("facts") or "{}")
-            return profile
-        return {}
+        profile = UserProfileRepo.get(self.user_id)
+        if not profile:
+            return {}
+        return {
+            "user_id": profile.user_id,
+            "name": profile.name,
+            "timezone": profile.timezone,
+            "preferences": profile.preferences,
+            "facts": profile.facts,
+            "created_at": profile.created_at.isoformat() if profile.created_at else None,
+            "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
+        }
     
     def update(self, **kwargs):
         """Update profile fields."""
         allowed = ["name", "timezone", "preferences", "facts"]
         updates = {k: v for k, v in kwargs.items() if k in allowed}
-        
-        if not updates:
-            return
-        
-        # JSON encode dict fields
-        if "preferences" in updates and isinstance(updates["preferences"], dict):
-            updates["preferences"] = json.dumps(updates["preferences"])
-        if "facts" in updates and isinstance(updates["facts"], dict):
-            updates["facts"] = json.dumps(updates["facts"])
-        
-        set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
-        values = list(updates.values()) + [self.user_id]
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            UPDATE user_profile 
-            SET {set_clause}, updated_at = CURRENT_TIMESTAMP
-            WHERE user_id = ?
-        """, values)
-        conn.commit()
-        conn.close()
-        logger.info(f"Updated profile for {self.user_id}: {list(updates.keys())}")
+        if updates:
+            UserProfileRepo.update(self.user_id, **updates)
+            logger.info(f"Updated profile for {self.user_id}: {list(updates.keys())}")
     
     def add_fact(self, key: str, value: Any):
         """Add a single fact to profile."""
@@ -381,42 +283,31 @@ class DecisionMemory:
         context: Optional[str] = None
     ):
         """Log a decision/action taken."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO decision_memory (user_id, session_id, action, tool_used, success, context)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (self.user_id, self.session_id, action, tool_used, success, context))
-        conn.commit()
-        conn.close()
+        DecisionMemoryRepo.log(
+            user_id=self.user_id,
+            session_id=self.session_id,
+            action=action,
+            tool_used=tool_used,
+            success=success,
+            context=context
+        )
     
     def get_recent_failures(self, limit: int = 5) -> List[Dict]:
         """Get recent failed actions to avoid repeating."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT action, tool_used, context, created_at
-            FROM decision_memory
-            WHERE user_id = ? AND success = 0
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (self.user_id, limit))
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
+        records = DecisionMemoryRepo.get_recent_failures(self.user_id, limit)
+        return [
+            {
+                "action": r.action,
+                "tool_used": r.tool_used,
+                "context": r.context,
+                "created_at": r.created_at.isoformat() if r.created_at else None
+            }
+            for r in records
+        ]
     
     def has_recent_failure(self, action: str, within_minutes: int = 5) -> bool:
         """Check if action failed recently."""
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT COUNT(*) FROM decision_memory
-            WHERE user_id = ? AND action = ? AND success = 0
-            AND created_at > datetime('now', ?)
-        """, (self.user_id, action, f"-{within_minutes} minutes"))
-        count = cursor.fetchone()[0]
-        conn.close()
-        return count > 0
+        return DecisionMemoryRepo.has_recent_failure(self.user_id, action, within_minutes)
 
 
 class MemoryManager:
