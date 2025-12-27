@@ -1,16 +1,16 @@
 Till Now:
 - chat
 - basic STT - VAD - LLM - TTS
+- tool call - ()
+- memory
+- db
 
 Feat:
 - Interuption Handling
-- tool call - ()
-- memory
-- db, redis
+- redis
 - web search live
 - integration with calender, events
-
-
+- canvas API
 
 
 # Decision Intelligence Model – Training Data Collection Plan
