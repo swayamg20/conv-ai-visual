@@ -104,3 +104,7 @@ uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 yarl==1.22.0
+sqlmodel>=0.0.22
+aiosqlite>=0.20.0
+mem0ai>=0.1.0
+RestrictedPython>=7.0

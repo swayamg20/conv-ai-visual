@@ -3,7 +3,7 @@ asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 import json
 from typing import Any, Dict, Optional
 import os
-
+import uvicorn
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.mediastreams import AudioFrame
 from fastapi import FastAPI, Request
@@ -232,11 +232,11 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         # Reset VAD state for next utterance
                         vad_speech_detected[pc_id] = False
                         try:
-                            # Get or create voice session pipeline
+                            # Get or create voice session pipeline with tools
                             # user_id from peer_user_ids (set during /offer)
                             if pc_id not in voice_sessions:
                                 user_id = peer_user_ids.get(pc_id, "default_user")
-                                voice_sessions[pc_id] = LLMPipeline(
+                                voice_pipeline = LLMPipeline(
                                     api_key=config.OPENAI_API_KEY,
                                     model=config.OPENAI_MODEL,
                                     system_prompt=config.LLM_SYSTEM_PROMPT,
@@ -245,9 +245,13 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                     session_id=pc_id,
                                     enable_memory=True
                                 )
+                                # Load tools from DB
+                                voice_pipeline.load_tools_from_db()
+                                voice_sessions[pc_id] = voice_pipeline
+                                logger.info("[%s] Voice session created with %d tools", pc_id, len(voice_pipeline.get_tools_schema()))
                             
-                            # Process through LLM using new API
-                            llm_response = await voice_sessions[pc_id].chat(
+                            # Process through LLM with tools support
+                            llm_response = await voice_sessions[pc_id].chat_with_tools(
                                 transcript,
                                 temperature=config.LLM_TEMPERATURE,
                                 max_tokens=config.LLM_MAX_TOKENS
@@ -428,10 +432,10 @@ async def chat(chat_msg: ChatMessage, request: Request):
     # user_id from middleware (auth) or request body
     user_id = chat_msg.user_id or get_current_user_id(request)
     
-    # Get or create session pipeline with memory
+    # Get or create session pipeline with memory and tools
     if session_id not in chat_sessions:
         try:
-            chat_sessions[session_id] = LLMPipeline(
+            pipeline = LLMPipeline(
                 api_key=config.OPENAI_API_KEY,
                 model=config.OPENAI_MODEL,
                 system_prompt=config.LLM_SYSTEM_PROMPT,
@@ -440,6 +444,10 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 session_id=session_id,
                 enable_memory=True
             )
+            # Load tools from DB
+            pipeline.load_tools_from_db()
+            chat_sessions[session_id] = pipeline
+            logger.info("Created chat session %s with %d tools", session_id, len(pipeline.get_tools_schema()))
         except Exception as e:
             logger.exception("Failed to create chat session: %s", e)
             return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
@@ -451,8 +459,8 @@ async def chat(chat_msg: ChatMessage, request: Request):
             # Send session_id first
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
             
-            # Stream response using new API
-            async for chunk in pipeline.chat_stream(
+            # Stream response with tools support
+            async for chunk in pipeline.chat_with_tools_stream(
                 chat_msg.message,
                 temperature=config.LLM_TEMPERATURE,
                 max_tokens=config.LLM_MAX_TOKENS
@@ -507,10 +515,21 @@ async def offer(request: Request):
             except Exception:
                 pass
         @channel.on("close")
-        def on_close():
+        async def on_close():
             logger.info("[%s] datachannel closed", pc_id)
             datachannels.pop(pc_id, None)
-            voice_sessions.pop(pc_id, None)
+            
+            # Save voice session to episodic memory before cleanup
+            voice_pipeline = voice_sessions.pop(pc_id, None)
+            if voice_pipeline:
+                try:
+                    summary = await voice_pipeline.generate_session_summary()
+                    if summary:
+                        voice_pipeline.end_session(summary)
+                        logger.info("[%s] Voice session saved to episodic memory", pc_id)
+                except Exception as e:
+                    logger.warning("[%s] Failed to save voice session summary: %s", pc_id, e)
+            
             vad_speech_detected.pop(pc_id, None)
             peer_user_ids.pop(pc_id, None)
 
@@ -527,7 +546,18 @@ async def offer(request: Request):
             await pc.close()
             pcs.discard(pc)
             datachannels.pop(pc_id, None)
-            voice_sessions.pop(pc_id, None)
+            
+            # Save voice session to episodic memory before cleanup
+            voice_pipeline = voice_sessions.pop(pc_id, None)
+            if voice_pipeline:
+                try:
+                    summary = await voice_pipeline.generate_session_summary()
+                    if summary:
+                        voice_pipeline.end_session(summary)
+                        logger.info("[%s] Voice session saved to episodic memory", pc_id)
+                except Exception as e:
+                    logger.warning("[%s] Failed to save voice session summary: %s", pc_id, e)
+            
             vad_speech_detected.pop(pc_id, None)
             peer_user_ids.pop(pc_id, None)
             logger.info("[%s] closed and removed", pc_id)
@@ -562,5 +592,5 @@ async def on_shutdown():
     logger.info("Server shutdown, pcs closed")
 
 if __name__ == "__main__":
-    import uvicorn
+
     uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=True)

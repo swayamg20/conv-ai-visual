@@ -7,41 +7,25 @@ from typing import Optional
 
 class Config:
     """Application configuration."""
-    
-    # Deepgram configuration
     DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "your-key")
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova")
-    
-    # OpenAI configuration
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "your-key")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    
-    # Mem0 configuration
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY", "your-key")
-    
-    # LLM settings
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
-    
-    # System prompt
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
         "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."
     )
-    
-    # ElevenLabs TTS configuration
     ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY", "your-key")
     ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "2zRM7PkgwBPiau2jvVXc")  # Rachel
     ELEVENLABS_MODEL_ID: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
-    
-    # TTS voice settings
     TTS_STABILITY: float = float(os.getenv("TTS_STABILITY", "0.5"))
     TTS_SIMILARITY_BOOST: float = float(os.getenv("TTS_SIMILARITY_BOOST", "0.75"))
     TTS_STYLE: float = float(os.getenv("TTS_STYLE", "0.0"))
     TTS_USE_SPEAKER_BOOST: bool = os.getenv("TTS_USE_SPEAKER_BOOST", "true").lower() == "true"
-    
-    # Server configuration
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
     
@@ -56,4 +40,3 @@ class Config:
 
 
 config = Config()
-
