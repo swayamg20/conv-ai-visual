@@ -4,3 +4,5 @@ __pycache__/
 .DS_Store
 *.db
 /funcs/models.py
+/web/node_modules
+/web/.next
