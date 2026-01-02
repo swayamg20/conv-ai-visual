@@ -4,13 +4,13 @@ Till Now:
 - tool call - ()
 - memory
 - db
+- canvas API
 
 Feat:
 - Interuption Handling
 - redis
 - web search live
 - integration with calender, events
-- canvas API
 
 
 # Decision Intelligence Model – Training Data Collection Plan
