@@ -8,8 +8,8 @@ from typing import Optional, Dict, Any, List
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy import Column, JSON
 
-# Database path
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "memory.db")
+# Database path - use absolute path to avoid readonly issues
+DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "memory.db"))
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Create engine (sync for simplicity - can switch to async later)
