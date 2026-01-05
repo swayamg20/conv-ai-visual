@@ -23,7 +23,7 @@ This is **not** a generic ML data plan. It is designed to:
 
 * Minimize cost and annotation overhead
 * Capture *decision psychology*, not surface preferences
-* Compound into a defensible data moat
+* Compound into a defensible data moat  
 
 ---
 
