@@ -19,6 +19,7 @@ from funcs.llm_pipeline import LLMPipeline
 from funcs.tts_pipeline import TTSPipeline
 from funcs.config import config
 from funcs.auth import get_current_user_id
+from funcs.interruption import interruption_manager
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -221,9 +222,27 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         ch.send(payload)
                     except Exception:
                         logger.exception("[%s] failed to send transcript over datachannel", pc_id)
-                    
-                    # Process with LLM if final transcript, not empty, and VAD detected speech
+
+                    # Check for interruption: user speaking while TTS is active
                     vad_detected = vad_speech_detected.get(pc_id, False)
+                    state = interruption_manager.get_state(pc_id)
+                    tts_active = state.tts_active if state else False
+
+                    if interruption_manager.handle_interruption(
+                        pc_id, vad_detected, tts_active, transcript
+                    ):
+                        # Send acknowledgment to client
+                        if ch and ch.readyState == "open":
+                            interrupt_ack = json.dumps({
+                                "type": "interruption_ack",
+                                "message": "Stopping response, listening to you"
+                            })
+                            ch.send(interrupt_ack)
+
+                        # Wait a moment for TTS to stop before processing new input
+                        await asyncio.sleep(0.05)
+
+                    # Process with LLM if final transcript, not empty, and VAD detected speech
                     
                     if is_final and transcript.strip() and llm_pipeline:
                         if not vad_detected:
@@ -289,42 +308,12 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                             # Generate TTS audio if TTS pipeline is available
                             if tts_pipeline:
                                 try:
-                                    import base64
-                                    logger.info("[%s] Generating TTS audio (streaming)...", pc_id)
-                                    
-                                    chunk_count = 0
-                                    total_bytes = 0
-                                    
-                                    # Stream audio chunks as they're generated
-                                    async for audio_chunk in tts_pipeline.text_to_speech_stream(llm_response):
-                                        if ch and ch.readyState == "open":
-                                            # Encode chunk as base64
-                                            audio_b64 = base64.b64encode(audio_chunk).decode('utf-8')
-                                            
-                                            # Send chunk via datachannel
-                                            tts_payload = json.dumps({
-                                                "type": "tts_audio_chunk",
-                                                "audio": audio_b64,
-                                                "format": "pcm_16000",
-                                                "sample_rate": 16000,
-                                                "chunk_index": chunk_count
-                                            })
-                                            ch.send(tts_payload)
-                                            
-                                            chunk_count += 1
-                                            total_bytes += len(audio_chunk)
-                                    
-                                    # Send end marker
-                                    if ch and ch.readyState == "open":
-                                        end_payload = json.dumps({
-                                            "type": "tts_audio_end",
-                                            "total_chunks": chunk_count,
-                                            "total_bytes": total_bytes
-                                        })
-                                        ch.send(end_payload)
-                                    
-                                    logger.info("[%s] TTS audio sent: %d chunks, %d bytes", pc_id, chunk_count, total_bytes)
-                                    
+                                    # Use interruption manager to stream TTS with cancellation support
+                                    await interruption_manager.stream_tts_with_interruption(
+                                        peer_id=pc_id,
+                                        tts_generator=tts_pipeline.text_to_speech_stream(llm_response),
+                                        datachannel=ch
+                                    )
                                 except Exception as tts_error:
                                     logger.exception("[%s] Failed to generate TTS: %s", pc_id, tts_error)
                             
@@ -568,6 +557,10 @@ async def offer(request: Request):
     peer_user_ids[pc_id] = user_id
     canvas_mode = data.get("canvas_mode", False)
     peer_canvas_modes[pc_id] = canvas_mode
+
+    # Initialize interruption state for this peer connection
+    interruption_manager.create_state(pc_id)
+
     logger.info("[%s] User ID: %s, Canvas Mode: %s", pc_id, user_id, canvas_mode)
     @pc.on("datachannel")
     def on_datachannel(channel):
@@ -600,7 +593,10 @@ async def offer(request: Request):
             peer_user_ids.pop(pc_id, None)
             peer_canvas_modes.pop(pc_id, None)
 
-    
+            # Cleanup interruption state and stop any active TTS
+            interruption_manager.cleanup_state(pc_id)
+
+
     pcs.add(pc)
     logger.info("[%s] created for incoming offer", pc_id)
 
@@ -628,6 +624,10 @@ async def offer(request: Request):
             vad_speech_detected.pop(pc_id, None)
             peer_user_ids.pop(pc_id, None)
             peer_canvas_modes.pop(pc_id, None)
+
+            # Cleanup interruption state and stop any active TTS
+            interruption_manager.cleanup_state(pc_id)
+
             logger.info("[%s] closed and removed", pc_id)
 
     @pc.on("track")
