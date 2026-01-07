@@ -6,11 +6,15 @@ Till Now:
 - db
 - canvas API
 
-Feat:
+Feat/TO DO:
 - Interuption Handling
 - redis
 - web search live
 - integration with calender, events
+- re-routing LLM calls (based on complexities) for better latency
+- try out different LLMs, SLMs, classifiers
+- vector search scope discovery
+- sandbox coding the tools and execute them live
 
 
 # Decision Intelligence Model – Training Data Collection Plan
