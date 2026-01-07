@@ -4,6 +4,7 @@ import { useRef, useCallback } from "react";
 
 export function useAudio() {
   const audioContextRef = useRef<AudioContext | null>(null);
+  const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
   const initAudio = useCallback(() => {
     if (!audioContextRef.current) {
@@ -29,8 +30,33 @@ export function useAudio() {
     source.buffer = buffer;
     source.connect(ctx.destination);
     source.start();
+
+    // Track current source for interruption handling
+    currentSourceRef.current = source;
   }, [initAudio]);
 
-  return { initAudio, playPCM };
+  const stopAudio = useCallback(() => {
+    // Stop current audio playback
+    if (currentSourceRef.current) {
+      try {
+        currentSourceRef.current.stop();
+      } catch {
+        // Already stopped or never started
+      }
+      currentSourceRef.current = null;
+    }
+
+    // Suspend audio context to clear buffer
+    if (audioContextRef.current && audioContextRef.current.state === 'running') {
+      audioContextRef.current.suspend().then(() => {
+        // Resume after a brief pause to clear buffers
+        setTimeout(() => {
+          audioContextRef.current?.resume();
+        }, 50);
+      });
+    }
+  }, []);
+
+  return { initAudio, playPCM, stopAudio };
 }
 

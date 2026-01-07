@@ -35,6 +35,8 @@ interface UseWebRTCOptions {
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
+  onInterruptionDetected?: (message: string) => void;
+  onTTSCancelled?: (chunksSent: number) => void;
 }
 
 export function useWebRTC(options: UseWebRTCOptions = {}) {
@@ -46,6 +48,8 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onCanvasUpdate,
     onError,
     onLog,
+    onInterruptionDetected,
+    onTTSCancelled,
   } = options;
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
@@ -54,7 +58,8 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Uint8Array[]>([]);
   const isReceivingAudioRef = useRef(false);
-  const { initAudio, playPCM } = useAudio();
+  const isTTSPlayingRef = useRef(false);
+  const { initAudio, playPCM, stopAudio } = useAudio();
 
   const log = useCallback((msg: string) => {
     onLog?.(msg);
@@ -110,7 +115,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     channel.addEventListener("message", (e) => {
       try {
         const data = JSON.parse(e.data);
-        
+
         if (data.type === "transcript") {
           onTranscript?.({ text: data.text, isFinal: data.is_final });
         } else if (data.type === "llm_response") {
@@ -118,9 +123,33 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
         } else if (data.type === "canvas_update") {
           log(`Canvas: ${data.operations.length} ops`);
           onCanvasUpdate?.(data.operations);
+        } else if (data.type === "interruption_ack") {
+          log(`Interruption: ${data.message}`);
+
+          // Stop playing TTS immediately
+          stopAudio();
+
+          // Clear buffered chunks
+          audioChunksRef.current = [];
+          isReceivingAudioRef.current = false;
+          isTTSPlayingRef.current = false;
+
+          // Notify callback
+          onInterruptionDetected?.(data.message);
+        } else if (data.type === "tts_cancelled") {
+          log(`TTS cancelled: ${data.chunks_sent} chunks sent`);
+
+          // Clear any remaining buffered chunks
+          audioChunksRef.current = [];
+          isReceivingAudioRef.current = false;
+          isTTSPlayingRef.current = false;
+
+          // Notify callback
+          onTTSCancelled?.(data.chunks_sent);
         } else if (data.type === "tts_audio_chunk") {
           if (!isReceivingAudioRef.current) {
             isReceivingAudioRef.current = true;
+            isTTSPlayingRef.current = true;
             audioChunksRef.current = [];
           }
           const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
@@ -137,6 +166,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           }
           playPCM(combined, 16000);
           audioChunksRef.current = [];
+          isTTSPlayingRef.current = false;
         } else if (data.type === "error") {
           log(`Error: ${data.message}`);
           onError?.(data.message);
@@ -180,7 +210,19 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
     const answer = await response.json();
     await pc.setRemoteDescription(answer);
-  }, [apiUrl, canvasMode, log, onTranscript, onLLMResponse, onCanvasUpdate, onError, playPCM]);
+  }, [
+    apiUrl,
+    canvasMode,
+    log,
+    onTranscript,
+    onLLMResponse,
+    onCanvasUpdate,
+    onError,
+    onInterruptionDetected,
+    onTTSCancelled,
+    playPCM,
+    stopAudio,
+  ]);
 
   const disconnect = useCallback(() => {
     try {
