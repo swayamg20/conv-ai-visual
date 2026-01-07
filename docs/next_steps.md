@@ -15,7 +15,9 @@ Feat/TO DO:
 - try out different LLMs, SLMs, classifiers
 - vector search scope discovery
 - sandbox coding the tools and execute them live
-
+- https://jsoncanvas.org/ for canvas API
+- less priority:
+  - quartz based documentation
 
 # Decision Intelligence Model – Training Data Collection Plan
 

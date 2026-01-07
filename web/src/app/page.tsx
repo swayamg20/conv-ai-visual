@@ -17,7 +17,8 @@ export default function Home() {
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
-  
+  const [isInterrupted, setIsInterrupted] = useState(false);
+
   const canvasRef = useRef<CanvasRendererHandle>(null);
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -46,6 +47,17 @@ export default function Home() {
     handleLog(`Error: ${message}`);
   }, [handleLog]);
 
+  const handleInterruption = useCallback((message: string) => {
+    setIsInterrupted(true);
+    handleLog(`Interruption: ${message}`);
+  }, [handleLog]);
+
+  const handleTTSCancelled = useCallback((chunksSent: number) => {
+    handleLog(`TTS cancelled after ${chunksSent} chunks`);
+    // Clear interruption flag after a brief moment
+    setTimeout(() => setIsInterrupted(false), 1500);
+  }, [handleLog]);
+
   const { status, connect, disconnect, initAudio } = useWebRTC({
     canvasMode,
     onTranscript: handleTranscript,
@@ -53,6 +65,8 @@ export default function Home() {
     onCanvasUpdate: handleCanvasUpdate,
     onError: handleError,
     onLog: handleLog,
+    onInterruptionDetected: handleInterruption,
+    onTTSCancelled: handleTTSCancelled,
   });
 
   const { messages, isLoading, sendMessage, clearChat } = useChat({
@@ -180,6 +194,19 @@ export default function Home() {
                   </span>
                 </div>
               </div>
+
+              {/* Interruption Indicator */}
+              {isInterrupted && isConnected && (
+                <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="relative flex h-2 w-2">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75"></span>
+                      <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500"></span>
+                    </span>
+                    <span className="font-medium text-yellow-600">Listening to you...</span>
+                  </div>
+                </div>
+              )}
 
               {/* Transcripts */}
               <div>
