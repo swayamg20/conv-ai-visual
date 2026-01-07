@@ -197,10 +197,8 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     logger.info("[%s] Started audio consumer for track id=%s", pc_id, getattr(track, "id", "?"))
 
     audio_q: "asyncio.Queue[bytes]" = asyncio.Queue()
-
     sample_rate = None
     channel_count = None
-
     base_listen = "wss://api.deepgram.com/v1/listen"
     websocket_url_template = f"{base_listen}?model={config.DEEPGRAM_MODEL}&encoding=linear16&interim_results=true&vad_events=true"
 
@@ -231,23 +229,17 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     if interruption_manager.handle_interruption(
                         pc_id, vad_detected, tts_active, transcript
                     ):
-                        # Send acknowledgment to client
                         if ch and ch.readyState == "open":
                             interrupt_ack = json.dumps({
                                 "type": "interruption_ack",
                                 "message": "Stopping response, listening to you"
                             })
                             ch.send(interrupt_ack)
-
-                        # Wait a moment for TTS to stop before processing new input
                         await asyncio.sleep(0.05)
-
-                    # Process with LLM if final transcript, not empty, and VAD detected speech
                     
                     if is_final and transcript.strip() and llm_pipeline:
                         if not vad_detected:
                             logger.info("[%s] Skipping LLM - VAD did not detect speech: %s", pc_id, transcript)
-                            # Reset VAD state for next utterance
                             vad_speech_detected[pc_id] = False
                             return
                         
@@ -271,10 +263,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                     canvas_mode=canvas_mode,
                                     canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
                                 )
-                                # Load tools from DB
-                                voice_pipeline.load_tools_from_db()
-                                
-                                # Set up canvas callback for real-time broadcasting
+                                voice_pipeline.load_tools_from_db()                                
                                 async def canvas_broadcast(operations):
                                     ch = datachannels.get(pc_id)
                                     if ch and ch.readyState == "open":
@@ -458,7 +447,6 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 canvas_mode=chat_msg.canvas_mode or False,
                 canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
             )
-            # Load tools from DB
             pipeline.load_tools_from_db()
             chat_sessions[session_id] = pipeline
             logger.info("Created chat session %s with %d tools (canvas_mode=%s)", session_id, len(pipeline.get_tools_schema()), pipeline.canvas_mode)

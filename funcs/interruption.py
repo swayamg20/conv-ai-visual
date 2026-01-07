@@ -82,24 +82,11 @@ class InterruptionManager:
         tts_active: bool,
         transcript: str
     ) -> bool:
-        """
-        Check if conditions indicate an interruption and signal if so.
-
-        Returns:
-            True if interruption was detected and signaled, False otherwise
-        """
         state = self.get_state(peer_id)
-
         if state and tts_active and vad_detected and transcript.strip():
-            # User interrupted!
-            logger.info(
-                "[%s] INTERRUPTION detected: user said '%s' while TTS active",
-                peer_id,
-                transcript[:50]
-            )
+            logger.info("[%s] INTERRUPTION detected: user said '%s' while TTS active",peer_id,transcript[:50])
             state.signal_interrupt()
             return True
-
         return False
 
     async def stream_tts_with_interruption(
