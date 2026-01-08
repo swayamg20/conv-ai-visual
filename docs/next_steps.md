@@ -7,7 +7,6 @@ Till Now:
 - canvas API
 
 Feat/TO DO:
-- Interuption Handling
 - redis
 - web search live
 - integration with calender, events
@@ -15,7 +14,12 @@ Feat/TO DO:
 - try out different LLMs, SLMs, classifiers
 - vector search scope discovery
 - sandbox coding the tools and execute them live
+- https://jsoncanvas.org/ for canvas API
+- less priority:
+  - quartz based documentation
 
+In Test:
+- Interuption Handling
 
 # Decision Intelligence Model – Training Data Collection Plan
 
