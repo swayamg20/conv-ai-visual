@@ -7,7 +7,6 @@ Till Now:
 - canvas API
 
 Feat/TO DO:
-- Interuption Handling
 - redis
 - web search live
 - integration with calender, events
@@ -18,6 +17,9 @@ Feat/TO DO:
 - https://jsoncanvas.org/ for canvas API
 - less priority:
   - quartz based documentation
+
+In Test:
+- Interuption Handling
 
 # Decision Intelligence Model – Training Data Collection Plan
 

@@ -349,13 +349,6 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
         try:
             vad_gate = SileroVADGate(sample_rate=sample_rate, channels=channel_count)
-            # logger.info(
-            #     "[%s] Silero VAD gate init: sr=%s ch=%s thr=%.3f",
-            #     pc_id,
-            #     sample_rate,
-            #     channel_count,
-            #     vad_gate.threshold,
-            # )
         except Exception as e:
             logger.exception("[%s] Failed to initialize Silero VAD gate, bypassing VAD: %s", pc_id, e)
             vad_gate = None
