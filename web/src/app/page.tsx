@@ -6,9 +6,9 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { CanvasRenderer, type CanvasRendererHandle } from "@/components/canvas-renderer";
-import { useWebRTC, type TranscriptEvent, type CanvasOperation } from "@/hooks/use-webrtc";
+import { useWebRTC, type TranscriptEvent, type CanvasOperation, type LatencyMetrics } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
-import { Paintbrush, Mic, MessageSquare, Trash2 } from "lucide-react";
+import { Paintbrush, Mic, MessageSquare, Trash2, Activity } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export default function Home() {
@@ -18,6 +18,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [isInterrupted, setIsInterrupted] = useState(false);
+  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetrics | null>(null);
 
   const canvasRef = useRef<CanvasRendererHandle>(null);
   const transcriptsEndRef = useRef<HTMLDivElement>(null);
@@ -58,6 +59,11 @@ export default function Home() {
     setTimeout(() => setIsInterrupted(false), 1500);
   }, [handleLog]);
 
+  const handleLatencyUpdate = useCallback((metrics: LatencyMetrics) => {
+    setLatencyMetrics(metrics);
+    handleLog(`Pipeline: VAD=${metrics.vadLatency?.toFixed(1) || '-'}ms, STT=${metrics.sttFinalTranscript?.toFixed(0)}ms, LLM=${metrics.llmComplete?.toFixed(0)}ms, TTS=${metrics.ttsComplete?.toFixed(0)}ms, Total=${metrics.totalPipeline?.toFixed(0)}ms`);
+  }, [handleLog]);
+
   const { status, connect, disconnect, initAudio } = useWebRTC({
     canvasMode,
     onTranscript: handleTranscript,
@@ -67,6 +73,7 @@ export default function Home() {
     onLog: handleLog,
     onInterruptionDetected: handleInterruption,
     onTTSCancelled: handleTTSCancelled,
+    onLatencyUpdate: handleLatencyUpdate,
   });
 
   const { messages, isLoading, sendMessage, clearChat } = useChat({
@@ -224,6 +231,58 @@ export default function Home() {
                     ))
                   )}
                   <div ref={transcriptsEndRef} />
+                </div>
+              </div>
+
+              {/* Latency Metrics - Always visible */}
+              <div>
+                <h3 className="mb-2.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  Latency Metrics
+                </h3>
+                <div className="grid grid-cols-5 gap-2 rounded-lg border border-border bg-background p-3">
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-muted-foreground">VAD</div>
+                    <div className={cn(
+                      "text-sm font-mono font-semibold",
+                      latencyMetrics?.vadLatency !== undefined
+                        ? latencyMetrics.vadLatency < 5 ? "text-green-500" : "text-yellow-500"
+                        : "text-muted-foreground/50"
+                    )}>
+                      {latencyMetrics?.vadLatency?.toFixed(1) || '-'}ms
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-muted-foreground">STT</div>
+                    <div className="text-sm font-mono font-semibold">
+                      {latencyMetrics?.sttFinalTranscript?.toFixed(0) || '-'}ms
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-muted-foreground">LLM</div>
+                    <div className="text-sm font-mono font-semibold">
+                      {latencyMetrics?.llmComplete?.toFixed(0) || '-'}ms
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-muted-foreground">TTS</div>
+                    <div className="text-sm font-mono font-semibold">
+                      {latencyMetrics?.ttsComplete?.toFixed(0) || '-'}ms
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <div className="text-[10px] text-muted-foreground">Total</div>
+                    <div className={cn(
+                      "text-sm font-mono font-semibold",
+                      latencyMetrics?.totalPipeline !== undefined
+                        ? (latencyMetrics.totalPipeline || 0) < 2000 ? "text-green-500" :
+                          (latencyMetrics.totalPipeline || 0) < 4000 ? "text-yellow-500" :
+                          "text-red-500"
+                        : "text-muted-foreground/50"
+                    )}>
+                      {latencyMetrics?.totalPipeline?.toFixed(0) || '-'}ms
+                    </div>
+                  </div>
                 </div>
               </div>
 

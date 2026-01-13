@@ -1,4 +1,5 @@
 import logging
+import time
 import numpy as np
 import torch
 from silero_vad import load_silero_vad
@@ -42,14 +43,18 @@ class SileroVADGate:
 
         return audio / 32768.0
 
-    def should_send(self, pcm_bytes: bytes) -> bool:
+    def should_send(self, pcm_bytes: bytes) -> tuple[bool, float]:
         """
-        Return True if this chunk is likely to contain speech (send to ASR),
-        False if it is probably just silence / noise (drop it).
+        Return (decision, latency_ms) where:
+        - decision: True if this chunk is likely to contain speech (send to ASR),
+                    False if it is probably just silence / noise (drop it).
+        - latency_ms: Time taken for VAD inference in milliseconds.
         """
+        t_start = time.perf_counter()
+        
         audio = self._bytes_to_mono_float(pcm_bytes)
         if audio.size == 0:
-            return False
+            return False, 0.0
 
         sr = self.sample_rate
 
@@ -60,10 +65,10 @@ class SileroVADGate:
             sr = 16000
         elif sr not in (8000, 16000):
             # Unsupported sample rate, safest is to bypass VAD
-            return True
+            return True, 0.0
 
         if audio.size == 0:
-            return False
+            return False, 0.0
 
         # Silero expects fixed-size windows: 512 samples @ 16k, 256 @ 8k.
         window_size = 512 if sr == 16000 else 256
@@ -79,16 +84,18 @@ class SileroVADGate:
         # Model returns speech probability for this window.
         prob = float(self.model(chunk, sr).item())
         decision = prob >= self.threshold
+        
+        t_end = time.perf_counter()
+        latency_ms = (t_end - t_start) * 1000
 
         # Sampled logging so we don't spam too hard
         self._frame_index += 1
         if self._frame_index % 50 == 0:
             if decision:
-                logger.info("Speech detected %f", prob)
+                logger.info("Speech detected prob=%.3f latency=%.2fms", prob, latency_ms)
             else:
-                logger.info("noise/silence detected %f", prob)
-            
+                logger.debug("noise/silence prob=%.3f latency=%.2fms", prob, latency_ms)
 
-        return decision
+        return decision, latency_ms
 
 
