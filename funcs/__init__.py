@@ -44,6 +44,11 @@ from .tool_executor import (
     SandboxConfig,
     default_executor,
 )
+from .interruption import (
+    InterruptionState,
+    InterruptionManager,
+    interruption_manager,
+)
 
 __all__ = [
     "LLMPipeline",
@@ -86,5 +91,9 @@ __all__ = [
     "ToolExecutor",
     "SandboxConfig",
     "default_executor",
+    # Interruption
+    "InterruptionState",
+    "InterruptionManager",
+    "interruption_manager",
 ]
 

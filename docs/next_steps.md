@@ -14,6 +14,7 @@ Feat/TO DO:
 - try out different LLMs, SLMs, classifiers
 - vector search scope discovery
 - sandbox coding the tools and execute them live
+- fillers (low latency filler)
 - https://jsoncanvas.org/ for canvas API
 - less priority:
   - quartz based documentation

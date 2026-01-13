@@ -18,7 +18,6 @@ cd voiceai
 # Create conda environment (recommended)
 conda create -n voiceai python=3.11
 conda activate voiceai
-
 # Or use venv
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
@@ -47,7 +46,7 @@ Create a `.env` file in the project root:
 # Required
 OPENAI_API_KEY=sk-your-openai-api-key
 
-# Optional - Voice features
+# Optional - Voic–e features
 DEEPGRAM_KEY=your-deepgram-key
 ELEVENLABS_API_KEY=your-elevenlabs-key
 ELEVENLABS_VOICE_ID=your-voice-id

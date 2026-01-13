@@ -9,12 +9,12 @@ class Config:
     """Application configuration."""
     DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "dea381e9d217d2451a3ef550b95b2735e58f101b")
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova")
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "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")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "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")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY", "m0-HxU0GjNXPG2K2p5B6E3CkSiSD9L5v9lIcbhXCtrU")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
-    LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
+    LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
         "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."
