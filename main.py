@@ -90,6 +90,10 @@ vad_speech_detected: Dict[str, bool] = {}
 # Store user_id per peer connection (for memory)
 peer_user_ids: Dict[str, str] = {}
 
+# Latency tracking per peer (for metrics)
+import time
+peer_latency_tracking: Dict[str, Dict] = {}
+
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
@@ -211,7 +215,14 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 best = alts[0]
                 transcript = best.get("transcript", "")
                 is_final = data.get("is_final", False) or data.get("speech_final", False)
-                
+
+                # Latency tracking: STT received
+                if transcript and pc_id not in peer_latency_tracking:
+                    peer_latency_tracking[pc_id] = {}
+                if transcript and "stt_first_transcript" not in peer_latency_tracking[pc_id]:
+                    peer_latency_tracking[pc_id]["stt_first_transcript"] = time.time()
+                    logger.info("[%s] ⏱️ First STT transcript received", pc_id)
+
                 ch = datachannels.get(pc_id)
                 if ch and ch.readyState == "open":
                     # Send transcript to client
@@ -226,15 +237,15 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     state = interruption_manager.get_state(pc_id)
                     tts_active = state.tts_active if state else False
 
+                    logger.debug("[%s] Transcript received: vad=%s, tts_active=%s, text='%s'",
+                                pc_id, vad_detected, tts_active, transcript[:50])
+
+                    # Check for interruption (but client already notified by VAD)
                     if interruption_manager.handle_interruption(
                         pc_id, vad_detected, tts_active, transcript
                     ):
-                        if ch and ch.readyState == "open":
-                            interrupt_ack = json.dumps({
-                                "type": "interruption_ack",
-                                "message": "Stopping response, listening to you"
-                            })
-                            ch.send(interrupt_ack)
+                        logger.info("[%s] 🚨 Interruption confirmed by transcript: '%s'", pc_id, transcript[:50])
+                        # Client already notified by VAD loop above, just log
                         await asyncio.sleep(0.05)
                     
                     if is_final and transcript.strip() and llm_pipeline:
@@ -242,7 +253,13 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                             logger.info("[%s] Skipping LLM - VAD did not detect speech: %s", pc_id, transcript)
                             vad_speech_detected[pc_id] = False
                             return
-                        
+
+                        # Latency tracking: Final transcript
+                        t_final_transcript = time.time()
+                        if pc_id in peer_latency_tracking and "stt_first_transcript" in peer_latency_tracking[pc_id]:
+                            delta = (t_final_transcript - peer_latency_tracking[pc_id]["stt_first_transcript"]) * 1000
+                            logger.info("[%s] ⏱️ STT latency: %.0fms (first→final)", pc_id, delta)
+
                         logger.info("[%s] Final transcript (VAD confirmed): %s", pc_id, transcript)
                         # Reset VAD state for next utterance
                         vad_speech_detected[pc_id] = False
@@ -256,14 +273,14 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                     api_key=config.OPENAI_API_KEY,
                                     model=config.OPENAI_MODEL,
                                     system_prompt=config.LLM_SYSTEM_PROMPT,
-                                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,  # Lower context for voice sessions to reduce latency
                                     user_id=user_id,
                                     session_id=pc_id,
                                     enable_memory=True,
                                     canvas_mode=canvas_mode,
                                     canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
                                 )
-                                voice_pipeline.load_tools_from_db()                                
+                                voice_pipeline.load_tools_from_db()
                                 async def canvas_broadcast(operations):
                                     ch = datachannels.get(pc_id)
                                     if ch and ch.readyState == "open":
@@ -273,39 +290,68 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                         })
                                         ch.send(payload)
                                         logger.info("[%s] Canvas broadcast: %d ops", pc_id, len(operations))
-                                
+
                                 voice_pipeline.set_canvas_callback(canvas_broadcast)
                                 voice_sessions[pc_id] = voice_pipeline
                                 logger.info("[%s] Voice session created with %d tools (canvas_mode=%s)", pc_id, len(voice_pipeline.get_tools_schema()), canvas_mode)
-                            
-                            # Process through LLM with tools support
-                            llm_response = await voice_sessions[pc_id].chat_with_tools(
+
+                            # Latency tracking: LLM start
+                            t_llm_start = time.time()
+                            logger.info("[%s] ⏱️ LLM request started", pc_id)
+
+                            # Stream LLM response with tools support for lower latency
+                            llm_response = ""
+                            first_chunk = True
+                            async for chunk in voice_sessions[pc_id].chat_with_tools_stream(
                                 transcript,
                                 temperature=config.LLM_TEMPERATURE,
                                 max_tokens=config.LLM_MAX_TOKENS
-                            )
-                            
+                            ):
+                                if first_chunk:
+                                    t_llm_first_chunk = time.time()
+                                    delta_to_first = (t_llm_first_chunk - t_llm_start) * 1000
+                                    delta_total = (t_llm_first_chunk - t_final_transcript) * 1000
+                                    logger.info("[%s] ⏱️ LLM first chunk: %.0fms (request→chunk), %.0fms (transcript→chunk)", pc_id, delta_to_first, delta_total)
+                                    first_chunk = False
+                                llm_response += chunk
+
+                            t_llm_end = time.time()
+                            delta_llm_total = (t_llm_end - t_llm_start) * 1000
+                            logger.info("[%s] ⏱️ LLM complete: %.0fms total", pc_id, delta_llm_total)
                             logger.info("[%s] LLM response: %s", pc_id, llm_response)
-                            
+
                             # Send LLM response text to client
                             llm_payload = json.dumps({
                                 "type": "llm_response",
                                 "text": llm_response
                             })
                             ch.send(llm_payload)
-                            
+
                             # Generate TTS audio if TTS pipeline is available
                             if tts_pipeline:
                                 try:
+                                    # Latency tracking: TTS start
+                                    t_tts_start = time.time()
+                                    logger.info("[%s] ⏱️ TTS request started", pc_id)
+
                                     # Use interruption manager to stream TTS with cancellation support
                                     await interruption_manager.stream_tts_with_interruption(
                                         peer_id=pc_id,
                                         tts_generator=tts_pipeline.text_to_speech_stream(llm_response),
                                         datachannel=ch
                                     )
+
+                                    t_tts_end = time.time()
+                                    delta_tts = (t_tts_end - t_tts_start) * 1000
+                                    delta_total_pipeline = (t_tts_end - t_final_transcript) * 1000
+                                    logger.info("[%s] ⏱️ TTS complete: %.0fms (TTS only), %.0fms (full pipeline)", pc_id, delta_tts, delta_total_pipeline)
+
+                                    # Reset latency tracking for next utterance
+                                    peer_latency_tracking[pc_id] = {}
+
                                 except Exception as tts_error:
                                     logger.exception("[%s] Failed to generate TTS: %s", pc_id, tts_error)
-                            
+
                         except Exception as e:
                             logger.exception("[%s] Failed to process LLM: %s", pc_id, e)
                             error_payload = json.dumps({
@@ -373,20 +419,73 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         pcm_bytes = audioframe_to_pcm16_bytes(first_frame)
         # Run VAD and track if speech is detected
         if vad_gate is not None:
-            speech_detected = vad_gate.should_send(pcm_bytes)
+            speech_detected, vad_latency = vad_gate.should_send(pcm_bytes)
             if speech_detected:
                 vad_speech_detected[pc_id] = True
-                logger.info("[%s] VAD: Speech detected", pc_id)
+                logger.info("[%s] VAD: Speech detected (latency=%.2fms)", pc_id, vad_latency)
+                # Send VAD latency to client
+                ch = datachannels.get(pc_id)
+                if ch and ch.readyState == "open":
+                    vad_payload = json.dumps({
+                        "type": "vad_speech_detected",
+                        "latency_ms": vad_latency
+                    })
+                    ch.send(vad_payload)
+                # IMMEDIATELY trigger interruption and notify client if TTS is active
+                state = interruption_manager.get_state(pc_id)
+                if state and state.tts_active and not state.interrupt_ack_sent:
+                    logger.warning("[%s] 🎙️ VAD first frame - Speech DURING TTS - INTERRUPTING NOW!", pc_id)
+                    # signal_interrupt returns False if in grace period
+                    if state.signal_interrupt():
+                        # Immediately notify client to stop audio (don't wait for transcript)
+                        ch = datachannels.get(pc_id)
+                        if ch and ch.readyState == "open":
+                            interrupt_ack = json.dumps({
+                                "type": "interruption_ack",
+                                "message": "User speaking - stopping response"
+                            })
+                            ch.send(interrupt_ack)
+                            state.interrupt_ack_sent = True
+                            logger.info("[%s] 📤 Sent immediate interruption_ack to client", pc_id)
+                elif state:
+                    logger.debug("[%s] VAD first frame - Speech detected (tts_active=%s)", pc_id, state.tts_active)
         await audio_q.put(pcm_bytes)
 
         while True:
             frame = await track.recv()
             pcm_bytes = audioframe_to_pcm16_bytes(frame)
             if vad_gate is not None:
-                speech_detected = vad_gate.should_send(pcm_bytes)
-                if speech_detected and not vad_speech_detected[pc_id]:
-                    vad_speech_detected[pc_id] = True
-                    logger.info("[%s] VAD: Speech detected", pc_id)
+                speech_detected, vad_latency = vad_gate.should_send(pcm_bytes)
+                if speech_detected:
+                    if not vad_speech_detected[pc_id]:
+                        vad_speech_detected[pc_id] = True
+                        logger.info("[%s] VAD: Speech detected (latency=%.2fms)", pc_id, vad_latency)
+                        # Send VAD latency to client (only on first detection)
+                        ch = datachannels.get(pc_id)
+                        if ch and ch.readyState == "open":
+                            vad_payload = json.dumps({
+                                "type": "vad_speech_detected",
+                                "latency_ms": vad_latency
+                            })
+                            ch.send(vad_payload)
+                    # IMMEDIATELY trigger interruption and notify client if TTS is active
+                    state = interruption_manager.get_state(pc_id)
+                    if state and state.tts_active and not state.interrupt_ack_sent:
+                        logger.warning("[%s] 🎙️ VAD loop - Speech DURING TTS - INTERRUPTING NOW!", pc_id)
+                        # signal_interrupt returns False if in grace period
+                        if state.signal_interrupt():
+                            # Immediately notify client to stop audio (don't wait for transcript)
+                            ch = datachannels.get(pc_id)
+                            if ch and ch.readyState == "open":
+                                interrupt_ack = json.dumps({
+                                    "type": "interruption_ack",
+                                    "message": "User speaking - stopping response"
+                                })
+                                ch.send(interrupt_ack)
+                                state.interrupt_ack_sent = True
+                                logger.info("[%s] 📤 Sent immediate interruption_ack to client", pc_id)
+                    elif state:
+                        logger.debug("[%s] VAD loop - Speech detected (tts_active=%s)", pc_id, state.tts_active)
             await audio_q.put(pcm_bytes)
             await asyncio.sleep(0)
 
@@ -551,6 +650,21 @@ async def offer(request: Request):
         def on_message(message):
             logger.info("[%s] message from client: %s", pc_id, message)
             try:
+                data = json.loads(message)
+                
+                # Handle client-side interrupt signal (force=True bypasses grace period)
+                if data.get("type") == "client_interrupt":
+                    logger.warning("[%s] 🚨 CLIENT INTERRUPT received - stopping TTS immediately", pc_id)
+                    state = interruption_manager.get_state(pc_id)
+                    if state and state.tts_active:
+                        state.signal_interrupt(force=True)
+                        logger.info("[%s] ✓ TTS interrupted by client signal", pc_id)
+                    return
+                
+                # Echo other messages
+                channel.send(f"echo: {message}")
+            except json.JSONDecodeError:
+                # Not JSON, just echo
                 channel.send(f"echo: {message}")
             except Exception:
                 pass
