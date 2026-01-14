@@ -108,22 +108,35 @@ voiceai/
 
 ## Environment Variables
 
-### Required
+**Configuration is managed via `.env` file** - see `.env.example` for template.
+
+### LLM Provider Configuration
+- `LLM_PROVIDER` - Provider to use: "openai" or "gemini" (default: "openai")
+
+### Required (Provider-Specific)
+**For OpenAI:**
 - `OPENAI_API_KEY` - OpenAI API key
+- `OPENAI_MODEL` - Default: "gpt-4o-mini"
+
+**For Gemini:**
+- `GEMINI_API_KEY` - Google AI API key
+- `GEMINI_MODEL` - Default: "gemini-2.0-flash-exp"
+
+**For TTS:**
 - `ELEVENLABS_API_KEY` - ElevenLabs API key
 
 ### Optional (with defaults)
-- `OPENAI_MODEL` - Default: "gpt-4o-mini"
-- `DEEPGRAM_KEY` - Deepgram API key (has hardcoded default)
+- `DEEPGRAM_KEY` - Deepgram API key for STT
 - `DEEPGRAM_MODEL` - Default: "nova"
 - `LLM_TEMPERATURE` - Default: 0.7
 - `LLM_MAX_TOKENS` - Optional
-- `LLM_MAX_CONTEXT_MESSAGES` - Default: 20
+- `LLM_MAX_CONTEXT_MESSAGES` - Default: 5
 - `LLM_SYSTEM_PROMPT` - Custom system prompt
 - `ELEVENLABS_VOICE_ID` - Default: "21m00Tcm4TlvDq8ikWAM" (Rachel)
-- `ELEVENLABS_MODEL_ID` - Default: "eleven_turbo_v2_5"
+- `ELEVENLABS_MODEL_ID` - Default: "eleven_flash_v2_5"
 - `TTS_STABILITY` - Default: 0.5
 - `TTS_SIMILARITY_BOOST` - Default: 0.75
+- `MEM0_API_KEY` - Optional, for long-term memory features
 - `HOST` - Default: "0.0.0.0"
 - `PORT` - Default: 8000
 
@@ -131,12 +144,14 @@ voiceai/
 
 ### Completed Features
 - ✅ Real-time STT → VAD → LLM → TTS pipeline
+- ✅ **Modular LLM provider support** - OpenAI and Gemini with unified interface
 - ✅ Tool calling system with sandboxed execution
 - ✅ Memory system with database
 - ✅ Canvas API for visual mode
 - ✅ Basic chat and voice sessions
 - ✅ WebRTC integration
 - ✅ **Interruption handling** - Server-side VAD-based detection (Phase 1)
+- ✅ **Environment-based configuration** - Secure .env file management
 
 ### TODO (from `docs/next_steps.md`)
 - Redis integration
@@ -154,15 +169,24 @@ voiceai/
 # Install dependencies
 pip install -r requirements.txt
 
-# Set environment variables
-export OPENAI_API_KEY=your_key
-export ELEVENLABS_API_KEY=your_key
+# Setup environment variables
+cp .env.example .env
+# Edit .env and add your API keys
 
 # Run server
 uvicorn main:app --reload
 # Or with custom host/port
 uvicorn main:app --host localhost --port 3000 --reload
 ```
+
+**Quick Setup:**
+1. Copy `.env.example` to `.env`
+2. Add your API keys to `.env`:
+   - For OpenAI: Set `OPENAI_API_KEY`
+   - For Gemini: Set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY`
+   - Set `ELEVENLABS_API_KEY` for TTS
+   - Set `DEEPGRAM_KEY` for STT
+3. Run the server
 
 ### Testing
 ```bash
