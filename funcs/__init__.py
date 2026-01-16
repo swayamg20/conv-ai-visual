@@ -6,6 +6,12 @@ from .tts_pipeline import TTSPipeline
 from .vad_gate import SileroVADGate
 from .config import config, Config
 from .auth import get_current_user_id
+from .llm_clients import (
+    LLMClient,
+    OpenAIClient,
+    GeminiClient,
+    create_llm_client,
+)
 from .models import (
     init_db,
     get_session,
@@ -57,6 +63,11 @@ __all__ = [
     "config",
     "Config",
     "get_current_user_id",
+    # LLM Clients
+    "LLMClient",
+    "OpenAIClient",
+    "GeminiClient",
+    "create_llm_client",
     # ORM Models & Repos
     "init_db",
     "get_session",

@@ -29,8 +29,9 @@ try:
     config.validate()
         
     llm_pipeline = LLMPipeline(
-        api_key=config.OPENAI_API_KEY,
-        model=config.OPENAI_MODEL,
+        provider=config.LLM_PROVIDER,
+        api_key=None,  # Factory will get from config based on provider
+        model=None,    # Factory will get from config based on provider
         system_prompt=config.LLM_SYSTEM_PROMPT,
         max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES
     )
@@ -270,8 +271,9 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                 user_id = peer_user_ids.get(pc_id, "default_user")
                                 canvas_mode = peer_canvas_modes.get(pc_id, False)
                                 voice_pipeline = LLMPipeline(
-                                    api_key=config.OPENAI_API_KEY,
-                                    model=config.OPENAI_MODEL,
+                                    provider=config.LLM_PROVIDER,
+                                    api_key=None,  # Factory will get from config based on provider
+                                    model=None,    # Factory will get from config based on provider
                                     system_prompt=config.LLM_SYSTEM_PROMPT,
                                     max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,  # Lower context for voice sessions to reduce latency
                                     user_id=user_id,
@@ -529,8 +531,9 @@ async def chat(chat_msg: ChatMessage, request: Request):
     if session_id not in chat_sessions:
         try:
             pipeline = LLMPipeline(
-                api_key=config.OPENAI_API_KEY,
-                model=config.OPENAI_MODEL,
+                provider=config.LLM_PROVIDER,
+                api_key=None,  # Factory will get from config based on provider
+                model=None,    # Factory will get from config based on provider
                 system_prompt=config.LLM_SYSTEM_PROMPT,
                 max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
                 user_id=user_id,

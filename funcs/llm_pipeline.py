@@ -1,11 +1,12 @@
 import os
 import logging
 from typing import List, Dict, Optional, AsyncGenerator, Callable, Any
-from openai import AsyncOpenAI
 from funcs.memory import MemoryManager
 from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall
 from funcs.tool_executor import ToolExecutor, SandboxConfig, default_executor
 from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA
+from funcs.llm_clients import LLMClient, create_llm_client
+from funcs.config import config
 
 logger = logging.getLogger("llm-pipeline")
 
@@ -24,7 +25,8 @@ class LLMPipeline:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4o-mini",
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
         system_prompt: Optional[str] = None,
         max_context_messages: int = 20,
         user_id: str = "default_user",
@@ -35,10 +37,11 @@ class LLMPipeline:
     ):
         """
         Initialize LLM pipeline with memory.
-        
+
         Args:
-            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: Model to use for completions
+            api_key: API key (defaults to provider-specific env var)
+            model: Model name (defaults to provider-specific env var)
+            provider: LLM provider ("openai" or "gemini", defaults to LLM_PROVIDER env var)
             system_prompt: Base system prompt for the assistant
             max_context_messages: Max messages in context window
             user_id: User ID for memory isolation
@@ -47,12 +50,17 @@ class LLMPipeline:
             canvas_mode: Whether canvas visual mode is enabled (uses canvas for all responses)
             canvas_system_prompt: Custom canvas mode prompt (uses default if not provided)
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        if not self.api_key:
-            raise ValueError("OpenAI API key not provided")
-        
-        self.client = AsyncOpenAI(api_key=self.api_key)
-        self.model = model
+        self.provider = provider or config.LLM_PROVIDER
+        self.api_key = api_key  # Can be None, factory will get from config
+        self.model = model  # Can be None, factory will get from config
+
+        # Create LLM client using factory
+        self.client: LLMClient = create_llm_client(
+            provider=self.provider,
+            api_key=self.api_key,
+            model=self.model
+        )
+
         self.user_id = user_id
         self.enable_memory = enable_memory
         
@@ -80,13 +88,21 @@ class LLMPipeline:
         self.tools = ToolRegistry()
         self.tool_store: Optional[ToolStore] = None
         self.tool_executor: ToolExecutor = default_executor
-        self.adapter: ModelAdapter = OpenAIAdapter()
-        
+
+        # Set adapter based on provider (for tool schema formatting)
+        if self.provider == "openai":
+            self.adapter: ModelAdapter = OpenAIAdapter()
+        elif self.provider == "gemini":
+            # Will add GeminiAdapter later, for now use OpenAI (compatible format)
+            self.adapter: ModelAdapter = OpenAIAdapter()
+        else:
+            self.adapter: ModelAdapter = OpenAIAdapter()
+
         # Canvas support
         self.session_id = session_id or "default"
         self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
-        
-        logger.info(f"LLM pipeline initialized: model={model}, memory={enable_memory}, canvas_mode={canvas_mode}")
+
+        logger.info(f"LLM pipeline initialized: provider={self.provider}, model={self.model or 'default'}, memory={enable_memory}, canvas_mode={canvas_mode}")
     
     @property
     def active_system_prompt(self) -> str:
@@ -160,15 +176,13 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         temperature: float = 0.7,
         max_tokens: Optional[int] = None
     ) -> str:
-        """Get completion from LLM."""
+        """Get completion from LLM using provider-agnostic client."""
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            return await self.client.complete(
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            return response.choices[0].message.content.strip()
         except Exception as e:
             logger.exception(f"LLM completion error: {e}")
             raise
@@ -215,36 +229,30 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         save_to_memory: bool = True
     ) -> AsyncGenerator[str, None]:
         """
-        Streaming chat interface.
-        
+        Streaming chat interface using provider-agnostic client.
+
         Yields:
             Text chunks as they arrive
         """
         # Build context with all memory layers
         context = self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
-        
+
         full_response = ""
-        
+
         try:
-            stream = await self.client.chat.completions.create(
-                model=self.model,
+            async for chunk in self.client.stream(
                 messages=context,
                 temperature=temperature,
-                max_tokens=max_tokens,
-                stream=True
-            )
-            
-            async for chunk in stream:
-                if chunk.choices and chunk.choices[0].delta.content:
-                    text = chunk.choices[0].delta.content
-                    full_response += text
-                    yield text
-                    
+                max_tokens=max_tokens
+            ):
+                full_response += chunk
+                yield chunk
+
         except Exception as e:
             logger.exception(f"LLM stream error: {e}")
             raise
-        
+
         # Process for memory after stream completes
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
@@ -455,24 +463,23 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
             logger.warning("No tools available to send to LLM")
         
         for round_num in range(max_tool_rounds):
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.client.complete_with_tools(
                 messages=context,
+                tools=tools_schema,
                 temperature=temperature,
-                max_tokens=max_tokens,
-                tools=tools_schema if tools_schema else None
+                max_tokens=max_tokens
             )
-            
+
             # No tool calls - we're done
-            if not self.adapter.has_tool_calls(response):
-                result = self.adapter.get_response_content(response)
+            if not self.client.has_tool_calls(response):
+                result = self.client.get_response_content(response)
                 if self.memory:
                     self.memory.process_for_memory(user_message, result, save_semantic=save_to_memory)
                 return result
-            
+
             # LLM wants to call tools
-            tool_calls = self.adapter.parse_tool_calls(response)
-            context.append(self.adapter.get_assistant_message(response))
+            tool_calls = self.client.parse_tool_calls(response)
+            context.append(self.client.get_assistant_message(response))
             
             logger.info(f"Round {round_num + 1}: LLM requested {len(tool_calls)} tool call(s)")
             
@@ -504,9 +511,9 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                     tool_result = await self.tool_executor.execute_tool_call(tc)
                 
                 logger.info(f"Tool {tc.name} result: {tool_result.content[:100]}...")
-                
+
                 # Add result to context for LLM
-                context.append(self.adapter.format_tool_result(tool_result))
+                context.append(self.client.format_tool_result(tool_result))
                 
                 # Log for decision memory
                 self.log_decision(
@@ -542,19 +549,18 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         
         # Execute tool calls (non-streaming) until we get a text response
         for _ in range(max_tool_rounds):
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            response = await self.client.complete_with_tools(
                 messages=context,
+                tools=tools_schema,
                 temperature=temperature,
-                max_tokens=max_tokens,
-                tools=tools_schema
+                max_tokens=max_tokens
             )
-            
-            if not self.adapter.has_tool_calls(response):
+
+            if not self.client.has_tool_calls(response):
                 break
-            
-            tool_calls = self.adapter.parse_tool_calls(response)
-            context.append(self.adapter.get_assistant_message(response))
+
+            tool_calls = self.client.parse_tool_calls(response)
+            context.append(self.client.get_assistant_message(response))
             
             for tc in tool_calls:
                 # Special handling for canvas_update
@@ -577,25 +583,20 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                     )
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)
-                
-                context.append(self.adapter.format_tool_result(tool_result))
+
+                context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
-        
+
         # Now stream the final response
         full_response = ""
-        stream = await self.client.chat.completions.create(
-            model=self.model,
+
+        async for chunk in self.client.stream(
             messages=context,
             temperature=temperature,
-            max_tokens=max_tokens,
-            stream=True
-        )
-        
-        async for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta.content:
-                text = chunk.choices[0].delta.content
-                full_response += text
-                yield text
+            max_tokens=max_tokens
+        ):
+            full_response += chunk
+            yield chunk
         
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
