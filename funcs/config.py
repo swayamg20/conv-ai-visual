@@ -2,16 +2,34 @@
 Configuration module for voice AI application.
 """
 import os
+from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 
 class Config:
     """Application configuration."""
-    DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "dea381e9d217d2451a3ef550b95b2735e58f101b")
+    # Provider selection
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+
+    # Deepgram STT config
+    DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "")
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova")
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "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")
+
+    # OpenAI config
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY", "m0-HxU0GjNXPG2K2p5B6E3CkSiSD9L5v9lIcbhXCtrU")
+
+    # Gemini config
+    GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+
+    # Memory config
+    MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY")
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
@@ -40,8 +58,8 @@ TEACHING STYLE:
 
 The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update for every response."""
     )
-    ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY", "sk_55c31180bb9c89e7456a80e305e917dbdf73ac767cb26982")
-    ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "2zRM7PkgwBPiau2jvVXc")  # Rachel
+    ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY")
+    ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel
     ELEVENLABS_MODEL_ID: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
     TTS_STABILITY: float = float(os.getenv("TTS_STABILITY", "0.5"))
     TTS_SIMILARITY_BOOST: float = float(os.getenv("TTS_SIMILARITY_BOOST", "0.75"))
@@ -52,11 +70,25 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
     
     @classmethod
     def validate(cls) -> bool:
-        """Validate required configuration."""
-        if not cls.OPENAI_API_KEY:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
+        """Validate required configuration based on provider."""
+        provider = cls.LLM_PROVIDER.lower()
+
+        # Validate LLM provider configuration
+        if provider == "openai":
+            if not cls.OPENAI_API_KEY:
+                raise ValueError("OPENAI_API_KEY environment variable is required for provider=openai")
+        elif provider == "gemini":
+            if not cls.GEMINI_API_KEY:
+                raise ValueError("GEMINI_API_KEY environment variable is required for provider=gemini")
+        else:
+            raise ValueError(
+                f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, gemini"
+            )
+
+        # Validate other required configuration
         if not cls.ELEVENLABS_API_KEY:
             raise ValueError("ELEVENLABS_API_KEY environment variable is required")
+
         return True
 
 

@@ -6,3 +6,8 @@ __pycache__/
 /funcs/models.py
 /web/node_modules
 /web/.next
+
+# Environment variables
+.env
+.env.local
+.env.*.local
