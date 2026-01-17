@@ -53,11 +53,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [pipelineState, setPipelineState] = useState<PipelineState>("idle");
+  const pipelineStateRef = useRef<PipelineState>("idle");  // Ref for latest state in callbacks
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const isFirstTTSChunkRef = useRef(true);  // Track if this is first chunk of TTS session
-  const { initAudio, playChunkStreaming, stopAudio } = useAudio();
 
   const log = useCallback((msg: string) => {
     onLog?.(msg);
@@ -65,14 +65,35 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   }, [onLog]);
 
   const updatePipelineState = useCallback((state: PipelineState) => {
+    const prevState = pipelineStateRef.current;
+    console.log(`[State] ${prevState} → ${state}`);
+    pipelineStateRef.current = state;  // Update ref immediately
     setPipelineState(state);
     onStateChange?.(state);
     log(`State: ${state}`);
   }, [onStateChange, log]);
 
+  // Callback when audio playback completes
+  const handlePlaybackComplete = useCallback(() => {
+    console.log("[Playback] ✅ All audio chunks finished playing");
+    // Only transition to listening if we're currently in speaking state
+    if (pipelineStateRef.current === "speaking") {
+      console.log("[Playback] → Transitioning speaking → listening");
+      updatePipelineState("listening");
+    }
+  }, [updatePipelineState]);
+
+  const { initAudio, playChunkStreaming, stopAudio } = useAudio({
+    onPlaybackComplete: handlePlaybackComplete
+  });
+
   const connect = useCallback(async () => {
-    if (pcRef.current) return;
-    
+    console.log("[Connection] Connect called, current state:", pipelineStateRef.current);
+    if (pcRef.current) {
+      console.log("[Connection] Already connected, ignoring");
+      return;
+    }
+
     setStatus("connecting");
     log("Connecting...");
 
@@ -105,14 +126,18 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
     const channel = pc.createDataChannel("chat");
     channelRef.current = channel;
+    console.log("[Connection] DataChannel created, readyState:", channel.readyState);
 
     channel.addEventListener("open", () => {
+      console.log("[Connection] DataChannel opened");
       log("Connected");
       setStatus("connected");
       updatePipelineState("listening");
+      console.log("[Connection] State set to listening");
     });
 
     channel.addEventListener("close", () => {
+      console.log("[Connection] DataChannel closed");
       log("Disconnected");
       isFirstTTSChunkRef.current = true;  // Reset
       setStatus("disconnected");
@@ -122,27 +147,44 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     channel.addEventListener("message", (e) => {
       try {
         const data = JSON.parse(e.data);
-        console.log(`[Event] ${data.type}`, data);
+        // Skip verbose logging for tts_chunk (already logged in case handler)
+        if (data.type !== "tts_chunk") {
+          console.log(`[Event] ${data.type}`, data);
+        }
 
         switch (data.type) {
           case "transcript":
             onTranscript?.({ text: data.text, isFinal: data.is_final });
 
-            // User is speaking
-            if (data.text.trim()) {
-              // If we're speaking (TTS active) and user talks, interrupt
-              if (pipelineState === "speaking") {
-                log("🛑 Interrupting TTS - user is speaking");
-                stopAudio();
-                isFirstTTSChunkRef.current = true;  // Reset for next session
-                updatePipelineState("listening");
+            const currentState = pipelineStateRef.current;
+            console.log(`[Transcript] Received: "${data.text}" (final=${data.is_final}, state=${currentState})`);
 
-                // Tell server to stop TTS
-                if (channelRef.current?.readyState === "open") {
-                  channelRef.current.send(JSON.stringify({ type: "stop_tts" }));
-                }
-              } else if (data.is_final) {
-                // Final transcript - moving to processing
+            // IMMEDIATE INTERRUPTION: If we're speaking (AI talking) and user talks, stop TTS immediately
+            // Note: "speaking" state means AI is talking AND we're listening for interruptions
+            if (data.text.trim() && currentState === "speaking") {
+              console.log(`[Interrupt] 🛑 INTERRUPTION DETECTED - User spoke during TTS playback`);
+              console.log(`[Interrupt] 📝 Transcript: "${data.text}" (final=${data.is_final})`);
+              log("🛑 Interrupting TTS immediately");
+
+              // Stop audio playback immediately
+              stopAudio();
+              isFirstTTSChunkRef.current = true;  // Reset for next session
+              updatePipelineState("listening");
+
+              // Tell server to stop TTS generation immediately
+              if (channelRef.current?.readyState === "open") {
+                channelRef.current.send(JSON.stringify({ type: "stop_tts" }));
+                console.log("[Interrupt] ✓ Sent stop_tts to server");
+              }
+            } else if (data.text.trim() && currentState !== "speaking") {
+              console.log(`[Transcript] Not interrupting - state is ${currentState}, not speaking`);
+            }
+
+            // Process final transcripts (even after interruption)
+            if (data.is_final && data.text.trim()) {
+              // Only move to processing if we're listening (not already processing)
+              if (pipelineStateRef.current === "listening") {
+                console.log(`[Transcript] ✓ Processing final transcript through LLM`);
                 updatePipelineState("processing");
               }
             }
@@ -169,18 +211,27 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             // Decode and play audio
             const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
             const isFirstChunk = isFirstTTSChunkRef.current;
+
+            // Ensure we're in speaking state when receiving TTS chunks
+            if (pipelineStateRef.current !== "speaking") {
+              console.log(`[TTS] State was ${pipelineStateRef.current}, setting to speaking`);
+              updatePipelineState("speaking");
+            }
+
             if (isFirstChunk) {
               isFirstTTSChunkRef.current = false;  // Mark that we've received first chunk
               console.log(`[TTS] First chunk: ${bytes.length} bytes`);
             }
-            console.log(`[TTS] Playing chunk: ${bytes.length} bytes, isFirst=${isFirstChunk}`);
+            console.log(`[TTS] Playing chunk: ${bytes.length} bytes, isFirst=${isFirstChunk}, state=${pipelineStateRef.current}`);
             playChunkStreaming(bytes, 16000, isFirstChunk);
             break;
 
           case "tts_complete":
-            log("TTS complete");
+            log("TTS complete (backend done sending)");
             isFirstTTSChunkRef.current = true;  // Reset for next session
-            updatePipelineState("listening");
+            // NOTE: Don't change state here! State will change to "listening" when
+            // audio playback actually completes (via handlePlaybackComplete callback)
+            console.log("[TTS] Backend finished sending chunks, waiting for playback to complete...");
             break;
 
           case "tts_interrupted":
@@ -235,6 +286,8 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
     const answer = await response.json();
     await pc.setRemoteDescription(answer);
+
+    console.log("[Connection] Connection setup complete, waiting for datachannel to open...");
   }, [
     apiUrl,
     canvasMode,
@@ -246,7 +299,6 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     playChunkStreaming,
     stopAudio,
     updatePipelineState,
-    pipelineState,
   ]);
 
   const disconnect = useCallback(() => {

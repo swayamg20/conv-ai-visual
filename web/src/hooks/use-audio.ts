@@ -2,7 +2,12 @@
 
 import { useRef, useCallback } from "react";
 
-export function useAudio() {
+interface UseAudioOptions {
+  onPlaybackComplete?: () => void;
+}
+
+export function useAudio(options: UseAudioOptions = {}) {
+  const { onPlaybackComplete } = options;
   const audioContextRef = useRef<AudioContext | null>(null);
   const scheduledSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const nextStartTimeRef = useRef<number>(0);
@@ -125,17 +130,19 @@ export function useAudio() {
           scheduledSourcesRef.current.splice(index, 1);
         }
 
-        // If no more sources scheduled, mark inactive
+        // If no more sources scheduled, mark inactive and notify
         if (scheduledSourcesRef.current.length === 0) {
           isActiveRef.current = false;
           console.log(`[Audio] ✅ Session ${sessionId} playback complete`);
+          // Notify that all audio has finished playing
+          onPlaybackComplete?.();
         }
       };
 
     } catch (error) {
       console.error("[Audio] ❌ Error processing audio chunk:", error);
     }
-  }, [initAudio]);
+  }, [initAudio, onPlaybackComplete]);
 
   const stopAudio = useCallback(() => {
     const ctx = audioContextRef.current;
