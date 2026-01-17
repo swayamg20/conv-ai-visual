@@ -180,17 +180,19 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
             ch = datachannels.get(pc_id)
             if ch and ch.readyState == "open":
+                # IMMEDIATE INTERRUPTION: Stop TTS immediately on ANY transcript while TTS is active
+                if transcript.strip() and tts_interrupt_flags.get(pc_id, False):
+                    logger.warning("[%s] 🛑 IMMEDIATE INTERRUPT - User speaking during TTS: '%s' (final=%s)",
+                                   pc_id, transcript[:30], is_final)
+                    tts_interrupt_flags[pc_id] = False  # Signal TTS to stop immediately
+                    # Note: TTS loop will detect this flag change and stop on next chunk iteration
+
                 # Send all transcripts to client (interim + final)
                 ch.send(json.dumps({
                     "type": "transcript",
                     "text": transcript,
                     "is_final": is_final
                 }))
-
-                # INTERRUPT DETECTION: If we get a transcript while TTS is active, stop it
-                if transcript.strip() and tts_interrupt_flags.get(pc_id, False):
-                    logger.warning("[%s] 🛑 User speaking during TTS - interrupting", pc_id)
-                    tts_interrupt_flags[pc_id] = False  # Stop TTS
 
             # Process final transcripts through LLM
             if is_final and transcript.strip():
@@ -262,9 +264,9 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                             import base64
                             chunks_sent = 0
                             async for audio_chunk in tts_pipeline.text_to_speech_stream(llm_response):
-                                # Check interrupt flag before sending each chunk
+                                # Check interrupt flag BEFORE sending each chunk
                                 if not tts_interrupt_flags.get(pc_id, False):
-                                    logger.warning("[%s] TTS interrupted (sent %d chunks)", pc_id, chunks_sent)
+                                    logger.warning("[%s] 🛑 TTS interrupted after %d chunks - stopping immediately", pc_id, chunks_sent)
                                     if ch and ch.readyState == "open":
                                         ch.send(json.dumps({
                                             "type": "tts_interrupted",
@@ -282,6 +284,17 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                         "audio": base64.b64encode(audio_chunk).decode('utf-8')
                                     }))
                                     chunks_sent += 1
+
+                                    # Also check flag immediately after sending (for faster interruption)
+                                    if not tts_interrupt_flags.get(pc_id, False):
+                                        logger.warning("[%s] 🛑 TTS interrupted after chunk %d - stopping immediately", pc_id, chunks_sent)
+                                        if ch and ch.readyState == "open":
+                                            ch.send(json.dumps({
+                                                "type": "tts_interrupted",
+                                                "chunks_sent": chunks_sent
+                                            }))
+                                        break
+
                             else:
                                 # TTS completed without interruption
                                 logger.info("[%s] ✓ TTS complete (%d chunks)", pc_id, chunks_sent)
