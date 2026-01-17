@@ -1,29 +1,25 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { Button } from "@/components/ui/button";
+import { useState, useRef, useCallback, useMemo } from "react";
+import { motion } from "framer-motion";
+import { Mic, Settings, ChevronUp } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Input } from "@/components/ui/input";
 import { CanvasRenderer, type CanvasRendererHandle } from "@/components/canvas-renderer";
-import { useWebRTC, type TranscriptEvent, type CanvasOperation, type LatencyMetrics } from "@/hooks/use-webrtc";
-import { useChat } from "@/hooks/use-chat";
-import { Paintbrush, Mic, MessageSquare, Trash2, Activity } from "lucide-react";
+import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { cn } from "@/lib/utils";
+import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
+import { StatusIndicator } from "@/components/status-indicator";
+import { FloatingButton } from "@/components/ui/floating-button";
+import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
+import { TechnicalDrawer } from "@/components/technical-drawer";
 
 export default function Home() {
   const [canvasMode, setCanvasMode] = useState(false);
-  const [activeTab, setActiveTab] = useState<"voice" | "chat">("voice");
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
-  const [chatInput, setChatInput] = useState("");
-  const [isInterrupted, setIsInterrupted] = useState(false);
-  const [latencyMetrics, setLatencyMetrics] = useState<LatencyMetrics | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
   const canvasRef = useRef<CanvasRendererHandle>(null);
-  const transcriptsEndRef = useRef<HTMLDivElement>(null);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
     canvasRef.current?.render(operations);
@@ -48,364 +44,229 @@ export default function Home() {
     handleLog(`Error: ${message}`);
   }, [handleLog]);
 
-  const handleInterruption = useCallback((message: string) => {
-    setIsInterrupted(true);
-    handleLog(`Interruption: ${message}`);
+  const handleStateChange = useCallback((state: PipelineState) => {
+    handleLog(`State → ${state}`);
   }, [handleLog]);
 
-  const handleTTSCancelled = useCallback((chunksSent: number) => {
-    handleLog(`TTS cancelled after ${chunksSent} chunks`);
-    // Clear interruption flag after a brief moment
-    setTimeout(() => setIsInterrupted(false), 1500);
-  }, [handleLog]);
-
-  const handleLatencyUpdate = useCallback((metrics: LatencyMetrics) => {
-    setLatencyMetrics(metrics);
-    handleLog(`Pipeline: VAD=${metrics.vadLatency?.toFixed(1) || '-'}ms, STT=${metrics.sttFinalTranscript?.toFixed(0)}ms, LLM=${metrics.llmComplete?.toFixed(0)}ms, TTS=${metrics.ttsComplete?.toFixed(0)}ms, Total=${metrics.totalPipeline?.toFixed(0)}ms`);
-  }, [handleLog]);
-
-  const { status, connect, disconnect, initAudio } = useWebRTC({
+  const { status, pipelineState, connect, disconnect, initAudio } = useWebRTC({
     canvasMode,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
     onError: handleError,
     onLog: handleLog,
-    onInterruptionDetected: handleInterruption,
-    onTTSCancelled: handleTTSCancelled,
-    onLatencyUpdate: handleLatencyUpdate,
+    onStateChange: handleStateChange,
   });
-
-  const { messages, isLoading, sendMessage, clearChat } = useChat({
-    canvasMode,
-    onCanvasUpdate: handleCanvasUpdate,
-  });
-
-  // Auto-scroll effects
-  useEffect(() => {
-    transcriptsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcripts]);
-
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [logs]);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
 
   const handleConnect = useCallback(() => {
     initAudio();
     connect();
   }, [initAudio, connect]);
 
-  const handleSendMessage = useCallback(async () => {
-    if (!chatInput.trim() || isLoading) return;
-    const text = chatInput;
-    setChatInput("");
-    await sendMessage(text);
-  }, [chatInput, isLoading, sendMessage]);
-
-  const handleClearChat = useCallback(async () => {
-    await clearChat();
-    canvasRef.current?.clear();
-  }, [clearChat]);
-
-  const handleClearCanvas = useCallback(() => {
-    canvasRef.current?.clear();
-  }, []);
-
   const isConnected = status === "connected";
   const isConnecting = status === "connecting";
 
+  // Map pipeline state to voice orb state
+  const voiceState: VoiceState = useMemo(() => {
+    if (status === "error") return "error";
+    if (status === "connecting") return "connecting";
+    if (status === "idle" || status === "disconnected") return "idle";
+    // Map pipeline states directly
+    if (pipelineState === "listening") return "listening";
+    if (pipelineState === "processing") return "processing";
+    if (pipelineState === "speaking") return "speaking";
+    return "listening";
+  }, [status, pipelineState]);
+
+  // Get latest non-empty transcript
+  const latestTranscript = useMemo(() => {
+    const nonEmpty = transcripts.filter(t => t.trim() !== "" && !t.startsWith("Assistant:"));
+    return nonEmpty[nonEmpty.length - 1] || "";
+  }, [transcripts]);
+
+  // Status label
+  const statusLabel = useMemo(() => {
+    if (status === "idle") return "Ready";
+    if (status === "connecting") return "Connecting...";
+    if (status === "connected") return "Connected";
+    if (status === "error") return "Error";
+    return "Disconnected";
+  }, [status]);
+
   return (
-    <div className="flex h-screen">
-      {/* Sidebar */}
-      <div
-        className={cn(
-          "flex flex-col border-r border-border bg-card transition-all",
-          canvasMode ? "w-[400px] min-w-[360px]" : "w-full max-w-[680px] mx-auto border-none"
-        )}
-      >
-        {/* Brand Header */}
-        <div className="border-b border-border p-6">
-          <div className="mb-5 flex items-center justify-between">
+    <div className="relative min-h-screen bg-background">
+      {/* Top Navigation Bar */}
+      <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-white/10">
+        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <Mic className="h-6 w-6 text-primary" />
             <div>
-              <h1 className="text-[15px] font-semibold tracking-tight">Voice AI</h1>
-              <p className="mt-0.5 text-xs text-muted-foreground">Real-time assistant</p>
+              <h1 className="text-lg font-semibold tracking-tight">Voice AI</h1>
+              <p className="text-xs text-muted-foreground">Real-time assistant</p>
             </div>
+          </div>
+
+          <div className="flex items-center gap-6">
             <div className="flex items-center gap-2.5">
-              <span className="text-xs font-medium text-muted-foreground">Canvas</span>
+              <span className="text-sm font-medium text-muted-foreground">Canvas</span>
               <Switch checked={canvasMode} onCheckedChange={setCanvasMode} />
             </div>
+            <button
+              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              aria-label="Settings"
+            >
+              <Settings className="h-5 w-5 text-muted-foreground" />
+            </button>
           </div>
-
-          <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "voice" | "chat")}>
-            <TabsList>
-              <TabsTrigger value="voice">
-                <Mic className="mr-2 h-3.5 w-3.5" />
-                Voice
-              </TabsTrigger>
-              <TabsTrigger value="chat">
-                <MessageSquare className="mr-2 h-3.5 w-3.5" />
-                Chat
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
         </div>
+      </nav>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {/* Voice Panel */}
-          {activeTab === "voice" && (
-            <div className="space-y-6">
-              {/* Controls */}
-              <div className="flex items-center gap-2.5">
-                <Button
-                  onClick={handleConnect}
-                  disabled={isConnected || isConnecting}
-                >
-                  Connect
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={disconnect}
-                  disabled={!isConnected && !isConnecting}
-                >
-                  Disconnect
-                </Button>
-                <div className="ml-auto flex items-center gap-1.5">
-                  <span
-                    className={cn(
-                      "h-[7px] w-[7px] rounded-full",
-                      isConnected
-                        ? "bg-green-500 shadow-[0_0_8px] shadow-green-500"
-                        : "bg-muted-foreground"
-                    )}
-                  />
-                  <span
-                    className={cn(
-                      "text-xs",
-                      isConnected ? "text-green-500" : "text-muted-foreground"
-                    )}
-                  >
-                    {status === "idle"
-                      ? "Idle"
-                      : status === "connecting"
-                      ? "Connecting..."
-                      : status === "connected"
-                      ? "Connected"
-                      : status === "error"
-                      ? "Error"
-                      : "Disconnected"}
-                  </span>
-                </div>
-              </div>
-
-              {/* Interruption Indicator */}
-              {isInterrupted && isConnected && (
-                <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/10 px-4 py-3 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="relative flex h-2 w-2">
-                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-yellow-500 opacity-75"></span>
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-yellow-500"></span>
-                    </span>
-                    <span className="font-medium text-yellow-600">Listening to you...</span>
-                  </div>
-                </div>
-              )}
-
-              {/* Transcripts */}
-              <div>
-                <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  Transcripts
-                </h3>
-                <div className="max-h-40 overflow-y-auto rounded-lg border border-border bg-background p-3.5 font-mono text-xs leading-relaxed text-muted-foreground">
-                  {transcripts.length === 0 ? (
-                    <span className="text-muted-foreground/50">Waiting for audio...</span>
-                  ) : (
-                    transcripts.map((line, i) => (
-                      <div key={i} className="whitespace-pre-wrap">
-                        {line}
-                      </div>
-                    ))
-                  )}
-                  <div ref={transcriptsEndRef} />
-                </div>
-              </div>
-
-              {/* Latency Metrics - Always visible */}
-              <div>
-                <h3 className="mb-2.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  <Activity className="h-3.5 w-3.5" />
-                  Latency Metrics
-                </h3>
-                <div className="grid grid-cols-5 gap-2 rounded-lg border border-border bg-background p-3">
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-muted-foreground">VAD</div>
-                    <div className={cn(
-                      "text-sm font-mono font-semibold",
-                      latencyMetrics?.vadLatency !== undefined
-                        ? latencyMetrics.vadLatency < 5 ? "text-green-500" : "text-yellow-500"
-                        : "text-muted-foreground/50"
-                    )}>
-                      {latencyMetrics?.vadLatency?.toFixed(1) || '-'}ms
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-muted-foreground">STT</div>
-                    <div className="text-sm font-mono font-semibold">
-                      {latencyMetrics?.sttFinalTranscript?.toFixed(0) || '-'}ms
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-muted-foreground">LLM</div>
-                    <div className="text-sm font-mono font-semibold">
-                      {latencyMetrics?.llmComplete?.toFixed(0) || '-'}ms
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-muted-foreground">TTS</div>
-                    <div className="text-sm font-mono font-semibold">
-                      {latencyMetrics?.ttsComplete?.toFixed(0) || '-'}ms
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="text-[10px] text-muted-foreground">Total</div>
-                    <div className={cn(
-                      "text-sm font-mono font-semibold",
-                      latencyMetrics?.totalPipeline !== undefined
-                        ? (latencyMetrics.totalPipeline || 0) < 2000 ? "text-green-500" :
-                          (latencyMetrics.totalPipeline || 0) < 4000 ? "text-yellow-500" :
-                          "text-red-500"
-                        : "text-muted-foreground/50"
-                    )}>
-                      {latencyMetrics?.totalPipeline?.toFixed(0) || '-'}ms
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Logs */}
-              <div>
-                <h3 className="mb-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                  System Log
-                </h3>
-                <div className="max-h-40 overflow-y-auto rounded-lg border border-border bg-background p-3.5 font-mono text-xs leading-relaxed text-muted-foreground">
-                  {logs.length === 0 ? (
-                    <span className="text-muted-foreground/50">No logs yet...</span>
-                  ) : (
-                    logs.map((line, i) => (
-                      <div key={i} className="whitespace-pre-wrap">
-                        {line}
-                      </div>
-                    ))
-                  )}
-                  <div ref={logsEndRef} />
-                </div>
-              </div>
-            </div>
+      {/* Main Content Area */}
+      <main
+        className={cn(
+          "pt-24 pb-32 min-h-screen flex items-center justify-center",
+          canvasMode && "gap-8 px-8"
+        )}
+      >
+        {/* Voice Interaction Hero Section */}
+        <motion.section
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className={cn(
+            "flex flex-col items-center gap-8 md:gap-12 px-6",
+            canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-2xl mx-auto"
           )}
-
-          {/* Chat Panel */}
-          {activeTab === "chat" && (
-            <div className="flex h-full flex-col">
-              {/* Messages */}
-              <div className="mb-4 min-h-[280px] max-h-[360px] flex-1 overflow-y-auto rounded-xl border border-border bg-background p-4">
-                {messages.length === 0 ? (
-                  <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-                    Send a message to begin
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {messages.map((msg) => (
-                      <div
-                        key={msg.id}
-                        className={cn(
-                          "rounded-lg px-4 py-3 text-sm leading-relaxed",
-                          msg.role === "user"
-                            ? "ml-8 rounded-br-sm bg-primary/10 text-primary"
-                            : "mr-8 rounded-bl-sm bg-secondary text-foreground"
-                        )}
-                      >
-                        {msg.content}
-                      </div>
-                    ))}
-                    {isLoading && (
-                      <div className="flex items-center gap-2.5 py-3 text-sm text-muted-foreground">
-                        <div className="flex gap-1">
-                          <span className="loading-dot h-1.5 w-1.5 rounded-full bg-primary" />
-                          <span className="loading-dot h-1.5 w-1.5 rounded-full bg-primary" />
-                          <span className="loading-dot h-1.5 w-1.5 rounded-full bg-primary" />
-                        </div>
-                        <span>Thinking...</span>
-                      </div>
-                    )}
-                    <div ref={messagesEndRef} />
-                  </div>
-                )}
-              </div>
-
-              {/* Input */}
-              <div className="flex gap-2.5">
-                <Input
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault();
-                      handleSendMessage();
-                    }
-                  }}
-                  placeholder="Type your message..."
-                  disabled={isLoading}
-                />
-                <Button onClick={handleSendMessage} disabled={isLoading || !chatInput.trim()}>
-                  Send
-                </Button>
-              </div>
-
-              <button
-                onClick={handleClearChat}
-                className="mt-2.5 text-left text-xs text-muted-foreground hover:text-foreground transition-colors"
-              >
-                Clear conversation
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Canvas Area */}
-      {canvasMode && (
-        <div className="flex flex-1 flex-col bg-background">
-          {/* Canvas Header */}
-          <div className="flex items-center justify-between border-b border-border bg-card px-6 py-4">
-            <h2 className="text-sm font-medium text-muted-foreground">Canvas</h2>
-            <Button variant="outline" size="sm" onClick={handleClearCanvas}>
-              <Trash2 className="mr-2 h-3.5 w-3.5" />
-              Clear
-            </Button>
-          </div>
-
-          {/* Canvas Stage */}
-          <div className="relative flex flex-1 items-center justify-center p-8">
-            <CanvasRenderer
-              ref={canvasRef}
-              width={800}
-              height={600}
-              className="rounded-lg bg-white shadow-2xl"
+        >
+          {/* Voice Orb */}
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
+          >
+            <VoiceOrb
+              state={voiceState}
+              size={canvasMode ? "md" : "xl"}
+              audioLevel={0.3}
+              onClick={isConnected ? disconnect : handleConnect}
+              disabled={isConnecting}
             />
+          </motion.div>
 
-            {/* Placeholder */}
-            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-              <Paintbrush className="mb-3 h-10 w-10 opacity-40" />
-              <p className="text-sm">AI will draw here</p>
-            </div>
-          </div>
-        </div>
+          {/* Status Badge */}
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.4 }}
+          >
+            <StatusIndicator
+              status={status === "connected" ? "connected" : status === "connecting" ? "connecting" : status === "error" ? "error" : "idle"}
+              label={statusLabel}
+              pulse={status === "connected"}
+              showDot
+            />
+          </motion.div>
+
+          {/* Connection Button (if not connected) */}
+          {!isConnected && !isConnecting && (
+            <motion.div
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.6 }}
+            >
+              <FloatingButton
+                variant="primary"
+                size="lg"
+                onClick={handleConnect}
+                icon={<Mic className="h-5 w-5" />}
+              >
+                Connect to Voice AI
+              </FloatingButton>
+            </motion.div>
+          )}
+
+          {/* Latest Transcript Preview */}
+          {isConnected && latestTranscript && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0.8 }}
+              className="w-full max-w-md"
+            >
+              <GlassmorphicCard
+                variant="elevated"
+                padding="lg"
+                className="text-center"
+              >
+                <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
+                  {latestTranscript.replace(/^\d{2}:\d{2}:\d{2}\s+\[.*?\]\s+/, "")}
+                </p>
+              </GlassmorphicCard>
+            </motion.div>
+          )}
+
+          {/* Prompt Suggestion */}
+          {isConnected && transcripts.length === 0 && (
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 1 }}
+              className="text-sm text-muted-foreground text-center"
+            >
+              Try saying: "Tell me about your capabilities"
+            </motion.p>
+          )}
+        </motion.section>
+
+        {/* Canvas Section (if enabled) */}
+        {canvasMode && (
+          <motion.section
+            initial={{ opacity: 0, x: 20 }}
+            animate={{ opacity: 1, x: 0 }}
+            transition={{ delay: 0.3 }}
+            className="w-3/5 flex items-center justify-center"
+          >
+            <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
+              <div className="relative">
+                <CanvasRenderer
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  className="rounded-xl bg-white shadow-2xl"
+                />
+                {/* Canvas Placeholder */}
+                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+                  <Mic className="mb-3 h-10 w-10 opacity-20" />
+                  <p className="text-sm opacity-50">AI will draw here</p>
+                </div>
+              </div>
+            </GlassmorphicCard>
+          </motion.section>
+        )}
+      </main>
+
+      {/* Technical Drawer Toggle (Bottom Fixed) */}
+      {!drawerOpen && (
+        <motion.button
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 1.2 }}
+          onClick={() => setDrawerOpen(true)}
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass-card px-6 py-3 rounded-full text-sm font-medium hover:bg-white/10 transition-all flex items-center gap-2 shadow-glass"
+        >
+          <span>View Metrics & Logs</span>
+          <ChevronUp className="h-4 w-4" />
+        </motion.button>
       )}
+
+      {/* Technical Drawer */}
+      <TechnicalDrawer
+        isOpen={drawerOpen}
+        onClose={() => setDrawerOpen(false)}
+        transcripts={transcripts}
+        logs={logs}
+        pipelineState={pipelineState}
+      />
     </div>
   );
 }
-
