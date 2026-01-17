@@ -1,11 +1,3 @@
-"""
-4-Layer Memory Architecture for Voice AI Agent.
-
-Layer 1: Conversation Context (Short-Term) - sliding window, in-memory
-Layer 2: Episodic Memory - conversation summaries, SQLite via SQLModel
-Layer 3: Semantic Memory - vector search via Mem0 Cloud
-Layer 4: User Profile - canonical facts, SQLite via SQLModel
-"""
 import json
 import logging
 from datetime import datetime

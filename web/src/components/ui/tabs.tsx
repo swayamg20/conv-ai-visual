@@ -34,7 +34,7 @@ function TabsList({ children, className }: TabsListProps) {
   return (
     <div
       className={cn(
-        "flex rounded-lg bg-secondary p-1",
+        "flex rounded-xl glass-card p-1.5",
         className
       )}
     >
@@ -60,10 +60,10 @@ function TabsTrigger({ value, children, className }: TabsTriggerProps) {
       type="button"
       onClick={() => context.onValueChange(value)}
       className={cn(
-        "flex-1 rounded-md px-4 py-2.5 text-sm font-medium transition-all",
+        "relative flex-1 rounded-lg px-4 py-3 text-base font-medium transition-all duration-200 min-h-[44px]",
         isActive
-          ? "bg-muted text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground/70",
+          ? "bg-background-elevated text-foreground shadow-glass"
+          : "text-muted-foreground hover:text-foreground/80 hover:bg-white/5",
         className
       )}
     >
