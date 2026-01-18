@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import { useAudio } from "./use-audio";
+import { useVAD, VAD_PRESETS } from "./use-vad";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
@@ -85,6 +86,42 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
   const { initAudio, playChunkStreaming, stopAudio } = useAudio({
     onPlaybackComplete: handlePlaybackComplete
+  });
+
+  // VAD for instant interruption detection
+  // Only active when TTS is playing (speaking state)
+  const handleVADSpeechDetected = useCallback(() => {
+    console.log("[VAD] 🎤 Speech detected during TTS - interrupting immediately!");
+
+    // 1. Stop audio playback instantly
+    stopAudio();
+
+    // 2. Update state to listening
+    updatePipelineState("listening");
+
+    // 3. Tell server to stop generating TTS
+    if (channelRef.current?.readyState === "open") {
+      channelRef.current.send(JSON.stringify({ type: "stop_tts" }));
+      console.log("[VAD] ✓ Sent stop_tts to server");
+    }
+
+    // Note: Deepgram transcript will arrive shortly and be processed normally
+  }, [stopAudio, updatePipelineState]);
+
+  const vadState = useVAD({
+    // Only enable VAD when AI is speaking (TTS playing)
+    enabled: pipelineState === "speaking",
+
+    onSpeechDetected: handleVADSpeechDetected,
+
+    // Use balanced preset for good speed/accuracy trade-off
+    // Tune these if needed:
+    // - ultraFast: faster but more false positives
+    // - conservative: slower but more accurate
+    ...VAD_PRESETS.balanced,
+
+    // Enable debug logs to see VAD activity
+    debug: true,
   });
 
   const connect = useCallback(async () => {
@@ -331,6 +368,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     connect,
     disconnect,
     initAudio,
+    vadState,
   };
 }
 
