@@ -52,14 +52,28 @@ class CanvasElement:
         """Get bounding box for position awareness."""
         if self.action in [CanvasAction.LINE, CanvasAction.ARROW, CanvasAction.PATH]:
             if self.points:
-                xs = [p[0] for p in self.points]
-                ys = [p[1] for p in self.points]
-                return {
-                    "min_x": min(xs),
-                    "min_y": min(ys),
-                    "max_x": max(xs),
-                    "max_y": max(ys)
-                }
+                try:
+                    # Handle different point formats: [[x,y], ...] or [(x,y), ...]
+                    # Filter out invalid points (e.g., integers)
+                    valid_points = []
+                    for p in self.points:
+                        # Check if point is subscriptable (list/tuple) and has at least 2 elements
+                        if hasattr(p, '__getitem__') and len(p) >= 2:
+                            valid_points.append(p)
+
+                    if valid_points:
+                        xs = [p[0] for p in valid_points]
+                        ys = [p[1] for p in valid_points]
+                        return {
+                            "min_x": min(xs),
+                            "min_y": min(ys),
+                            "max_x": max(xs),
+                            "max_y": max(ys)
+                        }
+                except (TypeError, IndexError, ValueError) as e:
+                    # If points are malformed, fall back to x,y,width,height
+                    pass
+
         return {
             "min_x": self.x,
             "min_y": self.y,

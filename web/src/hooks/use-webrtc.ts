@@ -54,11 +54,15 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [pipelineState, setPipelineState] = useState<PipelineState>("idle");
+  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isTTSEnabled, setIsTTSEnabled] = useState(true);
+
   const pipelineStateRef = useRef<PipelineState>("idle");  // Ref for latest state in callbacks
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const isFirstTTSChunkRef = useRef(true);  // Track if this is first chunk of TTS session
+  const isTTSEnabledRef = useRef(true);  // Ref for TTS enabled state
 
   const log = useCallback((msg: string) => {
     onLog?.(msg);
@@ -123,6 +127,34 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     // Enable debug logs to see VAD activity
     debug: true,
   });
+
+  // Toggle microphone mute
+  const toggleMicMute = useCallback(() => {
+    if (!localStreamRef.current) return;
+
+    const audioTrack = localStreamRef.current.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      setIsMicMuted(!audioTrack.enabled);
+      log(`Microphone ${audioTrack.enabled ? "unmuted" : "muted"}`);
+      console.log(`[Mic] ${audioTrack.enabled ? "🎤 Unmuted" : "🔇 Muted"}`);
+    }
+  }, [log]);
+
+  // Toggle TTS playback
+  const toggleTTS = useCallback(() => {
+    const newState = !isTTSEnabledRef.current;
+    isTTSEnabledRef.current = newState;
+    setIsTTSEnabled(newState);
+    log(`TTS ${newState ? "enabled" : "disabled"}`);
+    console.log(`[TTS] ${newState ? "🔊 Enabled" : "🔇 Disabled"}`);
+
+    // If disabling TTS while speaking, stop current playback
+    if (!newState && pipelineStateRef.current === "speaking") {
+      stopAudio();
+      updatePipelineState("listening");
+    }
+  }, [log, stopAudio, updatePipelineState]);
 
   const connect = useCallback(async () => {
     console.log("[Connection] Connect called, current state:", pipelineStateRef.current);
@@ -241,10 +273,26 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           case "tts_started":
             log("TTS started");
             isFirstTTSChunkRef.current = true;  // Reset for new TTS session
-            updatePipelineState("speaking");
+
+            // Only enter speaking state if TTS is enabled
+            if (isTTSEnabledRef.current) {
+              updatePipelineState("speaking");
+            } else {
+              console.log("[TTS] TTS disabled, skipping playback");
+              // Tell server to stop sending TTS chunks
+              if (channelRef.current?.readyState === "open") {
+                channelRef.current.send(JSON.stringify({ type: "stop_tts" }));
+              }
+            }
             break;
 
           case "tts_chunk":
+            // Skip TTS playback if TTS is disabled
+            if (!isTTSEnabledRef.current) {
+              console.log("[TTS] Skipping chunk (TTS disabled)");
+              break;
+            }
+
             // Decode and play audio
             const bytes = Uint8Array.from(atob(data.audio), (c) => c.charCodeAt(0));
             const isFirstChunk = isFirstTTSChunkRef.current;
@@ -369,6 +417,10 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     disconnect,
     initAudio,
     vadState,
+    isMicMuted,
+    isTTSEnabled,
+    toggleMicMute,
+    toggleTTS,
   };
 }
 

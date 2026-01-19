@@ -12,6 +12,7 @@ import { StatusIndicator } from "@/components/status-indicator";
 import { FloatingButton } from "@/components/ui/floating-button";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
 import { TechnicalDrawer } from "@/components/technical-drawer";
+import { ControlButtons } from "@/components/control-buttons";
 
 export default function Home() {
   const [canvasMode, setCanvasMode] = useState(false);
@@ -48,7 +49,17 @@ export default function Home() {
     handleLog(`State → ${state}`);
   }, [handleLog]);
 
-  const { status, pipelineState, connect, disconnect, initAudio } = useWebRTC({
+  const {
+    status,
+    pipelineState,
+    connect,
+    disconnect,
+    initAudio,
+    isMicMuted,
+    isTTSEnabled,
+    toggleMicMute,
+    toggleTTS,
+  } = useWebRTC({
     canvasMode,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
@@ -166,6 +177,17 @@ export default function Home() {
               showDot
             />
           </motion.div>
+
+          {/* Control Buttons (when connected) */}
+          {isConnected && (
+            <ControlButtons
+              isMicMuted={isMicMuted}
+              isTTSEnabled={isTTSEnabled}
+              onToggleMic={toggleMicMute}
+              onToggleTTS={toggleTTS}
+              disabled={false}
+            />
+          )}
 
           {/* Connection Button (if not connected) */}
           {!isConnected && !isConnecting && (
