@@ -12,6 +12,14 @@ export interface TranscriptEvent {
   isFinal: boolean;
 }
 
+export interface LatencyMetrics {
+  vadLatency?: number;
+  sttFinalTranscript?: number;
+  llmComplete?: number;
+  ttsComplete?: number;
+  totalPipeline?: number;
+}
+
 export interface CanvasOperation {
   id?: string;
   action: string;

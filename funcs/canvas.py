@@ -1,6 +1,11 @@
 """
 Real-time canvas state management for AI-driven drawing.
 Tracks canvas elements with positions for AI context awareness.
+
+Frontend Integration:
+- Uses Excalidraw for rendering (hand-drawn sketch aesthetic)
+- Canvas operations are converted to Excalidraw elements on the client
+- Supports rect, circle, ellipse, line, arrow, text, path operations
 """
 import json
 import logging
@@ -54,12 +59,17 @@ class CanvasElement:
             if self.points:
                 try:
                     # Handle different point formats: [[x,y], ...] or [(x,y), ...]
-                    # Filter out invalid points (e.g., integers)
+                    # Filter out invalid points (e.g., integers, dicts)
                     valid_points = []
                     for p in self.points:
-                        # Check if point is subscriptable (list/tuple) and has at least 2 elements
-                        if hasattr(p, '__getitem__') and len(p) >= 2:
-                            valid_points.append(p)
+                        # Only accept lists or tuples with at least 2 numeric elements
+                        if isinstance(p, (list, tuple)) and len(p) >= 2:
+                            try:
+                                # Verify we can extract x, y as numbers
+                                x, y = float(p[0]), float(p[1])
+                                valid_points.append((x, y))
+                            except (ValueError, TypeError, IndexError):
+                                continue
 
                     if valid_points:
                         xs = [p[0] for p in valid_points]
@@ -70,7 +80,7 @@ class CanvasElement:
                             "max_x": max(xs),
                             "max_y": max(ys)
                         }
-                except (TypeError, IndexError, ValueError) as e:
+                except (TypeError, IndexError, ValueError, KeyError) as e:
                     # If points are malformed, fall back to x,y,width,height
                     pass
 
@@ -297,15 +307,20 @@ CANVAS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "canvas_update",
-        "description": """Draw on the shared canvas to illustrate concepts visually while explaining.
+        "description": """Draw on the shared Excalidraw canvas to illustrate concepts visually while explaining.
 Use this to create diagrams, flowcharts, highlight relationships, or sketch ideas.
-The canvas is visible to the user in real-time.
+The canvas renders with a hand-drawn aesthetic and is visible to the user in real-time.
 
-IMPORTANT: Send all related drawings in a single call to minimize latency.
-Use semantic labels to reference elements later.
+IMPORTANT:
+- Send all related drawings in a single call to minimize latency
+- Use semantic labels (via 'label' field) to reference elements later
+- To MODIFY existing elements, use "update" action with the element's ID or label
+- Only draw NEW elements - don't redraw existing ones unless updating them
+- Check [Current Canvas State] in your context to see what's already drawn
 
 Coordinate system: (0,0) is top-left. Canvas is 800x600 by default.
 Colors: Use hex codes like "#3b82f6" (blue), "#ef4444" (red), "#10b981" (green), "#f59e0b" (orange).
+Rendered style: Hand-drawn sketch look via Excalidraw.
 """,
         "parameters": {
             "type": "object",

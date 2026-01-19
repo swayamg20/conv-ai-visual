@@ -121,15 +121,15 @@ export function useVAD(options: UseVADOptions) {
     // Speed-optimized thresholds
     positiveSpeechThreshold,
     negativeSpeechThreshold,
-    minSpeechFrames,
-    redemptionFrames,
+    // minSpeechFrames, // TODO: Fix - should be minSpeechMs
+    // redemptionFrames, // TODO: Fix - should be redemptionMs
 
     // Optimize for low latency
-    preSpeechPadFrames: 1,  // Minimal pre-padding for speed
+    // preSpeechPadFrames: 1,  // TODO: Fix - should be preSpeechPadMs
 
     // Model loading
-    modelURL: undefined,  // Use default CDN model
-    workletURL: undefined, // Use default CDN worklet
+    // modelURL: undefined,  // Use default CDN model
+    // workletURL: undefined, // Use default CDN worklet
 
     // Error handling
     onVADMisfire: () => {
@@ -138,9 +138,9 @@ export function useVAD(options: UseVADOptions) {
       }
     },
 
-    onError: (error) => {
-      console.error("[VAD] ❌ Error:", error);
-    },
+    // onError: (error) => {
+    //   console.error("[VAD] ❌ Error:", error);
+    // },
   });
 
   // Control VAD based on enabled state

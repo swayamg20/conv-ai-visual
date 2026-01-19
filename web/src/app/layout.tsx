@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter, Fira_Code } from "next/font/google";
 import "./globals.css";
+import "@excalidraw/excalidraw/index.css";
 
 const inter = Inter({
   subsets: ["latin"],

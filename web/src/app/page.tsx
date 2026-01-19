@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
-import { CanvasRenderer, type CanvasRendererHandle } from "@/components/canvas-renderer";
+import { ExcalidrawCanvas, type ExcalidrawCanvasHandle } from "@/components/excalidraw-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { cn } from "@/lib/utils";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
@@ -20,7 +20,7 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const canvasRef = useRef<CanvasRendererHandle>(null);
+  const canvasRef = useRef<ExcalidrawCanvasHandle>(null);
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
     canvasRef.current?.render(operations);
@@ -250,11 +250,11 @@ export default function Home() {
           >
             <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
               <div className="relative">
-                <CanvasRenderer
+                <ExcalidrawCanvas
                   ref={canvasRef}
                   width={800}
                   height={600}
-                  className="rounded-xl bg-white shadow-2xl"
+                  className="rounded-xl shadow-2xl overflow-hidden"
                 />
                 {/* Canvas Placeholder */}
                 <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
