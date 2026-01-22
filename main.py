@@ -342,8 +342,14 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         logger.info("[%s] Audio: %sHz, %dch", pc_id, sample_rate, channel_count)
 
         # Connect to Deepgram
+        # Endpointing: Wait longer before finalizing to handle natural speech pauses
+        # - endpointing: Milliseconds of silence before finalizing (configured in .env, default 1200ms)
+        # - interim_results=true: Get partial results while speaking
+        # - smart_format=false: Disable auto-formatting that can trigger early finalization
+        # - punctuate=false: Disable auto-punctuation that can finalize utterances early
+        # - diarize=false: Disable speaker detection (can cause early segmentation)
         base_url = "wss://api.deepgram.com/v1/listen"
-        websocket_url = f"{base_url}?model={config.DEEPGRAM_MODEL}&encoding=linear16&sample_rate={sample_rate}&channels={channel_count}&interim_results=true"
+        websocket_url = f"{base_url}?model={config.DEEPGRAM_MODEL}&encoding=linear16&sample_rate={sample_rate}&channels={channel_count}&interim_results=true&endpointing={config.DEEPGRAM_ENDPOINTING}&smart_format=false&punctuate=false&diarize=false"
 
         dg_stream_task = asyncio.create_task(
             deepgram_stream_ws_send_and_recv(

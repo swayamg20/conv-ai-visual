@@ -125,13 +125,17 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
           case "arrow":
             if (op.points && op.points.length >= 2) {
               const start = op.points[0];
-              const end = op.points[op.points.length - 1];
+              const startX = start[0];
+              const startY = start[1];
+
+              // Convert absolute points to relative points (offsets from start)
+              const relativePoints = op.points.map(p => [p[0] - startX, p[1] - startY]);
+
               skeleton = {
                 type: "arrow",
-                x: start[0],
-                y: start[1],
-                width: end[0] - start[0],
-                height: end[1] - start[1],
+                x: startX,
+                y: startY,
+                points: relativePoints,
                 strokeColor: op.color ?? "#000000",
                 strokeWidth: op.stroke_width ?? 2,
                 roughness: 1,
@@ -142,13 +146,17 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
           case "line":
             if (op.points && op.points.length >= 2) {
               const start = op.points[0];
-              const end = op.points[op.points.length - 1];
+              const startX = start[0];
+              const startY = start[1];
+
+              // Convert absolute points to relative points (offsets from start)
+              const relativePoints = op.points.map(p => [p[0] - startX, p[1] - startY]);
+
               skeleton = {
                 type: "line",
-                x: start[0],
-                y: start[1],
-                width: end[0] - start[0],
-                height: end[1] - start[1],
+                x: startX,
+                y: startY,
+                points: relativePoints,
                 strokeColor: op.color ?? "#000000",
                 strokeWidth: op.stroke_width ?? 2,
                 roughness: 1,
@@ -157,19 +165,23 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
             break;
 
           case "path":
-            // Convert path to line for now (Excalidraw doesn't have a direct path type)
+            // Convert path to freedraw (Excalidraw's freehand drawing type)
             if (op.points && op.points.length >= 2) {
               const start = op.points[0];
-              const end = op.points[op.points.length - 1];
+              const startX = start[0];
+              const startY = start[1];
+
+              // Convert absolute points to relative points (offsets from start)
+              const relativePoints = op.points.map(p => [p[0] - startX, p[1] - startY]);
+
               skeleton = {
-                type: "line",
-                x: start[0],
-                y: start[1],
-                width: end[0] - start[0],
-                height: end[1] - start[1],
+                type: "freedraw",
+                x: startX,
+                y: startY,
+                points: relativePoints,
                 strokeColor: op.color ?? "#000000",
                 strokeWidth: op.stroke_width ?? 2,
-                roughness: 2, // More rough for freehand look
+                roughness: 0, // Freedraw should be smooth
               };
             }
             break;

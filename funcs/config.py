@@ -19,6 +19,12 @@ class Config:
     # Deepgram STT config
     DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "")
     DEEPGRAM_MODEL: str = os.getenv("DEEPGRAM_MODEL", "nova")
+    # Endpointing: milliseconds of silence before finalizing transcript
+    # Higher values = wait longer for user to continue speaking (better for natural pauses)
+    # Lower values = faster finalization (but may cut off mid-sentence)
+    # Recommended: 1500-2000ms for natural conversation with pauses
+    # Default: 1800ms (1.8 seconds) - patient enough for natural speech
+    DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "1800"))
 
     # OpenAI config
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
