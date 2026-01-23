@@ -33,6 +33,7 @@ export interface CanvasOperation {
   stroke_width?: number;
   points?: [number, number][];
   text?: string;
+  label?: string;
   font_size?: number;
   font_family?: string;
   target_id?: string;

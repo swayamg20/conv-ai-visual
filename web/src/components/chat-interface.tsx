@@ -96,7 +96,7 @@ export function ChatInterface({
                 )}
                 <div
                   className={cn(
-                    "max-w-[80%] rounded-2xl px-4 py-3 text-sm",
+                    "max-w-[80%] rounded-2xl px-4 py-3 text-sm max-h-[300px] overflow-y-auto",
                     message.role === "user"
                       ? "bg-primary text-primary-foreground rounded-br-md"
                       : "glass-card rounded-bl-md"

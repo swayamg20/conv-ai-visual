@@ -20,14 +20,19 @@ CANVAS_PARAMETERS = {
     "required": ["operations_json"]
 }
 
-CANVAS_DESCRIPTION = """Draw on the shared Excalidraw canvas to illustrate concepts visually.
-Pass a JSON string of operations. Each operation has: action (rect/circle/text/arrow/line/clear), x, y, width, height, text, color, label.
+CANVAS_DESCRIPTION = """Draw diagrams on the shared canvas.
 
-Example: '[{"action":"rect","x":100,"y":100,"width":200,"height":100,"color":"#3b82f6","label":"box1"},{"action":"text","x":150,"y":140,"text":"Hello"}]'
+Operations JSON format - each object has:
+- action: "rect", "circle", "ellipse", "arrow", "text"
+- x, y: position (canvas is 800x600)
+- width, height: size (use 150+ width for boxes with text)
+- label: text to show INSIDE the shape (auto-centered)
+- color: hex color
 
-Actions: rect, circle, ellipse, line, arrow, text, clear, delete, highlight
-For arrow/line, use points: '[{"action":"arrow","points":"[[100,100],[300,100]]"}]'
-Canvas is 800x600. Colors: #3b82f6 (blue), #ef4444 (red), #10b981 (green), #f59e0b (orange)."""
+Example: '[{"action":"rect","x":350,"y":50,"width":150,"height":50,"color":"#6b7280","label":"Clients"},{"action":"rect","x":350,"y":150,"width":150,"height":50,"color":"#3b82f6","label":"LB"},{"action":"arrow","points":"[[425,100],[425,150]]","color":"#000000"}]'
+
+For arrows: use "points" as JSON string like "[[x1,y1],[x2,y2]]"
+Colors: #3b82f6 blue, #10b981 green, #f59e0b orange, #ef4444 red, #6b7280 gray"""
 
 # Register in DB
 ToolRepo.upsert(

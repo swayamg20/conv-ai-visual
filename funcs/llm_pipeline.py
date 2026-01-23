@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 from typing import List, Dict, Optional, AsyncGenerator, Callable, Any
 from funcs.memory import MemoryManager
@@ -9,6 +10,22 @@ from funcs.llm_clients import LLMClient, create_llm_client
 from funcs.config import config
 
 logger = logging.getLogger("llm-pipeline")
+
+# Pattern to match tool call syntax that shouldn't be shown to user
+TOOL_CALL_PATTERN = re.compile(
+    r'canvas_update\s*\([^)]*\{[\s\S]*?\}\s*\)|'  # canvas_update({...})
+    r'canvas_update\s*\(\s*\[[\s\S]*?\]\s*\)|'     # canvas_update([...])
+    r'```[\s\S]*?canvas_update[\s\S]*?```|'        # code blocks with canvas_update
+    r'\{"action":\s*"rect"[\s\S]*?\}',              # raw JSON operations
+    re.MULTILINE
+)
+
+def clean_tool_syntax(text: str) -> str:
+    """Remove any tool call syntax from response text."""
+    cleaned = TOOL_CALL_PATTERN.sub('', text)
+    # Clean up extra whitespace/newlines left behind
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+    return cleaned.strip()
 
 
 class LLMPipeline:
@@ -546,17 +563,26 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         context.append({"role": "user", "content": user_message})
         
         tools_schema = self.get_tools_schema() or None
+        logger.info(f"Tools schema: {len(tools_schema) if tools_schema else 0} tools available")
         
         # Execute tool calls (non-streaming) until we get a text response
-        for _ in range(max_tool_rounds):
-            response = await self.client.complete_with_tools(
-                messages=context,
-                tools=tools_schema,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+        for round_num in range(max_tool_rounds):
+            try:
+                response = await self.client.complete_with_tools(
+                    messages=context,
+                    tools=tools_schema,
+                    temperature=temperature,
+                    max_tokens=max_tokens
+                )
+            except Exception as e:
+                logger.error(f"Tool calling failed (round {round_num}): {e}")
+                # Fall back to streaming without tools
+                break
 
-            if not self.client.has_tool_calls(response):
+            has_tools = self.client.has_tool_calls(response)
+            logger.info(f"Round {round_num}: has_tool_calls={has_tools}")
+            
+            if not has_tools:
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
@@ -590,6 +616,7 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
 
         # Now stream the final response
+        # We accumulate first to clean any tool syntax, then yield
         full_response = ""
 
         async for chunk in self.client.stream(
@@ -598,7 +625,13 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
             max_tokens=max_tokens
         ):
             full_response += chunk
-            yield chunk
         
-        if self.memory:
-            self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
+        # Clean any tool call syntax from response
+        cleaned_response = clean_tool_syntax(full_response)
+        
+        # Yield the cleaned response (as a single chunk since we had to buffer)
+        if cleaned_response:
+            yield cleaned_response
+        
+        if self.memory and cleaned_response:
+            self.memory.process_for_memory(user_message, cleaned_response, save_semantic=save_to_memory)

@@ -65,48 +65,126 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
         let skeleton: any = null;
 
         switch (op.action) {
-          case "rect":
+          case "rect": {
+            const rectWidth = op.width ?? 100;
+            const rectHeight = op.height ?? 50;
+            const rectX = op.x ?? 0;
+            const rectY = op.y ?? 0;
+            
             skeleton = {
               type: "rectangle",
-              x: op.x ?? 0,
-              y: op.y ?? 0,
-              width: op.width ?? 100,
-              height: op.height ?? 100,
+              x: rectX,
+              y: rectY,
+              width: rectWidth,
+              height: rectHeight,
               strokeColor: op.color ?? "#000000",
               backgroundColor: op.fill ?? "transparent",
               strokeWidth: op.stroke_width ?? 2,
               roughness: 1,
               roundness: null,
             };
+            
+            // If rect has label/text, add centered text element
+            const labelText = op.label || op.text;
+            if (labelText) {
+              const fontSize = op.font_size ?? 16;
+              // Center text inside rectangle
+              const textX = rectX + rectWidth / 2 - (labelText.length * fontSize * 0.3);
+              const textY = rectY + rectHeight / 2 - fontSize / 2;
+              
+              skeletonElements.push({
+                type: "text",
+                x: textX,
+                y: textY,
+                text: labelText,
+                fontSize: fontSize,
+                fontFamily: 1,
+                textAlign: "center",
+                verticalAlign: "middle",
+                strokeColor: op.color ?? "#000000",
+              });
+            }
             break;
+          }
 
-          case "circle":
+          case "circle": {
+            const circleSize = op.width ?? 100;
+            const circleX = op.x ?? 0;
+            const circleY = op.y ?? 0;
+            
             skeleton = {
               type: "ellipse",
-              x: op.x ?? 0,
-              y: op.y ?? 0,
-              width: op.width ?? 100,
-              height: op.width ?? 100, // Use width for both to make it a circle
+              x: circleX,
+              y: circleY,
+              width: circleSize,
+              height: circleSize,
               strokeColor: op.color ?? "#000000",
               backgroundColor: op.fill ?? "transparent",
               strokeWidth: op.stroke_width ?? 2,
               roughness: 1,
             };
+            
+            // If has label, add centered text
+            const circleLabel = op.label || op.text;
+            if (circleLabel) {
+              const fontSize = op.font_size ?? 16;
+              const textX = circleX + circleSize / 2 - (circleLabel.length * fontSize * 0.3);
+              const textY = circleY + circleSize / 2 - fontSize / 2;
+              
+              skeletonElements.push({
+                type: "text",
+                x: textX,
+                y: textY,
+                text: circleLabel,
+                fontSize: fontSize,
+                fontFamily: 1,
+                textAlign: "center",
+                verticalAlign: "middle",
+                strokeColor: op.color ?? "#000000",
+              });
+            }
             break;
+          }
 
-          case "ellipse":
+          case "ellipse": {
+            const ellipseWidth = op.width ?? 100;
+            const ellipseHeight = op.height ?? 80;
+            const ellipseX = op.x ?? 0;
+            const ellipseY = op.y ?? 0;
+            
             skeleton = {
               type: "ellipse",
-              x: op.x ?? 0,
-              y: op.y ?? 0,
-              width: op.width ?? 100,
-              height: op.height ?? 80,
+              x: ellipseX,
+              y: ellipseY,
+              width: ellipseWidth,
+              height: ellipseHeight,
               strokeColor: op.color ?? "#000000",
               backgroundColor: op.fill ?? "transparent",
               strokeWidth: op.stroke_width ?? 2,
               roughness: 1,
             };
+            
+            // If has label, add centered text
+            const ellipseLabel = op.label || op.text;
+            if (ellipseLabel) {
+              const fontSize = op.font_size ?? 16;
+              const textX = ellipseX + ellipseWidth / 2 - (ellipseLabel.length * fontSize * 0.3);
+              const textY = ellipseY + ellipseHeight / 2 - fontSize / 2;
+              
+              skeletonElements.push({
+                type: "text",
+                x: textX,
+                y: textY,
+                text: ellipseLabel,
+                fontSize: fontSize,
+                fontFamily: 1,
+                textAlign: "center",
+                verticalAlign: "middle",
+                strokeColor: op.color ?? "#000000",
+              });
+            }
             break;
+          }
 
           case "text":
             skeleton = {
