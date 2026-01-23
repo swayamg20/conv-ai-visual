@@ -107,6 +107,7 @@ async def deepgram_stream_ws_send_and_recv(
     auth_key: str,
     audio_queue: "asyncio.Queue[bytes]",
     results_callback,
+    on_connected=None,
 ):
     """Stream audio to Deepgram and receive transcripts"""
     headers = {"Authorization": f"Token {auth_key}"}
@@ -118,6 +119,9 @@ async def deepgram_stream_ws_send_and_recv(
             max_size=None,
         ) as ws:
             logger.info("Deepgram WS connected")
+            # Notify that Deepgram is ready
+            if on_connected:
+                await on_connected()
 
             async def sender():
                 try:
@@ -343,20 +347,29 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
         # Connect to Deepgram
         # Endpointing: Wait longer before finalizing to handle natural speech pauses
-        # - endpointing: Milliseconds of silence before finalizing (configured in .env, default 1200ms)
+        # - endpointing: Milliseconds of silence before finalizing (configured in .env, default 1800ms)
+        # - utterance_end_ms: Gap after last word before UtteranceEnd event (default 1000ms)
         # - interim_results=true: Get partial results while speaking
         # - smart_format=false: Disable auto-formatting that can trigger early finalization
         # - punctuate=false: Disable auto-punctuation that can finalize utterances early
         # - diarize=false: Disable speaker detection (can cause early segmentation)
         base_url = "wss://api.deepgram.com/v1/listen"
-        websocket_url = f"{base_url}?model={config.DEEPGRAM_MODEL}&encoding=linear16&sample_rate={sample_rate}&channels={channel_count}&interim_results=true&endpointing={config.DEEPGRAM_ENDPOINTING}&smart_format=false&punctuate=false&diarize=false"
+        websocket_url = f"{base_url}?model={config.DEEPGRAM_MODEL}&encoding=linear16&sample_rate={sample_rate}&channels={channel_count}&interim_results=true&endpointing={config.DEEPGRAM_ENDPOINTING}&utterance_end_ms={config.DEEPGRAM_UTTERANCE_END_MS}&smart_format=false&punctuate=false&diarize=false"
+
+        # Callback when Deepgram connects - notify client they can start speaking
+        async def on_deepgram_connected():
+            ch = datachannels.get(pc_id)
+            if ch and ch.readyState == "open":
+                ch.send(json.dumps({"type": "ready"}))
+                logger.info("[%s] Sent ready signal to client", pc_id)
 
         dg_stream_task = asyncio.create_task(
             deepgram_stream_ws_send_and_recv(
                 websocket_url,
                 config.DEEPGRAM_KEY,
                 audio_q,
-                on_deepgram_event
+                on_deepgram_event,
+                on_connected=on_deepgram_connected
             )
         )
 

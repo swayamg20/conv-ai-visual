@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
+import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
@@ -219,6 +220,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
       isFirstTTSChunkRef.current = true;  // Reset
       setStatus("disconnected");
       updatePipelineState("idle");
+      playDisconnectSound();
     });
 
     channel.addEventListener("message", (e) => {
@@ -230,6 +232,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
         }
 
         switch (data.type) {
+          case "ready":
+            log("Ready - you can start speaking");
+            playReadySound();
+            break;
+
           case "transcript":
             onTranscript?.({ text: data.text, isFinal: data.is_final });
 
@@ -336,6 +343,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
           case "error":
             log(`Error: ${data.message}`);
+            playErrorSound();
             onError?.(data.message);
             updatePipelineState("listening");
             break;
@@ -415,6 +423,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
     setStatus("disconnected");
     updatePipelineState("idle");
+    playDisconnectSound();
     log("Disconnected");
   }, [log, updatePipelineState]);
 
