@@ -567,8 +567,10 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                 if tc.name == "canvas_update":
                     from funcs.canvas import canvas_update
                     from funcs.tools import ToolResult
+                    # Support both old format (operations) and new format (operations_json)
+                    operations_json = tc.arguments.get("operations_json")
                     operations = tc.arguments.get("operations", [])
-                    result = canvas_update(operations, session_id=self.session_id)
+                    result = canvas_update(operations_json=operations_json, operations=operations, session_id=self.session_id)
                     
                     if self.canvas_callback and result.get("operations"):
                         try:

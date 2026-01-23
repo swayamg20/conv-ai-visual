@@ -359,22 +359,41 @@ class GeminiClient(LLMClient):
         history = []
 
         for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            
+            # Ensure content is a string
+            if content is None:
+                content = ""
+            elif not isinstance(content, str):
+                # Handle list of content parts (OpenAI format)
+                if isinstance(content, list):
+                    text_parts = []
+                    for part in content:
+                        if isinstance(part, dict) and "text" in part:
+                            text_parts.append(part["text"])
+                        elif isinstance(part, str):
+                            text_parts.append(part)
+                    content = "\n".join(text_parts)
+                else:
+                    content = str(content)
 
             if role == "system":
                 system_prompt = content
             elif role == "user":
-                history.append({"role": "user", "parts": [content]})
+                if content:  # Skip empty messages
+                    history.append({"role": "user", "parts": [content]})
             elif role == "assistant":
-                history.append({"role": "model", "parts": [content]})
+                if content:  # Skip empty messages (e.g., tool call only responses)
+                    history.append({"role": "model", "parts": [content]})
             elif role == "tool":
                 # Gemini handles tool results differently
                 # For now, append as user message with tool result context
-                history.append({
-                    "role": "user",
-                    "parts": [f"Tool result: {content}"]
-                })
+                if content:
+                    history.append({
+                        "role": "user",
+                        "parts": [f"Tool result: {content}"]
+                    })
 
         return system_prompt, history
 
@@ -492,15 +511,25 @@ class GeminiClient(LLMClient):
             if not history:
                 raise ValueError("No messages to process")
 
+            # Debug: log history structure
+            history_to_pass = history[:-1] if len(history) > 1 else []
+            logger.info(f"History length: {len(history)}, passing {len(history_to_pass)} messages to chat")
+            for i, h in enumerate(history_to_pass):
+                if isinstance(h, dict):
+                    parts_info = [f"type={type(p)}, len={len(p) if isinstance(p, str) else 'N/A'}" for p in h.get("parts", [])]
+                    logger.info(f"  History[{i}]: role={h.get('role')}, parts=[{', '.join(parts_info)}]")
+                else:
+                    logger.info(f"  History[{i}]: UNEXPECTED type={type(h)}")
+
             # Create model with tools if provided
             if gemini_tools:
                 model_with_tools = self.genai.GenerativeModel(
                     self.model_name,
                     tools=gemini_tools
                 )
-                chat = model_with_tools.start_chat(history=history[:-1] if len(history) > 1 else [])
+                chat = model_with_tools.start_chat(history=history_to_pass)
             else:
-                chat = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
+                chat = self.model.start_chat(history=history_to_pass)
 
             last_message = history[-1]["parts"][0] if history else ""
             response = await chat.send_message_async(last_message, generation_config=generation_config)
@@ -579,11 +608,15 @@ class GeminiClient(LLMClient):
                 gemini_schema = self._convert_json_schema_to_gemini(params)
 
                 # Gemini's high-level API accepts dicts with specific structure
-                gemini_tools.append({
+                gemini_tool = {
                     "name": func["name"],
                     "description": func.get("description", ""),
                     "parameters": gemini_schema
-                })
+                }
+                gemini_tools.append(gemini_tool)
+                
+                # Debug log the converted schema
+                logger.debug(f"Converted tool {func['name']} to Gemini format:\n{json.dumps(gemini_tool, indent=2)}")
 
         return gemini_tools
 

@@ -120,7 +120,7 @@ export default function Home() {
   }, [status]);
 
   return (
-    <div className="relative min-h-screen bg-background">
+    <div className="relative min-h-screen bg-background overflow-x-hidden">
       {/* Top Navigation Bar */}
       <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-white/10">
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
@@ -337,16 +337,18 @@ export default function Home() {
 
       {/* Technical Drawer Toggle (Bottom Fixed) - Voice Mode Only */}
       {appMode === "voice" && !drawerOpen && (
-        <motion.button
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 1.2 }}
-          onClick={() => setDrawerOpen(true)}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass-card px-6 py-3 rounded-full text-sm font-medium hover:bg-white/10 transition-all flex items-center gap-2 shadow-glass"
-        >
-          <span>View Metrics & Logs</span>
-          <ChevronUp className="h-4 w-4" />
-        </motion.button>
+        <div className="fixed bottom-6 inset-x-0 z-20 flex justify-center pointer-events-none">
+          <motion.button
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 1.2 }}
+            onClick={() => setDrawerOpen(true)}
+            className="pointer-events-auto glass-card px-6 py-3 rounded-full text-sm font-medium hover:bg-white/10 transition-all flex items-center gap-2 shadow-glass"
+          >
+            <span>View Metrics & Logs</span>
+            <ChevronUp className="h-4 w-4" />
+          </motion.button>
+        </div>
       )}
 
       {/* Technical Drawer - Voice Mode Only */}

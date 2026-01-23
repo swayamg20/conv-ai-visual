@@ -171,6 +171,14 @@ class CanvasState:
                 # Drawing operation - create element
                 elem_id = op.get("id") or f"el_{uuid.uuid4().hex[:8]}"
                 
+                # Parse points if it's a JSON string
+                points = op.get("points", [])
+                if isinstance(points, str):
+                    try:
+                        points = json.loads(points)
+                    except json.JSONDecodeError:
+                        points = []
+                
                 elem = CanvasElement(
                     id=elem_id,
                     action=action,
@@ -184,7 +192,7 @@ class CanvasState:
                     stroke_width=op.get("stroke_width", 2),
                     font_size=op.get("font_size", 16),
                     font_family=op.get("font_family", "Arial"),
-                    points=op.get("points", []),
+                    points=points,
                     label=op.get("label", "")
                 )
                 
@@ -268,29 +276,30 @@ def clear_canvas_session(session_id: str):
 
 # ============= Canvas Tool Handler =============
 
-def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
+def canvas_update(operations_json: str = None, operations: List[Dict] = None, session_id: str = "default") -> Dict:
     """
     Tool handler for canvas updates.
     Called by LLM via tool system.
     
     Args:
-        operations: List of drawing operations
-            Each operation: {
-                "action": "rect|circle|text|arrow|line|clear|delete|highlight",
-                "x": float, "y": float,
-                "width": float, "height": float,
-                "text": str,
-                "color": str,
-                "fill": str,
-                "points": [[x,y], ...],  # for arrow/line
-                "label": str,  # semantic label
-                "target_id": str  # for delete/update/highlight
-            }
+        operations_json: JSON string of operations (for Gemini compatibility)
+        operations: List of drawing operations (legacy, for direct calls)
         session_id: Session identifier
         
     Returns:
         Dict with applied operations and canvas summary
     """
+    # Parse operations from JSON string if provided
+    if operations_json:
+        try:
+            operations = json.loads(operations_json)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse operations_json: {e}")
+            return {"success": False, "error": f"Invalid JSON: {e}"}
+    
+    if not operations:
+        return {"success": False, "error": "No operations provided"}
+    
     state = get_canvas_state(session_id)
     applied = state.apply_operations(operations)
     
@@ -302,62 +311,28 @@ def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
     }
 
 
-# Canvas tool schema for LLM
+# Canvas tool schema for LLM - simplified for Gemini compatibility
 CANVAS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "canvas_update",
-        "description": """Draw on the shared Excalidraw canvas to illustrate concepts visually while explaining.
-Use this to create diagrams, flowcharts, highlight relationships, or sketch ideas.
-The canvas renders with a hand-drawn aesthetic and is visible to the user in real-time.
+        "description": """Draw on the shared Excalidraw canvas to illustrate concepts visually.
+Pass a JSON string of operations. Each operation has: action (rect/circle/text/arrow/line/clear), x, y, width, height, text, color, label.
 
-IMPORTANT:
-- Send all related drawings in a single call to minimize latency
-- Use semantic labels (via 'label' field) to reference elements later
-- To MODIFY existing elements, use "update" action with the element's ID or label
-- Only draw NEW elements - don't redraw existing ones unless updating them
-- Check [Current Canvas State] in your context to see what's already drawn
+Example: '[{"action":"rect","x":100,"y":100,"width":200,"height":100,"color":"#3b82f6","label":"box1"},{"action":"text","x":150,"y":140,"text":"Hello"}]'
 
-Coordinate system: (0,0) is top-left. Canvas is 800x600 by default.
-Colors: Use hex codes like "#3b82f6" (blue), "#ef4444" (red), "#10b981" (green), "#f59e0b" (orange).
-Rendered style: Hand-drawn sketch look via Excalidraw.
-""",
+Actions: rect, circle, ellipse, line, arrow, text, clear, delete, highlight
+For arrow/line, use points: '[{"action":"arrow","points":"[[100,100],[300,100]]"}]'
+Canvas is 800x600. Colors: #3b82f6 (blue), #ef4444 (red), #10b981 (green), #f59e0b (orange).""",
         "parameters": {
             "type": "object",
             "properties": {
-                "operations": {
-                    "type": "array",
-                    "description": "List of drawing operations to apply in order",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "enum": ["rect", "circle", "ellipse", "line", "arrow", "text", "path", "clear", "delete", "highlight"],
-                                "description": "Type of drawing operation"
-                            },
-                            "x": {"type": "number", "description": "X position (left edge for shapes, anchor for text)"},
-                            "y": {"type": "number", "description": "Y position (top edge for shapes)"},
-                            "width": {"type": "number", "description": "Width of shape (or diameter for circle)"},
-                            "height": {"type": "number", "description": "Height of shape"},
-                            "text": {"type": "string", "description": "Text content (for text action)"},
-                            "color": {"type": "string", "description": "Stroke/text color (hex)"},
-                            "fill": {"type": "string", "description": "Fill color (hex, empty for no fill)"},
-                            "stroke_width": {"type": "number", "description": "Line thickness"},
-                            "font_size": {"type": "number", "description": "Font size for text"},
-                            "points": {
-                                "type": "array",
-                                "items": {"type": "array", "items": {"type": "number"}},
-                                "description": "Array of [x,y] points for line/arrow/path"
-                            },
-                            "label": {"type": "string", "description": "Semantic label for referencing this element later"},
-                            "target_id": {"type": "string", "description": "ID of element to delete/update/highlight"}
-                        },
-                        "required": ["action"]
-                    }
+                "operations_json": {
+                    "type": "string",
+                    "description": "JSON array of drawing operations as a string"
                 }
             },
-            "required": ["operations"]
+            "required": ["operations_json"]
         }
     }
 }
