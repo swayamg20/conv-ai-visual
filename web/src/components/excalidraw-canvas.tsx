@@ -4,7 +4,7 @@ import { useState, useEffect, useImperativeHandle, forwardRef, useCallback, useR
 import dynamic from "next/dynamic";
 import type { CanvasOperation } from "@/hooks/use-webrtc";
 import type { ExcalidrawElement, ExcalidrawImperativeAPI } from "@/types/excalidraw";
-import { convertToExcalidrawElements } from "@excalidraw/excalidraw";
+// Note: convertToExcalidrawElements is imported dynamically to avoid SSR issues
 
 // Dynamically import Excalidraw with SSR disabled (Next.js requirement)
 const Excalidraw = dynamic(
@@ -16,6 +16,8 @@ export interface ExcalidrawCanvasHandle {
   render: (operations: CanvasOperation[]) => void;
   clear: () => void;
   getState: () => string; // Export canvas state as JSON for LLM context
+  exportToPNG: () => Promise<void>; // Export canvas to PNG and download
+  zoomToFit: () => void; // Zoom to fit all content
 }
 
 interface ExcalidrawCanvasProps {
@@ -43,8 +45,27 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
     /**
      * Convert canvas operations to Excalidraw elements
      */
-    const operationsToExcalidrawElements = useCallback((operations: CanvasOperation[]): ExcalidrawElement[] => {
+    const operationsToExcalidrawElements = useCallback(async (operations: CanvasOperation[]): Promise<ExcalidrawElement[]> => {
       const skeletonElements: any[] = [];
+
+      // Check if this is a full scene update (no clear/update/delete actions = full redraw)
+      const hasControlActions = operations.some(op =>
+        ["clear", "update", "delete", "highlight"].includes(op.action)
+      );
+
+      // If it's a new diagram (no control actions), clear existing AI elements
+      // but keep user-drawn elements (those without our el_ prefix)
+      if (!hasControlActions && operations.length > 0) {
+        const userElements = new Map<string, ExcalidrawElement>();
+        elementsMapRef.current.forEach((elem, id) => {
+          // Keep elements that don't have our prefix (user-drawn)
+          if (!id.startsWith("el_")) {
+            userElements.set(id, elem);
+          }
+        });
+        elementsMapRef.current.clear();
+        userElements.forEach((elem, id) => elementsMapRef.current.set(id, elem));
+      }
 
       for (const op of operations) {
         // Handle control actions
@@ -70,8 +91,10 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
             const rectHeight = op.height ?? 50;
             const rectX = op.x ?? 0;
             const rectY = op.y ?? 0;
-            
+            const rectId = op.id || `el_rect_${rectX}_${rectY}`;
+
             skeleton = {
+              id: rectId,
               type: "rectangle",
               x: rectX,
               y: rectY,
@@ -83,16 +106,17 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
               roughness: 1,
               roundness: null,
             };
-            
-            // If rect has label/text, add centered text element
+
+            // If rect has label/text, add centered text element with stable ID
             const labelText = op.label || op.text;
             if (labelText) {
               const fontSize = op.font_size ?? 16;
               // Center text inside rectangle
               const textX = rectX + rectWidth / 2 - (labelText.length * fontSize * 0.3);
               const textY = rectY + rectHeight / 2 - fontSize / 2;
-              
+
               skeletonElements.push({
+                id: `${rectId}_label`,
                 type: "text",
                 x: textX,
                 y: textY,
@@ -111,8 +135,10 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
             const circleSize = op.width ?? 100;
             const circleX = op.x ?? 0;
             const circleY = op.y ?? 0;
-            
+            const circleId = op.id || `el_circle_${circleX}_${circleY}`;
+
             skeleton = {
+              id: circleId,
               type: "ellipse",
               x: circleX,
               y: circleY,
@@ -123,15 +149,16 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
               strokeWidth: op.stroke_width ?? 2,
               roughness: 1,
             };
-            
-            // If has label, add centered text
+
+            // If has label, add centered text with stable ID
             const circleLabel = op.label || op.text;
             if (circleLabel) {
               const fontSize = op.font_size ?? 16;
               const textX = circleX + circleSize / 2 - (circleLabel.length * fontSize * 0.3);
               const textY = circleY + circleSize / 2 - fontSize / 2;
-              
+
               skeletonElements.push({
+                id: `${circleId}_label`,
                 type: "text",
                 x: textX,
                 y: textY,
@@ -151,8 +178,10 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
             const ellipseHeight = op.height ?? 80;
             const ellipseX = op.x ?? 0;
             const ellipseY = op.y ?? 0;
-            
+            const ellipseId = op.id || `el_ellipse_${ellipseX}_${ellipseY}`;
+
             skeleton = {
+              id: ellipseId,
               type: "ellipse",
               x: ellipseX,
               y: ellipseY,
@@ -163,15 +192,16 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
               strokeWidth: op.stroke_width ?? 2,
               roughness: 1,
             };
-            
-            // If has label, add centered text
+
+            // If has label, add centered text with stable ID
             const ellipseLabel = op.label || op.text;
             if (ellipseLabel) {
               const fontSize = op.font_size ?? 16;
               const textX = ellipseX + ellipseWidth / 2 - (ellipseLabel.length * fontSize * 0.3);
               const textY = ellipseY + ellipseHeight / 2 - fontSize / 2;
-              
+
               skeletonElements.push({
+                id: `${ellipseId}_label`,
                 type: "text",
                 x: textX,
                 y: textY,
@@ -186,11 +216,14 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
             break;
           }
 
-          case "text":
+          case "text": {
+            const textX = op.x ?? 0;
+            const textY = op.y ?? 0;
             skeleton = {
+              id: op.id || `el_text_${textX}_${textY}`,
               type: "text",
-              x: op.x ?? 0,
-              y: op.y ?? 0,
+              x: textX,
+              y: textY,
               text: op.text ?? "",
               fontSize: op.font_size ?? 16,
               fontFamily: 1, // Excalidraw uses numeric font families
@@ -199,17 +232,20 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
               strokeColor: op.color ?? "#000000",
             };
             break;
+          }
 
           case "arrow":
             if (op.points && op.points.length >= 2) {
               const start = op.points[0];
               const startX = start[0];
               const startY = start[1];
+              const end = op.points[op.points.length - 1];
 
               // Convert absolute points to relative points (offsets from start)
               const relativePoints = op.points.map(p => [p[0] - startX, p[1] - startY]);
 
               skeleton = {
+                id: op.id || `el_arrow_${startX}_${startY}_${end[0]}_${end[1]}`,
                 type: "arrow",
                 x: startX,
                 y: startY,
@@ -226,11 +262,13 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
               const start = op.points[0];
               const startX = start[0];
               const startY = start[1];
+              const end = op.points[op.points.length - 1];
 
               // Convert absolute points to relative points (offsets from start)
               const relativePoints = op.points.map(p => [p[0] - startX, p[1] - startY]);
 
               skeleton = {
+                id: op.id || `el_line_${startX}_${startY}_${end[0]}_${end[1]}`,
                 type: "line",
                 x: startX,
                 y: startY,
@@ -301,10 +339,6 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
         }
 
         if (skeleton) {
-          // Preserve ID if provided
-          if (op.id) {
-            skeleton.id = op.id;
-          }
           skeletonElements.push(skeleton);
         }
       }
@@ -314,6 +348,8 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
         return Array.from(elementsMapRef.current.values());
       }
 
+      // Dynamically import to avoid SSR issues
+      const { convertToExcalidrawElements } = await import("@excalidraw/excalidraw");
       const newElements = convertToExcalidrawElements(skeletonElements, { regenerateIds: false });
 
       // Update the elements map
@@ -347,13 +383,81 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
     }, []);
 
     /**
+     * Export canvas to PNG and trigger download
+     */
+    const exportToPNG = useCallback(async (): Promise<void> => {
+      if (!excalidrawAPI) return;
+
+      const elements = excalidrawAPI.getSceneElements();
+      if (elements.length === 0) {
+        console.warn("[Canvas] No elements to export");
+        return;
+      }
+
+      try {
+        // Dynamically import to avoid SSR issues
+        const { exportToBlob } = await import("@excalidraw/excalidraw");
+
+        const blob = await exportToBlob({
+          elements: elements as any,
+          appState: {
+            exportWithDarkMode: false,
+            exportBackground: true,
+            viewBackgroundColor: "#ffffff",
+          },
+          files: excalidrawAPI.getFiles(),
+          getDimensions: () => ({ width: 1600, height: 1200, scale: 2 }),
+        });
+
+        // Create download link
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `canvas-${Date.now()}.png`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        console.log("[Canvas] Exported to PNG");
+      } catch (err) {
+        console.error("[Canvas] Export failed:", err);
+      }
+    }, [excalidrawAPI]);
+
+    /**
+     * Zoom to fit all content in view
+     */
+    const zoomToFit = useCallback((): void => {
+      if (!excalidrawAPI) return;
+
+      const elements = excalidrawAPI.getSceneElements();
+      if (elements.length === 0) return;
+
+      excalidrawAPI.scrollToContent(elements as any, {
+        fitToContent: true,
+        viewportZoomFactor: 0.9, // Leave some padding
+      });
+    }, [excalidrawAPI]);
+
+    /**
      * Render operations to the canvas
      */
-    const render = useCallback((operations: CanvasOperation[]) => {
+    const render = useCallback(async (operations: CanvasOperation[]) => {
       if (!excalidrawAPI || !operations?.length) return;
 
-      const elements = operationsToExcalidrawElements(operations);
+      const elements = await operationsToExcalidrawElements(operations);
       excalidrawAPI.updateScene({ elements });
+
+      // Auto-zoom to fit content after a small delay (let scene update)
+      setTimeout(() => {
+        if (elements.length > 0) {
+          excalidrawAPI.scrollToContent(elements as any, {
+            fitToContent: true,
+            viewportZoomFactor: 0.85,
+          });
+        }
+      }, 50);
     }, [excalidrawAPI, operationsToExcalidrawElements]);
 
     /**
@@ -365,7 +469,7 @@ export const ExcalidrawCanvas = forwardRef<ExcalidrawCanvasHandle, ExcalidrawCan
       excalidrawAPI.updateScene({ elements: [] });
     }, [excalidrawAPI]);
 
-    useImperativeHandle(ref, () => ({ render, clear, getState }), [render, clear, getState]);
+    useImperativeHandle(ref, () => ({ render, clear, getState, exportToPNG, zoomToFit }), [render, clear, getState, exportToPNG, zoomToFit]);
 
     return (
       <div className={className} style={{ width, height }}>

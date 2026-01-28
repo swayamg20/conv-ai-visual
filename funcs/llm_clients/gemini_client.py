@@ -21,7 +21,7 @@ class GeminiClient(LLMClient):
         self.model = genai.GenerativeModel(model)
         self.default_params = default_params
         logger.info(f"Gemini client initialized: model={model}")
-        
+
     def _convert_messages(self, messages: List[Dict]) -> tuple:
         system_prompt = ""
         history = []

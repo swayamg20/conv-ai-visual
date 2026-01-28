@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Mic, Settings, ChevronUp } from "lucide-react";
+import { Mic, Settings, ChevronUp, Download, Trash2, ZoomIn } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
 import { ExcalidrawCanvas, type ExcalidrawCanvasHandle } from "@/components/excalidraw-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
@@ -28,6 +28,18 @@ export default function Home() {
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
     canvasRef.current?.render(operations);
+  }, []);
+
+  const handleExportCanvas = useCallback(() => {
+    canvasRef.current?.exportToPNG();
+  }, []);
+
+  const handleClearCanvas = useCallback(() => {
+    canvasRef.current?.clear();
+  }, []);
+
+  const handleZoomToFit = useCallback(() => {
+    canvasRef.current?.zoomToFit();
   }, []);
 
   // Chat mode hook
@@ -250,16 +262,39 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {/* Prompt Suggestion */}
+              {/* Demo Prompts */}
               {isConnected && transcripts.length === 0 && (
-                <motion.p
+                <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                   transition={{ delay: 1 }}
-                  className="text-sm text-muted-foreground text-center"
+                  className="w-full max-w-lg"
                 >
-                  Try saying: "Tell me about your capabilities"
-                </motion.p>
+                  <p className="text-sm text-muted-foreground text-center mb-4">
+                    {canvasMode ? "Try these visual demos:" : "Try saying:"}
+                  </p>
+                  {canvasMode ? (
+                    <div className="grid grid-cols-1 gap-2">
+                      {[
+                        "Explain how a load balancer works",
+                        "Show me the flow of a REST API request",
+                        "Draw how React component rendering works",
+                        "Explain microservices vs monolith architecture",
+                      ].map((prompt, i) => (
+                        <button
+                          key={i}
+                          className="glass-card px-4 py-3 rounded-xl text-sm text-left hover:bg-white/10 transition-colors"
+                        >
+                          "{prompt}"
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-center text-muted-foreground">
+                      "Tell me about your capabilities"
+                    </p>
+                  )}
+                </motion.div>
               )}
             </motion.section>
 
@@ -269,8 +304,36 @@ export default function Home() {
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.3 }}
-                className="w-3/5 flex items-center justify-center"
+                className="w-3/5 flex flex-col items-center justify-center gap-4"
               >
+                {/* Canvas Toolbar */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleZoomToFit}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
+                    title="Zoom to fit"
+                  >
+                    <ZoomIn className="h-4 w-4" />
+                    <span>Fit</span>
+                  </button>
+                  <button
+                    onClick={handleExportCanvas}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
+                    title="Export as PNG"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Export</span>
+                  </button>
+                  <button
+                    onClick={handleClearCanvas}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 hover:text-destructive transition-colors text-sm"
+                    title="Clear canvas"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    <span>Clear</span>
+                  </button>
+                </div>
+
                 <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
                   <div className="relative">
                     <ExcalidrawCanvas
@@ -279,10 +342,11 @@ export default function Home() {
                       height={600}
                       className="rounded-xl shadow-2xl overflow-hidden"
                     />
-                    {/* Canvas Placeholder */}
-                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+                    {/* Canvas Placeholder - hidden when content exists */}
+                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground opacity-0 transition-opacity duration-300" id="canvas-placeholder">
                       <Mic className="mb-3 h-10 w-10 opacity-20" />
-                      <p className="text-sm opacity-50">AI will draw here</p>
+                      <p className="text-sm opacity-50">Ask me to explain something</p>
+                      <p className="text-xs opacity-30 mt-1">I'll draw while I talk</p>
                     </div>
                   </div>
                 </GlassmorphicCard>
@@ -314,7 +378,35 @@ export default function Home() {
 
             {/* Canvas Section for Chat Mode */}
             {canvasMode && (
-              <div className="flex-1 flex items-center justify-center">
+              <div className="flex-1 flex flex-col items-center justify-center gap-4">
+                {/* Canvas Toolbar */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={handleZoomToFit}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
+                    title="Zoom to fit"
+                  >
+                    <ZoomIn className="h-4 w-4" />
+                    <span>Fit</span>
+                  </button>
+                  <button
+                    onClick={handleExportCanvas}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
+                    title="Export as PNG"
+                  >
+                    <Download className="h-4 w-4" />
+                    <span>Export</span>
+                  </button>
+                  <button
+                    onClick={handleClearCanvas}
+                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 hover:text-destructive transition-colors text-sm"
+                    title="Clear canvas"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    <span>Clear</span>
+                  </button>
+                </div>
+
                 <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
                   <div className="relative">
                     <ExcalidrawCanvas
@@ -323,9 +415,10 @@ export default function Home() {
                       height={600}
                       className="rounded-xl shadow-2xl overflow-hidden"
                     />
-                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
+                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground opacity-0 transition-opacity duration-300">
                       <Mic className="mb-3 h-10 w-10 opacity-20" />
-                      <p className="text-sm opacity-50">AI will draw here</p>
+                      <p className="text-sm opacity-50">Ask me to explain something</p>
+                      <p className="text-xs opacity-30 mt-1">I'll draw while I talk</p>
                     </div>
                   </div>
                 </GlassmorphicCard>

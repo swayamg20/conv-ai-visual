@@ -23,11 +23,14 @@ CANVAS_PARAMETERS = {
 CANVAS_DESCRIPTION = """Draw diagrams on the shared canvas.
 
 Operations JSON format - each object has:
-- action: "rect", "circle", "ellipse", "arrow", "text"
+- action: "rect", "circle", "ellipse", "arrow", "text", "clear"
 - x, y: position (canvas is 800x600)
 - width, height: size (use 150+ width for boxes with text)
 - label: text to show INSIDE the shape (auto-centered)
 - color: hex color
+
+Special actions:
+- "clear": Clears entire canvas. Use '[{"action":"clear"}]' when user asks to clear/reset canvas.
 
 Example: '[{"action":"rect","x":350,"y":50,"width":150,"height":50,"color":"#6b7280","label":"Clients"},{"action":"rect","x":350,"y":150,"width":150,"height":50,"color":"#3b82f6","label":"LB"},{"action":"arrow","points":"[[425,100],[425,150]]","color":"#000000"}]'
 
