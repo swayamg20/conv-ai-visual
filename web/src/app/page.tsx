@@ -2,9 +2,9 @@
 
 import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Mic, Settings, ChevronUp, Download, Trash2, ZoomIn } from "lucide-react";
+import { Mic, Settings, ChevronUp, Trash2 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
-import { ExcalidrawCanvas, type ExcalidrawCanvasHandle } from "@/components/excalidraw-canvas";
+import { ManimCanvas, type ManimCanvasHandle } from "@/components/manim-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
 import { cn } from "@/lib/utils";
@@ -24,22 +24,18 @@ export default function Home() {
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const canvasRef = useRef<ExcalidrawCanvasHandle>(null);
+  const canvasRef = useRef<ManimCanvasHandle>(null);
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
-    canvasRef.current?.render(operations);
+    // Legacy canvas_update support (kept for backwards compat)
   }, []);
 
-  const handleExportCanvas = useCallback(() => {
-    canvasRef.current?.exportToPNG();
+  const handleManimCommand = useCallback((command: any) => {
+    canvasRef.current?.processCommand(command);
   }, []);
 
   const handleClearCanvas = useCallback(() => {
     canvasRef.current?.clear();
-  }, []);
-
-  const handleZoomToFit = useCallback(() => {
-    canvasRef.current?.zoomToFit();
   }, []);
 
   // Chat mode hook
@@ -51,6 +47,7 @@ export default function Home() {
   } = useChat({
     canvasMode,
     onCanvasUpdate: handleCanvasUpdate,
+    onManimCommand: handleManimCommand,
   });
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
@@ -91,6 +88,7 @@ export default function Home() {
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
+    onManimCommand: handleManimCommand,
     onError: handleError,
     onLog: handleLog,
     onStateChange: handleStateChange,
@@ -276,10 +274,10 @@ export default function Home() {
                   {canvasMode ? (
                     <div className="grid grid-cols-1 gap-2">
                       {[
-                        "Explain how a load balancer works",
-                        "Show me the flow of a REST API request",
-                        "Draw how React component rendering works",
-                        "Explain microservices vs monolith architecture",
+                        "Explain the Pythagorean theorem with a diagram",
+                        "Show me how derivatives work visually",
+                        "Visualize the relationship between sine and cosine",
+                        "Explain Euler's formula with animations",
                       ].map((prompt, i) => (
                         <button
                           key={i}
@@ -309,22 +307,6 @@ export default function Home() {
                 {/* Canvas Toolbar */}
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handleZoomToFit}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
-                    title="Zoom to fit"
-                  >
-                    <ZoomIn className="h-4 w-4" />
-                    <span>Fit</span>
-                  </button>
-                  <button
-                    onClick={handleExportCanvas}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
-                    title="Export as PNG"
-                  >
-                    <Download className="h-4 w-4" />
-                    <span>Export</span>
-                  </button>
-                  <button
                     onClick={handleClearCanvas}
                     className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 hover:text-destructive transition-colors text-sm"
                     title="Clear canvas"
@@ -336,17 +318,18 @@ export default function Home() {
 
                 <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
                   <div className="relative">
-                    <ExcalidrawCanvas
+                    <ManimCanvas
                       ref={canvasRef}
                       width={800}
-                      height={600}
-                      className="rounded-xl shadow-2xl overflow-hidden"
+                      height={450}
+                      backgroundColor="#1a1a2e"
+                      className="w-full h-full"
                     />
                     {/* Canvas Placeholder - hidden when content exists */}
                     <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground opacity-0 transition-opacity duration-300" id="canvas-placeholder">
                       <Mic className="mb-3 h-10 w-10 opacity-20" />
                       <p className="text-sm opacity-50">Ask me to explain something</p>
-                      <p className="text-xs opacity-30 mt-1">I'll draw while I talk</p>
+                      <p className="text-xs opacity-30 mt-1">I'll animate while I talk</p>
                     </div>
                   </div>
                 </GlassmorphicCard>
@@ -382,22 +365,6 @@ export default function Home() {
                 {/* Canvas Toolbar */}
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={handleZoomToFit}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
-                    title="Zoom to fit"
-                  >
-                    <ZoomIn className="h-4 w-4" />
-                    <span>Fit</span>
-                  </button>
-                  <button
-                    onClick={handleExportCanvas}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 transition-colors text-sm"
-                    title="Export as PNG"
-                  >
-                    <Download className="h-4 w-4" />
-                    <span>Export</span>
-                  </button>
-                  <button
                     onClick={handleClearCanvas}
                     className="flex items-center gap-2 px-3 py-2 rounded-lg glass-card hover:bg-white/10 hover:text-destructive transition-colors text-sm"
                     title="Clear canvas"
@@ -409,16 +376,17 @@ export default function Home() {
 
                 <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
                   <div className="relative">
-                    <ExcalidrawCanvas
+                    <ManimCanvas
                       ref={canvasRef}
                       width={800}
-                      height={600}
-                      className="rounded-xl shadow-2xl overflow-hidden"
+                      height={450}
+                      backgroundColor="#1a1a2e"
+                      className="w-full h-full"
                     />
                     <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground opacity-0 transition-opacity duration-300">
                       <Mic className="mb-3 h-10 w-10 opacity-20" />
                       <p className="text-sm opacity-50">Ask me to explain something</p>
-                      <p className="text-xs opacity-30 mt-1">I'll draw while I talk</p>
+                      <p className="text-xs opacity-30 mt-1">I'll animate while I talk</p>
                     </div>
                   </div>
                 </GlassmorphicCard>

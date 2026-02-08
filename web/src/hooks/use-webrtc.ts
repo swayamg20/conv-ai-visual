@@ -45,6 +45,7 @@ interface UseWebRTCOptions {
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
+  onManimCommand?: (command: any) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
   onStateChange?: (state: PipelineState) => void;
@@ -57,6 +58,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onManimCommand,
     onError,
     onLog,
     onStateChange,
@@ -280,6 +282,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             onCanvasUpdate?.(data.operations);
             break;
 
+          case "manim_command":
+            log(`Manim: ${data.command.cmd}`);
+            onManimCommand?.(data.command);
+            break;
+
           case "llm_response":
             log(`LLM: ${data.text.substring(0, 50)}...`);
             onLLMResponse?.(data.text);
@@ -397,6 +404,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onManimCommand,
     onError,
     playChunkStreaming,
     stopAudio,

@@ -13,10 +13,11 @@ interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
+  onManimCommand?: (command: any) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate } = options;
+  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate, onManimCommand } = options;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -68,6 +69,8 @@ export function useChat(options: UseChatOptions = {}) {
                 sessionIdRef.current = data.session_id;
               } else if (data.type === "canvas_update") {
                 onCanvasUpdate?.(data.operations);
+              } else if (data.type === "manim_command") {
+                onManimCommand?.(data.command);
               } else if (data.type === "chunk") {
                 fullContent += data.text;
                 if (!assistantId) {
@@ -112,7 +115,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [apiUrl, canvasMode, onCanvasUpdate]);
+  }, [apiUrl, canvasMode, onCanvasUpdate, onManimCommand]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {

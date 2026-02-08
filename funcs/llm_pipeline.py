@@ -6,6 +6,7 @@ from funcs.memory import MemoryManager
 from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall
 from funcs.tool_executor import ToolExecutor, SandboxConfig, default_executor
 from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA
+from funcs.manim_bridge import MANIM_TOOL_SCHEMA, manim_animate
 from funcs.llm_clients import LLMClient, create_llm_client
 from funcs.config import config
 
@@ -16,7 +17,11 @@ TOOL_CALL_PATTERN = re.compile(
     r'canvas_update\s*\([^)]*\{[\s\S]*?\}\s*\)|'  # canvas_update({...})
     r'canvas_update\s*\(\s*\[[\s\S]*?\]\s*\)|'     # canvas_update([...])
     r'```[\s\S]*?canvas_update[\s\S]*?```|'        # code blocks with canvas_update
-    r'\{"action":\s*"rect"[\s\S]*?\}',              # raw JSON operations
+    r'manim_animate\s*\([^)]*\{[\s\S]*?\}\s*\)|'   # manim_animate({...})
+    r'manim_animate\s*\(\s*\[[\s\S]*?\]\s*\)|'     # manim_animate([...])
+    r'```[\s\S]*?manim_animate[\s\S]*?```|'        # code blocks with manim_animate
+    r'\{"action":\s*"rect"[\s\S]*?\}|'              # raw JSON canvas operations
+    r'\{"action":\s*"add"[\s\S]*?\}',               # raw JSON manim operations
     re.MULTILINE
 )
 
@@ -448,11 +453,16 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
         should_include_canvas = include_canvas if include_canvas is not None else self.canvas_mode
         
         if should_include_canvas:
-            # Check if already in tools
+            # Add manim tool (preferred for animated visualizations)
+            has_manim = any(t.get("function", {}).get("name") == "manim_animate" for t in tools)
+            if not has_manim:
+                tools.append(MANIM_TOOL_SCHEMA)
+
+            # Keep canvas_update as fallback
             has_canvas = any(t.get("function", {}).get("name") == "canvas_update" for t in tools)
             if not has_canvas:
                 tools.append(CANVAS_TOOL_SCHEMA)
-        
+
         return tools
     
     async def chat_with_tools(
@@ -524,19 +534,36 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                     from funcs.tools import ToolResult
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations, session_id=self.session_id)
-                    
+
                     # Broadcast to client via callback
                     if self.canvas_callback and result.get("operations"):
                         try:
                             await self.canvas_callback(result["operations"])
                         except TypeError:
-                            # Sync callback
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
+                    )
+
+                # Special handling for manim_animate - generate and broadcast commands
+                elif tc.name == "manim_animate":
+                    from funcs.tools import ToolResult
+                    instructions_json = tc.arguments.get("instructions_json", "[]")
+                    result = manim_animate(instructions_json, session_id=self.session_id)
+
+                    if self.canvas_callback and result.get("commands"):
+                        try:
+                            await self.canvas_callback(result["commands"], "manim")
+                        except TypeError:
+                            self.canvas_callback(result["commands"], "manim")
+
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"Animation created with {result.get('command_count', 0)} commands" if result.get("success") else result.get("error", "Failed"),
+                        success=result.get("success", False)
                     )
                 else:
                     # Execute via executor (fetches from DB, runs in sandbox)
@@ -608,21 +635,37 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                 if tc.name == "canvas_update":
                     from funcs.canvas import canvas_update
                     from funcs.tools import ToolResult
-                    # Support both old format (operations) and new format (operations_json)
                     operations_json = tc.arguments.get("operations_json")
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations_json=operations_json, operations=operations, session_id=self.session_id)
-                    
+
                     if self.canvas_callback and result.get("operations"):
                         try:
                             await self.canvas_callback(result["operations"])
                         except TypeError:
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
+                    )
+
+                elif tc.name == "manim_animate":
+                    from funcs.tools import ToolResult
+                    instructions_json = tc.arguments.get("instructions_json", "[]")
+                    result = manim_animate(instructions_json, session_id=self.session_id)
+
+                    if self.canvas_callback and result.get("commands"):
+                        try:
+                            await self.canvas_callback(result["commands"], "manim")
+                        except TypeError:
+                            self.canvas_callback(result["commands"], "manim")
+
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"Animation created with {result.get('command_count', 0)} commands" if result.get("success") else result.get("error", "Failed"),
+                        success=result.get("success", False)
                     )
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)

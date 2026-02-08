@@ -245,13 +245,21 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             voice_pipeline.load_tools_from_db()
 
             # Canvas callback
-            async def canvas_broadcast(operations):
+            async def canvas_broadcast(data, tool_type="canvas"):
                 ch = datachannels.get(pc_id)
                 if ch and ch.readyState == "open":
-                    ch.send(json.dumps({
-                        "type": "canvas_update",
-                        "operations": operations
-                    }))
+                    if tool_type == "manim":
+                        # Send each Manim command individually for streaming
+                        for cmd in data:
+                            ch.send(json.dumps({
+                                "type": "manim_command",
+                                "command": cmd
+                            }))
+                    else:
+                        ch.send(json.dumps({
+                            "type": "canvas_update",
+                            "operations": data
+                        }))
 
             voice_pipeline.set_canvas_callback(canvas_broadcast)
             voice_sessions[pc_id] = voice_pipeline
@@ -651,8 +659,8 @@ async def chat(chat_msg: ChatMessage, request: Request):
         pipeline.set_canvas_mode(chat_msg.canvas_mode)
     
     # Set canvas callback to queue events
-    def canvas_callback(operations):
-        canvas_events.append(operations)
+    def canvas_callback(data, tool_type="canvas"):
+        canvas_events.append({"data": data, "tool_type": tool_type})
     pipeline.set_canvas_callback(canvas_callback)
     
     async def generate():
@@ -668,15 +676,23 @@ async def chat(chat_msg: ChatMessage, request: Request):
             ):
                 # Check if we have pending canvas events to send
                 while canvas_events:
-                    ops = canvas_events.pop(0)
-                    yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
-                
+                    event = canvas_events.pop(0)
+                    if event.get("tool_type") == "manim":
+                        for cmd in event["data"]:
+                            yield f"data: {json.dumps({'type': 'manim_command', 'command': cmd})}\n\n"
+                    else:
+                        yield f"data: {json.dumps({'type': 'canvas_update', 'operations': event['data']})}\n\n"
+
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
-            
+
             # Send any remaining canvas events
             while canvas_events:
-                ops = canvas_events.pop(0)
-                yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
+                event = canvas_events.pop(0)
+                if event.get("tool_type") == "manim":
+                    for cmd in event["data"]:
+                        yield f"data: {json.dumps({'type': 'manim_command', 'command': cmd})}\n\n"
+                else:
+                    yield f"data: {json.dumps({'type': 'canvas_update', 'operations': event['data']})}\n\n"
             
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             

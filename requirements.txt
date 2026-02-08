@@ -110,3 +110,4 @@ sqlmodel>=0.0.22
 aiosqlite>=0.20.0
 mem0ai>=0.1.0
 RestrictedPython>=7.0
+-e /Users/swayam.gupta/Documents/GitHub/manim
