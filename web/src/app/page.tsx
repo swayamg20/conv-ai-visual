@@ -3,8 +3,8 @@
 import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
-import { ExcalidrawCanvas, type ExcalidrawCanvasHandle } from "@/components/excalidraw-canvas";
+// Switch removed - canvas is always enabled
+import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
 import { cn } from "@/lib/utils";
@@ -19,16 +19,43 @@ import { ChatInterface } from "@/components/chat-interface";
 
 export default function Home() {
   const [appMode, setAppMode] = useState<AppMode>("voice");
-  const [canvasMode, setCanvasMode] = useState(false);
+  // Canvas is always enabled for math tutor
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const canvasRef = useRef<ExcalidrawCanvasHandle>(null);
+  const canvasRef = useRef<SVGCanvasHandle>(null);
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
     canvasRef.current?.render(operations);
   }, []);
+
+  const handleAnimation = useCallback((animation: AnimationOperation) => {
+    canvasRef.current?.animate(animation);
+  }, []);
+
+  const handleLatex = useCallback((latex: LatexOperation) => {
+    canvasRef.current?.renderLatex(latex);
+  }, []);
+
+  const handleTeachingSequence = useCallback((sequence: TeachingSequence) => {
+    canvasRef.current?.createSequence(sequence);
+  }, []);
+
+  // Dispatch animation events from SSE to the correct SVGCanvas method
+  const handleAnimationEvent = useCallback((data: any) => {
+    const tool = data.tool;
+    if (tool === "animate_element" && data.animation_command) {
+      handleAnimation(data.animation_command);
+    } else if (tool === "render_latex" && data.element) {
+      handleLatex(data.element);
+    } else if (tool === "create_teaching_sequence" && data.timeline) {
+      handleTeachingSequence(data.timeline);
+    } else if (tool === "plot_function" && data.graph) {
+      // Plot function data goes to render as canvas operations
+      canvasRef.current?.render([data.graph]);
+    }
+  }, [handleAnimation, handleLatex, handleTeachingSequence]);
 
   // Chat mode hook
   const {
@@ -37,8 +64,9 @@ export default function Home() {
     sendMessage: sendChatMessage,
     clearChat,
   } = useChat({
-    canvasMode,
+    canvasMode: true,
     onCanvasUpdate: handleCanvasUpdate,
+    onAnimationEvent: handleAnimationEvent,
   });
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
@@ -75,7 +103,6 @@ export default function Home() {
     toggleMicMute,
     toggleTTS,
   } = useWebRTC({
-    canvasMode,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
@@ -138,10 +165,6 @@ export default function Home() {
               onChange={setAppMode}
               disabled={isConnected || isConnecting}
             />
-            <div className="flex items-center gap-2.5">
-              <span className="text-sm font-medium text-muted-foreground">Canvas</span>
-              <Switch checked={canvasMode} onCheckedChange={setCanvasMode} />
-            </div>
             <button
               className="p-2 rounded-lg hover:bg-white/10 transition-colors"
               aria-label="Settings"
@@ -152,25 +175,16 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* Main Content Area */}
-      <main
-        className={cn(
-          "pt-24 min-h-screen flex",
-          appMode === "voice" ? "pb-32 items-center justify-center" : "pb-4",
-          canvasMode && appMode === "voice" && "gap-8 px-8"
-        )}
-      >
+      {/* Main Content Area - Always Split Screen */}
+      <main className="pt-24 min-h-screen flex gap-8 px-8 pb-4">
         {appMode === "voice" ? (
           <>
-            {/* Voice Interaction Hero Section */}
+            {/* Voice Interaction Section */}
             <motion.section
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5 }}
-              className={cn(
-                "flex flex-col items-center gap-8 md:gap-12 px-6",
-                canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-2xl mx-auto"
-              )}
+              className="w-2/5 min-w-[400px] flex flex-col items-center justify-center gap-8 md:gap-12"
             >
               {/* Voice Orb */}
               <motion.div
@@ -180,7 +194,7 @@ export default function Home() {
               >
                 <VoiceOrb
                   state={voiceState}
-                  size={canvasMode ? "md" : "xl"}
+                  size="lg"
                   audioLevel={0.3}
                   onClick={isConnected ? disconnect : handleConnect}
                   disabled={isConnecting}
@@ -263,75 +277,59 @@ export default function Home() {
               )}
             </motion.section>
 
-            {/* Canvas Section (if enabled) */}
-            {canvasMode && (
-              <motion.section
-                initial={{ opacity: 0, x: 20 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.3 }}
-                className="w-3/5 flex items-center justify-center"
-              >
-                <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
-                  <div className="relative">
-                    <ExcalidrawCanvas
-                      ref={canvasRef}
-                      width={800}
-                      height={600}
-                      className="rounded-xl shadow-2xl overflow-hidden"
-                    />
-                    {/* Canvas Placeholder */}
-                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                      <Mic className="mb-3 h-10 w-10 opacity-20" />
-                      <p className="text-sm opacity-50">AI will draw here</p>
-                    </div>
-                  </div>
-                </GlassmorphicCard>
-              </motion.section>
-            )}
+            {/* Math Whiteboard (Always Visible) */}
+            <motion.section
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.3 }}
+              className="flex-1 flex items-center justify-center"
+            >
+              <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
+                <SVGCanvas
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  className="w-full h-full"
+                />
+              </GlassmorphicCard>
+            </motion.section>
           </>
         ) : (
-          /* Chat Mode */
-          <motion.section
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-            className={cn(
-              "flex-1 w-full flex",
-              canvasMode ? "gap-6 px-6 max-w-7xl mx-auto" : "justify-center px-4"
-            )}
-          >
-            <div className={cn(
-              "glass-card rounded-2xl overflow-hidden flex flex-col",
-              canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-3xl h-[calc(100vh-7rem)]"
-            )}>
-              <ChatInterface
-                messages={chatMessages}
-                isLoading={chatLoading}
-                onSendMessage={sendChatMessage}
-                onClearChat={clearChat}
-              />
-            </div>
-
-            {/* Canvas Section for Chat Mode */}
-            {canvasMode && (
-              <div className="flex-1 flex items-center justify-center">
-                <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
-                  <div className="relative">
-                    <ExcalidrawCanvas
-                      ref={canvasRef}
-                      width={800}
-                      height={600}
-                      className="rounded-xl shadow-2xl overflow-hidden"
-                    />
-                    <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                      <Mic className="mb-3 h-10 w-10 opacity-20" />
-                      <p className="text-sm opacity-50">AI will draw here</p>
-                    </div>
-                  </div>
-                </GlassmorphicCard>
+          /* Chat Mode - Always Split Screen */
+          <>
+            <motion.section
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3 }}
+              className="w-2/5 min-w-[400px] flex flex-col h-[calc(100vh-7rem)]"
+            >
+              <div className="glass-card rounded-2xl overflow-hidden flex flex-col h-full">
+                <ChatInterface
+                  messages={chatMessages}
+                  isLoading={chatLoading}
+                  onSendMessage={sendChatMessage}
+                  onClearChat={clearChat}
+                />
               </div>
-            )}
-          </motion.section>
+            </motion.section>
+
+            {/* Math Whiteboard for Chat Mode */}
+            <motion.section
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.2 }}
+              className="flex-1 flex items-center justify-center"
+            >
+              <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
+                <SVGCanvas
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  className="w-full h-full"
+                />
+              </GlassmorphicCard>
+            </motion.section>
+          </>
         )}
       </main>
 

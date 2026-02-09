@@ -30,6 +30,11 @@ class CanvasAction(str, Enum):
     DELETE = "delete"
     UPDATE = "update"
     HIGHLIGHT = "highlight"
+    # Animation actions
+    ANIMATE = "animate"  # Animate existing element
+    LATEX = "latex"  # Render LaTeX equation
+    MORPH = "morph"  # Shape morphing
+    GRAPH = "graph"  # Plot function graph
 
 
 @dataclass
@@ -49,6 +54,10 @@ class CanvasElement:
     font_family: str = "Arial"
     points: List[List[float]] = field(default_factory=list)  # for line/arrow/path
     label: str = ""  # semantic label for AI reference
+    # Animation state fields
+    initial_state: Dict[str, Any] = field(default_factory=dict)  # For animation resets
+    animation_state: str = "idle"  # idle, animating, paused
+    timeline_id: Optional[str] = None  # Associated timeline
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -371,4 +380,26 @@ CANVAS_TOOL_DEFINITION = {
     "handler_module": "funcs.canvas",
     "handler_function": "canvas_update"
 }
+
+
+# ============= Animation Tool Schemas =============
+# Import animation tool schemas from animation_pipeline
+try:
+    from funcs.animation_pipeline import (
+        ANIMATE_ELEMENT_SCHEMA,
+        RENDER_LATEX_SCHEMA,
+        CREATE_TEACHING_SEQUENCE_SCHEMA,
+        PLOT_FUNCTION_SCHEMA
+    )
+
+    # Export for use by LLM pipeline
+    ANIMATION_TOOLS = [
+        ANIMATE_ELEMENT_SCHEMA,
+        RENDER_LATEX_SCHEMA,
+        CREATE_TEACHING_SEQUENCE_SCHEMA,
+        PLOT_FUNCTION_SCHEMA
+    ]
+except ImportError:
+    logger.warning("Animation tools not available - animation_pipeline module not found")
+    ANIMATION_TOOLS = []
 

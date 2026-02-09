@@ -101,6 +101,7 @@ class LLMPipeline:
         # Canvas support
         self.session_id = session_id or "default"
         self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
+        self.animation_callback: Optional[Callable[[Dict], Any]] = None
 
         logger.info(f"LLM pipeline initialized: provider={self.provider}, model={self.model or 'default'}, memory={enable_memory}, canvas_mode={canvas_mode}")
     
@@ -110,24 +111,8 @@ class LLMPipeline:
         if self.canvas_mode:
             if self._canvas_system_prompt:
                 return self._canvas_system_prompt
-            # Default canvas prompt
-            return """You are an interactive visual tutor. You ALWAYS use the canvas to illustrate your explanations.
-
-CANVAS RULES:
-- Draw diagrams, flowcharts, and visual aids for EVERY explanation
-- Use clear colors: blue (#3b82f6) for main concepts, green (#10b981) for good/correct, red (#ef4444) for warnings/errors, orange (#f59e0b) for highlights
-- Label important elements for reference
-- Build diagrams incrementally as you explain
-- Use arrows to show relationships and flow
-- Position elements logically: left-to-right for sequences, top-to-bottom for hierarchies
-
-TEACHING STYLE:
-- Start with a visual overview, then explain while pointing to elements
-- Use the canvas as a whiteboard - sketch, annotate, highlight
-- Keep verbal explanations brief; let the visuals do the heavy lifting
-- Reference drawn elements: "As you can see in the diagram..."
-
-The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update for every response."""
+            # Default to math tutor prompt from config
+            return config.LLM_MATH_TUTOR_PROMPT
         return self.base_system_prompt
     
     def set_canvas_mode(self, enabled: bool, custom_prompt: Optional[str] = None):
@@ -386,11 +371,21 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         """
         Set callback for canvas events.
         Called whenever canvas_update tool is executed.
-        
+
         Args:
             callback: Function that receives list of canvas operations
         """
         self.canvas_callback = callback
+
+    def set_animation_callback(self, callback: Callable[[Dict], Any]):
+        """
+        Set callback for animation events.
+        Called whenever animation tools (animate_element, render_latex, etc.) are executed.
+
+        Args:
+            callback: Function that receives animation data dict
+        """
+        self.animation_callback = callback
     
     def get_canvas_context(self) -> str:
         """Get current canvas state summary for LLM context."""
@@ -414,13 +409,27 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         
         # Include canvas tool based on mode or explicit parameter
         should_include_canvas = include_canvas if include_canvas is not None else self.canvas_mode
-        
+
         if should_include_canvas:
             # Check if already in tools
             has_canvas = any(t.get("function", {}).get("name") == "canvas_update" for t in tools)
             if not has_canvas:
                 tools.append(CANVAS_TOOL_SCHEMA)
-        
+
+            # Include animation tools when canvas mode is enabled
+            try:
+                from funcs.canvas import ANIMATION_TOOLS
+
+                # Add animation tools if not already present
+                existing_tool_names = {t.get("function", {}).get("name") for t in tools}
+                for anim_tool in ANIMATION_TOOLS:
+                    tool_name = anim_tool.get("function", {}).get("name")
+                    if tool_name and tool_name not in existing_tool_names:
+                        tools.append(anim_tool)
+                        logger.debug(f"Added animation tool: {tool_name}")
+            except ImportError:
+                logger.warning("Animation tools not available")
+
         return tools
     
     async def chat_with_tools(
@@ -492,7 +501,7 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                     from funcs.tools import ToolResult
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations, session_id=self.session_id)
-                    
+
                     # Broadcast to client via callback
                     if self.canvas_callback and result.get("operations"):
                         try:
@@ -500,11 +509,49 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                         except TypeError:
                             # Sync callback
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
+                    )
+                # Special handling for animation tools
+                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
+                    from funcs.animation_pipeline import (
+                        animate_element,
+                        render_latex,
+                        create_teaching_sequence,
+                        plot_function
+                    )
+                    from funcs.tools import ToolResult
+
+                    # Execute animation tool with session_id
+                    tool_handlers = {
+                        "animate_element": animate_element,
+                        "render_latex": render_latex,
+                        "create_teaching_sequence": create_teaching_sequence,
+                        "plot_function": plot_function
+                    }
+
+                    handler = tool_handlers[tc.name]
+                    result = handler(**tc.arguments, session_id=self.session_id)
+
+                    # Broadcast to client via animation callback
+                    if self.animation_callback and result.get("success"):
+                        animation_data = {
+                            "tool": tc.name,
+                            **result
+                        }
+                        try:
+                            await self.animation_callback(animation_data)
+                        except TypeError:
+                            # Sync callback
+                            self.animation_callback(animation_data)
+
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"{tc.name} executed successfully",
+                        success=result.get("success", True)
                     )
                 else:
                     # Execute via executor (fetches from DB, runs in sandbox)
@@ -569,17 +616,49 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                     from funcs.tools import ToolResult
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations, session_id=self.session_id)
-                    
+
                     if self.canvas_callback and result.get("operations"):
                         try:
                             await self.canvas_callback(result["operations"])
                         except TypeError:
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
+                    )
+                # Special handling for animation tools
+                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
+                    from funcs.animation_pipeline import (
+                        animate_element,
+                        render_latex,
+                        create_teaching_sequence,
+                        plot_function
+                    )
+                    from funcs.tools import ToolResult
+
+                    tool_handlers = {
+                        "animate_element": animate_element,
+                        "render_latex": render_latex,
+                        "create_teaching_sequence": create_teaching_sequence,
+                        "plot_function": plot_function
+                    }
+
+                    handler = tool_handlers[tc.name]
+                    result = handler(**tc.arguments, session_id=self.session_id)
+
+                    if self.animation_callback and result.get("success"):
+                        animation_data = {"tool": tc.name, **result}
+                        try:
+                            await self.animation_callback(animation_data)
+                        except TypeError:
+                            self.animation_callback(animation_data)
+
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"{tc.name} executed successfully",
+                        success=result.get("success", True)
                     )
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)

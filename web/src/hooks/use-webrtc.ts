@@ -40,10 +40,12 @@ export interface CanvasOperation {
 
 interface UseWebRTCOptions {
   apiUrl?: string;
-  canvasMode?: boolean;
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
+  onAnimation?: (data: any) => void;
+  onLatex?: (data: any) => void;
+  onTeachingSequence?: (data: any) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
   onStateChange?: (state: PipelineState) => void;
@@ -277,6 +279,21 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           case "canvas_update":
             log(`Canvas: ${data.operations.length} ops`);
             onCanvasUpdate?.(data.operations);
+            break;
+
+          case "animation":
+            log(`Animation: ${data.tool}`);
+            onAnimation?.(data);
+            break;
+
+          case "latex":
+            log(`LaTeX: ${data.element?.latex?.substring(0, 30)}...`);
+            onLatex?.(data);
+            break;
+
+          case "teaching_sequence":
+            log(`Teaching sequence: ${data.timeline?.steps?.length} steps`);
+            onTeachingSequence?.(data);
             break;
 
           case "llm_response":

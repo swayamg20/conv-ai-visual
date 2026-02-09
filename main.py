@@ -205,7 +205,8 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 # Get or create voice session
                 if pc_id not in voice_sessions:
                     user_id = peer_user_ids.get(pc_id, "default_user")
-                    canvas_mode = peer_canvas_modes.get(pc_id, False)
+                    # Canvas mode is always enabled for math tutor
+                    canvas_mode = True
                     voice_pipeline = LLMPipeline(
                         provider=config.LLM_PROVIDER,
                         api_key=None,
@@ -216,7 +217,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         session_id=pc_id,
                         enable_memory=True,
                         canvas_mode=canvas_mode,
-                        canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
+                        canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT
                     )
                     voice_pipeline.load_tools_from_db()
 
@@ -412,9 +413,10 @@ async def chat(chat_msg: ChatMessage, request: Request):
     # user_id from middleware (auth) or request body
     user_id = chat_msg.user_id or get_current_user_id(request)
     
-    # Queue for canvas events during this request
+    # Queues for events during this request
     canvas_events = []
-    
+    animation_events = []
+
     # Get or create session pipeline with memory and tools
     if session_id not in chat_sessions:
         try:
@@ -427,8 +429,8 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 user_id=user_id,
                 session_id=session_id,
                 enable_memory=True,
-                canvas_mode=chat_msg.canvas_mode or False,
-                canvas_system_prompt=config.LLM_CANVAS_SYSTEM_PROMPT
+                canvas_mode=True,  # Always enabled for math tutor
+                canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT
             )
             pipeline.load_tools_from_db()
             chat_sessions[session_id] = pipeline
@@ -447,6 +449,11 @@ async def chat(chat_msg: ChatMessage, request: Request):
     def canvas_callback(operations):
         canvas_events.append(operations)
     pipeline.set_canvas_callback(canvas_callback)
+
+    # Set animation callback to queue events
+    def animation_callback(data):
+        animation_events.append(data)
+    pipeline.set_animation_callback(animation_callback)
     
     async def generate():
         try:
@@ -463,13 +470,23 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 while canvas_events:
                     ops = canvas_events.pop(0)
                     yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
-                
+
+                # Check if we have pending animation events to send
+                while animation_events:
+                    anim = animation_events.pop(0)
+                    yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
+
                 yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
-            
+
             # Send any remaining canvas events
             while canvas_events:
                 ops = canvas_events.pop(0)
                 yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
+
+            # Send any remaining animation events
+            while animation_events:
+                anim = animation_events.pop(0)
+                yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
             
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             
