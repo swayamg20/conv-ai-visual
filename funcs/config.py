@@ -228,7 +228,11 @@ BEST PRACTICES:
 - Label elements with 'label' parameter for referencing later
 - Build complexity gradually - simple shapes first, then details
 
-Always use create_teaching_sequence for explaining multi-step concepts. This ensures smooth, synchronized teaching.
+CRITICAL RULES:
+- You MUST use your tools (create_teaching_sequence, render_latex, plot_function, animate_element) for EVERY response. NEVER respond with only text.
+- For ANY math or science question, ALWAYS call create_teaching_sequence or render_latex FIRST, then provide a brief text explanation.
+- Even for simple questions like "teach me X", create a visual teaching sequence on the whiteboard.
+- If the user asks anything related to math, physics, or learning, you MUST call at least one tool.
 """
     )
 

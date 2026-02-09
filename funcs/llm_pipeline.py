@@ -103,6 +103,12 @@ class LLMPipeline:
         self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
         self.animation_callback: Optional[Callable[[Dict], Any]] = None
 
+        # Call metrics (populated after each chat_with_tools_stream call)
+        self._last_call_timing: Optional[Dict] = None
+        self._last_call_tool_calls: List[Dict] = []
+        self._last_call_response: Optional[str] = None
+        self._last_call_error: Optional[str] = None
+
         logger.info(f"LLM pipeline initialized: provider={self.provider}, model={self.model or 'default'}, memory={enable_memory}, canvas_mode={canvas_mode}")
     
     @property
@@ -386,7 +392,18 @@ class LLMPipeline:
             callback: Function that receives animation data dict
         """
         self.animation_callback = callback
-    
+
+    def get_last_call_metrics(self) -> Optional[Dict]:
+        """Get timing and tool call data from the most recent chat_with_tools_stream call."""
+        if not self._last_call_timing:
+            return None
+        return {
+            **self._last_call_timing,
+            "tool_calls": self._last_call_tool_calls,
+            "response_text": self._last_call_response,
+            "error": self._last_call_error,
+        }
+
     def get_canvas_context(self) -> str:
         """Get current canvas state summary for LLM context."""
         state = get_canvas_state(self.session_id)
@@ -583,33 +600,57 @@ class LLMPipeline:
     ) -> AsyncGenerator[str, None]:
         """
         Streaming chat with tools.
-        
+
         Note: Tool calls are executed non-streaming, only final response streams.
-        
+
         Yields:
             Text chunks of final response
         """
+        import time as _time
+
+        t_start = _time.perf_counter()
+        t_llm_total = 0.0
+        t_tool_total = 0.0
+        all_tool_calls: List[Dict] = []
+        tokens_in = None
+        tokens_out = None
+        error_msg = None
+
         context = self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
-        
+
         tools_schema = self.get_tools_schema() or None
-        
+        tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
+        logger.info(f"chat_with_tools_stream: {len(tool_names)} tools passed to LLM: {tool_names}")
+
         # Execute tool calls (non-streaming) until we get a text response
         for _ in range(max_tool_rounds):
+            t_llm_start = _time.perf_counter()
             response = await self.client.complete_with_tools(
                 messages=context,
                 tools=tools_schema,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+            t_llm_total += _time.perf_counter() - t_llm_start
+
+            # Extract token usage if available
+            if hasattr(response, 'usage') and response.usage:
+                tokens_in = getattr(response.usage, 'prompt_tokens', None)
+                tokens_out = getattr(response.usage, 'completion_tokens', None)
 
             if not self.client.has_tool_calls(response):
+                logger.info("LLM returned no tool calls — streaming final text response")
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
+            logger.info(f"LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
             context.append(self.client.get_assistant_message(response))
-            
+
             for tc in tool_calls:
+                all_tool_calls.append({"name": tc.name, "arguments": tc.arguments})
+                t_tool_start = _time.perf_counter()
+
                 # Special handling for canvas_update
                 if tc.name == "canvas_update":
                     from funcs.canvas import canvas_update
@@ -663,10 +704,12 @@ class LLMPipeline:
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)
 
+                t_tool_total += _time.perf_counter() - t_tool_start
                 context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
 
         # Now stream the final response
+        t_stream_start = _time.perf_counter()
         full_response = ""
 
         async for chunk in self.client.stream(
@@ -676,6 +719,23 @@ class LLMPipeline:
         ):
             full_response += chunk
             yield chunk
-        
+
+        t_stream_end = _time.perf_counter()
+        t_end = _time.perf_counter()
+
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
+
+        # Store metrics for caller to retrieve
+        self._last_call_timing = {
+            "latency_total_ms": round((t_end - t_start) * 1000, 2),
+            "latency_llm_ms": round(t_llm_total * 1000, 2),
+            "latency_tool_ms": round(t_tool_total * 1000, 2),
+            "latency_stream_ms": round((t_stream_end - t_stream_start) * 1000, 2),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        }
+        self._last_call_tool_calls = all_tool_calls
+        self._last_call_response = full_response
+        self._last_call_error = error_msg
+        logger.info(f"Call metrics: total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")

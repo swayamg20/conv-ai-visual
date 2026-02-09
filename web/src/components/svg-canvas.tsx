@@ -52,17 +52,19 @@ export interface LatexOperation {
  * Teaching sequence step
  */
 export interface TeachingStep {
-  action: "draw" | "animate" | "latex" | "highlight" | "morph" | "pause";
+  action: "draw" | "animate" | "latex" | "highlight" | "morph" | "pause" | "text";
   element?: CanvasOperation;
   target_id?: string;
   properties?: Record<string, any>;
   duration?: number;
   speech_cue?: string;
   latex?: string;
+  text?: string;
   x?: number;
   y?: number;
   font_size?: number;
   color?: string;
+  font_family?: string;
 }
 
 /**
@@ -101,21 +103,14 @@ interface SVGCanvasProps {
   className?: string;
 }
 
-/**
- * SVGCanvas - Hand-drawn animated canvas using Rough.js + GSAP
- *
- * Features:
- * - Hand-drawn aesthetic via Rough.js
- * - Smooth animations via GSAP
- * - LaTeX rendering via KaTeX
- * - Multi-step teaching sequences
- */
 export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
   ({ width = 800, height = 600, className }, ref) => {
     const svgRef = useRef<SVGSVGElement>(null);
     const roughRef = useRef<RoughSVG | null>(null);
     const elementsRef = useRef<Map<string, SVGElementData>>(new Map());
     const timelinesRef = useRef<Map<string, gsap.core.Timeline>>(new Map());
+    const sequenceQueueRef = useRef<gsap.core.Timeline[]>([]);
+    const isPlayingRef = useRef<boolean>(false);
     const [, setForceUpdate] = useState(0);
 
     // Initialize Rough.js on mount
@@ -471,6 +466,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               if (targetId && elementsRef.current.has(targetId)) {
                 const data = elementsRef.current.get(targetId);
                 if (data) {
+                  gsap.set(data.element, { transformOrigin: "center center" });
                   gsap.to(data.element, {
                     scale: 1.15,
                     duration: 0.3,
@@ -568,34 +564,47 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     );
 
     /**
-     * Create teaching sequence (GSAP timeline)
+     * Play next queued sequence timeline
+     */
+    const playNextSequence = useCallback(() => {
+      if (sequenceQueueRef.current.length === 0) {
+        isPlayingRef.current = false;
+        return;
+      }
+      isPlayingRef.current = true;
+      const next = sequenceQueueRef.current.shift()!;
+      next.eventCallback("onComplete", () => playNextSequence());
+      next.play();
+    }, []);
+
+    /**
+     * Create teaching sequence (GSAP timeline) — auto-plays and queues
      */
     const createSequence = useCallback(
       (sequence: TeachingSequence): gsap.core.Timeline => {
-        const tl = createTimeline();
+        const tl = createTimeline({ paused: true });
+        const timelineId = `tl_${Math.random().toString(36).substring(2, 10)}`;
 
         for (const step of sequence.steps) {
           switch (step.action) {
             case "draw":
               if (step.element) {
-                // Draw element and animate it in
-                tl.add(() => render([step.element!]));
+                tl.add(() => render([step.element!]), "+=0.2");
               }
               break;
 
             case "animate":
               if (step.target_id && step.properties) {
-                const targetData = elementsRef.current.get(step.target_id);
-                if (targetData) {
-                  tl.to(
-                    targetData.element,
-                    {
-                      ...step.properties,
-                      duration: step.duration ?? DURATION.normal
-                    },
-                    ">"
-                  );
-                }
+                // Defer element lookup to playback time
+                const targetId = step.target_id;
+                const props = step.properties;
+                const dur = step.duration ?? DURATION.normal;
+                tl.add(() => {
+                  const targetData = elementsRef.current.get(targetId);
+                  if (targetData) {
+                    gsap.to(targetData.element, { ...props, duration: dur });
+                  }
+                }, ">");
               }
               break;
 
@@ -610,25 +619,47 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                   font_size: step.font_size ?? 20,
                   color: step.color ?? "#000000"
                 };
-                tl.add(() => renderLatex(latexOp));
+                tl.add(() => renderLatex(latexOp), "+=0.2");
               }
               break;
 
+            case "text": {
+              // LLM sends text steps directly (not wrapped in element)
+              const textId = step.target_id || `text_${generateId()}`;
+              const textOp: CanvasOperation = {
+                action: "text",
+                id: textId,
+                text: step.text ?? step.speech_cue ?? "",
+                x: step.x ?? 0,
+                y: step.y ?? 0,
+                color: step.color ?? "#000000",
+                font_size: step.font_size ?? 16,
+                font_family: step.font_family,
+              };
+              tl.add(() => render([textOp]), "+=0.2");
+              break;
+            }
+
             case "highlight":
               if (step.target_id) {
-                const targetData = elementsRef.current.get(step.target_id);
-                if (targetData) {
-                  tl.to(
-                    targetData.element,
-                    {
+                const hTargetId = step.target_id;
+                const hDuration = step.duration ?? 0.3;
+                tl.add(() => {
+                  const targetData = elementsRef.current.get(hTargetId);
+                  if (targetData) {
+                    // Set transformOrigin to center for proper scaling
+                    gsap.set(targetData.element, { transformOrigin: "center center" });
+                    gsap.to(targetData.element, {
                       scale: 1.15,
-                      duration: 0.3,
+                      duration: hDuration,
                       yoyo: true,
-                      repeat: 1
-                    },
-                    ">"
-                  );
-                }
+                      repeat: 1,
+                      ease: EASING.teaching
+                    });
+                  } else {
+                    console.warn(`Highlight target not found: ${hTargetId}`);
+                  }
+                }, ">");
               }
               break;
 
@@ -638,17 +669,31 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           }
         }
 
+        // Store and queue
+        timelinesRef.current.set(timelineId, tl);
+        sequenceQueueRef.current.push(tl);
+
+        // Start playing if not already
+        if (!isPlayingRef.current) {
+          playNextSequence();
+        }
+
         return tl;
       },
-      [render, renderLatex, generateId]
+      [render, renderLatex, generateId, playNextSequence]
     );
 
     /**
      * Clear canvas
      */
     const clear = useCallback(() => {
-      elementsRef.current.clear();
+      // Kill all queued and active timelines
+      sequenceQueueRef.current.forEach(tl => tl.kill());
+      sequenceQueueRef.current = [];
+      isPlayingRef.current = false;
+      timelinesRef.current.forEach(tl => tl.kill());
       timelinesRef.current.clear();
+      elementsRef.current.clear();
       if (svgRef.current) {
         svgRef.current.innerHTML = "";
       }

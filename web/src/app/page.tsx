@@ -2,7 +2,8 @@
 
 import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Mic, Settings, ChevronUp } from "lucide-react";
+import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
+import Link from "next/link";
 // Switch removed - canvas is always enabled
 import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
@@ -165,6 +166,13 @@ export default function Home() {
               onChange={setAppMode}
               disabled={isConnected || isConnecting}
             />
+            <Link
+              href="/dashboard"
+              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              aria-label="Dashboard"
+            >
+              <BarChart3 className="h-5 w-5 text-muted-foreground" />
+            </Link>
             <button
               className="p-2 rounded-lg hover:bg-white/10 transition-colors"
               aria-label="Settings"

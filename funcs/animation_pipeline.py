@@ -132,6 +132,20 @@ class AnimationPipeline:
                     "speech_cue": step.get("speech_cue")
                 })
 
+            elif action == "text":
+                # Text step (direct text rendering without wrapping in element)
+                timeline_steps.append({
+                    "action": "text",
+                    "text": step.get("text", ""),
+                    "x": step.get("x"),
+                    "y": step.get("y"),
+                    "color": step.get("color", "#000000"),
+                    "font_size": step.get("font_size", 16),
+                    "font_family": step.get("font_family"),
+                    "target_id": step.get("target_id"),
+                    "speech_cue": step.get("speech_cue")
+                })
+
             elif action == "highlight":
                 # Highlight step
                 timeline_steps.append({
@@ -512,8 +526,12 @@ Each step animates as you explain, creating synchronized teaching.
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["draw", "animate", "latex", "highlight", "morph", "pause"],
-                                "description": "Step action type"
+                                "enum": ["draw", "animate", "latex", "text", "highlight", "morph", "pause"],
+                                "description": "Step action type. Use 'text' for labels/annotations, 'latex' for math equations, 'draw' for shapes."
+                            },
+                            "text": {
+                                "type": "string",
+                                "description": "Text content (for 'text' action)"
                             },
                             "element": {
                                 "type": "object",

@@ -1,5 +1,4 @@
 import asyncio
-from types import NoneType
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 import json
 from typing import Any, Dict, Optional
@@ -67,7 +66,7 @@ class ChatMessage(BaseModel):
     message: str
     session_id: Optional[str] = None
     user_id: Optional[str] = None
-    canvas_mode: Optional[bool] = NoneType
+    canvas_mode: Optional[bool] = None
 
 class CanvasModeRequest(BaseModel):
     enabled: bool
@@ -487,11 +486,47 @@ async def chat(chat_msg: ChatMessage, request: Request):
             while animation_events:
                 anim = animation_events.pop(0)
                 yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
-            
+
+            # Save observability log
+            try:
+                from funcs.models import LLMCallLogRepo
+                metrics = pipeline.get_last_call_metrics()
+                if metrics:
+                    LLMCallLogRepo.save(
+                        session_id=session_id,
+                        user_id=user_id,
+                        user_message=chat_msg.message,
+                        llm_provider=pipeline.provider,
+                        llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                        tool_calls_json=json.dumps(metrics.get("tool_calls", [])),
+                        response_text=(metrics.get("response_text") or "")[:2000],
+                        latency_total_ms=metrics.get("latency_total_ms"),
+                        latency_llm_ms=metrics.get("latency_llm_ms"),
+                        latency_tool_ms=metrics.get("latency_tool_ms"),
+                        latency_stream_ms=metrics.get("latency_stream_ms"),
+                        tokens_in=metrics.get("tokens_in"),
+                        tokens_out=metrics.get("tokens_out"),
+                        error=metrics.get("error"),
+                    )
+            except Exception as log_err:
+                logger.warning("Failed to save LLM call log: %s", log_err)
+
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
-            
+
         except Exception as e:
             logger.exception("Chat stream error: %s", e)
+            try:
+                from funcs.models import LLMCallLogRepo
+                LLMCallLogRepo.save(
+                    session_id=session_id,
+                    user_id=user_id,
+                    user_message=chat_msg.message,
+                    llm_provider=pipeline.provider,
+                    llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                    error=str(e),
+                )
+            except Exception:
+                pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
     
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -526,6 +561,46 @@ async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
         "canvas_mode": pipeline.canvas_mode,
         "tools_count": len(pipeline.get_tools_schema())
     })
+
+
+@app.get("/api/logs")
+async def get_logs(limit: int = 50, offset: int = 0):
+    """Get recent LLM call logs with pagination."""
+    from funcs.models import LLMCallLogRepo
+    logs = LLMCallLogRepo.get_recent(limit=min(limit, 200), offset=offset)
+    return JSONResponse({
+        "logs": [
+            {
+                "id": log.id,
+                "session_id": log.session_id,
+                "user_id": log.user_id,
+                "user_message": log.user_message,
+                "llm_provider": log.llm_provider,
+                "llm_model": log.llm_model,
+                "tool_calls": log.get_tool_calls(),
+                "response_text": log.response_text,
+                "latency_total_ms": log.latency_total_ms,
+                "latency_llm_ms": log.latency_llm_ms,
+                "latency_tool_ms": log.latency_tool_ms,
+                "latency_stream_ms": log.latency_stream_ms,
+                "tokens_in": log.tokens_in,
+                "tokens_out": log.tokens_out,
+                "error": log.error,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in logs
+        ],
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@app.get("/api/logs/stats")
+async def get_logs_stats():
+    """Get aggregated LLM call stats."""
+    from funcs.models import LLMCallLogRepo
+    stats = LLMCallLogRepo.get_stats()
+    return JSONResponse(stats)
 
 
 @app.post("/offer")
