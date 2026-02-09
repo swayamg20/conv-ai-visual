@@ -155,6 +155,12 @@ class AnimationPipeline:
                     "speech_cue": step.get("speech_cue")
                 })
 
+            elif action == "clear":
+                # Clear canvas step
+                timeline_steps.append({
+                    "action": "clear"
+                })
+
             elif action == "pause":
                 # Pause step
                 timeline_steps.append({
@@ -165,6 +171,29 @@ class AnimationPipeline:
             elif action == "morph":
                 # Morph step (future enhancement)
                 logger.warning("Morph action not yet implemented")
+
+            elif action in ("rect", "circle", "ellipse", "line", "arrow", "path"):
+                # Shape primitives — pass through directly to frontend
+                shape_step = {
+                    "action": action,
+                    "x": step.get("x"),
+                    "y": step.get("y"),
+                    "width": step.get("width"),
+                    "height": step.get("height"),
+                    "color": step.get("color"),
+                    "fill": step.get("fill"),
+                    "stroke_width": step.get("stroke_width"),
+                    "points": step.get("points"),
+                    "text": step.get("text"),
+                    "label": step.get("label"),
+                    "target_id": step.get("target_id"),
+                    "speech_cue": step.get("speech_cue"),
+                }
+                # Remove None values to keep payload clean
+                timeline_steps.append({k: v for k, v in shape_step.items() if v is not None})
+
+            else:
+                logger.warning(f"Unknown teaching sequence action: {action}")
 
         self.timelines[timeline_id] = timeline_steps
 
@@ -526,8 +555,8 @@ Each step animates as you explain, creating synchronized teaching.
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["draw", "animate", "latex", "text", "highlight", "morph", "pause"],
-                                "description": "Step action type. Use 'text' for labels/annotations, 'latex' for math equations, 'draw' for shapes."
+                                "enum": ["clear", "draw", "animate", "latex", "text", "highlight", "morph", "pause", "rect", "circle", "ellipse", "line", "arrow", "path"],
+                                "description": "Step type. 'clear' wipes canvas. Shape primitives: 'rect', 'circle', 'ellipse', 'line', 'arrow', 'path' draw shapes directly. 'text' for labels. 'latex' for math equations. 'animate'/'highlight' for animating existing elements."
                             },
                             "text": {
                                 "type": "string",
@@ -535,11 +564,15 @@ Each step animates as you explain, creating synchronized teaching.
                             },
                             "element": {
                                 "type": "object",
-                                "description": "Canvas element to draw (for 'draw' action)"
+                                "description": "Canvas element to draw (for 'draw' action — alternative to using shape primitives directly)"
                             },
                             "target_id": {
                                 "type": "string",
                                 "description": "Element ID (for 'animate' or 'highlight')"
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Label/ID for a drawn shape (for referencing in later animate/highlight steps)"
                             },
                             "properties": {
                                 "type": "object",
@@ -549,10 +582,19 @@ Each step animates as you explain, creating synchronized teaching.
                                 "type": "string",
                                 "description": "LaTeX expression (for 'latex' action)"
                             },
-                            "x": {"type": "number"},
-                            "y": {"type": "number"},
+                            "x": {"type": "number", "description": "X position"},
+                            "y": {"type": "number", "description": "Y position"},
+                            "width": {"type": "number", "description": "Width (for rect, circle, ellipse)"},
+                            "height": {"type": "number", "description": "Height (for rect, ellipse)"},
                             "font_size": {"type": "number"},
-                            "color": {"type": "string"},
+                            "color": {"type": "string", "description": "Stroke color (e.g. '#3b82f6')"},
+                            "fill": {"type": "string", "description": "Fill color (empty string for no fill)"},
+                            "stroke_width": {"type": "number"},
+                            "points": {
+                                "type": "array",
+                                "items": {"type": "array", "items": {"type": "number"}},
+                                "description": "Array of [x,y] points (for line, arrow, path)"
+                            },
                             "duration": {
                                 "type": "number",
                                 "default": 0.5,

@@ -12,6 +12,8 @@ import {
   ArrowLeft,
   RefreshCw,
   Wrench,
+  Copy,
+  Check,
 } from "lucide-react";
 import Link from "next/link";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
@@ -131,6 +133,13 @@ export default function Dashboard() {
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+  const [copiedId, setCopiedId] = useState<number | null>(null);
+
+  const copyToolCalls = useCallback((logId: number, toolCalls: any[]) => {
+    navigator.clipboard.writeText(JSON.stringify(toolCalls, null, 2));
+    setCopiedId(logId);
+    setTimeout(() => setCopiedId(null), 2000);
+  }, []);
 
   const fetchData = useCallback(async () => {
     try {
@@ -426,9 +435,31 @@ export default function Dashboard() {
                       <div className="space-y-3">
                         {log.tool_calls.length > 0 && (
                           <div>
-                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
-                              Tool Calls ({log.tool_calls.length})
-                            </p>
+                            <div className="flex items-center justify-between mb-1">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                                Tool Calls ({log.tool_calls.length})
+                              </p>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  copyToolCalls(log.id, log.tool_calls);
+                                }}
+                                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] hover:bg-white/10 transition-colors text-muted-foreground hover:text-foreground"
+                                title="Copy tool calls JSON"
+                              >
+                                {copiedId === log.id ? (
+                                  <>
+                                    <Check className="h-3 w-3 text-emerald-400" />
+                                    <span className="text-emerald-400">Copied</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3 w-3" />
+                                    <span>Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
                             <pre className="text-xs font-mono bg-black/30 p-3 rounded overflow-auto max-h-48 text-muted-foreground">
                               {JSON.stringify(log.tool_calls, null, 2)}
                             </pre>

@@ -14,9 +14,8 @@ gsap.config({
   nullTargetWarn: false // Don't warn about null targets
 });
 
-// Custom easing function for teaching animations (smooth, friendly)
-// Using power2.inOut for a smooth, natural feel
-gsap.registerEase("teaching", "power2.inOut");
+// Custom easing alias for teaching animations
+// We use "power2.inOut" directly via EASING.teaching constant below
 
 /**
  * Animation presets for common teaching animations
@@ -25,7 +24,7 @@ export const ANIMATION_PRESETS = {
   // Fade in elements smoothly
   fadeIn: {
     from: { opacity: 0 },
-    to: { opacity: 1, duration: 0.4, ease: "teaching" }
+    to: { opacity: 1, duration: 0.4, ease: "power2.inOut" }
   },
 
   // Slide up with fade for entering elements

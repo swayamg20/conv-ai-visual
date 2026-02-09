@@ -40,6 +40,7 @@ export interface CanvasOperation {
 
 interface UseWebRTCOptions {
   apiUrl?: string;
+  canvasMode?: boolean;
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
@@ -58,6 +59,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onAnimation,
+    onLatex,
+    onTeachingSequence,
     onError,
     onLog,
     onStateChange,
@@ -413,6 +417,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onAnimation,
+    onLatex,
+    onTeachingSequence,
     onError,
     playChunkStreaming,
     stopAudio,

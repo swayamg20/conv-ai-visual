@@ -52,7 +52,7 @@ export interface LatexOperation {
  * Teaching sequence step
  */
 export interface TeachingStep {
-  action: "draw" | "animate" | "latex" | "highlight" | "morph" | "pause" | "text";
+  action: string; // "clear"|"draw"|"animate"|"latex"|"highlight"|"morph"|"pause"|"text" + shape primitives (rect, circle, ellipse, line, arrow, path)
   element?: CanvasOperation;
   target_id?: string;
   properties?: Record<string, any>;
@@ -62,9 +62,15 @@ export interface TeachingStep {
   text?: string;
   x?: number;
   y?: number;
+  width?: number;
+  height?: number;
   font_size?: number;
   color?: string;
+  fill?: string;
+  stroke_width?: number;
+  points?: [number, number][];
   font_family?: string;
+  label?: string;
 }
 
 /**
@@ -95,6 +101,7 @@ export interface SVGCanvasHandle {
   renderLatex(latex: LatexOperation): void;
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   clear(): void;
+  saveAsImage(): void;
 }
 
 interface SVGCanvasProps {
@@ -587,6 +594,15 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
         for (const step of sequence.steps) {
           switch (step.action) {
+            case "clear":
+              tl.add(() => {
+                elementsRef.current.clear();
+                if (svgRef.current) {
+                  svgRef.current.innerHTML = "";
+                }
+              });
+              break;
+
             case "draw":
               if (step.element) {
                 tl.add(() => render([step.element!]), "+=0.2");
@@ -666,6 +682,27 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             case "pause":
               tl.to({}, { duration: step.duration ?? 0.5 });
               break;
+
+            default: {
+              // Treat as a canvas drawing primitive (rect, circle, ellipse, line, arrow, path)
+              const shapeOp: CanvasOperation = {
+                action: step.action,
+                id: step.target_id || step.label || `${step.action}_${generateId()}`,
+                x: step.x,
+                y: step.y,
+                width: step.width,
+                height: step.height,
+                color: step.color,
+                fill: step.fill,
+                stroke_width: step.stroke_width,
+                points: step.points,
+                text: step.text,
+                font_size: step.font_size,
+                font_family: step.font_family,
+              };
+              tl.add(() => render([shapeOp]), "+=0.2");
+              break;
+            }
           }
         }
 
@@ -700,6 +737,79 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       setForceUpdate((n) => n + 1);
     }, []);
 
+    /**
+     * Save canvas as PNG image
+     */
+    const saveAsImage = useCallback(() => {
+      const svg = svgRef.current;
+      if (!svg) return;
+
+      // Clone SVG so we can modify it for export
+      const clone = svg.cloneNode(true) as SVGSVGElement;
+      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+      clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
+
+      // Inline KaTeX styles for foreignObject rendering
+      const katexStyles = document.querySelector('style[data-katex]')
+        || Array.from(document.styleSheets).find(s => s.href?.includes('katex'));
+
+      // Add a white background rect as first child
+      const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      bgRect.setAttribute("width", String(width));
+      bgRect.setAttribute("height", String(height));
+      bgRect.setAttribute("fill", "#ffffff");
+      clone.insertBefore(bgRect, clone.firstChild);
+
+      // Collect KaTeX CSS rules for inline embedding
+      let katexCss = "";
+      try {
+        for (const sheet of Array.from(document.styleSheets)) {
+          if (sheet.href?.includes("katex")) {
+            for (const rule of Array.from(sheet.cssRules)) {
+              katexCss += rule.cssText + "\n";
+            }
+          }
+        }
+      } catch { /* CORS may block access — ignore */ }
+
+      if (katexCss) {
+        const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+        styleEl.textContent = katexCss;
+        clone.insertBefore(styleEl, clone.firstChild);
+      }
+
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(clone);
+      const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(svgBlob);
+
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const scale = 2; // Retina quality
+        canvas.width = width * scale;
+        canvas.height = height * scale;
+        const ctx = canvas.getContext("2d")!;
+        ctx.scale(scale, scale);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob((blob) => {
+          if (!blob) return;
+          const pngUrl = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.download = `canvas_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.png`;
+          a.href = pngUrl;
+          a.click();
+          URL.revokeObjectURL(pngUrl);
+        }, "image/png");
+
+        URL.revokeObjectURL(url);
+      };
+      img.src = url;
+    }, [width, height]);
+
     // Expose methods via ref
     useImperativeHandle(
       ref,
@@ -708,13 +818,17 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         animate,
         renderLatex,
         createSequence,
-        clear
+        clear,
+        saveAsImage
       }),
-      [render, animate, renderLatex, createSequence, clear]
+      [render, animate, renderLatex, createSequence, clear, saveAsImage]
     );
 
+    // Track whether canvas has content for showing the save button
+    const hasContent = elementsRef.current.size > 0;
+
     return (
-      <div className={className}>
+      <div className={`relative ${className ?? ""}`}>
         <svg
           ref={svgRef}
           width={width}
@@ -725,6 +839,21 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             background: "#ffffff"
           }}
         />
+        {/* Save as Image button */}
+        <button
+          onClick={saveAsImage}
+          className="absolute top-3 right-3 p-2 rounded-lg bg-black/50 hover:bg-black/70 text-white/70 hover:text-white transition-all opacity-0 hover:opacity-100 focus:opacity-100 group-hover:opacity-100"
+          style={{ opacity: undefined }} // Let CSS handle it
+          title="Save as PNG"
+          onMouseEnter={(e) => (e.currentTarget.style.opacity = "1")}
+          onMouseLeave={(e) => (e.currentTarget.style.opacity = "0.3")}
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+        </button>
       </div>
     );
   }

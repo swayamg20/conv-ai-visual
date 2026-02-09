@@ -404,6 +404,65 @@ class LLMPipeline:
             "error": self._last_call_error,
         }
 
+    def _track_animation_in_canvas_state(self, canvas_state, tool_name: str, args: Dict, result: Dict):
+        """Track elements created by animation tools in canvas state for LLM awareness."""
+        from funcs.canvas import CanvasElement
+
+        if tool_name == "create_teaching_sequence":
+            steps = args.get("steps", [])
+            for step in steps:
+                if step.get("action") == "clear":
+                    canvas_state.elements.clear()
+                    continue
+                action = step.get("action")
+                if action == "draw" and step.get("element"):
+                    elem = step["element"]
+                    elem_id = elem.get("id", f"anim_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action=elem.get("action", "rect"),
+                        x=elem.get("x", 0), y=elem.get("y", 0),
+                        width=elem.get("width", 0), height=elem.get("height", 0),
+                        text=elem.get("text", ""), color=elem.get("color", ""),
+                        label=elem.get("label", "")
+                    )
+                elif action == "latex":
+                    elem_id = step.get("target_id", f"latex_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action="latex",
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        text=step.get("latex", ""), label=elem_id
+                    )
+                elif action == "text":
+                    elem_id = step.get("target_id", f"text_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action="text",
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        text=step.get("text", ""), label=elem_id
+                    )
+                elif action in ("rect", "circle", "ellipse", "line", "arrow", "path"):
+                    # Shape primitives sent directly as step actions
+                    elem_id = step.get("target_id") or step.get("label") or f"{action}_{id(step)}"
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action=action,
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        width=step.get("width", 0), height=step.get("height", 0),
+                        text=step.get("text", ""), color=step.get("color", ""),
+                        label=step.get("label", elem_id)
+                    )
+        elif tool_name == "render_latex":
+            elem_id = args.get("label") or result.get("element", {}).get("id", "latex")
+            canvas_state.elements[elem_id] = CanvasElement(
+                id=elem_id, action="latex",
+                x=args.get("x", 0), y=args.get("y", 0),
+                text=args.get("latex", ""), label=elem_id
+            )
+        elif tool_name == "plot_function":
+            elem_id = f"plot_{args.get('function', 'fn')}"
+            canvas_state.elements[elem_id] = CanvasElement(
+                id=elem_id, action="path",
+                text=f"Graph of {args.get('function', '')}", label=elem_id
+            )
+
     def get_canvas_context(self) -> str:
         """Get current canvas state summary for LLM context."""
         state = get_canvas_state(self.session_id)
@@ -678,6 +737,7 @@ class LLMPipeline:
                         plot_function
                     )
                     from funcs.tools import ToolResult
+                    from funcs.canvas import get_canvas_state
 
                     tool_handlers = {
                         "animate_element": animate_element,
@@ -689,6 +749,10 @@ class LLMPipeline:
                     handler = tool_handlers[tc.name]
                     result = handler(**tc.arguments, session_id=self.session_id)
 
+                    # Track drawn elements in canvas state so LLM knows what's on canvas
+                    canvas_state = get_canvas_state(self.session_id)
+                    self._track_animation_in_canvas_state(canvas_state, tc.name, tc.arguments, result)
+
                     if self.animation_callback and result.get("success"):
                         animation_data = {"tool": tc.name, **result}
                         try:
@@ -696,9 +760,11 @@ class LLMPipeline:
                         except TypeError:
                             self.animation_callback(animation_data)
 
+                    # Give LLM a summary of what's now on canvas
+                    canvas_summary = canvas_state.get_context_summary()
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
-                        content=f"{tc.name} executed successfully",
+                        content=f"{tc.name} executed successfully. {canvas_summary}",
                         success=result.get("success", True)
                     )
                 else:
