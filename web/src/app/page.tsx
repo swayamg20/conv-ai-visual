@@ -179,7 +179,7 @@ export default function Home() {
               transition={{ duration: 0.5 }}
               className={cn(
                 "flex flex-col items-center gap-8 md:gap-12 px-6",
-                canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-2xl mx-auto"
+                canvasMode ? "w-1/4 min-w-[300px] max-w-[380px]" : "w-full max-w-2xl mx-auto"
               )}
             >
               {/* Voice Orb */}
@@ -302,7 +302,7 @@ export default function Home() {
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.3 }}
-                className="w-3/5 flex flex-col items-center justify-center gap-4"
+                className="flex-1 flex flex-col items-center justify-center gap-4"
               >
                 {/* Canvas Toolbar */}
                 <div className="flex items-center gap-2">
@@ -316,12 +316,12 @@ export default function Home() {
                   </button>
                 </div>
 
-                <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
-                  <div className="relative">
+                <GlassmorphicCard variant="elevated" shadow="lg" padding="sm" className="w-full">
+                  <div className="relative w-full" style={{ aspectRatio: "16/9", maxHeight: "80vh" }}>
                     <ManimCanvas
                       ref={canvasRef}
-                      width={800}
-                      height={450}
+                      width={1920}
+                      height={1080}
                       backgroundColor="#1a1a2e"
                       className="w-full h-full"
                     />
@@ -349,7 +349,7 @@ export default function Home() {
           >
             <div className={cn(
               "glass-card rounded-2xl overflow-hidden flex flex-col",
-              canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-3xl h-[calc(100vh-7rem)]"
+              canvasMode ? "w-1/4 min-w-[300px] max-w-[380px] h-[calc(100vh-7rem)]" : "w-full max-w-3xl h-[calc(100vh-7rem)]"
             )}>
               <ChatInterface
                 messages={chatMessages}
@@ -374,12 +374,12 @@ export default function Home() {
                   </button>
                 </div>
 
-                <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
-                  <div className="relative">
+                <GlassmorphicCard variant="elevated" shadow="lg" padding="sm" className="w-full">
+                  <div className="relative w-full" style={{ aspectRatio: "16/9", maxHeight: "80vh" }}>
                     <ManimCanvas
                       ref={canvasRef}
-                      width={800}
-                      height={450}
+                      width={1920}
+                      height={1080}
                       backgroundColor="#1a1a2e"
                       className="w-full h-full"
                     />

@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import re
 import logging
@@ -20,10 +22,25 @@ TOOL_CALL_PATTERN = re.compile(
     r'manim_animate\s*\([^)]*\{[\s\S]*?\}\s*\)|'   # manim_animate({...})
     r'manim_animate\s*\(\s*\[[\s\S]*?\]\s*\)|'     # manim_animate([...])
     r'```[\s\S]*?manim_animate[\s\S]*?```|'        # code blocks with manim_animate
-    r'\{"action":\s*"rect"[\s\S]*?\}|'              # raw JSON canvas operations
-    r'\{"action":\s*"add"[\s\S]*?\}',               # raw JSON manim operations
+    r'\{"action":\s*"(?:rect|add|play|clear|wait|remove|write|create|fade_in|fade_out|transform)"[\s\S]*?\}',  # raw JSON manim/canvas operations
     re.MULTILINE
 )
+
+# Pattern to extract leaked manim instructions from text
+LEAKED_MANIM_PATTERN = re.compile(
+    r'\{"action":\s*"(?:add|play|clear|wait|remove)"[\s\S]*?\}'
+)
+
+def extract_leaked_instructions(text: str) -> list:
+    """Extract any manim instructions that leaked into the text response."""
+    instructions = []
+    for match in LEAKED_MANIM_PATTERN.finditer(text):
+        try:
+            instr = json.loads(match.group())
+            instructions.append(instr)
+        except json.JSONDecodeError:
+            continue
+    return instructions
 
 def clean_tool_syntax(text: str) -> str:
     """Remove any tool call syntax from response text."""
@@ -515,6 +532,23 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
             # No tool calls - we're done
             if not self.client.has_tool_calls(response):
                 result = self.client.get_response_content(response)
+
+                # Rescue any leaked manim instructions
+                if self.canvas_mode and self.canvas_callback:
+                    leaked = extract_leaked_instructions(result)
+                    if leaked:
+                        logger.info(f"Rescued {len(leaked)} leaked manim instructions from text")
+                        try:
+                            manim_result = await asyncio.to_thread(manim_animate, json.dumps(leaked), self.session_id)
+                            if manim_result.get("commands"):
+                                try:
+                                    await self.canvas_callback(manim_result["commands"], "manim")
+                                except TypeError:
+                                    self.canvas_callback(manim_result["commands"], "manim")
+                        except Exception as e:
+                            logger.warning(f"Failed to execute leaked instructions: {e}")
+
+                result = clean_tool_syntax(result)
                 if self.memory:
                     self.memory.process_for_memory(user_message, result, save_semantic=save_to_memory)
                 return result
@@ -552,7 +586,10 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                 elif tc.name == "manim_animate":
                     from funcs.tools import ToolResult
                     instructions_json = tc.arguments.get("instructions_json", "[]")
-                    result = manim_animate(instructions_json, session_id=self.session_id)
+                    logger.info(f"manim_animate called with {len(instructions_json)} chars: {instructions_json[:200]}...")
+                    # Run off event loop to prevent blocking
+                    result = await asyncio.to_thread(manim_animate, instructions_json, self.session_id)
+                    logger.info(f"manim_animate result: success={result.get('success')}, commands={result.get('command_count', 0)}, error={result.get('error', 'none')}")
 
                     if self.canvas_callback and result.get("commands"):
                         try:
@@ -560,11 +597,19 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                         except TypeError:
                             self.canvas_callback(result["commands"], "manim")
 
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=f"Animation created with {result.get('command_count', 0)} commands" if result.get("success") else result.get("error", "Failed"),
-                        success=result.get("success", False)
-                    )
+                    if result.get("success"):
+                        tool_result = ToolResult(
+                            tool_call_id=tc.id,
+                            content=f"Animation rendered successfully ({result.get('command_count', 0)} commands). The student can see it on the canvas now. Respond ONLY with 2-3 sentences of natural language narration. Do NOT output any JSON, code, or animation instructions in your text response.",
+                            success=True
+                        )
+                        tools_schema = None
+                    else:
+                        tool_result = ToolResult(
+                            tool_call_id=tc.id,
+                            content=f"Animation failed: {result.get('error', 'Unknown error')}. Try again with simpler instructions and valid hex colors. Use 'text' type instead of 'tex' for labels.",
+                            success=False
+                        )
                 else:
                     # Execute via executor (fetches from DB, runs in sandbox)
                     tool_result = await self.tool_executor.execute_tool_call(tc)
@@ -654,7 +699,10 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                 elif tc.name == "manim_animate":
                     from funcs.tools import ToolResult
                     instructions_json = tc.arguments.get("instructions_json", "[]")
-                    result = manim_animate(instructions_json, session_id=self.session_id)
+                    logger.info(f"manim_animate called with {len(instructions_json)} chars: {instructions_json[:200]}...")
+                    # Run off event loop to prevent blocking
+                    result = await asyncio.to_thread(manim_animate, instructions_json, self.session_id)
+                    logger.info(f"manim_animate result: success={result.get('success')}, commands={result.get('command_count', 0)}, error={result.get('error', 'none')}")
 
                     if self.canvas_callback and result.get("commands"):
                         try:
@@ -662,11 +710,19 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
                         except TypeError:
                             self.canvas_callback(result["commands"], "manim")
 
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=f"Animation created with {result.get('command_count', 0)} commands" if result.get("success") else result.get("error", "Failed"),
-                        success=result.get("success", False)
-                    )
+                    if result.get("success"):
+                        tool_result = ToolResult(
+                            tool_call_id=tc.id,
+                            content=f"Animation rendered successfully ({result.get('command_count', 0)} commands). The student can see it on the canvas now. Respond ONLY with 2-3 sentences of natural language narration. Do NOT output any JSON, code, or animation instructions in your text response.",
+                            success=True
+                        )
+                        tools_schema = None
+                    else:
+                        tool_result = ToolResult(
+                            tool_call_id=tc.id,
+                            content=f"Animation failed: {result.get('error', 'Unknown error')}. Try again with simpler instructions and valid hex colors. Use 'text' type instead of 'tex' for labels.",
+                            success=False
+                        )
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)
 
@@ -683,10 +739,25 @@ ONLY use [{"action":"clear"}] when user explicitly asks to "clear", "reset", or 
             max_tokens=max_tokens
         ):
             full_response += chunk
-        
+
+        # Rescue any leaked manim instructions from the text response
+        if self.canvas_mode and self.canvas_callback:
+            leaked = extract_leaked_instructions(full_response)
+            if leaked:
+                logger.info(f"Rescued {len(leaked)} leaked manim instructions from text")
+                try:
+                    result = await asyncio.to_thread(manim_animate, json.dumps(leaked), self.session_id)
+                    if result.get("commands"):
+                        try:
+                            await self.canvas_callback(result["commands"], "manim")
+                        except TypeError:
+                            self.canvas_callback(result["commands"], "manim")
+                except Exception as e:
+                    logger.warning(f"Failed to execute leaked instructions: {e}")
+
         # Clean any tool call syntax from response
         cleaned_response = clean_tool_syntax(full_response)
-        
+
         # Yield the cleaned response (as a single chunk since we had to buffer)
         if cleaned_response:
             yield cleaned_response
