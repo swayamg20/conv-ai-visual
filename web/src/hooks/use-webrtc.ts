@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
+import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
@@ -10,6 +11,14 @@ export type PipelineState = "idle" | "listening" | "processing" | "speaking";
 export interface TranscriptEvent {
   text: string;
   isFinal: boolean;
+}
+
+export interface LatencyMetrics {
+  vadLatency?: number;
+  sttFinalTranscript?: number;
+  llmComplete?: number;
+  ttsComplete?: number;
+  totalPipeline?: number;
 }
 
 export interface CanvasOperation {
@@ -35,6 +44,9 @@ interface UseWebRTCOptions {
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
+  onAnimation?: (data: any) => void;
+  onLatex?: (data: any) => void;
+  onTeachingSequence?: (data: any) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
   onStateChange?: (state: PipelineState) => void;
@@ -47,6 +59,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onAnimation,
+    onLatex,
+    onTeachingSequence,
     onError,
     onLog,
     onStateChange,
@@ -211,6 +226,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
       isFirstTTSChunkRef.current = true;  // Reset
       setStatus("disconnected");
       updatePipelineState("idle");
+      playDisconnectSound();
     });
 
     channel.addEventListener("message", (e) => {
@@ -222,6 +238,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
         }
 
         switch (data.type) {
+          case "ready":
+            log("Ready - you can start speaking");
+            playReadySound();
+            break;
+
           case "transcript":
             onTranscript?.({ text: data.text, isFinal: data.is_final });
 
@@ -262,6 +283,21 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           case "canvas_update":
             log(`Canvas: ${data.operations.length} ops`);
             onCanvasUpdate?.(data.operations);
+            break;
+
+          case "animation":
+            log(`Animation: ${data.tool}`);
+            onAnimation?.(data);
+            break;
+
+          case "latex":
+            log(`LaTeX: ${data.element?.latex?.substring(0, 30)}...`);
+            onLatex?.(data);
+            break;
+
+          case "teaching_sequence":
+            log(`Teaching sequence: ${data.timeline?.steps?.length} steps`);
+            onTeachingSequence?.(data);
             break;
 
           case "llm_response":
@@ -328,6 +364,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
           case "error":
             log(`Error: ${data.message}`);
+            playErrorSound();
             onError?.(data.message);
             updatePipelineState("listening");
             break;
@@ -380,6 +417,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
+    onAnimation,
+    onLatex,
+    onTeachingSequence,
     onError,
     playChunkStreaming,
     stopAudio,
@@ -407,6 +447,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
 
     setStatus("disconnected");
     updatePipelineState("idle");
+    playDisconnectSound();
     log("Disconnected");
   }, [log, updatePipelineState]);
 

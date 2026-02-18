@@ -82,6 +82,31 @@ class DecisionMemoryModel(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class LLMCallLogModel(SQLModel, table=True):
+    """End-to-end logging for LLM API calls."""
+    __tablename__ = "llm_call_log"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: str = Field(index=True)
+    user_id: Optional[str] = Field(default=None, index=True)
+    user_message: str
+    llm_provider: str
+    llm_model: str
+    tool_calls_json: Optional[str] = None
+    response_text: Optional[str] = None
+    latency_total_ms: Optional[float] = None
+    latency_llm_ms: Optional[float] = None
+    latency_tool_ms: Optional[float] = None
+    latency_stream_ms: Optional[float] = None
+    tokens_in: Optional[int] = None
+    tokens_out: Optional[int] = None
+    error: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def get_tool_calls(self) -> list:
+        return json.loads(self.tool_calls_json) if self.tool_calls_json else []
+
+
 class ToolModel(SQLModel, table=True):
     """Tool definitions for function calling."""
     __tablename__ = "tools"
@@ -349,6 +374,90 @@ class ToolRepo:
         """Get all enabled tools in Anthropic format."""
         tools = ToolRepo.list_all(enabled_only=True)
         return [t.to_anthropic_schema() for t in tools]
+
+
+class LLMCallLogRepo:
+    """Repository for LLM call log operations."""
+
+    @staticmethod
+    def save(
+        session_id: str,
+        user_message: str,
+        llm_provider: str,
+        llm_model: str,
+        user_id: Optional[str] = None,
+        tool_calls_json: Optional[str] = None,
+        response_text: Optional[str] = None,
+        latency_total_ms: Optional[float] = None,
+        latency_llm_ms: Optional[float] = None,
+        latency_tool_ms: Optional[float] = None,
+        latency_stream_ms: Optional[float] = None,
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
+        error: Optional[str] = None
+    ) -> LLMCallLogModel:
+        with get_session() as session:
+            record = LLMCallLogModel(
+                session_id=session_id,
+                user_id=user_id,
+                user_message=user_message,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                tool_calls_json=tool_calls_json,
+                response_text=response_text,
+                latency_total_ms=latency_total_ms,
+                latency_llm_ms=latency_llm_ms,
+                latency_tool_ms=latency_tool_ms,
+                latency_stream_ms=latency_stream_ms,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                error=error
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    @staticmethod
+    def get_recent(limit: int = 50, offset: int = 0) -> List[LLMCallLogModel]:
+        with get_session() as session:
+            stmt = (
+                select(LLMCallLogModel)
+                .order_by(LLMCallLogModel.created_at.desc())
+                .offset(offset)
+                .limit(limit)
+            )
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def get_stats() -> Dict:
+        """Get aggregated stats."""
+        with get_session() as db:
+            from sqlalchemy import func
+            total = db.exec(
+                select(func.count(LLMCallLogModel.id))
+            ).one()
+            avg_total = db.exec(
+                select(func.avg(LLMCallLogModel.latency_total_ms))
+            ).one()
+            avg_llm = db.exec(
+                select(func.avg(LLMCallLogModel.latency_llm_ms))
+            ).one()
+            avg_tool = db.exec(
+                select(func.avg(LLMCallLogModel.latency_tool_ms))
+            ).one()
+            error_count = db.exec(
+                select(func.count(LLMCallLogModel.id)).where(LLMCallLogModel.error.isnot(None))
+            ).one()
+
+            return {
+                "total_calls": total or 0,
+                "avg_latency_ms": round(avg_total or 0, 2),
+                "avg_llm_latency_ms": round(avg_llm or 0, 2),
+                "avg_tool_latency_ms": round(avg_tool or 0, 2),
+                "error_count": error_count or 0,
+                "error_rate": round((error_count or 0) / total * 100, 2) if total else 0
+            }
 
 
 # Initialize DB on import

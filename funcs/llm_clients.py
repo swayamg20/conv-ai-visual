@@ -359,21 +359,28 @@ class GeminiClient(LLMClient):
         history = []
 
         for msg in messages:
-            role = msg["role"]
-            content = msg["content"]
+            role = msg.get("role", "")
+            content = msg.get("content")
 
             if role == "system":
-                system_prompt = content
+                system_prompt = content or ""
             elif role == "user":
-                history.append({"role": "user", "parts": [content]})
+                history.append({"role": "user", "parts": [content or ""]})
             elif role == "assistant":
-                history.append({"role": "model", "parts": [content]})
+                # Tool call responses have content=None — reconstruct as text summary
+                if content is None and "tool_calls" in msg:
+                    tool_names = [tc.get("function", {}).get("name", "tool") for tc in msg.get("tool_calls", [])]
+                    summary = f"[Called tools: {', '.join(tool_names)}]"
+                    history.append({"role": "model", "parts": [summary]})
+                elif content:
+                    history.append({"role": "model", "parts": [content]})
+                # Skip if content is None and no tool_calls (empty message)
             elif role == "tool":
                 # Gemini handles tool results differently
-                # For now, append as user message with tool result context
+                # Append as user message with tool result context
                 history.append({
                     "role": "user",
-                    "parts": [f"Tool result: {content}"]
+                    "parts": [f"Tool result: {content or ''}"]
                 })
 
         return system_prompt, history
@@ -503,7 +510,17 @@ class GeminiClient(LLMClient):
                 chat = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
 
             last_message = history[-1]["parts"][0] if history else ""
-            response = await chat.send_message_async(last_message, generation_config=generation_config)
+            try:
+                response = await chat.send_message_async(last_message, generation_config=generation_config)
+            except Exception as send_err:
+                # Handle MALFORMED_FUNCTION_CALL — Gemini generated bad tool call JSON
+                # Retry without tools so it returns a plain text response
+                if "MALFORMED_FUNCTION_CALL" in str(send_err):
+                    logger.warning("Gemini MALFORMED_FUNCTION_CALL — retrying without tools")
+                    chat_no_tools = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
+                    response = await chat_no_tools.send_message_async(last_message, generation_config=generation_config)
+                else:
+                    raise
 
             return response
         except Exception as e:
@@ -686,18 +703,34 @@ class GeminiClient(LLMClient):
             return ""
 
     def _convert_protobuf_to_dict(self, protobuf_struct) -> Dict:
-        """Convert protobuf Struct to regular Python dict."""
-        from google.protobuf.json_format import MessageToDict
+        """Convert protobuf Struct to regular Python dict with native types."""
+        def _to_native(val):
+            """Recursively convert protobuf/proto-plus values to native Python."""
+            if isinstance(val, dict):
+                return {k: _to_native(v) for k, v in val.items()}
+            if isinstance(val, (list, tuple)):
+                return [_to_native(v) for v in val]
+            # Handle proto-plus RepeatedComposite / MapComposite
+            type_name = type(val).__name__
+            if 'RepeatedComposite' in type_name or 'Repeated' in type_name:
+                return [_to_native(v) for v in val]
+            if 'MapComposite' in type_name:
+                return {k: _to_native(v) for k, v in val.items()}
+            if hasattr(val, 'items'):
+                return {k: _to_native(v) for k, v in val.items()}
+            if hasattr(val, '__iter__') and not isinstance(val, (str, bytes)):
+                return [_to_native(v) for v in val]
+            return val
 
         try:
-            # Convert protobuf Struct to dict
-            return MessageToDict(protobuf_struct, preserving_proto_field_name=True)
+            from google.protobuf.json_format import MessageToDict
+            result = MessageToDict(protobuf_struct, preserving_proto_field_name=True)
+            return _to_native(result)
         except Exception:
-            # Fallback: try to access the fields directly
             try:
                 result = {}
                 for key, value in protobuf_struct.items():
-                    result[key] = value
+                    result[key] = _to_native(value)
                 return result
             except Exception:
                 return {}

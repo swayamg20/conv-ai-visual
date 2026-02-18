@@ -1,6 +1,11 @@
 """
 Real-time canvas state management for AI-driven drawing.
 Tracks canvas elements with positions for AI context awareness.
+
+Frontend Integration:
+- Uses Excalidraw for rendering (hand-drawn sketch aesthetic)
+- Canvas operations are converted to Excalidraw elements on the client
+- Supports rect, circle, ellipse, line, arrow, text, path operations
 """
 import json
 import logging
@@ -25,6 +30,11 @@ class CanvasAction(str, Enum):
     DELETE = "delete"
     UPDATE = "update"
     HIGHLIGHT = "highlight"
+    # Animation actions
+    ANIMATE = "animate"  # Animate existing element
+    LATEX = "latex"  # Render LaTeX equation
+    MORPH = "morph"  # Shape morphing
+    GRAPH = "graph"  # Plot function graph
 
 
 @dataclass
@@ -44,6 +54,10 @@ class CanvasElement:
     font_family: str = "Arial"
     points: List[List[float]] = field(default_factory=list)  # for line/arrow/path
     label: str = ""  # semantic label for AI reference
+    # Animation state fields
+    initial_state: Dict[str, Any] = field(default_factory=dict)  # For animation resets
+    animation_state: str = "idle"  # idle, animating, paused
+    timeline_id: Optional[str] = None  # Associated timeline
     
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -54,12 +68,17 @@ class CanvasElement:
             if self.points:
                 try:
                     # Handle different point formats: [[x,y], ...] or [(x,y), ...]
-                    # Filter out invalid points (e.g., integers)
+                    # Filter out invalid points (e.g., integers, dicts)
                     valid_points = []
                     for p in self.points:
-                        # Check if point is subscriptable (list/tuple) and has at least 2 elements
-                        if hasattr(p, '__getitem__') and len(p) >= 2:
-                            valid_points.append(p)
+                        # Only accept lists or tuples with at least 2 numeric elements
+                        if isinstance(p, (list, tuple)) and len(p) >= 2:
+                            try:
+                                # Verify we can extract x, y as numbers
+                                x, y = float(p[0]), float(p[1])
+                                valid_points.append((x, y))
+                            except (ValueError, TypeError, IndexError):
+                                continue
 
                     if valid_points:
                         xs = [p[0] for p in valid_points]
@@ -70,7 +89,7 @@ class CanvasElement:
                             "max_x": max(xs),
                             "max_y": max(ys)
                         }
-                except (TypeError, IndexError, ValueError) as e:
+                except (TypeError, IndexError, ValueError, KeyError) as e:
                     # If points are malformed, fall back to x,y,width,height
                     pass
 
@@ -297,15 +316,20 @@ CANVAS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "canvas_update",
-        "description": """Draw on the shared canvas to illustrate concepts visually while explaining.
+        "description": """Draw on the shared Excalidraw canvas to illustrate concepts visually while explaining.
 Use this to create diagrams, flowcharts, highlight relationships, or sketch ideas.
-The canvas is visible to the user in real-time.
+The canvas renders with a hand-drawn aesthetic and is visible to the user in real-time.
 
-IMPORTANT: Send all related drawings in a single call to minimize latency.
-Use semantic labels to reference elements later.
+IMPORTANT:
+- Send all related drawings in a single call to minimize latency
+- Use semantic labels (via 'label' field) to reference elements later
+- To MODIFY existing elements, use "update" action with the element's ID or label
+- Only draw NEW elements - don't redraw existing ones unless updating them
+- Check [Current Canvas State] in your context to see what's already drawn
 
 Coordinate system: (0,0) is top-left. Canvas is 800x600 by default.
 Colors: Use hex codes like "#3b82f6" (blue), "#ef4444" (red), "#10b981" (green), "#f59e0b" (orange).
+Rendered style: Hand-drawn sketch look via Excalidraw.
 """,
         "parameters": {
             "type": "object",
@@ -356,4 +380,26 @@ CANVAS_TOOL_DEFINITION = {
     "handler_module": "funcs.canvas",
     "handler_function": "canvas_update"
 }
+
+
+# ============= Animation Tool Schemas =============
+# Import animation tool schemas from animation_pipeline
+try:
+    from funcs.animation_pipeline import (
+        ANIMATE_ELEMENT_SCHEMA,
+        RENDER_LATEX_SCHEMA,
+        CREATE_TEACHING_SEQUENCE_SCHEMA,
+        PLOT_FUNCTION_SCHEMA
+    )
+
+    # Export for use by LLM pipeline
+    ANIMATION_TOOLS = [
+        ANIMATE_ELEMENT_SCHEMA,
+        RENDER_LATEX_SCHEMA,
+        CREATE_TEACHING_SEQUENCE_SCHEMA,
+        PLOT_FUNCTION_SCHEMA
+    ]
+except ImportError:
+    logger.warning("Animation tools not available - animation_pipeline module not found")
+    ANIMATION_TOOLS = []
 

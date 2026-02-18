@@ -55,6 +55,11 @@ from .interruption import (
     InterruptionManager,
     interruption_manager,
 )
+from .smart_turn import (
+    SmartTurnAnalyzer,
+    SmartTurnSession,
+    TurnAudioBuffer,
+)
 
 __all__ = [
     "LLMPipeline",
@@ -106,5 +111,9 @@ __all__ = [
     "InterruptionState",
     "InterruptionManager",
     "interruption_manager",
+    # Smart Turn
+    "SmartTurnAnalyzer",
+    "SmartTurnSession",
+    "TurnAudioBuffer",
 ]
 

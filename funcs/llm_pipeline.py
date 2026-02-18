@@ -101,6 +101,13 @@ class LLMPipeline:
         # Canvas support
         self.session_id = session_id or "default"
         self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
+        self.animation_callback: Optional[Callable[[Dict], Any]] = None
+
+        # Call metrics (populated after each chat_with_tools_stream call)
+        self._last_call_timing: Optional[Dict] = None
+        self._last_call_tool_calls: List[Dict] = []
+        self._last_call_response: Optional[str] = None
+        self._last_call_error: Optional[str] = None
 
         logger.info(f"LLM pipeline initialized: provider={self.provider}, model={self.model or 'default'}, memory={enable_memory}, canvas_mode={canvas_mode}")
     
@@ -110,24 +117,8 @@ class LLMPipeline:
         if self.canvas_mode:
             if self._canvas_system_prompt:
                 return self._canvas_system_prompt
-            # Default canvas prompt
-            return """You are an interactive visual tutor. You ALWAYS use the canvas to illustrate your explanations.
-
-CANVAS RULES:
-- Draw diagrams, flowcharts, and visual aids for EVERY explanation
-- Use clear colors: blue (#3b82f6) for main concepts, green (#10b981) for good/correct, red (#ef4444) for warnings/errors, orange (#f59e0b) for highlights
-- Label important elements for reference
-- Build diagrams incrementally as you explain
-- Use arrows to show relationships and flow
-- Position elements logically: left-to-right for sequences, top-to-bottom for hierarchies
-
-TEACHING STYLE:
-- Start with a visual overview, then explain while pointing to elements
-- Use the canvas as a whiteboard - sketch, annotate, highlight
-- Keep verbal explanations brief; let the visuals do the heavy lifting
-- Reference drawn elements: "As you can see in the diagram..."
-
-The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update for every response."""
+            # Default to math tutor prompt from config
+            return config.LLM_MATH_TUTOR_PROMPT
         return self.base_system_prompt
     
     def set_canvas_mode(self, enabled: bool, custom_prompt: Optional[str] = None):
@@ -386,12 +377,92 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         """
         Set callback for canvas events.
         Called whenever canvas_update tool is executed.
-        
+
         Args:
             callback: Function that receives list of canvas operations
         """
         self.canvas_callback = callback
-    
+
+    def set_animation_callback(self, callback: Callable[[Dict], Any]):
+        """
+        Set callback for animation events.
+        Called whenever animation tools (animate_element, render_latex, etc.) are executed.
+
+        Args:
+            callback: Function that receives animation data dict
+        """
+        self.animation_callback = callback
+
+    def get_last_call_metrics(self) -> Optional[Dict]:
+        """Get timing and tool call data from the most recent chat_with_tools_stream call."""
+        if not self._last_call_timing:
+            return None
+        return {
+            **self._last_call_timing,
+            "tool_calls": self._last_call_tool_calls,
+            "response_text": self._last_call_response,
+            "error": self._last_call_error,
+        }
+
+    def _track_animation_in_canvas_state(self, canvas_state, tool_name: str, args: Dict, result: Dict):
+        """Track elements created by animation tools in canvas state for LLM awareness."""
+        from funcs.canvas import CanvasElement
+
+        if tool_name == "create_teaching_sequence":
+            steps = args.get("steps", [])
+            for step in steps:
+                if step.get("action") == "clear":
+                    canvas_state.elements.clear()
+                    continue
+                action = step.get("action")
+                if action == "draw" and step.get("element"):
+                    elem = step["element"]
+                    elem_id = elem.get("id", f"anim_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action=elem.get("action", "rect"),
+                        x=elem.get("x", 0), y=elem.get("y", 0),
+                        width=elem.get("width", 0), height=elem.get("height", 0),
+                        text=elem.get("text", ""), color=elem.get("color", ""),
+                        label=elem.get("label", "")
+                    )
+                elif action == "latex":
+                    elem_id = step.get("target_id", f"latex_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action="latex",
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        text=step.get("latex", ""), label=elem_id
+                    )
+                elif action == "text":
+                    elem_id = step.get("target_id", f"text_{id(step)}")
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action="text",
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        text=step.get("text", ""), label=elem_id
+                    )
+                elif action in ("rect", "circle", "ellipse", "line", "arrow", "path"):
+                    # Shape primitives sent directly as step actions
+                    elem_id = step.get("target_id") or step.get("label") or f"{action}_{id(step)}"
+                    canvas_state.elements[elem_id] = CanvasElement(
+                        id=elem_id, action=action,
+                        x=step.get("x", 0), y=step.get("y", 0),
+                        width=step.get("width", 0), height=step.get("height", 0),
+                        text=step.get("text", ""), color=step.get("color", ""),
+                        label=step.get("label", elem_id)
+                    )
+        elif tool_name == "render_latex":
+            elem_id = args.get("label") or result.get("element", {}).get("id", "latex")
+            canvas_state.elements[elem_id] = CanvasElement(
+                id=elem_id, action="latex",
+                x=args.get("x", 0), y=args.get("y", 0),
+                text=args.get("latex", ""), label=elem_id
+            )
+        elif tool_name == "plot_function":
+            elem_id = f"plot_{args.get('function', 'fn')}"
+            canvas_state.elements[elem_id] = CanvasElement(
+                id=elem_id, action="path",
+                text=f"Graph of {args.get('function', '')}", label=elem_id
+            )
+
     def get_canvas_context(self) -> str:
         """Get current canvas state summary for LLM context."""
         state = get_canvas_state(self.session_id)
@@ -414,13 +485,27 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         
         # Include canvas tool based on mode or explicit parameter
         should_include_canvas = include_canvas if include_canvas is not None else self.canvas_mode
-        
+
         if should_include_canvas:
             # Check if already in tools
             has_canvas = any(t.get("function", {}).get("name") == "canvas_update" for t in tools)
             if not has_canvas:
                 tools.append(CANVAS_TOOL_SCHEMA)
-        
+
+            # Include animation tools when canvas mode is enabled
+            try:
+                from funcs.canvas import ANIMATION_TOOLS
+
+                # Add animation tools if not already present
+                existing_tool_names = {t.get("function", {}).get("name") for t in tools}
+                for anim_tool in ANIMATION_TOOLS:
+                    tool_name = anim_tool.get("function", {}).get("name")
+                    if tool_name and tool_name not in existing_tool_names:
+                        tools.append(anim_tool)
+                        logger.debug(f"Added animation tool: {tool_name}")
+            except ImportError:
+                logger.warning("Animation tools not available")
+
         return tools
     
     async def chat_with_tools(
@@ -492,7 +577,7 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                     from funcs.tools import ToolResult
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations, session_id=self.session_id)
-                    
+
                     # Broadcast to client via callback
                     if self.canvas_callback and result.get("operations"):
                         try:
@@ -500,11 +585,49 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
                         except TypeError:
                             # Sync callback
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
+                    )
+                # Special handling for animation tools
+                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
+                    from funcs.animation_pipeline import (
+                        animate_element,
+                        render_latex,
+                        create_teaching_sequence,
+                        plot_function
+                    )
+                    from funcs.tools import ToolResult
+
+                    # Execute animation tool with session_id
+                    tool_handlers = {
+                        "animate_element": animate_element,
+                        "render_latex": render_latex,
+                        "create_teaching_sequence": create_teaching_sequence,
+                        "plot_function": plot_function
+                    }
+
+                    handler = tool_handlers[tc.name]
+                    result = handler(**tc.arguments, session_id=self.session_id)
+
+                    # Broadcast to client via animation callback
+                    if self.animation_callback and result.get("success"):
+                        animation_data = {
+                            "tool": tc.name,
+                            **result
+                        }
+                        try:
+                            await self.animation_callback(animation_data)
+                        except TypeError:
+                            # Sync callback
+                            self.animation_callback(animation_data)
+
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"{tc.name} executed successfully",
+                        success=result.get("success", True)
                     )
                 else:
                     # Execute via executor (fetches from DB, runs in sandbox)
@@ -536,58 +659,123 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
     ) -> AsyncGenerator[str, None]:
         """
         Streaming chat with tools.
-        
+
         Note: Tool calls are executed non-streaming, only final response streams.
-        
+
         Yields:
             Text chunks of final response
         """
+        import time as _time
+
+        t_start = _time.perf_counter()
+        t_llm_total = 0.0
+        t_tool_total = 0.0
+        all_tool_calls: List[Dict] = []
+        tokens_in = None
+        tokens_out = None
+        error_msg = None
+
         context = self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
-        
+
         tools_schema = self.get_tools_schema() or None
-        
+        tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
+        logger.info(f"chat_with_tools_stream: {len(tool_names)} tools passed to LLM: {tool_names}")
+
         # Execute tool calls (non-streaming) until we get a text response
         for _ in range(max_tool_rounds):
+            t_llm_start = _time.perf_counter()
             response = await self.client.complete_with_tools(
                 messages=context,
                 tools=tools_schema,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
+            t_llm_total += _time.perf_counter() - t_llm_start
+
+            # Extract token usage if available
+            if hasattr(response, 'usage') and response.usage:
+                tokens_in = getattr(response.usage, 'prompt_tokens', None)
+                tokens_out = getattr(response.usage, 'completion_tokens', None)
 
             if not self.client.has_tool_calls(response):
+                logger.info("LLM returned no tool calls — streaming final text response")
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
+            logger.info(f"LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
             context.append(self.client.get_assistant_message(response))
-            
+
             for tc in tool_calls:
+                all_tool_calls.append({"name": tc.name, "arguments": tc.arguments})
+                t_tool_start = _time.perf_counter()
+
                 # Special handling for canvas_update
                 if tc.name == "canvas_update":
                     from funcs.canvas import canvas_update
                     from funcs.tools import ToolResult
                     operations = tc.arguments.get("operations", [])
                     result = canvas_update(operations, session_id=self.session_id)
-                    
+
                     if self.canvas_callback and result.get("operations"):
                         try:
                             await self.canvas_callback(result["operations"])
                         except TypeError:
                             self.canvas_callback(result["operations"])
-                    
+
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
                         content=result.get("canvas_summary", "Canvas updated"),
                         success=True
                     )
+                # Special handling for animation tools
+                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
+                    from funcs.animation_pipeline import (
+                        animate_element,
+                        render_latex,
+                        create_teaching_sequence,
+                        plot_function
+                    )
+                    from funcs.tools import ToolResult
+                    from funcs.canvas import get_canvas_state
+
+                    tool_handlers = {
+                        "animate_element": animate_element,
+                        "render_latex": render_latex,
+                        "create_teaching_sequence": create_teaching_sequence,
+                        "plot_function": plot_function
+                    }
+
+                    handler = tool_handlers[tc.name]
+                    result = handler(**tc.arguments, session_id=self.session_id)
+
+                    # Track drawn elements in canvas state so LLM knows what's on canvas
+                    canvas_state = get_canvas_state(self.session_id)
+                    self._track_animation_in_canvas_state(canvas_state, tc.name, tc.arguments, result)
+
+                    if self.animation_callback and result.get("success"):
+                        animation_data = {"tool": tc.name, **result}
+                        try:
+                            await self.animation_callback(animation_data)
+                        except TypeError:
+                            self.animation_callback(animation_data)
+
+                    # Give LLM a summary of what's now on canvas
+                    canvas_summary = canvas_state.get_context_summary()
+                    tool_result = ToolResult(
+                        tool_call_id=tc.id,
+                        content=f"{tc.name} executed successfully. {canvas_summary}",
+                        success=result.get("success", True)
+                    )
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)
 
+                t_tool_total += _time.perf_counter() - t_tool_start
                 context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
 
         # Now stream the final response
+        t_stream_start = _time.perf_counter()
         full_response = ""
 
         async for chunk in self.client.stream(
@@ -597,6 +785,23 @@ The canvas is 800x600. Coordinate (0,0) is top-left. Always use canvas_update fo
         ):
             full_response += chunk
             yield chunk
-        
+
+        t_stream_end = _time.perf_counter()
+        t_end = _time.perf_counter()
+
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
+
+        # Store metrics for caller to retrieve
+        self._last_call_timing = {
+            "latency_total_ms": round((t_end - t_start) * 1000, 2),
+            "latency_llm_ms": round(t_llm_total * 1000, 2),
+            "latency_tool_ms": round(t_tool_total * 1000, 2),
+            "latency_stream_ms": round((t_stream_end - t_stream_start) * 1000, 2),
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+        }
+        self._last_call_tool_calls = all_tool_calls
+        self._last_call_response = full_response
+        self._last_call_error = error_msg
+        logger.info(f"Call metrics: total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")

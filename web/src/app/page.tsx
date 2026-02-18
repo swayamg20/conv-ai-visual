@@ -2,10 +2,12 @@
 
 import { useState, useRef, useCallback, useMemo } from "react";
 import { motion } from "framer-motion";
-import { Mic, Settings, ChevronUp } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
-import { CanvasRenderer, type CanvasRendererHandle } from "@/components/canvas-renderer";
+import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
+import Link from "next/link";
+// Switch removed - canvas is always enabled
+import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
+import { useChat } from "@/hooks/use-chat";
 import { cn } from "@/lib/utils";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
 import { StatusIndicator } from "@/components/status-indicator";
@@ -13,18 +15,60 @@ import { FloatingButton } from "@/components/ui/floating-button";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
 import { TechnicalDrawer } from "@/components/technical-drawer";
 import { ControlButtons } from "@/components/control-buttons";
+import { ModeToggle, type AppMode } from "@/components/mode-toggle";
+import { ChatInterface } from "@/components/chat-interface";
 
 export default function Home() {
-  const [canvasMode, setCanvasMode] = useState(false);
+  const [appMode, setAppMode] = useState<AppMode>("voice");
+  // Canvas is always enabled for math tutor
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  const canvasRef = useRef<CanvasRendererHandle>(null);
+  const canvasRef = useRef<SVGCanvasHandle>(null);
 
   const handleCanvasUpdate = useCallback((operations: CanvasOperation[]) => {
     canvasRef.current?.render(operations);
   }, []);
+
+  const handleAnimation = useCallback((animation: AnimationOperation) => {
+    canvasRef.current?.animate(animation);
+  }, []);
+
+  const handleLatex = useCallback((latex: LatexOperation) => {
+    canvasRef.current?.renderLatex(latex);
+  }, []);
+
+  const handleTeachingSequence = useCallback((sequence: TeachingSequence) => {
+    canvasRef.current?.createSequence(sequence);
+  }, []);
+
+  // Dispatch animation events from SSE to the correct SVGCanvas method
+  const handleAnimationEvent = useCallback((data: any) => {
+    const tool = data.tool;
+    if (tool === "animate_element" && data.animation_command) {
+      handleAnimation(data.animation_command);
+    } else if (tool === "render_latex" && data.element) {
+      handleLatex(data.element);
+    } else if (tool === "create_teaching_sequence" && data.timeline) {
+      handleTeachingSequence(data.timeline);
+    } else if (tool === "plot_function" && data.graph) {
+      // Plot function data goes to render as canvas operations
+      canvasRef.current?.render([data.graph]);
+    }
+  }, [handleAnimation, handleLatex, handleTeachingSequence]);
+
+  // Chat mode hook
+  const {
+    messages: chatMessages,
+    isLoading: chatLoading,
+    sendMessage: sendChatMessage,
+    clearChat,
+  } = useChat({
+    canvasMode: true,
+    onCanvasUpdate: handleCanvasUpdate,
+    onAnimationEvent: handleAnimationEvent,
+  });
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
     const time = new Date().toLocaleTimeString();
@@ -60,7 +104,6 @@ export default function Home() {
     toggleMicMute,
     toggleTTS,
   } = useWebRTC({
-    canvasMode,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
@@ -118,10 +161,18 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2.5">
-              <span className="text-sm font-medium text-muted-foreground">Canvas</span>
-              <Switch checked={canvasMode} onCheckedChange={setCanvasMode} />
-            </div>
+            <ModeToggle
+              mode={appMode}
+              onChange={setAppMode}
+              disabled={isConnected || isConnecting}
+            />
+            <Link
+              href="/dashboard"
+              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              aria-label="Dashboard"
+            >
+              <BarChart3 className="h-5 w-5 text-muted-foreground" />
+            </Link>
             <button
               className="p-2 rounded-lg hover:bg-white/10 transition-colors"
               aria-label="Settings"
@@ -132,143 +183,166 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* Main Content Area */}
-      <main
-        className={cn(
-          "pt-24 pb-32 min-h-screen flex items-center justify-center",
-          canvasMode && "gap-8 px-8"
-        )}
-      >
-        {/* Voice Interaction Hero Section */}
-        <motion.section
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.5 }}
-          className={cn(
-            "flex flex-col items-center gap-8 md:gap-12 px-6",
-            canvasMode ? "w-2/5 min-w-[400px]" : "w-full max-w-2xl mx-auto"
-          )}
-        >
-          {/* Voice Orb */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.8 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
-          >
-            <VoiceOrb
-              state={voiceState}
-              size={canvasMode ? "md" : "xl"}
-              audioLevel={0.3}
-              onClick={isConnected ? disconnect : handleConnect}
-              disabled={isConnecting}
-            />
-          </motion.div>
-
-          {/* Status Badge */}
-          <motion.div
-            initial={{ opacity: 0, y: 10 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.4 }}
-          >
-            <StatusIndicator
-              status={status === "connected" ? "connected" : status === "connecting" ? "connecting" : status === "error" ? "error" : "idle"}
-              label={statusLabel}
-              pulse={status === "connected"}
-              showDot
-            />
-          </motion.div>
-
-          {/* Control Buttons (when connected) */}
-          {isConnected && (
-            <ControlButtons
-              isMicMuted={isMicMuted}
-              isTTSEnabled={isTTSEnabled}
-              onToggleMic={toggleMicMute}
-              onToggleTTS={toggleTTS}
-              disabled={false}
-            />
-          )}
-
-          {/* Connection Button (if not connected) */}
-          {!isConnected && !isConnecting && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
+      {/* Main Content Area - Always Split Screen */}
+      <main className="pt-24 min-h-screen flex gap-8 px-8 pb-4">
+        {appMode === "voice" ? (
+          <>
+            {/* Voice Interaction Section */}
+            <motion.section
+              initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.6 }}
+              transition={{ duration: 0.5 }}
+              className="w-2/5 min-w-[400px] flex flex-col items-center justify-center gap-8 md:gap-12"
             >
-              <FloatingButton
-                variant="primary"
-                size="lg"
-                onClick={handleConnect}
-                icon={<Mic className="h-5 w-5" />}
+              {/* Voice Orb */}
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
               >
-                Connect to Voice AI
-              </FloatingButton>
-            </motion.div>
-          )}
+                <VoiceOrb
+                  state={voiceState}
+                  size="lg"
+                  audioLevel={0.3}
+                  onClick={isConnected ? disconnect : handleConnect}
+                  disabled={isConnecting}
+                />
+              </motion.div>
 
-          {/* Latest Transcript Preview */}
-          {isConnected && latestTranscript && (
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: 0.8 }}
-              className="w-full max-w-md"
-            >
-              <GlassmorphicCard
-                variant="elevated"
-                padding="lg"
-                className="text-center"
+              {/* Status Badge */}
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.4 }}
               >
-                <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
-                  {latestTranscript.replace(/^\d{2}:\d{2}:\d{2}\s+\[.*?\]\s+/, "")}
-                </p>
-              </GlassmorphicCard>
-            </motion.div>
-          )}
+                <StatusIndicator
+                  status={status === "connected" ? "connected" : status === "connecting" ? "connecting" : status === "error" ? "error" : "idle"}
+                  label={statusLabel}
+                  pulse={status === "connected"}
+                  showDot
+                />
+              </motion.div>
 
-          {/* Prompt Suggestion */}
-          {isConnected && transcripts.length === 0 && (
-            <motion.p
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 1 }}
-              className="text-sm text-muted-foreground text-center"
+              {/* Control Buttons (when connected) */}
+              {isConnected && (
+                <ControlButtons
+                  isMicMuted={isMicMuted}
+                  isTTSEnabled={isTTSEnabled}
+                  onToggleMic={toggleMicMute}
+                  onToggleTTS={toggleTTS}
+                  disabled={false}
+                />
+              )}
+
+              {/* Connection Button (if not connected) */}
+              {!isConnected && !isConnecting && (
+                <motion.div
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ delay: 0.6 }}
+                >
+                  <FloatingButton
+                    variant="primary"
+                    size="lg"
+                    onClick={handleConnect}
+                    icon={<Mic className="h-5 w-5" />}
+                  >
+                    Connect to Voice AI
+                  </FloatingButton>
+                </motion.div>
+              )}
+
+              {/* Latest Transcript Preview */}
+              {isConnected && latestTranscript && (
+                <motion.div
+                  initial={{ opacity: 0, scale: 0.95 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: 0.8 }}
+                  className="w-full max-w-md"
+                >
+                  <GlassmorphicCard
+                    variant="elevated"
+                    padding="lg"
+                    className="text-center"
+                  >
+                    <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
+                      {latestTranscript.replace(/^\d{2}:\d{2}:\d{2}\s+\[.*?\]\s+/, "")}
+                    </p>
+                  </GlassmorphicCard>
+                </motion.div>
+              )}
+
+              {/* Prompt Suggestion */}
+              {isConnected && transcripts.length === 0 && (
+                <motion.p
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 1 }}
+                  className="text-sm text-muted-foreground text-center"
+                >
+                  Try saying: "Tell me about your capabilities"
+                </motion.p>
+              )}
+            </motion.section>
+
+            {/* Math Whiteboard (Always Visible) */}
+            <motion.section
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.3 }}
+              className="flex-1 flex items-center justify-center"
             >
-              Try saying: "Tell me about your capabilities"
-            </motion.p>
-          )}
-        </motion.section>
-
-        {/* Canvas Section (if enabled) */}
-        {canvasMode && (
-          <motion.section
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.3 }}
-            className="w-3/5 flex items-center justify-center"
-          >
-            <GlassmorphicCard variant="elevated" shadow="lg" padding="xl">
-              <div className="relative">
-                <CanvasRenderer
+              <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
+                <SVGCanvas
                   ref={canvasRef}
                   width={800}
                   height={600}
-                  className="rounded-xl bg-white shadow-2xl"
+                  className="w-full h-full"
                 />
-                {/* Canvas Placeholder */}
-                <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center text-muted-foreground">
-                  <Mic className="mb-3 h-10 w-10 opacity-20" />
-                  <p className="text-sm opacity-50">AI will draw here</p>
-                </div>
+              </GlassmorphicCard>
+            </motion.section>
+          </>
+        ) : (
+          /* Chat Mode - Always Split Screen */
+          <>
+            <motion.section
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.3 }}
+              className="w-2/5 min-w-[400px] flex flex-col h-[calc(100vh-7rem)]"
+            >
+              <div className="glass-card rounded-2xl overflow-hidden flex flex-col h-full">
+                <ChatInterface
+                  messages={chatMessages}
+                  isLoading={chatLoading}
+                  onSendMessage={sendChatMessage}
+                  onClearChat={clearChat}
+                />
               </div>
-            </GlassmorphicCard>
-          </motion.section>
+            </motion.section>
+
+            {/* Math Whiteboard for Chat Mode */}
+            <motion.section
+              initial={{ opacity: 0, x: 20 }}
+              animate={{ opacity: 1, x: 0 }}
+              transition={{ delay: 0.2 }}
+              className="flex-1 flex items-center justify-center"
+            >
+              <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
+                <SVGCanvas
+                  ref={canvasRef}
+                  width={800}
+                  height={600}
+                  className="w-full h-full"
+                />
+              </GlassmorphicCard>
+            </motion.section>
+          </>
         )}
       </main>
 
-      {/* Technical Drawer Toggle (Bottom Fixed) */}
-      {!drawerOpen && (
+      {/* Technical Drawer Toggle (Bottom Fixed) - Voice Mode Only */}
+      {appMode === "voice" && !drawerOpen && (
         <motion.button
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -281,14 +355,16 @@ export default function Home() {
         </motion.button>
       )}
 
-      {/* Technical Drawer */}
-      <TechnicalDrawer
-        isOpen={drawerOpen}
-        onClose={() => setDrawerOpen(false)}
-        transcripts={transcripts}
-        logs={logs}
-        pipelineState={pipelineState}
-      />
+      {/* Technical Drawer - Voice Mode Only */}
+      {appMode === "voice" && (
+        <TechnicalDrawer
+          isOpen={drawerOpen}
+          onClose={() => setDrawerOpen(false)}
+          transcripts={transcripts}
+          logs={logs}
+          pipelineState={pipelineState}
+        />
+      )}
     </div>
   );
 }
