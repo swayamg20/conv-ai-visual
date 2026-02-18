@@ -83,7 +83,19 @@ voiceai/
 - Supports various widget types (text, code, image, etc.)
 - Can be enabled per message
 
-### 6. Interruption Handling (`main.py`)
+### 6. Smart Turn Detection (`funcs/smart_turn.py`)
+- **pipecat-ai/smart-turn-v3** - native audio turn detection model
+- Uses Whisper Tiny encoder + linear classifier to analyze prosody, intonation, grammar cues
+- Works alongside Deepgram endpointing: when Deepgram detects a pause, Smart Turn decides if the turn is actually complete
+- ~8M params, 8MB ONNX model, <60ms inference on CPU
+- Per-session audio buffering with `TurnAudioBuffer` (last 8s of 16kHz mono audio)
+- `SmartTurnSession` orchestrates: audio buffering → inference → transcript accumulation → fallback timeout
+- Fallback: if Smart Turn says "incomplete" but silence exceeds `SMART_TURN_STOP_SECS`, force-complete
+- Auto-downloads model from HuggingFace on first use
+- Toggled via `SMART_TURN_ENABLED` env var (default: true)
+- When enabled, Deepgram endpointing is shortened (500ms) since Smart Turn handles real turn detection
+
+### 7. Interruption Handling (`main.py`)
 - **Server-side detection** using VAD (Phase 1 - Completed)
 - Detects when user speaks while TTS is playing
 - Automatically cancels ongoing TTS generation
@@ -136,6 +148,10 @@ voiceai/
 - `ELEVENLABS_MODEL_ID` - Default: "eleven_flash_v2_5"
 - `TTS_STABILITY` - Default: 0.5
 - `TTS_SIMILARITY_BOOST` - Default: 0.75
+- `SMART_TURN_ENABLED` - Enable Smart Turn detection (default: true)
+- `SMART_TURN_THRESHOLD` - Probability threshold for turn completion (default: 0.5)
+- `SMART_TURN_STOP_SECS` - Fallback silence timeout in seconds (default: 2.0)
+- `SMART_TURN_MODEL_PATH` - Optional custom ONNX model path (auto-downloads if not set)
 - `MEM0_API_KEY` - Optional, for long-term memory features
 - `HOST` - Default: "0.0.0.0"
 - `PORT` - Default: 8000
@@ -152,6 +168,7 @@ voiceai/
 - ✅ WebRTC integration
 - ✅ **Interruption handling** - Server-side VAD-based detection (Phase 1)
 - ✅ **Environment-based configuration** - Secure .env file management
+- ✅ **Smart Turn Detection** - Native audio turn detection with pipecat-ai/smart-turn-v3
 
 ### TODO (from `docs/next_steps.md`)
 - Redis integration

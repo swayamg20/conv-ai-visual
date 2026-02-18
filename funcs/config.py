@@ -243,6 +243,12 @@ CRITICAL RULES:
 """
     )
 
+    # Smart Turn detection config
+    SMART_TURN_ENABLED: bool = os.getenv("SMART_TURN_ENABLED", "true").lower() == "true"
+    SMART_TURN_THRESHOLD: float = float(os.getenv("SMART_TURN_THRESHOLD", "0.5"))
+    SMART_TURN_STOP_SECS: float = float(os.getenv("SMART_TURN_STOP_SECS", "2.0"))
+    SMART_TURN_MODEL_PATH: Optional[str] = os.getenv("SMART_TURN_MODEL_PATH")
+
     ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY")
     ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel
     ELEVENLABS_MODEL_ID: str = os.getenv("ELEVENLABS_MODEL_ID", "eleven_flash_v2_5")
