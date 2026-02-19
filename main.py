@@ -272,10 +272,29 @@ async def _process_user_turn(pc_id: str, user_text: str):
     turn_processing_tasks[pc_id] = task
 
 
+def _split_sentence(buf: str):
+    """Split buffer at the first sentence boundary, returning (sentence, remainder).
+    Returns (None, buf) if no boundary found yet."""
+    import re
+    # Match sentence-ending punctuation followed by a space, newline, or end-of-string
+    m = re.search(r'[.!?](?:\s|$)', buf)
+    if m:
+        idx = m.end()
+        return buf[:idx].strip(), buf[idx:]
+    return None, buf
+
+
 async def _run_llm_tts(pc_id: str, user_text: str):
     """
-    Actual LLM → TTS → client pipeline. Runs as a cancellable task.
-    Fully instrumented: saves every stage latency to VoicePipelineLogModel.
+    LLM → TTS pipeline with sentence-pipelined audio.
+
+    Key optimisation: TTS starts on the FIRST complete sentence from the LLM
+    text stream, rather than waiting for the full response. This cuts perceived
+    latency roughly in half.
+
+    Drawings (tool calls) are dispatched during the LLM tool-calling rounds,
+    which happen BEFORE text streaming, so the user sees whiteboard activity
+    even while waiting for audio.
     """
     import base64
 
@@ -301,40 +320,41 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     llm_response = ""
     error_msg = None
 
-    try:
-        logger.info("[%s] → LLM: '%s'", pc_id, user_text[:60])
-        t_llm_start = _time.perf_counter()
+    # Sentence queue: LLM text stream → sentence buffer → TTS tasks
+    sentence_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-        async for chunk in pipeline.chat_with_tools_stream(
-            user_text,
-            temperature=config.LLM_TEMPERATURE,
-            max_tokens=config.LLM_MAX_TOKENS,
-        ):
-            llm_response += chunk
+    async def _tts_sender():
+        """Consume sentences from the queue and stream TTS audio to client."""
+        nonlocal tts_chunks_sent, tts_interrupted, t_tts_first_chunk, t_tts_end, t_tts_start
 
-        t_llm_end = _time.perf_counter()
-        logger.info("[%s] ← LLM: '%s'", pc_id, llm_response[:50] + "...")
+        tts_started_sent = False
 
-        if ch and ch.readyState == "open":
-            ch.send(json.dumps({"type": "llm_response", "text": llm_response}))
+        while True:
+            sentence = await sentence_queue.get()
+            if sentence is None:
+                break  # poison pill — no more sentences
 
-        # TTS streaming
-        if tts_pipeline and llm_response.strip():
-            logger.info("[%s] → TTS", pc_id)
-            t_tts_start = _time.perf_counter()
-            tts_interrupt_flags[pc_id] = True
+            if not sentence.strip():
+                continue
 
-            if ch and ch.readyState == "open":
-                ch.send(json.dumps({"type": "tts_started"}))
+            if not tts_pipeline:
+                continue
+
+            if not tts_started_sent:
+                t_tts_start = _time.perf_counter()
+                tts_interrupt_flags[pc_id] = True
+                if ch and ch.readyState == "open":
+                    ch.send(json.dumps({"type": "tts_started"}))
+                tts_started_sent = True
 
             try:
-                async for audio_chunk in tts_pipeline.text_to_speech_stream(llm_response):
+                async for audio_chunk in tts_pipeline.text_to_speech_stream(sentence):
                     if not tts_interrupt_flags.get(pc_id, False):
                         tts_interrupted = True
                         logger.warning("[%s] TTS interrupted after %d chunks", pc_id, tts_chunks_sent)
                         if ch and ch.readyState == "open":
                             ch.send(json.dumps({"type": "tts_interrupted", "chunks_sent": tts_chunks_sent}))
-                        break
+                        return  # exit sender entirely
 
                     if ch and ch.readyState == "open":
                         if tts_chunks_sent == 0:
@@ -345,29 +365,76 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                             "audio": base64.b64encode(audio_chunk).decode("utf-8"),
                         }))
                         tts_chunks_sent += 1
-                else:
-                    logger.info("[%s] TTS complete (%d chunks)", pc_id, tts_chunks_sent)
-                    if ch and ch.readyState == "open":
-                        ch.send(json.dumps({"type": "tts_complete"}))
-            finally:
-                tts_interrupt_flags[pc_id] = False
-                t_tts_end = _time.perf_counter()
+            except Exception as tts_err:
+                logger.exception("[%s] TTS error on sentence: %s", pc_id, tts_err)
+
+        # All sentences processed
+        t_tts_end = _time.perf_counter()
+        tts_interrupt_flags[pc_id] = False
+        if tts_started_sent and not tts_interrupted:
+            logger.info("[%s] TTS complete (%d chunks)", pc_id, tts_chunks_sent)
+            if ch and ch.readyState == "open":
+                ch.send(json.dumps({"type": "tts_complete"}))
+
+    try:
+        logger.info("[%s] → LLM: '%s'", pc_id, user_text[:60])
+        t_llm_start = _time.perf_counter()
+
+        # Start TTS sender task — it blocks on the queue until sentences arrive
+        tts_task = asyncio.create_task(_tts_sender())
+
+        sentence_buf = ""
+        async for chunk in pipeline.chat_with_tools_stream(
+            user_text,
+            temperature=config.LLM_TEMPERATURE,
+            max_tokens=config.LLM_MAX_TOKENS,
+        ):
+            llm_response += chunk
+            sentence_buf += chunk
+
+            # Try to extract complete sentences and push them to TTS immediately
+            while True:
+                sentence, sentence_buf = _split_sentence(sentence_buf)
+                if sentence is None:
+                    break
+                await sentence_queue.put(sentence)
+
+        t_llm_end = _time.perf_counter()
+        logger.info("[%s] ← LLM (%d chars)", pc_id, len(llm_response))
+
+        # Flush remaining text to TTS
+        if sentence_buf.strip():
+            await sentence_queue.put(sentence_buf.strip())
+
+        # Signal TTS sender to finish
+        await sentence_queue.put(None)
+
+        # Send full response to client (for display)
+        if ch and ch.readyState == "open":
+            ch.send(json.dumps({"type": "llm_response", "text": llm_response}))
+
+        # Wait for TTS to finish
+        await tts_task
 
     except asyncio.CancelledError:
         logger.info("[%s] Turn processing cancelled (new turn arrived)", pc_id)
         tts_interrupted = True
         tts_interrupt_flags[pc_id] = False
+        # Kill TTS sender
+        sentence_queue.put_nowait(None)
         ch = datachannels.get(pc_id)
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "tts_interrupted", "reason": "new_turn"}))
     except Exception as e:
         error_msg = str(e)
         logger.exception("[%s] Pipeline error: %s", pc_id, e)
+        sentence_queue.put_nowait(None)
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "error", "message": error_msg}))
     finally:
         t_end = _time.perf_counter()
         turn_processing_tasks.pop(pc_id, None)
+        tts_interrupt_flags.pop(pc_id, None)
 
         # ── Compute all latencies ──
         def _ms(start, end):
