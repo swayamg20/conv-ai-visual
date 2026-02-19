@@ -121,16 +121,17 @@ class AnimationPipeline:
                 })
 
             elif action == "latex":
-                # LaTeX rendering step
-                timeline_steps.append({
+                latex_step = {
                     "action": "latex",
                     "latex": step.get("latex"),
                     "x": step.get("x"),
                     "y": step.get("y"),
                     "font_size": step.get("font_size", 20),
                     "color": step.get("color", "#000000"),
-                    "speech_cue": step.get("speech_cue")
-                })
+                    "target_id": step.get("target_id"),
+                    "speech_cue": step.get("speech_cue"),
+                }
+                timeline_steps.append({k: v for k, v in latex_step.items() if v is not None})
 
             elif action == "text":
                 # Text step (direct text rendering without wrapping in element)
@@ -147,33 +148,37 @@ class AnimationPipeline:
                 })
 
             elif action == "highlight":
-                # Highlight step
                 timeline_steps.append({
                     "action": "highlight",
                     "target_id": step.get("target_id"),
                     "duration": step.get("duration", 0.3),
+                    "highlight_color": step.get("highlight_color"),
+                    "speech_cue": step.get("speech_cue")
+                })
+
+            elif action == "crossout":
+                timeline_steps.append({
+                    "action": "crossout",
+                    "target_id": step.get("target_id"),
+                    "color": step.get("color", "#ef4444"),
                     "speech_cue": step.get("speech_cue")
                 })
 
             elif action == "clear":
-                # Clear canvas step
                 timeline_steps.append({
                     "action": "clear"
                 })
 
             elif action == "pause":
-                # Pause step
                 timeline_steps.append({
                     "action": "pause",
                     "duration": step.get("duration", 0.5)
                 })
 
             elif action == "morph":
-                # Morph step (future enhancement)
                 logger.warning("Morph action not yet implemented")
 
             elif action in ("rect", "circle", "ellipse", "line", "arrow", "path"):
-                # Shape primitives — pass through directly to frontend
                 shape_step = {
                     "action": action,
                     "x": step.get("x"),
@@ -183,13 +188,14 @@ class AnimationPipeline:
                     "color": step.get("color"),
                     "fill": step.get("fill"),
                     "stroke_width": step.get("stroke_width"),
+                    "roughness": step.get("roughness"),
+                    "animate_style": step.get("animate_style"),
                     "points": step.get("points"),
                     "text": step.get("text"),
                     "label": step.get("label"),
                     "target_id": step.get("target_id"),
                     "speech_cue": step.get("speech_cue"),
                 }
-                # Remove None values to keep payload clean
                 timeline_steps.append({k: v for k, v in shape_step.items() if v is not None})
 
             else:
@@ -534,15 +540,23 @@ CREATE_TEACHING_SEQUENCE_SCHEMA = {
     "type": "function",
     "function": {
         "name": "create_teaching_sequence",
-        "description": """Create a step-by-step animation sequence for teaching math concepts.
+        "description": """Create a step-by-step animated teaching sequence on the whiteboard.
 
 Perfect for:
-- Solving equations step-by-step
+- Solving equations step-by-step with hand-drawn animations
 - Geometric transformations (rotate, scale, translate)
-- Building diagrams incrementally
-- Showing mathematical relationships
+- Building diagrams incrementally with draw-on effects
+- Showing wrong answers via crossout, then revealing correct ones
+- Highlighting key parts with color pulses
 
-Each step animates as you explain, creating synchronized teaching.
+ANIMATION STYLES:
+- Shapes (rect, circle, line, arrow, etc.) animate with a hand-drawing "draw-on" stroke effect by default
+- Set animate_style="fade" for simple fade-in, "scale" for pop-in, "none" for instant
+- Text fades in naturally
+- Use "crossout" to strike through wrong answers with an animated red line
+- Use "highlight" with highlight_color for color-pulse emphasis
+
+Each step animates sequentially, creating synchronized teaching visuals.
         """,
         "parameters": {
             "type": "object",
@@ -555,8 +569,8 @@ Each step animates as you explain, creating synchronized teaching.
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["clear", "draw", "animate", "latex", "text", "highlight", "morph", "pause", "rect", "circle", "ellipse", "line", "arrow", "path"],
-                                "description": "Step type. 'clear' wipes canvas. Shape primitives: 'rect', 'circle', 'ellipse', 'line', 'arrow', 'path' draw shapes directly. 'text' for labels. 'latex' for math equations. 'animate'/'highlight' for animating existing elements."
+                                "enum": ["clear", "draw", "animate", "latex", "text", "highlight", "crossout", "pause", "rect", "circle", "ellipse", "line", "arrow", "path"],
+                                "description": "Step type. 'clear' wipes canvas. Shape primitives draw with hand-drawn stroke animation. 'crossout' draws a strikethrough over target_id. 'highlight' pulses target_id with color."
                             },
                             "text": {
                                 "type": "string",
@@ -564,32 +578,45 @@ Each step animates as you explain, creating synchronized teaching.
                             },
                             "element": {
                                 "type": "object",
-                                "description": "Canvas element to draw (for 'draw' action — alternative to using shape primitives directly)"
+                                "description": "Canvas element to draw (for 'draw' action)"
                             },
                             "target_id": {
                                 "type": "string",
-                                "description": "Element ID (for 'animate' or 'highlight')"
+                                "description": "Element ID for animate/highlight/crossout, or to assign as this element's ID"
                             },
                             "label": {
                                 "type": "string",
-                                "description": "Label/ID for a drawn shape (for referencing in later animate/highlight steps)"
+                                "description": "Label/ID for a drawn shape (for referencing later)"
                             },
                             "properties": {
                                 "type": "object",
-                                "description": "Animation properties (for 'animate')"
+                                "description": "Animation properties (for 'animate'): x, y, opacity, scale, rotation"
                             },
                             "latex": {
                                 "type": "string",
-                                "description": "LaTeX expression (for 'latex' action)"
+                                "description": "LaTeX expression (for 'latex' action). Use \\\\ for backslash."
                             },
                             "x": {"type": "number", "description": "X position"},
                             "y": {"type": "number", "description": "Y position"},
-                            "width": {"type": "number", "description": "Width (for rect, circle, ellipse)"},
-                            "height": {"type": "number", "description": "Height (for rect, ellipse)"},
+                            "width": {"type": "number", "description": "Width"},
+                            "height": {"type": "number", "description": "Height"},
                             "font_size": {"type": "number"},
-                            "color": {"type": "string", "description": "Stroke color (e.g. '#3b82f6')"},
-                            "fill": {"type": "string", "description": "Fill color (empty string for no fill)"},
+                            "color": {"type": "string", "description": "Stroke/text color (hex)"},
+                            "fill": {"type": "string", "description": "Fill color (empty for no fill)"},
                             "stroke_width": {"type": "number"},
+                            "roughness": {
+                                "type": "number",
+                                "description": "Hand-drawn roughness (0=smooth, 1=normal, 3=very sketchy). Default 1.5"
+                            },
+                            "animate_style": {
+                                "type": "string",
+                                "enum": ["draw", "fade", "scale", "none"],
+                                "description": "How element appears. 'draw'=hand-drawing stroke effect (default for shapes), 'fade'=simple fade, 'scale'=pop in, 'none'=instant"
+                            },
+                            "highlight_color": {
+                                "type": "string",
+                                "description": "Color for highlight pulse (e.g. '#ef4444' for red). If omitted, uses scale pulse."
+                            },
                             "points": {
                                 "type": "array",
                                 "items": {"type": "array", "items": {"type": "number"}},
@@ -602,7 +629,7 @@ Each step animates as you explain, creating synchronized teaching.
                             },
                             "speech_cue": {
                                 "type": "string",
-                                "description": "What you're saying during this step"
+                                "description": "What you're saying during this step (for sync reference)"
                             }
                         },
                         "required": ["action"]

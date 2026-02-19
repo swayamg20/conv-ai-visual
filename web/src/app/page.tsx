@@ -5,7 +5,7 @@ import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
 import Link from "next/link";
 // Switch removed - canvas is always enabled
-import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence } from "@/components/svg-canvas";
+import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence, type FunctionPlotData } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
 import { cn } from "@/lib/utils";
@@ -43,6 +43,10 @@ export default function Home() {
     canvasRef.current?.createSequence(sequence);
   }, []);
 
+  const handleFunctionPlot = useCallback((plot: FunctionPlotData) => {
+    canvasRef.current?.renderFunctionPlot(plot);
+  }, []);
+
   // Dispatch animation events from SSE to the correct SVGCanvas method
   const handleAnimationEvent = useCallback((data: any) => {
     const tool = data.tool;
@@ -53,10 +57,9 @@ export default function Home() {
     } else if (tool === "create_teaching_sequence" && data.timeline) {
       handleTeachingSequence(data.timeline);
     } else if (tool === "plot_function" && data.graph) {
-      // Plot function data goes to render as canvas operations
-      canvasRef.current?.render([data.graph]);
+      handleFunctionPlot(data.graph);
     }
-  }, [handleAnimation, handleLatex, handleTeachingSequence]);
+  }, [handleAnimation, handleLatex, handleTeachingSequence, handleFunctionPlot]);
 
   // Chat mode hook
   const {
@@ -107,6 +110,9 @@ export default function Home() {
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
+    onAnimation: handleAnimationEvent,
+    onLatex: (data: any) => data.element && handleLatex(data.element),
+    onTeachingSequence: (data: any) => data.timeline && handleTeachingSequence(data.timeline),
     onError: handleError,
     onLog: handleLog,
     onStateChange: handleStateChange,
