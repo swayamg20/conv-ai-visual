@@ -133,6 +133,41 @@ class LLMPipeline:
         if custom_prompt:
             self._canvas_system_prompt = custom_prompt
         logger.info(f"Canvas mode {'enabled' if enabled else 'disabled'}")
+
+    @staticmethod
+    def _is_high_detail_request(current_query: Optional[str]) -> bool:
+        """Heuristic for user intent that warrants more visual detail."""
+        if not current_query:
+            return False
+        query = current_query.lower()
+        detail_markers = (
+            "deep dive",
+            "in depth",
+            "in-depth",
+            "step by step",
+            "step-by-step",
+            "detailed",
+            "thorough",
+            "comprehensive",
+            "full explanation",
+            "long form",
+            "long-form",
+        )
+        return any(marker in query for marker in detail_markers)
+
+    def _get_visual_latency_guardrail(self, current_query: Optional[str]) -> str:
+        """Append compactness constraints to reduce tool-call output latency."""
+        high_detail = self._is_high_detail_request(current_query)
+        max_steps = 14 if high_detail else 8
+        max_words_per_cue = 18 if high_detail else 12
+        return (
+            "\n\n[Latency Guardrails]\n"
+            "Keep visuals concise unless user explicitly asks for deep detail:\n"
+            f"- Use exactly one create_teaching_sequence call with <= {max_steps} steps.\n"
+            "- Prefer high-information visuals (shapes/arrows/latex) over verbose text steps.\n"
+            f"- Keep each speech_cue short (<= {max_words_per_cue} words).\n"
+            "- Avoid repeating labels in speech_cue when the label is already drawn."
+        )
     
     def get_context(self, current_query: Optional[str] = None, include_canvas: bool = True) -> List[Dict[str, str]]:
         """
@@ -144,6 +179,8 @@ class LLMPipeline:
         """
         # Use canvas prompt when canvas mode is enabled
         system_prompt = self.active_system_prompt
+        if self.canvas_mode:
+            system_prompt += self._get_visual_latency_guardrail(current_query)
         
         if self.memory and current_query:
             context = self.memory.build_context(current_query, system_prompt)
@@ -703,6 +740,7 @@ class LLMPipeline:
         tokens_out = None
         error_msg = None
         speech_cue_text = None  # extracted from tool calls if available
+        direct_response_text: Optional[str] = None
 
         context = self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
@@ -720,7 +758,8 @@ class LLMPipeline:
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            t_llm_total += _time.perf_counter() - t_llm_start
+            llm_round_elapsed = _time.perf_counter() - t_llm_start
+            t_llm_total += llm_round_elapsed
 
             # Extract token usage if available
             if hasattr(response, 'usage') and response.usage:
@@ -728,7 +767,13 @@ class LLMPipeline:
                 tokens_out = getattr(response.usage, 'completion_tokens', None)
 
             if not self.client.has_tool_calls(response):
-                logger.info("LLM returned no tool calls — streaming final text response")
+                direct_response_text = self.client.get_response_content(response) or ""
+                logger.info(
+                    "Round %d: no tool calls (llm=%sms, chars=%d) — using direct response",
+                    round_num + 1,
+                    round(llm_round_elapsed * 1000, 2),
+                    len(direct_response_text),
+                )
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
@@ -736,6 +781,7 @@ class LLMPipeline:
             context.append(self.client.get_assistant_message(response))
 
             round_tool_data = []
+            round_tool_elapsed = 0.0
             for tc in tool_calls:
                 tc_data = {"name": tc.name, "arguments": tc.arguments}
                 all_tool_calls.append(tc_data)
@@ -800,14 +846,32 @@ class LLMPipeline:
                 else:
                     tool_result = await self.tool_executor.execute_tool_call(tc)
 
-                t_tool_total += _time.perf_counter() - t_tool_start
+                tool_elapsed = _time.perf_counter() - t_tool_start
+                round_tool_elapsed += tool_elapsed
+                t_tool_total += tool_elapsed
                 context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
+
+            logger.info(
+                "Round %d timings: llm=%sms tools=%sms tool_calls=%d",
+                round_num + 1,
+                round(llm_round_elapsed * 1000, 2),
+                round(round_tool_elapsed * 1000, 2),
+                len(tool_calls),
+            )
 
             # Check if we can extract speech cues from this round's tool calls
             extracted = self._extract_speech_cues(round_tool_data)
             if extracted:
                 speech_cue_text = extracted
+                logger.info(
+                    "Round %d: extracted speech cues (%d chars), ending tool loop early",
+                    round_num + 1,
+                    len(extracted),
+                )
+                break
+        else:
+            logger.warning("Exceeded max tool rounds (%d) without terminal response", max_tool_rounds)
 
         # ── Yield the response text ──
         t_stream_start = _time.perf_counter()
@@ -819,6 +883,12 @@ class LLMPipeline:
             logger.info(f"Using speech_cues as response ({len(speech_cue_text)} chars), skipping 2nd LLM round")
             full_response = speech_cue_text
             yield speech_cue_text
+        elif direct_response_text is not None:
+            # A complete non-tool answer is already available from complete_with_tools.
+            # Avoid an unnecessary second inference call.
+            full_response = direct_response_text
+            if full_response:
+                yield full_response
         else:
             # No speech cues — fall back to streaming the LLM's text response
             async for chunk in self.client.stream(
@@ -846,5 +916,5 @@ class LLMPipeline:
         self._last_call_tool_calls = all_tool_calls
         self._last_call_response = full_response
         self._last_call_error = error_msg
-        used_cues = "speech_cues" if speech_cue_text else "llm_stream"
-        logger.info(f"Call metrics ({used_cues}): total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
+        response_mode = "speech_cues" if speech_cue_text else "direct_response" if direct_response_text is not None else "llm_stream"
+        logger.info(f"Call metrics ({response_mode}): total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
