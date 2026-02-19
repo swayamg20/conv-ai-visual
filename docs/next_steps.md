@@ -18,6 +18,7 @@ Feat/TO DO:
 - https://jsoncanvas.org/ for canvas API
 - less priority:
   - quartz based documentation
+- not just teaching an exisiting/famous topic but instead, user should be able to discuss, experiment, think, generate,   explore with canvas
 
 In Test:
 - Interuption Handling
