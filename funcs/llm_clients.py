@@ -163,22 +163,29 @@ class OpenAIClient(LLMClient):
         self,
         api_key: str,
         model: str,
+        base_url: Optional[str] = None,
         **default_params
     ):
         """
         Initialize OpenAI client.
 
         Args:
-            api_key: OpenAI API key
-            model: Model name (e.g., "gpt-4o-mini")
+            api_key: OpenAI API key (or Groq/Together key for compatible APIs)
+            model: Model name (e.g., "gpt-4o-mini", "llama-3.3-70b-versatile")
+            base_url: Optional base URL override (e.g., "https://api.groq.com/openai/v1")
             **default_params: Default parameters to include in all requests
         """
         from openai import AsyncOpenAI
 
-        self.client = AsyncOpenAI(api_key=api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = AsyncOpenAI(**client_kwargs)
         self.model = model
         self.default_params = default_params
-        logger.info(f"OpenAI client initialized: model={model}")
+        provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
+        logger.info(f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}")
 
     async def complete(
         self,
@@ -814,6 +821,13 @@ def create_llm_client(
             model=model or config.OPENAI_MODEL,
             **kwargs
         )
+    elif provider == "groq":
+        return OpenAIClient(
+            api_key=api_key or config.GROQ_API_KEY,
+            model=model or config.GROQ_MODEL,
+            base_url="https://api.groq.com/openai/v1",
+            **kwargs
+        )
     elif provider == "gemini":
         return GeminiClient(
             api_key=api_key or config.GEMINI_API_KEY,
@@ -823,5 +837,5 @@ def create_llm_client(
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider}. "
-            f"Supported providers: openai, gemini"
+            f"Supported providers: openai, groq, gemini"
         )

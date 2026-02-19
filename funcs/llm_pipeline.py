@@ -649,6 +649,32 @@ class LLMPipeline:
         logger.warning(f"Exceeded max tool rounds ({max_tool_rounds})")
         return "I encountered an issue processing your request. Please try again."
     
+    @staticmethod
+    def _extract_speech_cues(tool_calls_data: List[Dict]) -> Optional[str]:
+        """Extract speech_cue text from tool call arguments.
+
+        If tool calls contain speech_cue fields (e.g., create_teaching_sequence),
+        concatenate them into a single TTS-ready string. This lets us skip
+        the second LLM round entirely — the spoken explanation is already
+        embedded in the tool call.
+
+        Returns None if no speech cues found.
+        """
+        cues = []
+        for tc in tool_calls_data:
+            args = tc.get("arguments", {})
+            # create_teaching_sequence has steps with speech_cue
+            for step in args.get("steps", []):
+                cue = step.get("speech_cue", "")
+                if cue and cue.strip():
+                    cues.append(cue.strip())
+            # render_latex or other tools might have a top-level speech_cue
+            if args.get("speech_cue"):
+                cues.append(args["speech_cue"].strip())
+        if cues:
+            return " ".join(cues)
+        return None
+
     async def chat_with_tools_stream(
         self,
         user_message: str,
@@ -660,7 +686,9 @@ class LLMPipeline:
         """
         Streaming chat with tools.
 
-        Note: Tool calls are executed non-streaming, only final response streams.
+        Optimisation: if tool calls contain speech_cue fields (teaching sequences),
+        the spoken explanation is extracted directly and yielded as the TTS text,
+        skipping the second LLM inference round entirely. This saves ~3-5s.
 
         Yields:
             Text chunks of final response
@@ -674,6 +702,7 @@ class LLMPipeline:
         tokens_in = None
         tokens_out = None
         error_msg = None
+        speech_cue_text = None  # extracted from tool calls if available
 
         context = self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
@@ -683,7 +712,7 @@ class LLMPipeline:
         logger.info(f"chat_with_tools_stream: {len(tool_names)} tools passed to LLM: {tool_names}")
 
         # Execute tool calls (non-streaming) until we get a text response
-        for _ in range(max_tool_rounds):
+        for round_num in range(max_tool_rounds):
             t_llm_start = _time.perf_counter()
             response = await self.client.complete_with_tools(
                 messages=context,
@@ -703,11 +732,14 @@ class LLMPipeline:
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
-            logger.info(f"LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
+            logger.info(f"Round {round_num+1}: LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
             context.append(self.client.get_assistant_message(response))
 
+            round_tool_data = []
             for tc in tool_calls:
-                all_tool_calls.append({"name": tc.name, "arguments": tc.arguments})
+                tc_data = {"name": tc.name, "arguments": tc.arguments}
+                all_tool_calls.append(tc_data)
+                round_tool_data.append(tc_data)
                 t_tool_start = _time.perf_counter()
 
                 # Special handling for canvas_update
@@ -749,7 +781,6 @@ class LLMPipeline:
                     handler = tool_handlers[tc.name]
                     result = handler(**tc.arguments, session_id=self.session_id)
 
-                    # Track drawn elements in canvas state so LLM knows what's on canvas
                     canvas_state = get_canvas_state(self.session_id)
                     self._track_animation_in_canvas_state(canvas_state, tc.name, tc.arguments, result)
 
@@ -760,7 +791,6 @@ class LLMPipeline:
                         except TypeError:
                             self.animation_callback(animation_data)
 
-                    # Give LLM a summary of what's now on canvas
                     canvas_summary = canvas_state.get_context_summary()
                     tool_result = ToolResult(
                         tool_call_id=tc.id,
@@ -774,17 +804,30 @@ class LLMPipeline:
                 context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
 
-        # Now stream the final response
+            # Check if we can extract speech cues from this round's tool calls
+            extracted = self._extract_speech_cues(round_tool_data)
+            if extracted:
+                speech_cue_text = extracted
+
+        # ── Yield the response text ──
         t_stream_start = _time.perf_counter()
         full_response = ""
 
-        async for chunk in self.client.stream(
-            messages=context,
-            temperature=temperature,
-            max_tokens=max_tokens
-        ):
-            full_response += chunk
-            yield chunk
+        if speech_cue_text:
+            # We have speech cues from tool calls — use them directly as TTS text.
+            # This skips the entire second LLM inference round.
+            logger.info(f"Using speech_cues as response ({len(speech_cue_text)} chars), skipping 2nd LLM round")
+            full_response = speech_cue_text
+            yield speech_cue_text
+        else:
+            # No speech cues — fall back to streaming the LLM's text response
+            async for chunk in self.client.stream(
+                messages=context,
+                temperature=temperature,
+                max_tokens=max_tokens
+            ):
+                full_response += chunk
+                yield chunk
 
         t_stream_end = _time.perf_counter()
         t_end = _time.perf_counter()
@@ -792,7 +835,6 @@ class LLMPipeline:
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
 
-        # Store metrics for caller to retrieve
         self._last_call_timing = {
             "latency_total_ms": round((t_end - t_start) * 1000, 2),
             "latency_llm_ms": round(t_llm_total * 1000, 2),
@@ -804,4 +846,5 @@ class LLMPipeline:
         self._last_call_tool_calls = all_tool_calls
         self._last_call_response = full_response
         self._last_call_error = error_msg
-        logger.info(f"Call metrics: total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
+        used_cues = "speech_cues" if speech_cue_text else "llm_stream"
+        logger.info(f"Call metrics ({used_cues}): total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
