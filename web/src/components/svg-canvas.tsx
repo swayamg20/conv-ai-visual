@@ -121,6 +121,99 @@ interface SVGCanvasProps {
   showGrid?: boolean;
 }
 
+// ============= Layout Normalization =============
+
+const GRID_SNAP = 20; // snap coordinates to 20px grid
+
+function snap(v: number): number {
+  return Math.round(v / GRID_SNAP) * GRID_SNAP;
+}
+
+function snapPoints(pts: [number, number][]): [number, number][] {
+  return pts.map(([x, y]) => [snap(x), snap(y)]);
+}
+
+type ShapeBounds = { x: number; y: number; w: number; h: number };
+
+/**
+ * Pre-process a list of teaching steps to improve layout:
+ * 1. Snap all coordinates to a 20px grid
+ * 2. Auto-center text labels inside the most recent preceding shape
+ * 3. Ensure minimum shape sizes
+ */
+function normalizeSteps(steps: TeachingStep[]): TeachingStep[] {
+  let lastShapeBounds: ShapeBounds | null = null;
+  const SHAPE_ACTIONS = new Set(["rect", "circle", "ellipse"]);
+
+  return steps.map((step) => {
+    const s = { ...step };
+
+    // Snap coordinates
+    if (s.x != null) s.x = snap(s.x);
+    if (s.y != null) s.y = snap(s.y);
+    if (s.width != null) s.width = Math.max(snap(s.width), 40);
+    if (s.height != null) s.height = Math.max(snap(s.height), 40);
+    if (s.points) s.points = snapPoints(s.points);
+
+    // Track shape bounds
+    if (SHAPE_ACTIONS.has(s.action) && s.x != null && s.y != null) {
+      const w = s.width ?? (s.action === "circle" ? s.width ?? 60 : 100);
+      const h = s.height ?? (s.action === "circle" ? w : 60);
+      lastShapeBounds = { x: s.x, y: s.y, w, h };
+    }
+
+    // Auto-center text inside preceding shape if it looks like a label
+    if (s.action === "text" && lastShapeBounds && s.text) {
+      const isShortLabel = (s.text.length <= 20);
+      const b = lastShapeBounds;
+      // Check if the text position is roughly near the shape (within 40px)
+      const textX = s.x ?? 0;
+      const textY = s.y ?? 0;
+      const nearShape =
+        Math.abs(textX - b.x) < b.w + 40 &&
+        Math.abs(textY - b.y) < b.h + 40;
+
+      if (isShortLabel && nearShape) {
+        const fontSize = s.font_size ?? 16;
+        const estTextWidth = s.text.length * fontSize * 0.55;
+        s.x = snap(b.x + b.w / 2 - estTextWidth / 2);
+        s.y = snap(b.y + b.h / 2 + fontSize / 3);
+        s.font_size = Math.min(fontSize, b.h * 0.4);
+        // Also set text-anchor to middle for precise centering
+        (s as any)._centered = true;
+      }
+
+      // If text is a standalone label below a shape, center it under the shape
+      if (isShortLabel && nearShape && textY > b.y + b.h - 10) {
+        s.x = snap(b.x + b.w / 2 - (s.text.length * (s.font_size ?? 14) * 0.55) / 2);
+        s.y = snap(b.y + b.h + 20);
+      }
+    }
+
+    // For non-shape/non-text actions, don't update lastShapeBounds
+    if (s.action === "text" || s.action === "latex") {
+      // don't overwrite lastShapeBounds
+    } else if (!SHAPE_ACTIONS.has(s.action)) {
+      lastShapeBounds = null;
+    }
+
+    return s;
+  });
+}
+
+/**
+ * Normalize a single CanvasOperation (snap to grid, minimum sizes).
+ */
+function normalizeOp(op: CanvasOperation): CanvasOperation {
+  const o = { ...op };
+  if (o.x != null) o.x = snap(o.x);
+  if (o.y != null) o.y = snap(o.y);
+  if (o.width != null) o.width = Math.max(snap(o.width), 40);
+  if (o.height != null) o.height = Math.max(snap(o.height), 40);
+  if (o.points) o.points = snapPoints(o.points);
+  return o;
+}
+
 // ============= Grid Background =============
 
 function renderGrid(
@@ -364,6 +457,10 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         text.setAttribute("fill", op.color ?? "#000000");
         text.setAttribute("font-size", String(op.font_size ?? 16));
         text.setAttribute("font-family", op.font_family ?? "var(--font-handwriting), var(--font-handwriting-alt), cursive, sans-serif");
+        if ((op as any)._centered) {
+          text.setAttribute("text-anchor", "middle");
+          text.setAttribute("dominant-baseline", "central");
+        }
         text.textContent = op.text ?? "";
         g.appendChild(text);
         return g;
@@ -557,7 +654,10 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       (operations: CanvasOperation[]) => {
         if (!svgRef.current) return;
 
-        for (const op of operations) {
+        for (const rawOp of operations) {
+          const op = (rawOp.action === "clear" || rawOp.action === "delete" || rawOp.action === "highlight" || rawOp.action === "crossout")
+            ? rawOp
+            : normalizeOp(rawOp);
           if (op.action === "clear") {
             elementsRef.current.clear();
             if (svgRef.current) {
@@ -759,8 +859,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       (sequence: TeachingSequence): gsap.core.Timeline => {
         const tl = createTimeline({ paused: true });
         const timelineId = `tl_${Math.random().toString(36).substring(2, 10)}`;
+        const normalizedSteps = normalizeSteps(sequence.steps);
 
-        for (const step of sequence.steps) {
+        for (const step of normalizedSteps) {
           const entryStyle = step.animate_style ?? "draw";
 
           switch (step.action) {

@@ -182,12 +182,32 @@ SPEECH_CUE RULES:
 - Write them conversationally: "Let's start by drawing the input layer..." not "This is the input layer."
 - Together, all speech_cues should form a coherent spoken explanation.
 
-LAYOUT (800×600 canvas):
-- Title: y=40-60, font_size 22-26
-- Main diagram: y=80-500
-- Spacing: 80-120px between major components
-- Keep 50px margins from edges
-- Flow left-to-right or top-to-bottom
+LAYOUT GRID (800×600 canvas, coordinates snap to 20px grid):
+Use these named positions for consistent alignment. Always pick from this grid:
+
+Rows (y):
+  - title:  y=40
+  - row1:   y=120
+  - row2:   y=260
+  - row3:   y=400
+  - bottom: y=520
+
+Columns (x):
+  - col1: x=80    (left)
+  - col2: x=240   (center-left)
+  - col3: x=400   (center)
+  - col4: x=560   (center-right)
+  - col5: x=700   (right)
+
+Standard shape sizes:
+  - Small box:  width=120, height=60
+  - Large box:  width=160, height=80
+  - Circle:     width=60 (diameter)
+  - Ellipse:    width=160, height=80
+
+Arrow tips: connect shape centers. E.g., from col1 shape center (x=140, y=150) to col2 shape center (x=300, y=150).
+Text labels: place INSIDE shapes at shape center. Keep labels ≤2-3 words.
+Title: centered at x=400, y=40, font_size=24
 
 COLORS:
 - #3b82f6 (blue): Primary components
@@ -202,22 +222,22 @@ CANVAS MANAGEMENT:
 - Follow-up → add to existing canvas
 - Check [Current Canvas State] before drawing
 
-EXAMPLE — "Explain how a Transformer works":
+EXAMPLE — "Explain how a Transformer works" (uses grid positions):
 [
   {"action": "clear"},
-  {"action": "text", "text": "Transformer Architecture", "x": 250, "y": 40, "font_size": 24, "color": "#3b82f6", "speech_cue": "Let me show you how a Transformer works."},
-  {"action": "rect", "x": 60, "y": 100, "width": 120, "height": 50, "color": "#3b82f6", "label": "input", "speech_cue": "First we have the input embeddings."},
-  {"action": "text", "text": "Input", "x": 90, "y": 130, "font_size": 14, "color": "#000"},
-  {"action": "arrow", "points": [[180, 125], [260, 125]], "color": "#3b82f6", "speech_cue": "These feed into the self-attention mechanism."},
-  {"action": "rect", "x": 260, "y": 90, "width": 160, "height": 70, "color": "#f59e0b", "label": "attention", "speech_cue": "Self-attention lets the model look at all words simultaneously."},
-  {"action": "text", "text": "Self-Attention", "x": 290, "y": 130, "font_size": 14, "color": "#000"},
-  {"action": "latex", "latex": "\\\\frac{QK^T}{\\\\sqrt{d_k}}", "x": 280, "y": 165, "font_size": 16, "color": "#f59e0b", "target_id": "attn_eq", "speech_cue": "The attention score is computed as Q times K transpose divided by the square root of d_k."},
-  {"action": "arrow", "points": [[420, 125], [500, 125]], "color": "#3b82f6", "speech_cue": "The output then goes through a feed-forward network."},
-  {"action": "rect", "x": 500, "y": 100, "width": 140, "height": 50, "color": "#10b981", "label": "ffn", "speech_cue": "This feed-forward layer applies non-linear transformations."},
-  {"action": "text", "text": "Feed-Forward", "x": 525, "y": 130, "font_size": 14, "color": "#000"},
-  {"action": "arrow", "points": [[640, 125], [720, 125]], "color": "#3b82f6"},
-  {"action": "text", "text": "Output", "x": 720, "y": 130, "font_size": 14, "color": "#000", "speech_cue": "And finally we get the output predictions."},
-  {"action": "highlight", "target_id": "attention", "highlight_color": "#f59e0b", "speech_cue": "The self-attention block is the key innovation of the Transformer."}
+  {"action": "text", "text": "Transformer", "x": 400, "y": 40, "font_size": 24, "color": "#3b82f6", "speech_cue": "Let me show you how a Transformer works."},
+  {"action": "rect", "x": 80, "y": 120, "width": 120, "height": 60, "color": "#3b82f6", "label": "input", "speech_cue": "First we have the input embeddings."},
+  {"action": "text", "text": "Input", "x": 140, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "arrow", "points": [[200, 150], [240, 150]], "color": "#3b82f6", "speech_cue": "These feed into the self-attention mechanism."},
+  {"action": "rect", "x": 240, "y": 120, "width": 160, "height": 60, "color": "#f59e0b", "label": "attention", "speech_cue": "Self-attention lets the model focus on relevant words."},
+  {"action": "text", "text": "Self-Attention", "x": 320, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "latex", "latex": "\\\\frac{QK^T}{\\\\sqrt{d_k}}", "x": 260, "y": 200, "font_size": 16, "color": "#f59e0b", "target_id": "attn_eq", "speech_cue": "The attention formula is Q times K transpose divided by root d_k."},
+  {"action": "arrow", "points": [[400, 150], [560, 150]], "color": "#3b82f6", "speech_cue": "Then it goes through a feed-forward network."},
+  {"action": "rect", "x": 560, "y": 120, "width": 140, "height": 60, "color": "#10b981", "label": "ffn", "speech_cue": "The feed-forward layer applies non-linear transformations."},
+  {"action": "text", "text": "FFN", "x": 630, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "arrow", "points": [[700, 150], [740, 150]], "color": "#3b82f6"},
+  {"action": "text", "text": "Output", "x": 740, "y": 150, "font_size": 14, "color": "#000", "speech_cue": "And finally the output predictions."},
+  {"action": "highlight", "target_id": "attention", "highlight_color": "#f59e0b", "speech_cue": "Self-attention is the key innovation of the Transformer."}
 ]
 
 REMEMBER: Draw SHAPES and ARROWS. Use text only for short labels ON the shapes. Put all explanation in speech_cue fields.
