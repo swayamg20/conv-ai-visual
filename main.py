@@ -101,6 +101,12 @@ tts_interrupt_flags: Dict[str, bool] = {}  # Simple interrupt flag: True = TTS a
 smart_turn_sessions: Dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
 turn_processing_tasks: Dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
 
+import time as _time
+
+# Per-peer turn timing data. Populated by consume_audio_track, consumed by _run_llm_tts.
+# Keys: speech_start_ts, stt_final_ts, turn_confirmed_ts, smart_turn_result, vad_detect_ts
+turn_timing: Dict[str, Dict[str, Any]] = {}
+
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
     Convert aiortc.AudioFrame to interleaved 16-bit PCM bytes.
@@ -258,6 +264,9 @@ async def _process_user_turn(pc_id: str, user_text: str):
     Schedule LLM → TTS pipeline for a confirmed user turn.
     Cancels any previous in-flight turn for this peer first.
     """
+    # Stamp turn-confirmed time
+    timing = turn_timing.setdefault(pc_id, {})
+    timing["turn_confirmed_ts"] = _time.perf_counter()
     await _cancel_active_turn(pc_id)
     task = asyncio.create_task(_run_llm_tts(pc_id, user_text))
     turn_processing_tasks[pc_id] = task
@@ -266,15 +275,36 @@ async def _process_user_turn(pc_id: str, user_text: str):
 async def _run_llm_tts(pc_id: str, user_text: str):
     """
     Actual LLM → TTS → client pipeline. Runs as a cancellable task.
+    Fully instrumented: saves every stage latency to VoicePipelineLogModel.
     """
     import base64
 
     ch = datachannels.get(pc_id)
     pipeline = await _ensure_voice_session(pc_id)
 
+    # Grab timing context from STT/turn detection phase
+    timing = turn_timing.pop(pc_id, {})
+    t_speech_start = timing.get("speech_start_ts")
+    t_stt_final = timing.get("stt_final_ts")
+    t_turn_confirmed = timing.get("turn_confirmed_ts", _time.perf_counter())
+    smart_turn_result = timing.get("smart_turn_result")
+    t_turn_detection = timing.get("turn_detection_ms")
+
+    t_pipeline_start = _time.perf_counter()
+    t_llm_start = None
+    t_llm_end = None
+    t_tts_start = None
+    t_tts_first_chunk = None
+    t_tts_end = None
+    tts_chunks_sent = 0
+    tts_interrupted = False
+    llm_response = ""
+    error_msg = None
+
     try:
         logger.info("[%s] → LLM: '%s'", pc_id, user_text[:60])
-        llm_response = ""
+        t_llm_start = _time.perf_counter()
+
         async for chunk in pipeline.chat_with_tools_stream(
             user_text,
             temperature=config.LLM_TEMPERATURE,
@@ -282,6 +312,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         ):
             llm_response += chunk
 
+        t_llm_end = _time.perf_counter()
         logger.info("[%s] ← LLM: '%s'", pc_id, llm_response[:50] + "...")
 
         if ch and ch.readyState == "open":
@@ -290,47 +321,135 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         # TTS streaming
         if tts_pipeline and llm_response.strip():
             logger.info("[%s] → TTS", pc_id)
+            t_tts_start = _time.perf_counter()
             tts_interrupt_flags[pc_id] = True
 
             if ch and ch.readyState == "open":
                 ch.send(json.dumps({"type": "tts_started"}))
 
             try:
-                chunks_sent = 0
                 async for audio_chunk in tts_pipeline.text_to_speech_stream(llm_response):
                     if not tts_interrupt_flags.get(pc_id, False):
-                        logger.warning("[%s] 🛑 TTS interrupted after %d chunks", pc_id, chunks_sent)
+                        tts_interrupted = True
+                        logger.warning("[%s] TTS interrupted after %d chunks", pc_id, tts_chunks_sent)
                         if ch and ch.readyState == "open":
-                            ch.send(json.dumps({"type": "tts_interrupted", "chunks_sent": chunks_sent}))
+                            ch.send(json.dumps({"type": "tts_interrupted", "chunks_sent": tts_chunks_sent}))
                         break
 
                     if ch and ch.readyState == "open":
-                        if chunks_sent == 0:
-                            logger.info("[%s] Sending first TTS chunk (%d bytes)", pc_id, len(audio_chunk))
+                        if tts_chunks_sent == 0:
+                            t_tts_first_chunk = _time.perf_counter()
+                            logger.info("[%s] First TTS chunk (%d bytes)", pc_id, len(audio_chunk))
                         ch.send(json.dumps({
                             "type": "tts_chunk",
                             "audio": base64.b64encode(audio_chunk).decode("utf-8"),
                         }))
-                        chunks_sent += 1
+                        tts_chunks_sent += 1
                 else:
-                    logger.info("[%s] ✓ TTS complete (%d chunks)", pc_id, chunks_sent)
+                    logger.info("[%s] TTS complete (%d chunks)", pc_id, tts_chunks_sent)
                     if ch and ch.readyState == "open":
                         ch.send(json.dumps({"type": "tts_complete"}))
             finally:
                 tts_interrupt_flags[pc_id] = False
+                t_tts_end = _time.perf_counter()
 
     except asyncio.CancelledError:
         logger.info("[%s] Turn processing cancelled (new turn arrived)", pc_id)
+        tts_interrupted = True
         tts_interrupt_flags[pc_id] = False
         ch = datachannels.get(pc_id)
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "tts_interrupted", "reason": "new_turn"}))
     except Exception as e:
+        error_msg = str(e)
         logger.exception("[%s] Pipeline error: %s", pc_id, e)
         if ch and ch.readyState == "open":
-            ch.send(json.dumps({"type": "error", "message": str(e)}))
+            ch.send(json.dumps({"type": "error", "message": error_msg}))
     finally:
+        t_end = _time.perf_counter()
         turn_processing_tasks.pop(pc_id, None)
+
+        # ── Compute all latencies ──
+        def _ms(start, end):
+            if start is not None and end is not None:
+                return round((end - start) * 1000, 2)
+            return None
+
+        llm_metrics = pipeline.get_last_call_metrics() or {}
+
+        latency_vad_ms = None
+        latency_stt_ms = _ms(t_speech_start, t_stt_final) if t_speech_start and t_stt_final else None
+        latency_stt_to_llm_ms = _ms(t_turn_confirmed, t_llm_start)
+        latency_llm_ms = llm_metrics.get("latency_llm_ms") or _ms(t_llm_start, t_llm_end)
+        latency_tool_ms = llm_metrics.get("latency_tool_ms")
+        latency_tts_ms = _ms(t_tts_start, t_tts_end)
+        latency_tts_first_chunk_ms = _ms(t_tts_start, t_tts_first_chunk)
+        latency_total_ms = _ms(t_speech_start or t_turn_confirmed, t_end)
+        turn_detection_ms = t_turn_detection
+
+        metrics_payload = {
+            "latency_stt_ms": latency_stt_ms,
+            "latency_turn_detection_ms": turn_detection_ms,
+            "latency_stt_to_llm_ms": latency_stt_to_llm_ms,
+            "latency_llm_ms": latency_llm_ms,
+            "latency_tool_ms": latency_tool_ms,
+            "latency_tts_ms": latency_tts_ms,
+            "latency_tts_first_chunk_ms": latency_tts_first_chunk_ms,
+            "latency_total_ms": latency_total_ms,
+            "tts_chunks_sent": tts_chunks_sent,
+            "tts_interrupted": tts_interrupted,
+            "smart_turn_result": smart_turn_result,
+        }
+
+        # Send metrics to client
+        ch = datachannels.get(pc_id)
+        if ch and ch.readyState == "open":
+            try:
+                ch.send(json.dumps({"type": "pipeline_metrics", **metrics_payload}))
+            except Exception:
+                pass
+
+        # Log to console
+        logger.info(
+            "[%s] METRICS: stt=%s turn=%s llm=%s tool=%s tts=%s tts_ttfb=%s total=%s interrupted=%s",
+            pc_id,
+            latency_stt_ms, turn_detection_ms, latency_llm_ms, latency_tool_ms,
+            latency_tts_ms, latency_tts_first_chunk_ms, latency_total_ms, tts_interrupted,
+        )
+
+        # ── Save to DB ──
+        try:
+            from funcs.models import VoicePipelineLogRepo
+            user_id = peer_user_ids.get(pc_id, "default_user")
+            VoicePipelineLogRepo.save(
+                session_id=pc_id,
+                user_id=user_id,
+                mode="voice",
+                user_message=user_text,
+                response_text=(llm_response[:2000] if llm_response else None),
+                llm_provider=pipeline.provider,
+                llm_model=getattr(pipeline.client, "model", pipeline.provider),
+                latency_vad_ms=latency_vad_ms,
+                latency_stt_ms=latency_stt_ms,
+                latency_turn_detection_ms=turn_detection_ms,
+                latency_stt_to_llm_ms=latency_stt_to_llm_ms,
+                latency_llm_ms=latency_llm_ms,
+                latency_llm_first_token_ms=llm_metrics.get("latency_stream_ms"),
+                latency_tool_ms=latency_tool_ms,
+                latency_tts_ms=latency_tts_ms,
+                latency_tts_first_chunk_ms=latency_tts_first_chunk_ms,
+                latency_total_ms=latency_total_ms,
+                tool_calls_json=json.dumps(llm_metrics.get("tool_calls", [])) if llm_metrics.get("tool_calls") else None,
+                tokens_in=llm_metrics.get("tokens_in"),
+                tokens_out=llm_metrics.get("tokens_out"),
+                tts_chunks_sent=tts_chunks_sent,
+                tts_interrupted=tts_interrupted,
+                smart_turn_used=smart_turn_result is not None,
+                smart_turn_result=smart_turn_result,
+                error=error_msg,
+            )
+        except Exception as log_err:
+            logger.warning("[%s] Failed to save voice pipeline log: %s", pc_id, log_err)
 
 
 async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
@@ -360,13 +479,15 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
         # Wire up fallback callback: when silence exceeds stop_secs, force-complete
         async def on_fallback_complete(text: str):
+            timing = turn_timing.setdefault(pc_id, {})
+            timing["smart_turn_result"] = "fallback"
             await _process_user_turn(pc_id, text)
 
         st_session.set_turn_complete_callback(on_fallback_complete)
         logger.info("[%s] Smart Turn session created", pc_id)
 
     async def on_deepgram_event(data: Dict):
-        """Handle Deepgram transcript events.
+        """Handle Deepgram transcript events with full timing instrumentation.
 
         Key distinction:
           - is_final: transcript for this audio segment is finalized (fires often)
@@ -390,15 +511,19 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             ch = datachannels.get(pc_id)
             tts_was_active = tts_interrupt_flags.get(pc_id, False)
 
+            # ── Timing: record first speech detection ──
+            timing = turn_timing.setdefault(pc_id, {})
+            if transcript.strip() and "speech_start_ts" not in timing:
+                timing["speech_start_ts"] = _time.perf_counter()
+
             if ch and ch.readyState == "open":
                 # Interruption: stop TTS if user speaks during playback
                 if transcript.strip() and tts_was_active:
                     logger.warning(
-                        "[%s] 🛑 INTERRUPT - User speaking during TTS: '%s'",
+                        "[%s] INTERRUPT - User speaking during TTS: '%s'",
                         pc_id, transcript[:30],
                     )
                     tts_interrupt_flags[pc_id] = False
-                    # Reset Smart Turn so interrupt speech starts a fresh turn
                     if st_session:
                         st_session._reset_turn()
                         logger.info("[%s] Smart Turn reset for new turn after interrupt", pc_id)
@@ -413,21 +538,27 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
             if st_session:
                 # ── Smart Turn path ──────────────────────────────
-                # Step 1: Accumulate finalized transcript segments
                 if is_final and transcript.strip():
                     st_session.accumulate_transcript(transcript)
+                    # Record STT final timestamp
+                    timing["stt_final_ts"] = _time.perf_counter()
 
-                # Step 2: Only run Smart Turn when Deepgram detects an actual pause
                 if speech_final and st_session.accumulated_transcript.strip():
                     logger.info("[%s] Speech final → Smart Turn (text='%s')",
                                 pc_id, st_session.accumulated_transcript[:60])
 
+                    t_smart_start = _time.perf_counter()
                     is_complete, accumulated_text = await st_session.on_speech_final("")
+                    t_smart_end = _time.perf_counter()
+
+                    timing["turn_detection_ms"] = round((t_smart_end - t_smart_start) * 1000, 2)
+                    timing["smart_turn_result"] = "complete" if is_complete else "incomplete"
 
                     if ch and ch.readyState == "open":
                         ch.send(json.dumps({
                             "type": "smart_turn",
                             "is_complete": is_complete,
+                            "latency_ms": timing["turn_detection_ms"],
                         }))
 
                     if is_complete and accumulated_text:
@@ -437,6 +568,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 # ── Legacy path (no Smart Turn) ──────────────────
                 if (is_final or speech_final) and transcript.strip():
                     logger.info("[%s] Final: '%s'", pc_id, transcript)
+                    timing["stt_final_ts"] = _time.perf_counter()
                     await _process_user_turn(pc_id, transcript)
 
     dg_stream_task: Optional[asyncio.Task] = None
@@ -624,9 +756,9 @@ async def chat(chat_msg: ChatMessage, request: Request):
                 anim = animation_events.pop(0)
                 yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
 
-            # Save observability log
+            # Save observability log (legacy + unified)
             try:
-                from funcs.models import LLMCallLogRepo
+                from funcs.models import LLMCallLogRepo, VoicePipelineLogRepo
                 metrics = pipeline.get_last_call_metrics()
                 if metrics:
                     LLMCallLogRepo.save(
@@ -641,6 +773,23 @@ async def chat(chat_msg: ChatMessage, request: Request):
                         latency_llm_ms=metrics.get("latency_llm_ms"),
                         latency_tool_ms=metrics.get("latency_tool_ms"),
                         latency_stream_ms=metrics.get("latency_stream_ms"),
+                        tokens_in=metrics.get("tokens_in"),
+                        tokens_out=metrics.get("tokens_out"),
+                        error=metrics.get("error"),
+                    )
+                    # Also save to unified pipeline log
+                    VoicePipelineLogRepo.save(
+                        session_id=session_id,
+                        user_id=user_id,
+                        mode="chat",
+                        user_message=chat_msg.message,
+                        response_text=(metrics.get("response_text") or "")[:2000],
+                        llm_provider=pipeline.provider,
+                        llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                        latency_llm_ms=metrics.get("latency_llm_ms"),
+                        latency_tool_ms=metrics.get("latency_tool_ms"),
+                        latency_total_ms=metrics.get("latency_total_ms"),
+                        tool_calls_json=json.dumps(metrics.get("tool_calls", [])),
                         tokens_in=metrics.get("tokens_in"),
                         tokens_out=metrics.get("tokens_out"),
                         error=metrics.get("error"),
@@ -737,6 +886,57 @@ async def get_logs_stats():
     """Get aggregated LLM call stats."""
     from funcs.models import LLMCallLogRepo
     stats = LLMCallLogRepo.get_stats()
+    return JSONResponse(stats)
+
+
+@app.get("/api/voice-logs")
+async def get_voice_logs(limit: int = 50, offset: int = 0, mode: Optional[str] = None):
+    """Get recent voice pipeline logs with full stage latencies."""
+    from funcs.models import VoicePipelineLogRepo
+    logs = VoicePipelineLogRepo.get_recent(limit=min(limit, 200), offset=offset, mode=mode)
+    return JSONResponse({
+        "logs": [
+            {
+                "id": log.id,
+                "session_id": log.session_id,
+                "user_id": log.user_id,
+                "mode": log.mode,
+                "user_message": log.user_message,
+                "response_text": log.response_text,
+                "llm_provider": log.llm_provider,
+                "llm_model": log.llm_model,
+                "latency_vad_ms": log.latency_vad_ms,
+                "latency_stt_ms": log.latency_stt_ms,
+                "latency_turn_detection_ms": log.latency_turn_detection_ms,
+                "latency_stt_to_llm_ms": log.latency_stt_to_llm_ms,
+                "latency_llm_ms": log.latency_llm_ms,
+                "latency_llm_first_token_ms": log.latency_llm_first_token_ms,
+                "latency_tool_ms": log.latency_tool_ms,
+                "latency_tts_ms": log.latency_tts_ms,
+                "latency_tts_first_chunk_ms": log.latency_tts_first_chunk_ms,
+                "latency_total_ms": log.latency_total_ms,
+                "tool_calls": log.get_tool_calls(),
+                "tokens_in": log.tokens_in,
+                "tokens_out": log.tokens_out,
+                "tts_chunks_sent": log.tts_chunks_sent,
+                "tts_interrupted": log.tts_interrupted,
+                "smart_turn_used": log.smart_turn_used,
+                "smart_turn_result": log.smart_turn_result,
+                "error": log.error,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in logs
+        ],
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+@app.get("/api/voice-logs/stats")
+async def get_voice_logs_stats(mode: Optional[str] = None):
+    """Get aggregated voice pipeline stats with per-stage averages."""
+    from funcs.models import VoicePipelineLogRepo
+    stats = VoicePipelineLogRepo.get_stats(mode=mode)
     return JSONResponse(stats)
 
 
