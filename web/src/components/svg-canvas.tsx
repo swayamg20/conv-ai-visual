@@ -1012,30 +1012,41 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
       const url = URL.createObjectURL(svgBlob);
 
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement("canvas");
-        const scale = 2;
-        canvas.width = width * scale;
-        canvas.height = height * scale;
-        const ctx = canvas.getContext("2d")!;
-        ctx.scale(scale, scale);
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
+      const hasForeignObject = clone.querySelector("foreignObject") !== null;
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
 
-        canvas.toBlob((blob) => {
-          if (!blob) return;
-          const pngUrl = URL.createObjectURL(blob);
-          const a = document.createElement("a");
-          a.download = `canvas_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.png`;
-          a.href = pngUrl;
-          a.click();
-          URL.revokeObjectURL(pngUrl);
-        }, "image/png");
-        URL.revokeObjectURL(url);
-      };
-      img.src = url;
+      if (hasForeignObject) {
+        const a = document.createElement("a");
+        a.download = `canvas_${timestamp}.svg`;
+        a.href = url;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 100);
+      } else {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const scale = 2;
+          canvas.width = width * scale;
+          canvas.height = height * scale;
+          const ctx = canvas.getContext("2d")!;
+          ctx.scale(scale, scale);
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+
+          canvas.toBlob((blob) => {
+            if (!blob) return;
+            const pngUrl = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.download = `canvas_${timestamp}.png`;
+            a.href = pngUrl;
+            a.click();
+            URL.revokeObjectURL(pngUrl);
+          }, "image/png");
+          URL.revokeObjectURL(url);
+        };
+        img.src = url;
+      }
     }, [width, height]);
 
     // ============= Expose Handle =============
