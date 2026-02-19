@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, Fira_Code } from "next/font/google";
+import { Inter, Fira_Code, Caveat, Patrick_Hand } from "next/font/google";
 import "./globals.css";
 import "@excalidraw/excalidraw/index.css";
 
@@ -15,6 +15,19 @@ const firaCode = Fira_Code({
   display: "swap",
 });
 
+const caveat = Caveat({
+  subsets: ["latin"],
+  variable: "--font-handwriting",
+  display: "swap",
+});
+
+const patrickHand = Patrick_Hand({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-handwriting-alt",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Voice AI",
   description: "Real-time voice assistant with canvas capabilities",
@@ -27,7 +40,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${firaCode.variable} font-sans antialiased`}>
+      <body className={`${inter.variable} ${firaCode.variable} ${caveat.variable} ${patrickHand.variable} font-sans antialiased`}>
         {children}
       </body>
     </html>

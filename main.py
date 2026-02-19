@@ -206,6 +206,35 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
                 }))
 
         voice_pipeline.set_canvas_callback(canvas_broadcast)
+
+        async def animation_broadcast(data):
+            ch = datachannels.get(pc_id)
+            if ch and ch.readyState == "open":
+                tool_name = data.get("tool", "")
+                if tool_name == "create_teaching_sequence" and data.get("timeline"):
+                    ch.send(json.dumps({
+                        "type": "teaching_sequence",
+                        "timeline": data["timeline"],
+                    }))
+                elif tool_name == "render_latex" and data.get("element"):
+                    ch.send(json.dumps({
+                        "type": "latex",
+                        "element": data["element"],
+                    }))
+                elif tool_name == "animate_element" and data.get("animation_command"):
+                    ch.send(json.dumps({
+                        "type": "animation",
+                        "tool": tool_name,
+                        **data,
+                    }))
+                elif tool_name == "plot_function" and data.get("graph"):
+                    ch.send(json.dumps({
+                        "type": "animation",
+                        "tool": tool_name,
+                        **data,
+                    }))
+
+        voice_pipeline.set_animation_callback(animation_broadcast)
         voice_sessions[pc_id] = voice_pipeline
         logger.info("[%s] Session created (%d tools)", pc_id, len(voice_pipeline.get_tools_schema()))
     return voice_sessions[pc_id]

@@ -363,7 +363,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         text.setAttribute("y", String(op.y ?? 0));
         text.setAttribute("fill", op.color ?? "#000000");
         text.setAttribute("font-size", String(op.font_size ?? 16));
-        text.setAttribute("font-family", op.font_family ?? "'Caveat', 'Patrick Hand', cursive, sans-serif");
+        text.setAttribute("font-family", op.font_family ?? "var(--font-handwriting), var(--font-handwriting-alt), cursive, sans-serif");
         text.textContent = op.text ?? "";
         g.appendChild(text);
         return g;
