@@ -19,6 +19,7 @@ Feat/TO DO:
 - less priority:
   - quartz based documentation
 - not just teaching an exisiting/famous topic but instead, user should be able to discuss, experiment, think, generate,   explore with canvas
+- agent should also find images and put it in canvas on the realtime while explaining
 
 In Test:
 - Interuption Handling
