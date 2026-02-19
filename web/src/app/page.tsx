@@ -96,6 +96,17 @@ export default function Home() {
     handleLog(`State → ${state}`);
   }, [handleLog]);
 
+  const handlePipelineMetrics = useCallback((metrics: Record<string, any>) => {
+    const parts = [];
+    if (metrics.latency_stt_ms) parts.push(`STT:${metrics.latency_stt_ms}ms`);
+    if (metrics.latency_llm_ms) parts.push(`LLM:${metrics.latency_llm_ms}ms`);
+    if (metrics.latency_tool_ms) parts.push(`Tool:${metrics.latency_tool_ms}ms`);
+    if (metrics.latency_tts_ms) parts.push(`TTS:${metrics.latency_tts_ms}ms`);
+    if (metrics.latency_total_ms) parts.push(`Total:${metrics.latency_total_ms}ms`);
+    if (metrics.tts_interrupted) parts.push("(interrupted)");
+    handleLog(`Pipeline: ${parts.join(" | ")}`);
+  }, [handleLog]);
+
   const {
     status,
     pipelineState,
@@ -113,6 +124,7 @@ export default function Home() {
     onAnimation: handleAnimationEvent,
     onLatex: (data: any) => data.element && handleLatex(data.element),
     onTeachingSequence: (data: any) => data.timeline && handleTeachingSequence(data.timeline),
+    onPipelineMetrics: handlePipelineMetrics,
     onError: handleError,
     onLog: handleLog,
     onStateChange: handleStateChange,
