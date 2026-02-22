@@ -448,6 +448,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         latency_stt_ms = _ms(t_speech_start, t_stt_final) if t_speech_start and t_stt_final else None
         latency_stt_to_llm_ms = _ms(t_turn_confirmed, t_llm_start)
         latency_llm_ms = llm_metrics.get("latency_llm_ms") or _ms(t_llm_start, t_llm_end)
+        latency_llm_first_token_ms = llm_metrics.get("latency_llm_first_token_ms")
         latency_tool_ms = llm_metrics.get("latency_tool_ms")
         latency_tts_ms = _ms(t_tts_start, t_tts_end)
         latency_tts_first_chunk_ms = _ms(t_tts_start, t_tts_first_chunk)
@@ -459,6 +460,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
             "latency_turn_detection_ms": turn_detection_ms,
             "latency_stt_to_llm_ms": latency_stt_to_llm_ms,
             "latency_llm_ms": latency_llm_ms,
+            "latency_llm_first_token_ms": latency_llm_first_token_ms,
+            "latency_context_ms": llm_metrics.get("latency_context_ms"),
+            "latency_tools_schema_ms": llm_metrics.get("latency_tools_schema_ms"),
             "latency_tool_ms": latency_tool_ms,
             "latency_tts_ms": latency_tts_ms,
             "latency_tts_first_chunk_ms": latency_tts_first_chunk_ms,
@@ -501,7 +505,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 latency_turn_detection_ms=turn_detection_ms,
                 latency_stt_to_llm_ms=latency_stt_to_llm_ms,
                 latency_llm_ms=latency_llm_ms,
-                latency_llm_first_token_ms=llm_metrics.get("latency_stream_ms"),
+                latency_llm_first_token_ms=latency_llm_first_token_ms,
                 latency_tool_ms=latency_tool_ms,
                 latency_tts_ms=latency_tts_ms,
                 latency_tts_first_chunk_ms=latency_tts_first_chunk_ms,
@@ -854,6 +858,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
                         llm_provider=pipeline.provider,
                         llm_model=getattr(pipeline.client, 'model', pipeline.provider),
                         latency_llm_ms=metrics.get("latency_llm_ms"),
+                        latency_llm_first_token_ms=metrics.get("latency_llm_first_token_ms"),
                         latency_tool_ms=metrics.get("latency_tool_ms"),
                         latency_total_ms=metrics.get("latency_total_ms"),
                         tool_calls_json=json.dumps(metrics.get("tool_calls", [])),

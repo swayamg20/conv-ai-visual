@@ -46,9 +46,14 @@ class Config:
 
     # Memory config
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY")
+    MEMORY_SEMANTIC_TIMEOUT_SECS: float = float(os.getenv("MEMORY_SEMANTIC_TIMEOUT_SECS", "1.0"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
+    LLM_ASYNC_CONTEXT: bool = os.getenv("LLM_ASYNC_CONTEXT", "true").lower() == "true"
+    LLM_TOOL_SCHEMA_CACHE: bool = os.getenv("LLM_TOOL_SCHEMA_CACHE", "true").lower() == "true"
+    LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "false").lower() == "true"
+    LLM_PARALLEL_TOOLS: bool = os.getenv("LLM_PARALLEL_TOOLS", "false").lower() == "true"
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
         "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."

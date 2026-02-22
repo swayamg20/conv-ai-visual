@@ -4,9 +4,9 @@ SQLModel database models.
 import os
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from sqlmodel import SQLModel, Field, create_engine, Session, select
-from sqlalchemy import Column, JSON
+from sqlalchemy import Column, JSON, func
 
 # Database path - use absolute path to avoid readonly issues
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "memory.db"))
@@ -335,6 +335,23 @@ class DecisionMemoryRepo:
 
 class ToolRepo:
     """Repository for tool operations."""
+    _openai_schema_cache: Optional[List[Dict]] = None
+    _openai_schema_cache_key: Optional[Tuple[int, Optional[datetime]]] = None
+
+    @staticmethod
+    def _invalidate_schema_cache():
+        ToolRepo._openai_schema_cache = None
+        ToolRepo._openai_schema_cache_key = None
+
+    @staticmethod
+    def _get_enabled_schema_cache_key() -> Tuple[int, Optional[datetime]]:
+        with get_session() as session:
+            stmt = select(
+                func.count(ToolModel.name),
+                func.max(ToolModel.updated_at),
+            ).where(ToolModel.enabled == True)
+            count, latest_updated_at = session.exec(stmt).one()
+            return int(count or 0), latest_updated_at
     
     @staticmethod
     def upsert(name: str, description: str, parameters: Dict,
@@ -365,6 +382,7 @@ class ToolRepo:
             session.add(tool)
             session.commit()
             session.refresh(tool)
+            ToolRepo._invalidate_schema_cache()
             return tool
     
     @staticmethod
@@ -393,6 +411,7 @@ class ToolRepo:
             if tool:
                 session.delete(tool)
                 session.commit()
+                ToolRepo._invalidate_schema_cache()
                 return True
             return False
     
@@ -405,14 +424,28 @@ class ToolRepo:
                 tool.updated_at = datetime.utcnow()
                 session.add(tool)
                 session.commit()
+                ToolRepo._invalidate_schema_cache()
                 return True
             return False
     
     @staticmethod
     def to_openai_format() -> List[Dict]:
-        """Get all enabled tools in OpenAI format."""
+        """
+        Get all enabled tools in OpenAI format.
+        Uses an in-memory cache invalidated on tool mutations.
+        """
+        cache_key = ToolRepo._get_enabled_schema_cache_key()
+        if (
+            ToolRepo._openai_schema_cache is not None
+            and ToolRepo._openai_schema_cache_key == cache_key
+        ):
+            return ToolRepo._openai_schema_cache
+
         tools = ToolRepo.list_all(enabled_only=True)
-        return [t.to_openai_schema() for t in tools]
+        formatted = [t.to_openai_schema() for t in tools]
+        ToolRepo._openai_schema_cache = formatted
+        ToolRepo._openai_schema_cache_key = cache_key
+        return formatted
     
     @staticmethod
     def to_anthropic_format() -> List[Dict]:
@@ -478,7 +511,6 @@ class LLMCallLogRepo:
     def get_stats() -> Dict:
         """Get aggregated stats."""
         with get_session() as db:
-            from sqlalchemy import func
             total = db.exec(
                 select(func.count(LLMCallLogModel.id))
             ).one()
@@ -495,11 +527,25 @@ class LLMCallLogRepo:
                 select(func.count(LLMCallLogModel.id)).where(LLMCallLogModel.error.isnot(None))
             ).one()
 
+            def _percentile(col, p: float) -> Optional[float]:
+                values = [v for v in db.exec(select(col).where(col.isnot(None))).all() if v is not None]
+                if not values:
+                    return None
+                values.sort()
+                rank = int(round((p / 100.0) * (len(values) - 1)))
+                rank = min(max(rank, 0), len(values) - 1)
+                return round(values[rank], 2)
+
             return {
                 "total_calls": total or 0,
                 "avg_latency_ms": round(avg_total or 0, 2),
                 "avg_llm_latency_ms": round(avg_llm or 0, 2),
                 "avg_tool_latency_ms": round(avg_tool or 0, 2),
+                "p50_llm_latency_ms": _percentile(LLMCallLogModel.latency_llm_ms, 50),
+                "p95_llm_latency_ms": _percentile(LLMCallLogModel.latency_llm_ms, 95),
+                # For chat logs this is currently "stream phase" latency.
+                "p50_stream_latency_ms": _percentile(LLMCallLogModel.latency_stream_ms, 50),
+                "p95_stream_latency_ms": _percentile(LLMCallLogModel.latency_stream_ms, 95),
                 "error_count": error_count or 0,
                 "error_rate": round((error_count or 0) / total * 100, 2) if total else 0
             }
@@ -534,8 +580,6 @@ class VoicePipelineLogRepo:
     def get_stats(mode: Optional[str] = None) -> Dict:
         """Get aggregated pipeline stats."""
         with get_session() as db:
-            from sqlalchemy import func
-
             base = select(func.count(VoicePipelineLogModel.id))
             if mode:
                 base = base.where(VoicePipelineLogModel.mode == mode)
@@ -547,6 +591,18 @@ class VoicePipelineLogRepo:
                 if mode:
                     q = q.where(VoicePipelineLogModel.mode == mode)
                 return round(db.exec(q).one() or 0, 2)
+
+            def _percentile(col, p: float) -> Optional[float]:
+                q = select(col).where(col.isnot(None))
+                if mode:
+                    q = q.where(VoicePipelineLogModel.mode == mode)
+                values = [v for v in db.exec(q).all() if v is not None]
+                if not values:
+                    return None
+                values.sort()
+                rank = int(round((p / 100.0) * (len(values) - 1)))
+                rank = min(max(rank, 0), len(values) - 1)
+                return round(values[rank], 2)
 
             error_q = select(func.count(VoicePipelineLogModel.id)).where(
                 VoicePipelineLogModel.error.isnot(None)
@@ -570,6 +626,8 @@ class VoicePipelineLogRepo:
                 "avg_turn_detection_ms": _avg(VoicePipelineLogModel.latency_turn_detection_ms),
                 "avg_llm_ms": _avg(VoicePipelineLogModel.latency_llm_ms),
                 "avg_llm_ttft_ms": _avg(VoicePipelineLogModel.latency_llm_first_token_ms),
+                "p50_llm_ttft_ms": _percentile(VoicePipelineLogModel.latency_llm_first_token_ms, 50),
+                "p95_llm_ttft_ms": _percentile(VoicePipelineLogModel.latency_llm_first_token_ms, 95),
                 "avg_tool_ms": _avg(VoicePipelineLogModel.latency_tool_ms),
                 "avg_tts_ms": _avg(VoicePipelineLogModel.latency_tts_ms),
                 "avg_tts_ttfb_ms": _avg(VoicePipelineLogModel.latency_tts_first_chunk_ms),
