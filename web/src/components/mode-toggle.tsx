@@ -14,7 +14,7 @@ interface ModeToggleProps {
 
 export function ModeToggle({ mode, onChange, disabled }: ModeToggleProps) {
   return (
-    <div className="flex items-center gap-1 p-1 rounded-xl bg-white/5 border border-white/10">
+    <div className="flex items-center gap-1 p-1 rounded-xl bg-void border border-chalk-faint/30">
       <button
         onClick={() => onChange("voice")}
         disabled={disabled}
@@ -29,7 +29,7 @@ export function ModeToggle({ mode, onChange, disabled }: ModeToggleProps) {
         {mode === "voice" && (
           <motion.div
             layoutId="mode-bg"
-            className="absolute inset-0 bg-primary/20 rounded-lg"
+            className="absolute inset-0 bg-amber/15 rounded-lg"
             transition={{ type: "spring", bounce: 0.2, duration: 0.4 }}
           />
         )}
@@ -50,7 +50,7 @@ export function ModeToggle({ mode, onChange, disabled }: ModeToggleProps) {
         {mode === "chat" && (
           <motion.div
             layoutId="mode-bg"
-            className="absolute inset-0 bg-primary/20 rounded-lg"
+            className="absolute inset-0 bg-amber/15 rounded-lg"
             transition={{ type: "spring", bounce: 0.2, duration: 0.4 }}
           />
         )}

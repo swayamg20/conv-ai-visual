@@ -9,10 +9,10 @@ const floatingButtonVariants = cva(
     variants: {
       variant: {
         primary:
-          "bg-gradient-to-r from-accent-start to-accent-end text-primary-foreground shadow-lg hover:shadow-xl hover:scale-[1.02]",
+          "bg-amber text-void shadow-orb-amber hover:brightness-110 hover:scale-[1.02]",
         secondary:
-          "glass-card text-foreground hover:bg-white/10",
-        ghost: "hover:bg-white/5 text-foreground",
+          "glass-card text-foreground hover:bg-white/5",
+        ghost: "hover:bg-graphite text-foreground",
       },
       size: {
         sm: "h-10 px-4 text-sm rounded-lg",

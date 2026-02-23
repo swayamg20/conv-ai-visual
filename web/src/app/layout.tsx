@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Inter, Fira_Code } from "next/font/google";
+import { Inter, JetBrains_Mono, Caveat, Patrick_Hand } from "next/font/google";
 import "./globals.css";
 import "@excalidraw/excalidraw/index.css";
 
@@ -9,15 +9,28 @@ const inter = Inter({
   display: "swap",
 });
 
-const firaCode = Fira_Code({
+const jetBrainsMono = JetBrains_Mono({
   subsets: ["latin"],
   variable: "--font-mono",
   display: "swap",
 });
 
+const caveat = Caveat({
+  subsets: ["latin"],
+  variable: "--font-handwriting",
+  display: "swap",
+});
+
+const patrickHand = Patrick_Hand({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-handwriting-alt",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  title: "Voice AI",
-  description: "Real-time voice assistant with canvas capabilities",
+  title: "Murmur",
+  description: "Real-time voice assistant that thinks visually",
 };
 
 export default function RootLayout({
@@ -27,7 +40,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${firaCode.variable} font-sans antialiased`}>
+      <body className={`${inter.variable} ${jetBrainsMono.variable} ${caveat.variable} ${patrickHand.variable} font-sans antialiased`}>
         {children}
       </body>
     </html>

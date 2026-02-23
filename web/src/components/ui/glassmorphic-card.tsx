@@ -3,12 +3,12 @@ import { cn } from "@/lib/utils";
 import { cva, type VariantProps } from "class-variance-authority";
 
 const glassmorphicCardVariants = cva(
-  "glass-card rounded-lg",
+  "glass-card",
   {
     variants: {
       variant: {
         default: "",
-        elevated: "bg-background-elevated/50",
+        elevated: "bg-slate/50",
         interactive: "glass-card-hover cursor-pointer",
       },
       shadow: {

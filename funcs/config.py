@@ -24,7 +24,7 @@ class Config:
     # Lower values = faster finalization (but may cut off mid-sentence)
     # Recommended: 1500-2000ms for natural conversation with pauses
     # Default: 1800ms (1.8 seconds) - patient enough for natural speech
-    DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "1800"))
+    DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "1000"))
     # Utterance end: milliseconds of gap after last word before sending UtteranceEnd event
     # This works with endpointing to detect complete sentences vs just silence
     # Lower values = faster response but may cut mid-thought
@@ -36,15 +36,24 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    # Groq config (OpenAI-compatible, ultra-fast inference)
+    GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
     # Gemini config
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
     # Memory config
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY")
+    MEMORY_SEMANTIC_TIMEOUT_SECS: float = float(os.getenv("MEMORY_SEMANTIC_TIMEOUT_SECS", "1.0"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
+    LLM_ASYNC_CONTEXT: bool = os.getenv("LLM_ASYNC_CONTEXT", "true").lower() == "true"
+    LLM_TOOL_SCHEMA_CACHE: bool = os.getenv("LLM_TOOL_SCHEMA_CACHE", "true").lower() == "true"
+    LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "false").lower() == "true"
+    LLM_PARALLEL_TOOLS: bool = os.getenv("LLM_PARALLEL_TOOLS", "false").lower() == "true"
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
         "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."
@@ -142,104 +151,101 @@ ALWAYS use canvas_update. Build diagrams incrementally as you explain each compo
     # Math Tutor System Prompt (with animations)
     LLM_MATH_TUTOR_PROMPT: str = os.getenv(
         "LLM_MATH_TUTOR_PROMPT",
-        """You are an AI math tutor with an animated whiteboard. You teach math concepts using synchronized voice explanations and animated hand-drawn visuals.
+        """You are a visual AI tutor with an animated hand-drawn whiteboard. You MUST teach using DIAGRAMS, SHAPES, and ARROWS — not text bullet lists.
 
-TEACHING PHILOSOPHY:
-- Show, don't just tell - use animations to reveal concepts step-by-step
-- Synchronize voice with visuals (say "Let's solve for x..." as you animate the equation)
-- Build from simple to complex (start with basics, add details incrementally)
-- Use hand-drawn aesthetic for friendly, approachable feel
+ABSOLUTE RULE: Your teaching_sequence steps must be at least 60% visual shapes (rect, circle, ellipse, line, arrow, latex). Text steps are ONLY for short labels (≤8 words). NEVER create a sequence that is all text steps — that is a failure. If you catch yourself writing text-heavy content, STOP and redraw it as a diagram.
 
-VISUAL VOCABULARY:
+EVERY step MUST have a speech_cue field — this is what gets spoken aloud. The speech_cue is your voice narration. Put ALL your explanation in speech_cues, NOT in text steps on the canvas.
 
-Drawing Shapes (with Rough.js hand-drawn style):
-- rect: Boxes for equations, terms, results
-- circle: Highlight points, important values
-- ellipse: Regions, groupings
-- line/arrow: Show relationships, transformations
-- text: Labels, annotations
-- latex: Render mathematical equations beautifully
+WHAT TO DRAW (examples):
+- "Explain LLMs" → Draw a box for "Input Text", arrow to box "Tokenizer", arrow to stacked rects "Transformer Layers", arrow to "Output". Use latex for attention formula.
+- "Solve 2x + 3 = 7" → Use latex for equations, arrows between steps, crossout old equations, rect around final answer.
+- "Explain binary search" → Draw an array as a row of rects with numbers, arrows for left/right pointers, highlight the mid element.
+- "What is a neural network?" → Draw circles for neurons in columns (layers), arrows connecting them, labels for "Input", "Hidden", "Output".
 
-Animations (GSAP):
-- Fade in: Reveal new elements (opacity: 0 → 1, duration: 0.4)
-- Slide in: Elements entering (y: 20 → 0, duration: 0.5)
-- Scale pulse: Emphasize important parts (scale: 1 → 1.15 → 1)
-- Move: Show transformations (x, y coordinates change)
-- Rotate: Geometric transformations
+TOOLS:
+1. create_teaching_sequence — Primary tool. Steps: clear, rect, circle, ellipse, line, arrow, path, text, latex, highlight, crossout, animate, pause.
+2. render_latex — Math equations: \\\\frac{a}{b}, x^2, \\\\sqrt{x}
+3. plot_function — Animated graphs with axes
+4. animate_element — Move, scale, fade elements
 
-Math-Specific Tools:
-1. render_latex: Display equations (e.g., "\\\\frac{x^2 + 3x + 2}{x + 1}")
-2. animate_element: Move, scale, fade elements
-3. plot_function: Graph mathematical functions
-4. create_teaching_sequence: Multi-step teaching animations
+STEP TYPES:
+- rect: Boxes for components/concepts. MUST have x, y, width, height, color.
+- circle: Nodes, points. MUST have x, y, width (diameter), color.
+- arrow: Connections, flow. MUST have points: [[x1,y1],[x2,y2]], color.
+- line: Separators, axes. MUST have points.
+- latex: Math equations. MUST have latex, x, y. Use target_id for later reference.
+- text: SHORT labels only (≤8 words). For titles or labeling shapes. MUST have text, x, y, font_size.
+- highlight: Pulse an element. Use target_id + highlight_color.
+- crossout: Strike through wrong answers. Use target_id.
+- clear: Wipe canvas for new topic.
+- pause: Brief pause between visual groups (duration: 0.3-0.5).
 
-TEACHING PATTERNS:
+SPEECH_CUE RULES:
+- EVERY step that draws something MUST have a speech_cue explaining what's being drawn.
+- speech_cues are concatenated and spoken aloud via TTS — they ARE your voice narration.
+- Write them conversationally: "Let's start by drawing the input layer..." not "This is the input layer."
+- Together, all speech_cues should form a coherent spoken explanation.
 
-Step-by-Step Equation Solving:
-1. Draw initial equation with render_latex
-2. Highlight the term to manipulate (use highlight or animate with scale)
-3. Show operation (draw annotation with text)
-4. Animate equation moving to new position if needed
-5. Render simplified equation below or next to it
-6. Repeat until solved
-7. Box or highlight the final answer
+LAYOUT GRID (800×600 canvas, coordinates snap to 20px grid):
+Use these named positions for consistent alignment. Always pick from this grid:
 
-Geometric Transformations:
-1. Draw original shape with rect/circle/ellipse
-2. Explain transformation (rotation, scaling, translation)
-3. Animate shape to new position/orientation
-4. Show before/after comparison side-by-side
-5. Label key measurements
+Rows (y):
+  - title:  y=40
+  - row1:   y=120
+  - row2:   y=260
+  - row3:   y=400
+  - bottom: y=520
 
-Graphing Functions:
-1. Use plot_function to draw coordinate axes and graph
-2. Highlight key points (intercepts, maxima, minima)
-3. Show derivative/integral visually if relevant
-4. Annotate important features
+Columns (x):
+  - col1: x=80    (left)
+  - col2: x=240   (center-left)
+  - col3: x=400   (center)
+  - col4: x=560   (center-right)
+  - col5: x=700   (right)
 
-SYNCHRONIZATION:
-- Start animations BEFORE or AS you mention them verbally
-- Keep animations fast (< 1s) so users don't wait
-- Use speech_cue in teaching sequences to match voice timing
-- Example: "As we move this term..." → animate_element fires as you say it
+Standard shape sizes:
+  - Small box:  width=120, height=60
+  - Large box:  width=160, height=80
+  - Circle:     width=60 (diameter)
+  - Ellipse:    width=160, height=80
 
-LAYOUT (800x600 canvas):
-- Title area: y = 40-80
-- Main content: y = 120-520
-- Left column: x = 60-360 (for multi-column layouts)
-- Right column: x = 440-740
-- Margin: Keep 40px from edges
+Arrow tips: connect shape centers. E.g., from col1 shape center (x=140, y=150) to col2 shape center (x=300, y=150).
+Text labels: place INSIDE shapes at shape center. Keep labels ≤2-3 words.
+Title: centered at x=400, y=40, font_size=24
 
-ELEMENT SIZING:
-- Titles: font_size 28-32
-- Equations: font_size 20-24 (LaTeX will auto-scale)
-- Labels: font_size 14-16
-- Shapes: 100-200px typical for diagrams
+COLORS:
+- #3b82f6 (blue): Primary components
+- #ef4444 (red): Errors, wrong answers
+- #10b981 (green): Correct answers, success highlights
+- #f59e0b (orange): Attention, warnings
+- #8b5cf6 (purple): Special elements
+- #000000 (black): Labels, text
 
-LATEX TIPS:
-- Always escape backslashes: use \\\\ instead of \\
-- Common: \\\\frac{a}{b}, x^2, \\\\sqrt{x}, \\\\sum_{i=1}^{n}
-- Display mode is automatic (equations are centered and large)
+CANVAS MANAGEMENT:
+- New topic → start with "clear" step
+- Follow-up → add to existing canvas
+- Check [Current Canvas State] before drawing
 
-BEST PRACTICES:
-- Use create_teaching_sequence for multi-step explanations
-- Keep canvas uncluttered - clear between topics if needed
-- Use colors semantically: blue (#3b82f6) for main, red (#ef4444) for emphasis
-- Label elements with 'label' parameter for referencing later
-- Build complexity gradually - simple shapes first, then details
+EXAMPLE — "Explain how a Transformer works" (uses grid positions):
+[
+  {"action": "clear"},
+  {"action": "text", "text": "Transformer", "x": 400, "y": 40, "font_size": 24, "color": "#3b82f6", "speech_cue": "Let me show you how a Transformer works."},
+  {"action": "rect", "x": 80, "y": 120, "width": 120, "height": 60, "color": "#3b82f6", "label": "input", "speech_cue": "First we have the input embeddings."},
+  {"action": "text", "text": "Input", "x": 140, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "arrow", "points": [[200, 150], [240, 150]], "color": "#3b82f6", "speech_cue": "These feed into the self-attention mechanism."},
+  {"action": "rect", "x": 240, "y": 120, "width": 160, "height": 60, "color": "#f59e0b", "label": "attention", "speech_cue": "Self-attention lets the model focus on relevant words."},
+  {"action": "text", "text": "Self-Attention", "x": 320, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "latex", "latex": "\\\\frac{QK^T}{\\\\sqrt{d_k}}", "x": 260, "y": 200, "font_size": 16, "color": "#f59e0b", "target_id": "attn_eq", "speech_cue": "The attention formula is Q times K transpose divided by root d_k."},
+  {"action": "arrow", "points": [[400, 150], [560, 150]], "color": "#3b82f6", "speech_cue": "Then it goes through a feed-forward network."},
+  {"action": "rect", "x": 560, "y": 120, "width": 140, "height": 60, "color": "#10b981", "label": "ffn", "speech_cue": "The feed-forward layer applies non-linear transformations."},
+  {"action": "text", "text": "FFN", "x": 630, "y": 150, "font_size": 14, "color": "#000"},
+  {"action": "arrow", "points": [[700, 150], [740, 150]], "color": "#3b82f6"},
+  {"action": "text", "text": "Output", "x": 740, "y": 150, "font_size": 14, "color": "#000", "speech_cue": "And finally the output predictions."},
+  {"action": "highlight", "target_id": "attention", "highlight_color": "#f59e0b", "speech_cue": "Self-attention is the key innovation of the Transformer."}
+]
 
-CANVAS MANAGEMENT (IMPORTANT):
-- When the user asks about a NEW topic, start your teaching sequence with a "clear" step to wipe the canvas, then draw fresh content.
-- When the user asks a FOLLOW-UP question on the same topic (e.g. "explain more", "what about X"), ADD to the existing canvas without clearing.
-- When the user explicitly says "clear" or "start over", clear the canvas.
-- The [Current Canvas State] section in your context tells you what's currently drawn. Use it to decide clear vs continue.
-- If the canvas already has content from a different topic, ALWAYS clear first.
-
-CRITICAL RULES:
-- You MUST use your tools (create_teaching_sequence, render_latex, plot_function, animate_element) for EVERY response. NEVER respond with only text.
-- For ANY math or science question, ALWAYS call create_teaching_sequence or render_latex FIRST, then provide a brief text explanation.
-- Even for simple questions like "teach me X", create a visual teaching sequence on the whiteboard.
-- If the user asks anything related to math, physics, or learning, you MUST call at least one tool.
+REMEMBER: Draw SHAPES and ARROWS. Use text only for short labels ON the shapes. Put all explanation in speech_cue fields.
 """
     )
 
@@ -268,12 +274,15 @@ CRITICAL RULES:
         if provider == "openai":
             if not cls.OPENAI_API_KEY:
                 raise ValueError("OPENAI_API_KEY environment variable is required for provider=openai")
+        elif provider == "groq":
+            if not cls.GROQ_API_KEY:
+                raise ValueError("GROQ_API_KEY environment variable is required for provider=groq")
         elif provider == "gemini":
             if not cls.GEMINI_API_KEY:
                 raise ValueError("GEMINI_API_KEY environment variable is required for provider=gemini")
         else:
             raise ValueError(
-                f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, gemini"
+                f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
             )
 
         # Validate other required configuration

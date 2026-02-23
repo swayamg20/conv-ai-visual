@@ -1,327 +1,76 @@
-# CLAUDE.md - Project Context for AI Assistance
+# CLAUDE.md - Voice AI
 
-## Project Overview
+Real-time voice assistant: WebRTC → Deepgram STT → Silero VAD → LLM (OpenAI/Gemini) → ElevenLabs TTS → Audio Response
 
-**Voice AI** is a real-time voice assistant platform built with WebRTC, featuring Speech-to-Text, Voice Activity Detection, LLM integration, and Text-to-Speech in a low-latency pipeline.
+## Working Style
 
-**Current Branch:** `feat/interruption` (working on interruption handling)
-**Main Branch:** `main`
+- **Clarify before building.** When a feature can be implemented multiple ways, present 2-3 approaches in bullet points and wait for approval before writing code. Prefer the simplest approach unless told otherwise. Do not assume complex solutions (git-based sync, static generation, extra abstraction layers) when a direct API or DB call would work.
+- **Incremental over monolithic.** Break multi-file changes into small verified steps. After each step, confirm imports resolve and the server starts before moving on.
 
-## Core Architecture
+## Integration Guidelines
 
-```
-Audio Input → WebRTC → Deepgram STT → Silero VAD → LLM (OpenAI) → TTS (ElevenLabs) → Audio Response
-```
+- **Before integrating a new library**, check for known conflicts with the existing stack: argparse hijacking (breaks uvicorn), `__bool__`/`__len__` overrides (breaks conditionals), signal handler conflicts, and global state mutations. Run a minimal import smoke test first.
+- **Check system dependencies** (LaTeX, ffmpeg, etc.) before assuming code will run. If a dep is missing, flag it immediately rather than debugging cryptic errors.
+- **Manim specifically** — imports hijack argparse; must be isolated (lazy import or subprocess). Its Mobject classes override `__bool__`/`__len__`, so never use `if mob:` — use explicit checks instead.
 
-### Tech Stack
-- **Backend:** FastAPI (Python)
-- **Audio:** WebRTC (aiortc), Deepgram STT, ElevenLabs TTS
-- **VAD:** Silero VAD v6
-- **LLM:** OpenAI (GPT-4o-mini default)
-- **Database:** SQLite (tools, memory)
-- **Memory:** mem0ai integration
-- **Frontend:** Web client (in `/web`)
+## Code Style Rules
 
-## Project Structure
+- **Python imports at the top of the file.** Never add import statements in the middle of a function or file. All imports go at the top, grouped: stdlib → third-party → local.
+- **Async everywhere.** All I/O operations use `async def`. Use `httpx` not `requests`.
+- **Errors:** `logger.error()` for logging. Return error messages from tools, don't raise. Graceful degradation over hard failures.
+- **Config:** All env vars go in `funcs/config.py` (pydantic-settings). Never hardcode API keys.
+- **New modules** go in `funcs/`, follow existing patterns, update `funcs/__init__.py` exports.
+- **DB models** in `funcs/models.py` (SQLModel). Repos use static methods.
+- **Tools** use `ToolRepo.upsert()` — see `docs/TOOLS.md`. Two modes: inline code (DB) or module-based handlers.
+- **Tool execution** is sandboxed via RestrictedPython (`funcs/tool_executor.py`). No fs/os/subprocess access.
 
-```
-voiceai/
-├── main.py                 # FastAPI server, WebRTC endpoints
-├── funcs/                  # Core modular components
-│   ├── llm_pipeline.py     # LLM conversation pipeline
-│   ├── tts_pipeline.py     # Text-to-Speech pipeline
-│   ├── vad_gate.py         # Voice Activity Detection
-│   ├── tools.py            # Tool calling system
-│   ├── tool_executor.py    # Sandboxed tool execution
-│   ├── memory.py           # Memory management
-│   ├── models.py           # Pydantic models
-│   ├── config.py           # Environment config
-│   ├── canvas.py           # Canvas visual mode
-│   └── auth.py             # User authentication
-├── docs/                   # Documentation
-│   ├── TOOLS.md            # Tool calling system docs
-│   ├── DATABASE.md         # Database schema
-│   ├── ROADMAP.md          # Project roadmap
-│   ├── next_steps.md       # TODO and future plans
-│   └── *.md                # Other documentation
-├── test/                   # Test files
-├── scripts/                # Utility scripts
-├── web/                    # Frontend
-├── memory.db               # SQLite database
-└── requirements.txt        # Python dependencies
-```
+## Non-Obvious Architecture
 
-## Key Components
+- **Session dicts:** `voice_sessions` (peer ID → LLMPipeline), `chat_sessions` (session ID → LLMPipeline) in `main.py`
+- **SSE streaming:** Generator yields `data: {json}\n\n` with types: session, chunk, canvas_update, animation_event, done, error
+- **Callbacks:** `canvas_callback` and `animation_callback` set on pipeline in `main.py` before streaming
+- **Smart Turn:** pipecat-ai/smart-turn-v3 ONNX model alongside Deepgram endpointing. Config: `SMART_TURN_ENABLED`, `SMART_TURN_THRESHOLD`, `SMART_TURN_STOP_SECS`
+- **Interruption:** `InterruptionState` per session, VAD detects speech during TTS → cancels TTS → sends `tts_cancelled` to client
+- **Animation pipeline:** `funcs/animation_pipeline.py` → SSE `animation_event` → frontend `use-chat.ts` → `SVGCanvas`
+- **LLM providers:** Unified interface in `funcs/llm_clients.py`, configured via `LLM_PROVIDER` env var
 
-### 1. LLM Pipeline (`funcs/llm_pipeline.py`)
-- Manages conversation context per session
-- Automatic context trimming for token limits
-- Tool calling integration
-- Memory integration with mem0ai
-- Supports both chat and voice sessions
+## Known Gotchas
 
-### 2. Tool System (`funcs/tools.py`, `funcs/tool_executor.py`)
-- Two modes: inline code (stored in DB) or module-based handlers
-- Sandboxed execution with RestrictedPython
-- Tools stored in SQLite (`tools` table)
-- Available modules in sandbox: `json`, `datetime`, `httpx`, `math`, etc.
-- See `docs/TOOLS.md` for detailed documentation
+- **Gemini protobuf types** (RepeatedComposite, MapComposite) need recursive `_to_native()` before `json.dumps`
+- **Gemini content=None** for tool call messages — convert to `[Called tools: ...]` text summaries
+- **GSAP timelines paused by default** — must call `.play()`
+- **GSAP element lookup must be deferred** — wrap in `tl.add(() => {...})` so lookup happens at playback time
+- **canvas_mode** — frontend must send `canvas_mode: true` explicitly or tools won't be included
+- **LLM sends shape primitives directly** — handle `action: "circle"` etc. as pass-through in both `animation_pipeline.py` and `svg-canvas.tsx`
+- **Tool schema enum must match LLM output** — if enum doesn't include shape primitives, unknown actions get silently dropped
 
-### 3. VAD Gate (`funcs/vad_gate.py`)
-- Silero VAD model for speech detection
-- Filters audio chunks before processing
-- Reduces unnecessary LLM calls
+## Code Quality — Non-Negotiable
 
-### 4. Memory (`funcs/memory.py`)
-- User-specific conversation memory
-- Integration with mem0ai
-- SQLite-based storage
-- Per-user context persistence
+Every line of code written in this project must meet these standards. No exceptions.
 
-### 5. Canvas Mode (`funcs/canvas.py`)
-- Visual mode for UI components
-- Supports various widget types (text, code, image, etc.)
-- Can be enabled per message
+- **No dead code.** After completing any feature or refactor, audit every file you touched. Remove unused imports, unreachable branches, commented-out blocks, and orphaned functions. If something is no longer called, delete it — don't comment it out, don't rename it with an underscore.
+- **Consistency over cleverness.** Match the patterns already in the codebase. If existing code uses `static methods` on repo classes, new repos use static methods. If existing hooks return `[data, actions]`, new hooks do the same. Never introduce a new pattern when an existing one works.
+- **One way to do each thing.** Don't add a second way to achieve something that already works. No wrapper functions around wrapper functions. No "helper" that duplicates existing logic with a slightly different API.
+- **Naming is architecture.** File names, function names, variable names — they should make the code readable without comments. `compileScene` not `processData`. `stepPipelinedTTS` not `handleAudio2`. If you can't name it clearly, the abstraction is wrong.
+- **Post-completion cleanup.** After finishing any multi-file change, run a full audit:
+  1. Search for unused exports from every modified module
+  2. Check for config flags that no longer gate anything
+  3. Remove any scaffolding, temporary logging, or debug code
+  4. Verify no file has imports it doesn't use
+  5. Run `cd web && npx tsc --noEmit` and `python -c "from main import app"` — both must be clean
+- **Minimum viable code.** Write the least amount of code that solves the problem correctly. Three similar lines are better than a premature abstraction. A direct function call is better than a registry pattern with one entry. Add complexity only when the current code genuinely can't handle a real (not hypothetical) requirement.
 
-### 6. Smart Turn Detection (`funcs/smart_turn.py`)
-- **pipecat-ai/smart-turn-v3** - native audio turn detection model
-- Uses Whisper Tiny encoder + linear classifier to analyze prosody, intonation, grammar cues
-- Works alongside Deepgram endpointing: when Deepgram detects a pause, Smart Turn decides if the turn is actually complete
-- ~8M params, 8MB ONNX model, <60ms inference on CPU
-- Per-session audio buffering with `TurnAudioBuffer` (last 8s of 16kHz mono audio)
-- `SmartTurnSession` orchestrates: audio buffering → inference → transcript accumulation → fallback timeout
-- Fallback: if Smart Turn says "incomplete" but silence exceeds `SMART_TURN_STOP_SECS`, force-complete
-- Auto-downloads model from HuggingFace on first use
-- Toggled via `SMART_TURN_ENABLED` env var (default: true)
-- When enabled, Deepgram endpointing is shortened (500ms) since Smart Turn handles real turn detection
+## Verification
 
-### 7. Interruption Handling (`main.py`)
-- **Server-side detection** using VAD (Phase 1 - Completed)
-- Detects when user speaks while TTS is playing
-- Automatically cancels ongoing TTS generation
-- Sends acknowledgment to client
-- Fast response (~50-100ms detection latency)
+After implementing multi-file changes, always verify before reporting completion:
+- **Backend:** `python -c "from main import app"` — catches import errors and startup crashes
+- **Frontend:** `cd web && npx tsc --noEmit` — catches type errors
+- **Full start:** `uvicorn main:app` — confirm no runtime errors on startup
 
-**How it works:**
-1. `InterruptionState` class tracks TTS playback per session
-2. VAD continuously monitors for user speech
-3. When speech detected during TTS → signals interruption
-4. TTS streaming loop checks interruption flag on each chunk
-5. Breaks loop and sends `tts_cancelled` message to client
-6. Client can stop playback immediately
+## Running
 
-**Client messages:**
-- `interruption_ack` - Server confirms interruption detected
-- `tts_cancelled` - TTS generation stopped, includes chunks_sent count
-
-**Future enhancements (Phase 2/3):**
-- Client-side interrupt signal via datachannel
-- Client-side instant playback stop for lower latency
-
-## Environment Variables
-
-**Configuration is managed via `.env` file** - see `.env.example` for template.
-
-### LLM Provider Configuration
-- `LLM_PROVIDER` - Provider to use: "openai" or "gemini" (default: "openai")
-
-### Required (Provider-Specific)
-**For OpenAI:**
-- `OPENAI_API_KEY` - OpenAI API key
-- `OPENAI_MODEL` - Default: "gpt-4o-mini"
-
-**For Gemini:**
-- `GEMINI_API_KEY` - Google AI API key
-- `GEMINI_MODEL` - Default: "gemini-2.0-flash-exp"
-
-**For TTS:**
-- `ELEVENLABS_API_KEY` - ElevenLabs API key
-
-### Optional (with defaults)
-- `DEEPGRAM_KEY` - Deepgram API key for STT
-- `DEEPGRAM_MODEL` - Default: "nova"
-- `LLM_TEMPERATURE` - Default: 0.7
-- `LLM_MAX_TOKENS` - Optional
-- `LLM_MAX_CONTEXT_MESSAGES` - Default: 5
-- `LLM_SYSTEM_PROMPT` - Custom system prompt
-- `ELEVENLABS_VOICE_ID` - Default: "21m00Tcm4TlvDq8ikWAM" (Rachel)
-- `ELEVENLABS_MODEL_ID` - Default: "eleven_flash_v2_5"
-- `TTS_STABILITY` - Default: 0.5
-- `TTS_SIMILARITY_BOOST` - Default: 0.75
-- `SMART_TURN_ENABLED` - Enable Smart Turn detection (default: true)
-- `SMART_TURN_THRESHOLD` - Probability threshold for turn completion (default: 0.5)
-- `SMART_TURN_STOP_SECS` - Fallback silence timeout in seconds (default: 2.0)
-- `SMART_TURN_MODEL_PATH` - Optional custom ONNX model path (auto-downloads if not set)
-- `MEM0_API_KEY` - Optional, for long-term memory features
-- `HOST` - Default: "0.0.0.0"
-- `PORT` - Default: 8000
-
-## Current Status & Next Steps
-
-### Completed Features
-- ✅ Real-time STT → VAD → LLM → TTS pipeline
-- ✅ **Modular LLM provider support** - OpenAI and Gemini with unified interface
-- ✅ Tool calling system with sandboxed execution
-- ✅ Memory system with database
-- ✅ Canvas API for visual mode
-- ✅ Basic chat and voice sessions
-- ✅ WebRTC integration
-- ✅ **Interruption handling** - Server-side VAD-based detection (Phase 1)
-- ✅ **Environment-based configuration** - Secure .env file management
-- ✅ **Smart Turn Detection** - Native audio turn detection with pipecat-ai/smart-turn-v3
-
-### TODO (from `docs/next_steps.md`)
-- Redis integration
-- Live web search
-- Calendar/events integration
-- Re-routing LLM calls based on complexity
-- Testing different LLMs/SLMs/classifiers
-- Vector search scope discovery
-- Sandbox coding tools with live execution
-
-## Development Guidelines
-
-### Running the Server
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Setup environment variables
-cp .env.example .env
-# Edit .env and add your API keys
-
-# Run server
+cp .env.example .env  # add API keys
 uvicorn main:app --reload
-# Or with custom host/port
-uvicorn main:app --host localhost --port 3000 --reload
+python -m pytest test/
 ```
-
-**Quick Setup:**
-1. Copy `.env.example` to `.env`
-2. Add your API keys to `.env`:
-   - For OpenAI: Set `OPENAI_API_KEY`
-   - For Gemini: Set `LLM_PROVIDER=gemini` and `GEMINI_API_KEY`
-   - Set `ELEVENLABS_API_KEY` for TTS
-   - Set `DEEPGRAM_KEY` for STT
-3. Run the server
-
-### Testing
-```bash
-# Run specific tests
-python -m pytest test/test_llm.py
-python -m pytest test/test_tts.py
-python -m pytest test/test_memory.py
-python -m pytest test/test_tool_system.py
-```
-
-### Adding New Tools
-See `docs/TOOLS.md` for detailed instructions. Quick example:
-
-```python
-from funcs import ToolRepo
-
-ToolRepo.upsert(
-    name="tool_name",
-    description="What the tool does",
-    parameters={...},  # JSON Schema
-    code='''
-def tool_name(param):
-    # Implementation
-    return result
-'''
-)
-```
-
-## Code Style & Patterns
-
-### Async/Await
-- Most I/O operations are async
-- Use `async def` for handlers, pipelines
-- Prefer async libraries (httpx over requests)
-
-### Error Handling
-- Log errors with `logger.error()`
-- Return error messages rather than raising in tools
-- Graceful degradation where possible
-
-### Session Management
-- Voice sessions: `voice_sessions` dict (peer ID → LLMPipeline)
-- Chat sessions: `chat_sessions` dict (session ID → LLMPipeline)
-- User IDs for memory persistence
-
-### Configuration
-- All config in `funcs/config.py`
-- Uses pydantic-settings for validation
-- Environment variable overrides
-
-## Important Files to Reference
-
-- **Architecture:** `README.md`, `funcs/README.md`
-- **Tools:** `docs/TOOLS.md`
-- **Database:** `docs/DATABASE.md`
-- **Roadmap:** `docs/ROADMAP.md`
-- **Next Steps:** `docs/next_steps.md`
-- **Main Entry:** `main.py`
-
-## Common Operations
-
-### Adding a New Pipeline Component
-1. Create module in `funcs/`
-2. Follow pattern from existing pipelines
-3. Use async/await for I/O
-4. Add config variables to `funcs/config.py`
-5. Initialize in `main.py`
-6. Update `funcs/__init__.py` exports
-
-### Debugging WebRTC Issues
-- Check browser console for client-side errors
-- Monitor server logs for connection issues
-- Verify STUN/TURN configuration
-- Check audio format conversions in `audioframe_to_pcm16_bytes()`
-
-### Database Changes
-- Use SQLite CLI or SQLModel
-- Update `funcs/models.py` for schema changes
-- Consider migration if breaking changes
-
-## Security Notes
-
-### Sandboxed Tool Execution
-- Tools run in restricted environment (RestrictedPython)
-- No file system access
-- No subprocess/os module access
-- Limited imports (httpx, json, datetime, etc.)
-- See `funcs/tool_executor.py` for sandbox config
-
-### API Keys
-- Never commit `.env` files
-- Use environment variables
-- Keys validated on startup in `main.py`
-
-## References
-
-- [TEN Turn Detection](https://github.com/TEN-framework/ten-turn-detection)
-- [TEN VAD](https://github.com/TEN-framework/ten-vad)
-- Silero VAD v6 documentation
-- FastAPI documentation
-- aiortc (WebRTC) documentation
-
-## Tips for AI Assistants
-
-1. **Always check docs/** before implementing new features
-2. **Read existing code** in `funcs/` to understand patterns
-3. **Test changes** with existing test files
-4. **Follow async patterns** consistently
-5. **Update documentation** when adding features
-6. **Check `next_steps.md`** for alignment with roadmap
-7. **Use modular design** - keep components in `funcs/`
-8. **Consider memory/tools** integration for new features
-9. **Log appropriately** - use Python logging module
-10. **Handle errors gracefully** - this is real-time audio
-
-## Contact & Contribution
-
-- Check `docs/next_steps.md` for current priorities
-- Follow existing code patterns and style
-- Update relevant documentation with changes
-- Test thoroughly before committing

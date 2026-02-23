@@ -1,4 +1,5 @@
 import json
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -182,6 +183,35 @@ class SemanticMemory:
             lines.append(f"- {text}")
         return "\n".join(lines)
 
+    async def get_context_string_async(self, query: str, limit: int = 5) -> str:
+        """Async semantic context retrieval with sync fallback."""
+        if not self.client:
+            return ""
+
+        logger.info(f"Searching semantic memory async for user={self.user_id}, query={query[:50]}...")
+        try:
+            if hasattr(self.client, "search_async"):
+                results = await self.client.search_async(
+                    query,
+                    filters={"user_id": self.user_id},
+                    limit=limit,
+                )
+                memories = results if isinstance(results, list) else results.get("results", [])
+            else:
+                memories = await asyncio.to_thread(self.search, query, limit)
+        except Exception as e:
+            logger.error(f"Semantic memory async search error: {e}")
+            return ""
+
+        if not memories:
+            return ""
+
+        lines = ["Known facts about the user:"]
+        for mem in memories:
+            text = mem.get("memory", mem.get("text", str(mem)))
+            lines.append(f"- {text}")
+        return "\n".join(lines)
+
 
 class UserProfile:
     """
@@ -320,26 +350,73 @@ class MemoryManager:
         
         logger.info(f"MemoryManager initialized for user={user_id}, session={self.session_id}")
     
-    def build_context(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
+    def build_context_sync(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
+        """Build context sequentially (legacy path)."""
+        prompt_parts = [base_system_prompt]
+
+        profile_ctx = self.profile.get_context_string()
+        if profile_ctx:
+            prompt_parts.append(f"\n{profile_ctx}")
+
+        semantic_ctx = self.semantic.get_context_string(current_query, limit=5)
+        if semantic_ctx:
+            prompt_parts.append(f"\n{semantic_ctx}")
+
+        episodic_ctx = self.episodic.get_context_string(limit=2)
+        if episodic_ctx:
+            prompt_parts.append(f"\n{episodic_ctx}")
+
+        enriched_prompt = "\n".join(prompt_parts)
+        self.context.set_system_prompt(enriched_prompt)
+        return self.context.get_messages()
+
+    async def build_context(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
         """
         Build full context for LLM call.
         Combines all memory layers into system prompt + conversation history.
         """
         # Start with base prompt
         prompt_parts = [base_system_prompt]
-        
-        # Layer 4: User profile (identity)
-        profile_ctx = self.profile.get_context_string()
+
+        # Run memory lookups concurrently to cut pre-LLM latency.
+        profile_task = asyncio.to_thread(self.profile.get_context_string)
+        episodic_task = asyncio.to_thread(self.episodic.get_context_string, 2)
+        semantic_task = self.semantic.get_context_string_async(current_query, limit=5)
+
+        try:
+            semantic_timeout = config.MEMORY_SEMANTIC_TIMEOUT_SECS
+            semantic_task = asyncio.wait_for(semantic_task, timeout=semantic_timeout)
+        except Exception:
+            # Fallback in case config value is invalid.
+            semantic_task = asyncio.wait_for(semantic_task, timeout=1.0)
+
+        profile_ctx, semantic_ctx, episodic_ctx = await asyncio.gather(
+            profile_task,
+            semantic_task,
+            episodic_task,
+            return_exceptions=True,
+        )
+
+        if isinstance(profile_ctx, Exception):
+            logger.warning(f"Profile context lookup failed (non-fatal): {profile_ctx}")
+            profile_ctx = ""
+        if isinstance(semantic_ctx, asyncio.TimeoutError):
+            logger.warning(
+                "Semantic memory timed out after %.2fs; continuing without it",
+                config.MEMORY_SEMANTIC_TIMEOUT_SECS,
+            )
+            semantic_ctx = ""
+        elif isinstance(semantic_ctx, Exception):
+            logger.warning(f"Semantic context lookup failed (non-fatal): {semantic_ctx}")
+            semantic_ctx = ""
+        if isinstance(episodic_ctx, Exception):
+            logger.warning(f"Episodic context lookup failed (non-fatal): {episodic_ctx}")
+            episodic_ctx = ""
+
         if profile_ctx:
             prompt_parts.append(f"\n{profile_ctx}")
-        
-        # Layer 3: Semantic memory (relevant facts)
-        semantic_ctx = self.semantic.get_context_string(current_query, limit=5)
         if semantic_ctx:
             prompt_parts.append(f"\n{semantic_ctx}")
-        
-        # Layer 2: Episodic memory (past conversations)
-        episodic_ctx = self.episodic.get_context_string(limit=2)
         if episodic_ctx:
             prompt_parts.append(f"\n{episodic_ctx}")
         

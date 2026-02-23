@@ -52,51 +52,51 @@ const sizeConfig = {
 
 const stateConfig = {
   idle: {
-    gradient: "from-gray-600 to-gray-500",
-    borderStyle: "border-2 border-dashed border-white/20",
+    gradient: "from-graphite to-graphite",
+    borderStyle: "border-2 border-dashed border-chalk-faint",
     glow: "shadow-none",
     animation: "animate-pulse-glow",
     showWaveform: false,
   },
   connecting: {
-    gradient: "from-primary to-blue-500",
-    borderStyle: "border-2 border-white/30",
-    glow: "shadow-[0_0_40px_rgba(99,102,241,0.4)]",
+    gradient: "from-lavender to-lavender",
+    borderStyle: "border-2 border-chalk-faint/50",
+    glow: "shadow-orb",
     animation: "animate-pulse-glow",
     showWaveform: false,
   },
   listening: {
-    gradient: "from-state-listening to-emerald-500",
-    borderStyle: "border-2 border-white/30",
-    glow: "shadow-[0_0_50px_rgba(16,185,129,0.5)]",
+    gradient: "from-sage to-sage",
+    borderStyle: "border-2 border-chalk-faint/50",
+    glow: "shadow-orb-sage",
     animation: "animate-pulse-glow",
     showWaveform: true,
   },
   speaking: {
-    gradient: "from-accent-start to-accent-end",
-    borderStyle: "border-2 border-white/40",
+    gradient: "from-lavender to-amber",
+    borderStyle: "border-2 border-chalk-faint/60",
     glow: "shadow-orb",
     animation: "orb-glow",
     showWaveform: true,
   },
   processing: {
-    gradient: "from-state-processing to-yellow-500",
-    borderStyle: "border-2 border-white/30",
-    glow: "shadow-[0_0_50px_rgba(234,179,8,0.5)]",
+    gradient: "from-amber to-amber",
+    borderStyle: "border-2 border-chalk-faint/50",
+    glow: "shadow-orb-amber",
     animation: "animate-pulse-glow",
     showWaveform: false,
   },
   interrupted: {
-    gradient: "from-state-processing to-yellow-500",
-    borderStyle: "border-2 border-yellow-400/50 animate-ping",
-    glow: "shadow-[0_0_60px_rgba(234,179,8,0.6)]",
+    gradient: "from-amber to-amber",
+    borderStyle: "border-2 border-amber/50 animate-ping",
+    glow: "shadow-orb-amber",
     animation: "",
     showWaveform: false,
   },
   error: {
-    gradient: "from-destructive to-red-600",
-    borderStyle: "border-2 border-white/30",
-    glow: "shadow-[0_0_40px_rgba(239,68,68,0.5)]",
+    gradient: "from-ember to-ember",
+    borderStyle: "border-2 border-chalk-faint/30",
+    glow: "shadow-orb-ember",
     animation: "",
     showWaveform: false,
   },
@@ -155,32 +155,32 @@ export function VoiceOrb({
         }}
       >
         {/* Glass overlay */}
-        <div className="absolute inset-0 rounded-full bg-white/5 backdrop-blur-sm" />
+        <div className="absolute inset-0 rounded-full bg-white/3 backdrop-blur-sm" />
 
         {/* Content - either waveform, loading spinner, or icon */}
         <div className="absolute inset-0 flex items-center justify-center">
           {state === "connecting" && (
-            <Loader2 className={cn("animate-spin text-white", sizeSettings.icon)} />
+            <Loader2 className={cn("animate-spin text-chalk", sizeSettings.icon)} />
           )}
 
           {state === "error" && (
-            <MicOff className={cn("text-white", sizeSettings.icon)} />
+            <MicOff className={cn("text-chalk", sizeSettings.icon)} />
           )}
 
           {state === "processing" && (
             <div className="flex gap-2">
               <motion.div
-                className="h-3 w-3 rounded-full bg-white"
+                className="h-3 w-3 rounded-full bg-chalk"
                 animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 1, repeat: Infinity, delay: 0 }}
               />
               <motion.div
-                className="h-3 w-3 rounded-full bg-white"
+                className="h-3 w-3 rounded-full bg-chalk"
                 animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 1, repeat: Infinity, delay: 0.2 }}
               />
               <motion.div
-                className="h-3 w-3 rounded-full bg-white"
+                className="h-3 w-3 rounded-full bg-chalk"
                 animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
                 transition={{ duration: 1, repeat: Infinity, delay: 0.4 }}
               />
@@ -192,7 +192,7 @@ export function VoiceOrb({
               amplitude={audioLevel}
               barCount={sizeSettings.waveform.barCount}
               barHeight={sizeSettings.waveform.barHeight}
-              barColor="rgba(255, 255, 255, 0.9)"
+              barColor="rgba(232, 228, 220, 0.85)"
               animated={state === "speaking" || state === "listening"}
             />
           )}
@@ -204,7 +204,7 @@ export function VoiceOrb({
                 animate={{ opacity: 1, scale: 1 }}
                 transition={{ duration: 0.3 }}
               >
-                <p className="text-white/70 text-sm font-medium">
+                <p className="text-chalk-soft text-sm font-medium">
                   Tap to connect
                 </p>
               </motion.div>

@@ -20,7 +20,7 @@ const buttonVariants = cva(
         ghost: "hover:bg-muted hover:text-foreground",
         link: "text-muted-foreground underline-offset-4 hover:underline hover:text-foreground",
         glass: "glass-card hover:bg-white/10 text-foreground",
-        floating: "bg-gradient-to-r from-accent-start to-accent-end text-primary-foreground shadow-lg hover:shadow-xl hover:scale-[1.02] active:scale-[0.98]",
+        floating: "bg-amber text-void shadow-orb-amber hover:brightness-110 hover:scale-[1.02] active:scale-[0.98]",
       },
       size: {
         default: "h-11 px-5 py-2",

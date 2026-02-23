@@ -108,6 +108,23 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
+    async def iter_stream_tool_events(
+        self,
+        stream: AsyncGenerator[Any, None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        Normalize provider stream chunks into tool-aware events.
+
+        Yields dict events:
+          - {"type": "text_delta", "text": "..."}
+          - {"type": "tool_call_delta", ...}
+          - {"type": "tool_call_done", "tool_calls": [ToolCall, ...]}
+          - {"type": "usage", "tokens_in": int|None, "tokens_out": int|None}
+          - {"type": "done"}
+        """
+        pass
+
+    @abstractmethod
     def has_tool_calls(self, response: Any) -> bool:
         """Check if response contains tool calls."""
         pass
@@ -163,22 +180,29 @@ class OpenAIClient(LLMClient):
         self,
         api_key: str,
         model: str,
+        base_url: Optional[str] = None,
         **default_params
     ):
         """
         Initialize OpenAI client.
 
         Args:
-            api_key: OpenAI API key
-            model: Model name (e.g., "gpt-4o-mini")
+            api_key: OpenAI API key (or Groq/Together key for compatible APIs)
+            model: Model name (e.g., "gpt-4o-mini", "llama-3.3-70b-versatile")
+            base_url: Optional base URL override (e.g., "https://api.groq.com/openai/v1")
             **default_params: Default parameters to include in all requests
         """
         from openai import AsyncOpenAI
 
-        self.client = AsyncOpenAI(api_key=api_key)
+        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = AsyncOpenAI(**client_kwargs)
         self.model = model
         self.default_params = default_params
-        logger.info(f"OpenAI client initialized: model={model}")
+        provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
+        logger.info(f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}")
 
     async def complete(
         self,
@@ -274,6 +298,84 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logger.exception(f"OpenAI stream with tools error: {e}")
             raise
+
+    async def iter_stream_tool_events(
+        self,
+        stream: AsyncGenerator[Any, None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Normalize OpenAI-compatible streamed chunks into events."""
+        from funcs.tools import ToolCall
+
+        tool_acc: Dict[int, Dict[str, str]] = {}
+
+        async for chunk in stream:
+            usage = getattr(chunk, "usage", None)
+            if usage:
+                yield {
+                    "type": "usage",
+                    "tokens_in": getattr(usage, "prompt_tokens", None),
+                    "tokens_out": getattr(usage, "completion_tokens", None),
+                }
+
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+
+            choice = choices[0]
+            delta = getattr(choice, "delta", None)
+            if delta and getattr(delta, "content", None):
+                yield {"type": "text_delta", "text": delta.content}
+
+            delta_tool_calls = getattr(delta, "tool_calls", None) if delta else None
+            if delta_tool_calls:
+                for tc in delta_tool_calls:
+                    idx = getattr(tc, "index", 0) or 0
+                    if idx not in tool_acc:
+                        tool_acc[idx] = {"id": "", "name": "", "arguments": ""}
+
+                    if getattr(tc, "id", None):
+                        tool_acc[idx]["id"] = tc.id
+
+                    fn = getattr(tc, "function", None)
+                    if fn and getattr(fn, "name", None):
+                        tool_acc[idx]["name"] = fn.name
+                    if fn and getattr(fn, "arguments", None):
+                        tool_acc[idx]["arguments"] += fn.arguments
+
+                    yield {
+                        "type": "tool_call_delta",
+                        "index": idx,
+                        "name": tool_acc[idx]["name"],
+                    }
+
+            finish_reason = getattr(choice, "finish_reason", None)
+            if finish_reason == "tool_calls":
+                tool_calls = []
+                for idx in sorted(tool_acc.keys()):
+                    tc_data = tool_acc[idx]
+                    raw_args = tc_data["arguments"] or "{}"
+                    try:
+                        arguments = json.loads(raw_args)
+                    except Exception:
+                        logger.warning(
+                            "Failed to parse streamed tool args for '%s': %s",
+                            tc_data["name"],
+                            raw_args[:200],
+                        )
+                        arguments = {}
+
+                    tool_calls.append(
+                        ToolCall(
+                            id=tc_data["id"] or f"call_stream_{idx}",
+                            name=tc_data["name"] or "unknown_tool",
+                            arguments=arguments,
+                        )
+                    )
+
+                tool_acc = {}
+                yield {"type": "tool_call_done", "tool_calls": tool_calls}
+            elif finish_reason == "stop":
+                yield {"type": "done"}
 
     def has_tool_calls(self, response: Any) -> bool:
         """Check if response contains tool calls."""
@@ -579,6 +681,78 @@ class GeminiClient(LLMClient):
             logger.exception(f"Gemini stream with tools error: {e}")
             raise
 
+    async def iter_stream_tool_events(
+        self,
+        stream: AsyncGenerator[Any, None]
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """Normalize Gemini streamed chunks into tool-aware events."""
+        from funcs.tools import ToolCall
+
+        pending_tool_calls: Dict[str, ToolCall] = {}
+
+        async for chunk in stream:
+            usage = getattr(chunk, "usage_metadata", None)
+            if usage:
+                yield {
+                    "type": "usage",
+                    "tokens_in": getattr(usage, "prompt_token_count", None),
+                    "tokens_out": getattr(usage, "candidates_token_count", None),
+                }
+
+            chunk_text = ""
+            try:
+                chunk_text = getattr(chunk, "text", "") or ""
+            except Exception:
+                chunk_text = ""
+            if chunk_text:
+                yield {"type": "text_delta", "text": chunk_text}
+
+            finish_reason = None
+            candidates = getattr(chunk, "candidates", None) or []
+            for candidate in candidates:
+                if getattr(candidate, "finish_reason", None) is not None:
+                    finish_reason = candidate.finish_reason
+                content = getattr(candidate, "content", None)
+                parts = getattr(content, "parts", None) if content else None
+                if not parts:
+                    continue
+
+                for part_idx, part in enumerate(parts):
+                    function_call = getattr(part, "function_call", None)
+                    if not function_call:
+                        continue
+
+                    args_dict = {}
+                    if hasattr(function_call, "args") and function_call.args:
+                        args_dict = self._convert_protobuf_to_dict(function_call.args)
+
+                    call_id = f"call_{hash(function_call.name)}_{part_idx}"
+                    pending_tool_calls[call_id] = ToolCall(
+                        id=call_id,
+                        name=function_call.name,
+                        arguments=args_dict,
+                    )
+                    yield {
+                        "type": "tool_call_delta",
+                        "name": function_call.name,
+                    }
+
+            if pending_tool_calls and finish_reason is not None:
+                yield {
+                    "type": "tool_call_done",
+                    "tool_calls": list(pending_tool_calls.values()),
+                }
+                pending_tool_calls = {}
+
+            if finish_reason is not None:
+                yield {"type": "done"}
+
+        if pending_tool_calls:
+            yield {
+                "type": "tool_call_done",
+                "tool_calls": list(pending_tool_calls.values()),
+            }
+
     def _convert_tools_to_gemini_format(self, tools: List[Dict]) -> List:
         """
         Convert OpenAI tool format to Gemini function declarations.
@@ -814,6 +988,13 @@ def create_llm_client(
             model=model or config.OPENAI_MODEL,
             **kwargs
         )
+    elif provider == "groq":
+        return OpenAIClient(
+            api_key=api_key or config.GROQ_API_KEY,
+            model=model or config.GROQ_MODEL,
+            base_url="https://api.groq.com/openai/v1",
+            **kwargs
+        )
     elif provider == "gemini":
         return GeminiClient(
             api_key=api_key or config.GEMINI_API_KEY,
@@ -823,5 +1004,5 @@ def create_llm_client(
     else:
         raise ValueError(
             f"Unsupported LLM provider: {provider}. "
-            f"Supported providers: openai, gemini"
+            f"Supported providers: openai, groq, gemini"
         )

@@ -4,56 +4,66 @@
 
 @layer base {
   :root {
-    /* Background colors */
-    --background: 0 0% 4%;
-    --background-elevated: 0 0% 8%;
-    --foreground: 0 0% 96%;
+    /* Murmur Design Language — Chalk on Blackboard */
 
-    /* Card colors */
-    --card: 0 0% 8%;
-    --card-foreground: 0 0% 96%;
+    /* Blackboard backgrounds (blue undertone) */
+    --void: 240 20% 3%;
+    --slate: 240 15% 7%;
+    --graphite: 240 11% 11%;
 
-    /* Popover colors */
-    --popover: 0 0% 8%;
-    --popover-foreground: 0 0% 96%;
+    /* Chalk text (warm off-white, never pure white) */
+    --chalk: 36 17% 89%;
+    --chalk-soft: 36 5% 59%;
+    --chalk-faint: 40 3% 28%;
 
-    /* Primary colors */
-    --primary: 239 84% 67%;
-    --primary-foreground: 0 0% 100%;
+    /* Signal colors */
+    --amber: 38 91% 55%;
+    --lavender: 252 36% 64%;
+    --sage: 128 52% 61%;
+    --ember: 0 86% 60%;
 
-    /* Secondary colors */
-    --secondary: 0 0% 11%;
-    --secondary-foreground: 0 0% 96%;
+    /* Semantic mappings (so existing tailwind classes still work) */
+    --background: var(--void);
+    --background-elevated: var(--slate);
+    --foreground: var(--chalk);
 
-    /* Muted colors */
-    --muted: 0 0% 16%;
-    --muted-foreground: 0 0% 70%;
+    --card: var(--slate);
+    --card-foreground: var(--chalk);
 
-    /* Accent colors */
-    --accent: 239 84% 67%;
-    --accent-foreground: 0 0% 100%;
-    --accent-start: 239 84% 67%;
-    --accent-end: 262 83% 58%;
+    --popover: var(--slate);
+    --popover-foreground: var(--chalk);
 
-    /* Destructive colors */
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 0% 100%;
+    --primary: var(--amber);
+    --primary-foreground: var(--void);
 
-    /* Border and input */
-    --border: 0 0% 18%;
-    --input: 0 0% 18%;
-    --ring: 239 84% 67%;
+    --secondary: var(--graphite);
+    --secondary-foreground: var(--chalk);
+
+    --muted: var(--graphite);
+    --muted-foreground: var(--chalk-soft);
+
+    --accent: var(--amber);
+    --accent-foreground: var(--void);
+    --accent-start: var(--lavender);
+    --accent-end: var(--amber);
+
+    --destructive: var(--ember);
+    --destructive-foreground: var(--chalk);
+
+    --border: var(--chalk-faint);
+    --input: var(--chalk-faint);
+    --ring: var(--amber);
 
     /* State colors */
-    --state-idle: 220 15% 60%;
-    --state-listening: 142 76% 56%;
-    --state-processing: 48 96% 56%;
-    --state-speaking: 239 84% 67%;
+    --state-idle: var(--chalk-soft);
+    --state-listening: var(--sage);
+    --state-processing: var(--amber);
+    --state-speaking: var(--lavender);
 
     /* Border radius */
-    --radius: 1rem;
-    --radius-xl: 1.5rem;
-    --radius-2xl: 2rem;
+    --radius: 10px;
+    --radius-xl: 14px;
+    --radius-2xl: 16px;
   }
 }
 
@@ -72,40 +82,64 @@
 
 /* Glassmorphic utility classes */
 .glass-card {
-  background: rgba(255, 255, 255, 0.05);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.12), inset 0 1px 1px rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 16px;
 }
 
 .glass-card-hover {
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 .glass-card-hover:hover {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.15);
-  transform: translateY(-2px);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18), inset 0 1px 2px rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.10);
 }
 
-/* Voice orb glow animation */
+/* Voice orb glow animation — lavender */
 @keyframes orb-pulse {
   0%, 100% {
-    box-shadow: 0 0 40px rgba(99, 102, 241, 0.3),
-                0 0 80px rgba(99, 102, 241, 0.2),
-                0 0 120px rgba(99, 102, 241, 0.1);
+    box-shadow: 0 0 40px rgba(139, 126, 200, 0.2),
+                0 0 80px rgba(139, 126, 200, 0.1),
+                0 0 120px rgba(139, 126, 200, 0.05);
   }
   50% {
-    box-shadow: 0 0 60px rgba(99, 102, 241, 0.5),
-                0 0 100px rgba(99, 102, 241, 0.3),
-                0 0 140px rgba(99, 102, 241, 0.15);
+    box-shadow: 0 0 60px rgba(139, 126, 200, 0.35),
+                0 0 100px rgba(139, 126, 200, 0.15),
+                0 0 140px rgba(139, 126, 200, 0.08);
   }
 }
 
 .orb-glow {
   animation: orb-pulse 2s ease-in-out infinite;
+}
+
+/* Settle glow — amber fades after element appears */
+@keyframes settle-glow {
+  0% {
+    box-shadow: 0 0 20px rgba(245, 166, 35, 0.15),
+                0 0 40px rgba(245, 166, 35, 0.05);
+  }
+  100% {
+    box-shadow: 0 0 0px rgba(245, 166, 35, 0),
+                0 0 0px rgba(245, 166, 35, 0);
+  }
+}
+
+/* Card entrance — scale up from blur */
+@keyframes card-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+    filter: blur(4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
 }
 
 /* Waveform bars */
@@ -119,7 +153,7 @@
 .waveform-bar:nth-child(4) { animation-delay: 0.3s; }
 .waveform-bar:nth-child(5) { animation-delay: 0.4s; }
 
-/* Premium scrollbar */
+/* Scrollbar — chalk-tinted */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -130,12 +164,12 @@
 }
 
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(232, 228, 220, 0.12);
   border-radius: 8px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(232, 228, 220, 0.20);
 }
 
 /* Loading dots animation */
@@ -162,3 +196,15 @@
   animation-delay: -0.16s;
 }
 
+/* Grain texture overlay */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.03;
+  z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
+}

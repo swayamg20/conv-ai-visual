@@ -47,6 +47,7 @@ interface UseWebRTCOptions {
   onAnimation?: (data: any) => void;
   onLatex?: (data: any) => void;
   onTeachingSequence?: (data: any) => void;
+  onPipelineMetrics?: (metrics: Record<string, any>) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
   onStateChange?: (state: PipelineState) => void;
@@ -62,6 +63,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onAnimation,
     onLatex,
     onTeachingSequence,
+    onPipelineMetrics,
     onError,
     onLog,
     onStateChange,
@@ -362,6 +364,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             updatePipelineState("listening");
             break;
 
+          case "pipeline_metrics":
+            log(`Metrics: total=${data.latency_total_ms}ms llm=${data.latency_llm_ms}ms tts=${data.latency_tts_ms}ms`);
+            onPipelineMetrics?.(data);
+            break;
+
           case "error":
             log(`Error: ${data.message}`);
             playErrorSound();
@@ -420,6 +427,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onAnimation,
     onLatex,
     onTeachingSequence,
+    onPipelineMetrics,
     onError,
     playChunkStreaming,
     stopAudio,

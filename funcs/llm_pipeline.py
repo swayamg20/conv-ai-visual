@@ -1,10 +1,14 @@
 import os
+import json
+import time
+import copy
+import asyncio
 import logging
-from typing import List, Dict, Optional, AsyncGenerator, Callable, Any
+from typing import List, Dict, Optional, AsyncGenerator, Callable, Any, Tuple
 from funcs.memory import MemoryManager
 from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall
 from funcs.tool_executor import ToolExecutor, SandboxConfig, default_executor
-from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA
+from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA, ANIMATION_TOOLS
 from funcs.llm_clients import LLMClient, create_llm_client
 from funcs.config import config
 
@@ -21,6 +25,13 @@ class LLMPipeline:
     3. Semantic Memory - vector search via Mem0
     4. User Profile - canonical identity facts
     """
+    MUTATING_TOOL_NAMES = {
+        "canvas_update",
+        "animate_element",
+        "render_latex",
+        "create_teaching_sequence",
+        "plot_function",
+    }
     
     def __init__(
         self,
@@ -134,7 +145,7 @@ class LLMPipeline:
             self._canvas_system_prompt = custom_prompt
         logger.info(f"Canvas mode {'enabled' if enabled else 'disabled'}")
     
-    def get_context(self, current_query: Optional[str] = None, include_canvas: bool = True) -> List[Dict[str, str]]:
+    async def get_context(self, current_query: Optional[str] = None, include_canvas: bool = True) -> List[Dict[str, str]]:
         """
         Get conversation context enriched with all memory layers.
         
@@ -146,7 +157,10 @@ class LLMPipeline:
         system_prompt = self.active_system_prompt
         
         if self.memory and current_query:
-            context = self.memory.build_context(current_query, system_prompt)
+            if config.LLM_ASYNC_CONTEXT:
+                context = await self.memory.build_context(current_query, system_prompt)
+            else:
+                context = self.memory.build_context_sync(current_query, system_prompt)
         else:
             # Fallback: basic context without memory
             context = [{"role": "system", "content": system_prompt}]
@@ -198,7 +212,7 @@ class LLMPipeline:
             Assistant's response
         """
         # Build context with all memory layers
-        context = self.get_context(user_message)
+        context = await self.get_context(user_message)
         
         # Add user message to context
         context.append({"role": "user", "content": user_message})
@@ -226,7 +240,7 @@ class LLMPipeline:
             Text chunks as they arrive
         """
         # Build context with all memory layers
-        context = self.get_context(user_message)
+        context = await self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
 
         full_response = ""
@@ -318,7 +332,10 @@ class LLMPipeline:
     def log_decision(self, action: str, tool: Optional[str] = None, success: bool = True):
         """Log a decision/action for agentic memory."""
         if self.memory:
-            self.memory.decisions.log_decision(action, tool, success)
+            try:
+                self.memory.decisions.log_decision(action, tool, success)
+            except Exception as e:
+                logger.warning("Failed to log decision (non-fatal): %s", e)
     
     def check_recent_failure(self, action: str) -> bool:
         """Check if action failed recently (prevents loops)."""
@@ -476,10 +493,15 @@ class LLMPipeline:
         Args:
             include_canvas: Whether to include canvas tool. If None, uses canvas_mode setting.
         """
-        tools = []
-        
+        tools: List[Dict] = []
+
         if self.tool_store:
-            tools = self.tool_store.to_openai_format()
+            if config.LLM_TOOL_SCHEMA_CACHE:
+                db_tools = self.tool_store.to_openai_format()
+            else:
+                db_tools = [t.to_openai_schema() for t in self.tool_store.list_all(enabled_only=True)]
+            # Deep-copy so canvas/animation appends don't mutate shared objects.
+            tools = copy.deepcopy(db_tools)
         elif self.tools.list_names():
             tools = self.adapter.format_tools(self.tools)
         
@@ -493,20 +515,135 @@ class LLMPipeline:
                 tools.append(CANVAS_TOOL_SCHEMA)
 
             # Include animation tools when canvas mode is enabled
-            try:
-                from funcs.canvas import ANIMATION_TOOLS
-
-                # Add animation tools if not already present
-                existing_tool_names = {t.get("function", {}).get("name") for t in tools}
-                for anim_tool in ANIMATION_TOOLS:
-                    tool_name = anim_tool.get("function", {}).get("name")
-                    if tool_name and tool_name not in existing_tool_names:
-                        tools.append(anim_tool)
-                        logger.debug(f"Added animation tool: {tool_name}")
-            except ImportError:
-                logger.warning("Animation tools not available")
+            existing_tool_names = {t.get("function", {}).get("name") for t in tools}
+            for anim_tool in ANIMATION_TOOLS:
+                tool_name = anim_tool.get("function", {}).get("name")
+                if tool_name and tool_name not in existing_tool_names:
+                    tools.append(anim_tool)
+                    logger.debug(f"Added animation tool: {tool_name}")
 
         return tools
+
+    @staticmethod
+    def _tool_calls_to_assistant_message(tool_calls: List[ToolCall], content: Optional[str] = None) -> Dict[str, Any]:
+        """Build OpenAI-style assistant message containing tool calls."""
+        return {
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": json.dumps(tc.arguments),
+                    },
+                }
+                for tc in tool_calls
+            ],
+        }
+
+    def _is_mutating_tool(self, tool_name: str) -> bool:
+        return tool_name in self.MUTATING_TOOL_NAMES
+
+    async def _execute_single_tool_call(self, tc: ToolCall):
+        """Execute one tool call, including canvas/animation side effects."""
+        from funcs.tools import ToolResult
+
+        if tc.name == "canvas_update":
+            from funcs.canvas import canvas_update
+
+            operations = tc.arguments.get("operations", [])
+            result = canvas_update(operations, session_id=self.session_id)
+
+            if self.canvas_callback and result.get("operations"):
+                try:
+                    await self.canvas_callback(result["operations"])
+                except TypeError:
+                    self.canvas_callback(result["operations"])
+
+            return ToolResult(
+                tool_call_id=tc.id,
+                content=result.get("canvas_summary", "Canvas updated"),
+                success=True,
+            )
+
+        if tc.name in self.MUTATING_TOOL_NAMES:
+            from funcs.animation_pipeline import (
+                animate_element,
+                render_latex,
+                create_teaching_sequence,
+                plot_function,
+            )
+
+            tool_handlers = {
+                "animate_element": animate_element,
+                "render_latex": render_latex,
+                "create_teaching_sequence": create_teaching_sequence,
+                "plot_function": plot_function,
+            }
+
+            handler = tool_handlers.get(tc.name)
+            if handler:
+                result = handler(**tc.arguments, session_id=self.session_id)
+                canvas_state = get_canvas_state(self.session_id)
+                self._track_animation_in_canvas_state(canvas_state, tc.name, tc.arguments, result)
+
+                if self.animation_callback and result.get("success"):
+                    animation_data = {"tool": tc.name, **result}
+                    try:
+                        await self.animation_callback(animation_data)
+                    except TypeError:
+                        self.animation_callback(animation_data)
+
+                canvas_summary = canvas_state.get_context_summary()
+                return ToolResult(
+                    tool_call_id=tc.id,
+                    content=f"{tc.name} executed successfully. {canvas_summary}",
+                    success=result.get("success", True),
+                )
+
+        return await self.tool_executor.execute_tool_call(tc)
+
+    async def _execute_tool_calls_with_policy(self, tool_calls: List[ToolCall]) -> Tuple[List[Any], float]:
+        """
+        Execute tool calls with deterministic policy:
+        - mutating tools execute sequentially
+        - non-mutating tools may run in parallel
+        """
+        t_start = time.perf_counter()
+        ordered_results: List[Any] = [None] * len(tool_calls)
+
+        if not tool_calls:
+            return [], 0.0
+
+        if not config.LLM_PARALLEL_TOOLS or len(tool_calls) == 1:
+            for idx, tc in enumerate(tool_calls):
+                ordered_results[idx] = await self._execute_single_tool_call(tc)
+            return ordered_results, time.perf_counter() - t_start
+
+        pending_indices: List[int] = []
+        pending_calls: List[ToolCall] = []
+
+        async def _flush_parallel_batch():
+            if not pending_calls:
+                return
+            batch_results = await self.tool_executor.execute_batch(pending_calls)
+            for result_idx, tool_result in enumerate(batch_results):
+                ordered_results[pending_indices[result_idx]] = tool_result
+            pending_indices.clear()
+            pending_calls.clear()
+
+        for idx, tc in enumerate(tool_calls):
+            if self._is_mutating_tool(tc.name):
+                await _flush_parallel_batch()
+                ordered_results[idx] = await self._execute_single_tool_call(tc)
+            else:
+                pending_indices.append(idx)
+                pending_calls.append(tc)
+
+        await _flush_parallel_batch()
+        return ordered_results, time.perf_counter() - t_start
     
     async def chat_with_tools(
         self,
@@ -535,7 +672,7 @@ class LLMPipeline:
         Returns:
             Final assistant response after tool execution
         """
-        context = self.get_context(user_message)
+        context = await self.get_context(user_message)
         context.append({"role": "user", "content": user_message})
         
         # Get tool schemas (from DB or in-memory registry)
@@ -567,72 +704,9 @@ class LLMPipeline:
             context.append(self.client.get_assistant_message(response))
             
             logger.info(f"Round {round_num + 1}: LLM requested {len(tool_calls)} tool call(s)")
-            
-            for tc in tool_calls:
-                logger.info(f"Executing tool: {tc.name} with args: {tc.arguments}")
-                
-                # Special handling for canvas_update - inject session_id and broadcast
-                if tc.name == "canvas_update":
-                    from funcs.canvas import canvas_update
-                    from funcs.tools import ToolResult
-                    operations = tc.arguments.get("operations", [])
-                    result = canvas_update(operations, session_id=self.session_id)
 
-                    # Broadcast to client via callback
-                    if self.canvas_callback and result.get("operations"):
-                        try:
-                            await self.canvas_callback(result["operations"])
-                        except TypeError:
-                            # Sync callback
-                            self.canvas_callback(result["operations"])
-
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=result.get("canvas_summary", "Canvas updated"),
-                        success=True
-                    )
-                # Special handling for animation tools
-                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
-                    from funcs.animation_pipeline import (
-                        animate_element,
-                        render_latex,
-                        create_teaching_sequence,
-                        plot_function
-                    )
-                    from funcs.tools import ToolResult
-
-                    # Execute animation tool with session_id
-                    tool_handlers = {
-                        "animate_element": animate_element,
-                        "render_latex": render_latex,
-                        "create_teaching_sequence": create_teaching_sequence,
-                        "plot_function": plot_function
-                    }
-
-                    handler = tool_handlers[tc.name]
-                    result = handler(**tc.arguments, session_id=self.session_id)
-
-                    # Broadcast to client via animation callback
-                    if self.animation_callback and result.get("success"):
-                        animation_data = {
-                            "tool": tc.name,
-                            **result
-                        }
-                        try:
-                            await self.animation_callback(animation_data)
-                        except TypeError:
-                            # Sync callback
-                            self.animation_callback(animation_data)
-
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=f"{tc.name} executed successfully",
-                        success=result.get("success", True)
-                    )
-                else:
-                    # Execute via executor (fetches from DB, runs in sandbox)
-                    tool_result = await self.tool_executor.execute_tool_call(tc)
-                
+            tool_results, _ = await self._execute_tool_calls_with_policy(tool_calls)
+            for tc, tool_result in zip(tool_calls, tool_results):
                 logger.info(f"Tool {tc.name} result: {tool_result.content[:100]}...")
 
                 # Add result to context for LLM
@@ -649,7 +723,33 @@ class LLMPipeline:
         logger.warning(f"Exceeded max tool rounds ({max_tool_rounds})")
         return "I encountered an issue processing your request. Please try again."
     
-    async def chat_with_tools_stream(
+    @staticmethod
+    def _extract_speech_cues(tool_calls_data: List[Dict]) -> Optional[str]:
+        """Extract speech_cue text from tool call arguments.
+
+        If tool calls contain speech_cue fields (e.g., create_teaching_sequence),
+        concatenate them into a single TTS-ready string. This lets us skip
+        the second LLM round entirely — the spoken explanation is already
+        embedded in the tool call.
+
+        Returns None if no speech cues found.
+        """
+        cues = []
+        for tc in tool_calls_data:
+            args = tc.get("arguments", {})
+            # create_teaching_sequence has steps with speech_cue
+            for step in args.get("steps", []):
+                cue = step.get("speech_cue", "")
+                if cue and cue.strip():
+                    cues.append(cue.strip())
+            # render_latex or other tools might have a top-level speech_cue
+            if args.get("speech_cue"):
+                cues.append(args["speech_cue"].strip())
+        if cues:
+            return " ".join(cues)
+        return None
+
+    async def _chat_with_tools_stream_legacy(
         self,
         user_message: str,
         temperature: float = 0.7,
@@ -660,38 +760,46 @@ class LLMPipeline:
         """
         Streaming chat with tools.
 
-        Note: Tool calls are executed non-streaming, only final response streams.
+        Optimisation: if tool calls contain speech_cue fields (teaching sequences),
+        the spoken explanation is extracted directly and yielded as the TTS text,
+        skipping the second LLM inference round entirely. This saves ~3-5s.
 
         Yields:
             Text chunks of final response
         """
-        import time as _time
-
-        t_start = _time.perf_counter()
+        t_start = time.perf_counter()
         t_llm_total = 0.0
         t_tool_total = 0.0
         all_tool_calls: List[Dict] = []
         tokens_in = None
         tokens_out = None
         error_msg = None
+        speech_cue_text = None  # extracted from tool calls if available
+        t_first_provider_chunk = None
+        t_first_text_yield = None
+        t_context_start = time.perf_counter()
+        t_context_end = None
+        t_tools_schema_end = None
 
-        context = self.get_context(user_message)
+        context = await self.get_context(user_message)
+        t_context_end = time.perf_counter()
         context.append({"role": "user", "content": user_message})
 
         tools_schema = self.get_tools_schema() or None
+        t_tools_schema_end = time.perf_counter()
         tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
         logger.info(f"chat_with_tools_stream: {len(tool_names)} tools passed to LLM: {tool_names}")
 
         # Execute tool calls (non-streaming) until we get a text response
-        for _ in range(max_tool_rounds):
-            t_llm_start = _time.perf_counter()
+        for round_num in range(max_tool_rounds):
+            t_llm_start = time.perf_counter()
             response = await self.client.complete_with_tools(
                 messages=context,
                 tools=tools_schema,
                 temperature=temperature,
                 max_tokens=max_tokens
             )
-            t_llm_total += _time.perf_counter() - t_llm_start
+            t_llm_total += time.perf_counter() - t_llm_start
 
             # Extract token usage if available
             if hasattr(response, 'usage') and response.usage:
@@ -703,100 +811,70 @@ class LLMPipeline:
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
-            logger.info(f"LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
+            logger.info(f"Round {round_num+1}: LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
             context.append(self.client.get_assistant_message(response))
 
-            for tc in tool_calls:
-                all_tool_calls.append({"name": tc.name, "arguments": tc.arguments})
-                t_tool_start = _time.perf_counter()
-
-                # Special handling for canvas_update
-                if tc.name == "canvas_update":
-                    from funcs.canvas import canvas_update
-                    from funcs.tools import ToolResult
-                    operations = tc.arguments.get("operations", [])
-                    result = canvas_update(operations, session_id=self.session_id)
-
-                    if self.canvas_callback and result.get("operations"):
-                        try:
-                            await self.canvas_callback(result["operations"])
-                        except TypeError:
-                            self.canvas_callback(result["operations"])
-
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=result.get("canvas_summary", "Canvas updated"),
-                        success=True
-                    )
-                # Special handling for animation tools
-                elif tc.name in ["animate_element", "render_latex", "create_teaching_sequence", "plot_function"]:
-                    from funcs.animation_pipeline import (
-                        animate_element,
-                        render_latex,
-                        create_teaching_sequence,
-                        plot_function
-                    )
-                    from funcs.tools import ToolResult
-                    from funcs.canvas import get_canvas_state
-
-                    tool_handlers = {
-                        "animate_element": animate_element,
-                        "render_latex": render_latex,
-                        "create_teaching_sequence": create_teaching_sequence,
-                        "plot_function": plot_function
-                    }
-
-                    handler = tool_handlers[tc.name]
-                    result = handler(**tc.arguments, session_id=self.session_id)
-
-                    # Track drawn elements in canvas state so LLM knows what's on canvas
-                    canvas_state = get_canvas_state(self.session_id)
-                    self._track_animation_in_canvas_state(canvas_state, tc.name, tc.arguments, result)
-
-                    if self.animation_callback and result.get("success"):
-                        animation_data = {"tool": tc.name, **result}
-                        try:
-                            await self.animation_callback(animation_data)
-                        except TypeError:
-                            self.animation_callback(animation_data)
-
-                    # Give LLM a summary of what's now on canvas
-                    canvas_summary = canvas_state.get_context_summary()
-                    tool_result = ToolResult(
-                        tool_call_id=tc.id,
-                        content=f"{tc.name} executed successfully. {canvas_summary}",
-                        success=result.get("success", True)
-                    )
-                else:
-                    tool_result = await self.tool_executor.execute_tool_call(tc)
-
-                t_tool_total += _time.perf_counter() - t_tool_start
+            round_tool_data = []
+            tool_results, tool_elapsed = await self._execute_tool_calls_with_policy(tool_calls)
+            t_tool_total += tool_elapsed
+            for tc, tool_result in zip(tool_calls, tool_results):
+                tc_data = {"name": tc.name, "arguments": tc.arguments}
+                all_tool_calls.append(tc_data)
+                round_tool_data.append(tc_data)
                 context.append(self.client.format_tool_result(tool_result))
                 self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
 
-        # Now stream the final response
-        t_stream_start = _time.perf_counter()
+            # Check if we can extract speech cues from this round's tool calls
+            extracted = self._extract_speech_cues(round_tool_data)
+            if extracted:
+                speech_cue_text = extracted
+
+        # ── Yield the response text ──
+        t_stream_start = time.perf_counter()
         full_response = ""
 
-        async for chunk in self.client.stream(
-            messages=context,
-            temperature=temperature,
-            max_tokens=max_tokens
-        ):
-            full_response += chunk
-            yield chunk
+        if speech_cue_text:
+            # We have speech cues from tool calls — use them directly as TTS text.
+            # This skips the entire second LLM inference round.
+            logger.info(f"Using speech_cues as response ({len(speech_cue_text)} chars), skipping 2nd LLM round")
+            full_response = speech_cue_text
+            if t_first_text_yield is None:
+                t_first_text_yield = time.perf_counter()
+            yield speech_cue_text
+        else:
+            # No speech cues — fall back to streaming the LLM's text response
+            async for chunk in self.client.stream(
+                messages=context,
+                temperature=temperature,
+                max_tokens=max_tokens
+            ):
+                if t_first_provider_chunk is None:
+                    t_first_provider_chunk = time.perf_counter()
+                full_response += chunk
+                if t_first_text_yield is None:
+                    t_first_text_yield = time.perf_counter()
+                yield chunk
 
-        t_stream_end = _time.perf_counter()
-        t_end = _time.perf_counter()
+        t_stream_end = time.perf_counter()
+        t_end = time.perf_counter()
 
         if self.memory:
             self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
 
-        # Store metrics for caller to retrieve
         self._last_call_timing = {
             "latency_total_ms": round((t_end - t_start) * 1000, 2),
             "latency_llm_ms": round(t_llm_total * 1000, 2),
             "latency_tool_ms": round(t_tool_total * 1000, 2),
+            "latency_context_ms": round(((t_context_end or t_start) - t_context_start) * 1000, 2),
+            "latency_tools_schema_ms": round(((t_tools_schema_end or t_start) - (t_context_end or t_start)) * 1000, 2),
+            "latency_first_provider_chunk_ms": (
+                round((t_first_provider_chunk - t_start) * 1000, 2)
+                if t_first_provider_chunk else None
+            ),
+            "latency_llm_first_token_ms": (
+                round((t_first_text_yield - t_start) * 1000, 2)
+                if t_first_text_yield else None
+            ),
             "latency_stream_ms": round((t_stream_end - t_stream_start) * 1000, 2),
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
@@ -804,4 +882,199 @@ class LLMPipeline:
         self._last_call_tool_calls = all_tool_calls
         self._last_call_response = full_response
         self._last_call_error = error_msg
-        logger.info(f"Call metrics: total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
+        used_cues = "speech_cues" if speech_cue_text else "llm_stream"
+        logger.info(f"Call metrics ({used_cues}): total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
+
+    async def chat_with_tools_stream(
+        self,
+        user_message: str,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        save_to_memory: bool = True,
+        max_tool_rounds: int = 10
+    ) -> AsyncGenerator[str, None]:
+        """
+        Streaming chat with tool support.
+
+        - Legacy path: non-streaming planner rounds + final stream.
+        - New path (flagged): stream_with_tools orchestration so text can be emitted earlier.
+        """
+        if not config.LLM_STREAM_TOOL_ORCHESTRATION:
+            async for chunk in self._chat_with_tools_stream_legacy(
+                user_message=user_message,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                save_to_memory=save_to_memory,
+                max_tool_rounds=max_tool_rounds,
+            ):
+                yield chunk
+            return
+
+        t_start = time.perf_counter()
+        t_context_start = t_start
+        t_context_end = None
+        t_tools_schema_end = None
+        t_llm_total = 0.0
+        t_tool_total = 0.0
+        t_stream_start = None
+        t_first_provider_chunk = None
+        t_first_text_yield = None
+        tokens_in = None
+        tokens_out = None
+        error_msg = None
+        speech_cue_text = None
+        all_tool_calls: List[Dict] = []
+        full_response = ""
+
+        try:
+            context = await self.get_context(user_message)
+            t_context_end = time.perf_counter()
+            context.append({"role": "user", "content": user_message})
+
+            tools_schema = self.get_tools_schema() or None
+            t_tools_schema_end = time.perf_counter()
+            tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
+            logger.info(
+                "chat_with_tools_stream(orchestrated): %d tools passed to LLM: %s",
+                len(tool_names),
+                tool_names,
+            )
+
+            exhausted_rounds = True
+            for round_num in range(max_tool_rounds):
+                round_tool_calls: List[ToolCall] = []
+
+                t_llm_start = time.perf_counter()
+                provider_stream = self.client.stream_with_tools(
+                    messages=context,
+                    tools=tools_schema,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+
+                async for event in self.client.iter_stream_tool_events(provider_stream):
+                    if t_first_provider_chunk is None:
+                        t_first_provider_chunk = time.perf_counter()
+
+                    event_type = event.get("type")
+                    if event_type == "text_delta":
+                        text = event.get("text") or ""
+                        if not text:
+                            continue
+                        full_response += text
+                        if t_first_text_yield is None:
+                            t_first_text_yield = time.perf_counter()
+                            t_stream_start = t_first_text_yield
+                        yield text
+                    elif event_type == "tool_call_done":
+                        round_tool_calls = event.get("tool_calls") or []
+                    elif event_type == "usage":
+                        tokens_in = event.get("tokens_in", tokens_in)
+                        tokens_out = event.get("tokens_out", tokens_out)
+
+                t_llm_total += time.perf_counter() - t_llm_start
+
+                if not round_tool_calls:
+                    exhausted_rounds = False
+                    logger.info("Round %d produced no tool calls — response streaming complete", round_num + 1)
+                    break
+
+                logger.info(
+                    "Round %d (streamed) called %d tools: %s",
+                    round_num + 1,
+                    len(round_tool_calls),
+                    [tc.name for tc in round_tool_calls],
+                )
+                context.append(
+                    self._tool_calls_to_assistant_message(
+                        round_tool_calls,
+                        content=None,
+                    )
+                )
+
+                round_tool_data = []
+                for tc in round_tool_calls:
+                    tc_data = {"name": tc.name, "arguments": tc.arguments}
+                    round_tool_data.append(tc_data)
+                    all_tool_calls.append(tc_data)
+
+                tool_results, tool_elapsed = await self._execute_tool_calls_with_policy(round_tool_calls)
+                t_tool_total += tool_elapsed
+                for tc, tool_result in zip(round_tool_calls, tool_results):
+                    context.append(self.client.format_tool_result(tool_result))
+                    self.log_decision(action=f"tool:{tc.name}", tool=tc.name, success=tool_result.success)
+
+                extracted = self._extract_speech_cues(round_tool_data)
+                if extracted:
+                    exhausted_rounds = False
+                    speech_cue_text = extracted
+                    break
+
+            if exhausted_rounds and not speech_cue_text:
+                logger.warning(
+                    "Exceeded max tool rounds (%d) in orchestrated path; falling back to final text stream",
+                    max_tool_rounds,
+                )
+                async for chunk in self.client.stream(
+                    messages=context,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                ):
+                    if t_first_provider_chunk is None:
+                        t_first_provider_chunk = time.perf_counter()
+                    full_response += chunk
+                    if t_first_text_yield is None:
+                        t_first_text_yield = time.perf_counter()
+                        t_stream_start = t_first_text_yield
+                    yield chunk
+
+            if speech_cue_text:
+                if full_response and not full_response.endswith(" "):
+                    full_response += " "
+                full_response += speech_cue_text
+                if t_first_text_yield is None:
+                    t_first_text_yield = time.perf_counter()
+                    t_stream_start = t_first_text_yield
+                yield speech_cue_text
+
+            if self.memory:
+                self.memory.process_for_memory(user_message, full_response, save_semantic=save_to_memory)
+
+        except Exception as e:
+            error_msg = str(e)
+            logger.exception("chat_with_tools_stream(orchestrated) error: %s", e)
+            raise
+        finally:
+            t_end = time.perf_counter()
+            stream_end = t_end if t_stream_start else t_end
+            self._last_call_timing = {
+                "latency_total_ms": round((t_end - t_start) * 1000, 2),
+                "latency_llm_ms": round(t_llm_total * 1000, 2),
+                "latency_tool_ms": round(t_tool_total * 1000, 2),
+                "latency_context_ms": round(((t_context_end or t_start) - t_context_start) * 1000, 2),
+                "latency_tools_schema_ms": round(((t_tools_schema_end or t_start) - (t_context_end or t_start)) * 1000, 2),
+                "latency_first_provider_chunk_ms": (
+                    round((t_first_provider_chunk - t_start) * 1000, 2)
+                    if t_first_provider_chunk else None
+                ),
+                "latency_llm_first_token_ms": (
+                    round((t_first_text_yield - t_start) * 1000, 2)
+                    if t_first_text_yield else None
+                ),
+                "latency_stream_ms": (
+                    round((stream_end - t_stream_start) * 1000, 2)
+                    if t_stream_start else 0.0
+                ),
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+            }
+            self._last_call_tool_calls = all_tool_calls
+            self._last_call_response = full_response
+            self._last_call_error = error_msg
+            logger.info(
+                "Call metrics (orchestrated): total=%sms, llm=%sms, tools=%sms, ttft=%sms",
+                self._last_call_timing["latency_total_ms"],
+                self._last_call_timing["latency_llm_ms"],
+                self._last_call_timing["latency_tool_ms"],
+                self._last_call_timing.get("latency_llm_first_token_ms"),
+            )
