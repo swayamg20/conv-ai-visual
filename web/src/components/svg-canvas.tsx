@@ -236,9 +236,9 @@ function renderGrid(
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
     line.setAttribute("y2", String(height));
-    line.setAttribute("stroke", "#e5e7eb");
+    line.setAttribute("stroke", "#4A4843");
     line.setAttribute("stroke-width", "0.5");
-    line.setAttribute("opacity", "0.5");
+    line.setAttribute("opacity", "0.3");
     g.appendChild(line);
   }
   for (let y = gridSize; y < height; y += gridSize) {
@@ -247,9 +247,9 @@ function renderGrid(
     line.setAttribute("y1", String(y));
     line.setAttribute("x2", String(width));
     line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#e5e7eb");
+    line.setAttribute("stroke", "#4A4843");
     line.setAttribute("stroke-width", "0.5");
-    line.setAttribute("opacity", "0.5");
+    line.setAttribute("opacity", "0.3");
     g.appendChild(line);
   }
 
@@ -261,9 +261,9 @@ function renderGrid(
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
     line.setAttribute("y2", String(height));
-    line.setAttribute("stroke", "#d1d5db");
+    line.setAttribute("stroke", "#4A4843");
     line.setAttribute("stroke-width", "0.8");
-    line.setAttribute("opacity", "0.6");
+    line.setAttribute("opacity", "0.5");
     g.appendChild(line);
   }
   for (let y = majorSize; y < height; y += majorSize) {
@@ -272,9 +272,9 @@ function renderGrid(
     line.setAttribute("y1", String(y));
     line.setAttribute("x2", String(width));
     line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#d1d5db");
+    line.setAttribute("stroke", "#4A4843");
     line.setAttribute("stroke-width", "0.8");
-    line.setAttribute("opacity", "0.6");
+    line.setAttribute("opacity", "0.5");
     g.appendChild(line);
   }
 
@@ -345,10 +345,10 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const getRoughOptions = useCallback(
       (op: CanvasOperation & { roughness?: number }) => ({
-        stroke: op.color ?? "#3b82f6",
-        strokeWidth: op.stroke_width ?? 2,
+        stroke: op.color ?? "#E8E4DC",
+        strokeWidth: op.stroke_width ?? 1.5,
         fill: op.fill || undefined,
-        roughness: op.roughness ?? 1.5,
+        roughness: op.roughness ?? 1.2,
         fillStyle: op.fill ? "solid" : undefined,
       }),
       []
@@ -438,7 +438,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           end[1],
           getRoughOptions(op)
         );
-        const markerId = createArrowhead(op.id || generateId(), op.color ?? "#3b82f6");
+        const markerId = createArrowhead(op.id || generateId(), op.color ?? "#E8E4DC");
         const p = node.querySelector("path");
         if (p && markerId) p.setAttribute("marker-end", `url(#${markerId})`);
         g.appendChild(node);
@@ -454,7 +454,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
         text.setAttribute("x", String(op.x ?? 0));
         text.setAttribute("y", String(op.y ?? 0));
-        text.setAttribute("fill", op.color ?? "#000000");
+        text.setAttribute("fill", op.color ?? "#E8E4DC");
         text.setAttribute("font-size", String(op.font_size ?? 16));
         text.setAttribute("font-family", op.font_family ?? "var(--font-handwriting), var(--font-handwriting-alt), cursive, sans-serif");
         if ((op as any)._centered) {
@@ -538,7 +538,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             xLine.setAttribute("y1", String(xAxisY));
             xLine.setAttribute("x2", String(canvasW - margin));
             xLine.setAttribute("y2", String(xAxisY));
-            xLine.setAttribute("stroke", "#9ca3af");
+            xLine.setAttribute("stroke", "#9B9790");
             xLine.setAttribute("stroke-width", "1.5");
             g.appendChild(xLine);
 
@@ -552,7 +552,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               tick.setAttribute("y1", String(xAxisY - 4));
               tick.setAttribute("x2", String(tx));
               tick.setAttribute("y2", String(xAxisY + 4));
-              tick.setAttribute("stroke", "#9ca3af");
+              tick.setAttribute("stroke", "#9B9790");
               tick.setAttribute("stroke-width", "1");
               g.appendChild(tick);
 
@@ -560,7 +560,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               label.setAttribute("x", String(tx));
               label.setAttribute("y", String(xAxisY + 18));
               label.setAttribute("text-anchor", "middle");
-              label.setAttribute("fill", "#6b7280");
+              label.setAttribute("fill", "#9B9790");
               label.setAttribute("font-size", "11");
               label.textContent = Number(v.toFixed(1)).toString();
               g.appendChild(label);
@@ -575,7 +575,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             yLine.setAttribute("y1", String(margin));
             yLine.setAttribute("x2", String(yAxisX));
             yLine.setAttribute("y2", String(canvasH - margin));
-            yLine.setAttribute("stroke", "#9ca3af");
+            yLine.setAttribute("stroke", "#9B9790");
             yLine.setAttribute("stroke-width", "1.5");
             g.appendChild(yLine);
 
@@ -588,7 +588,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               tick.setAttribute("y1", String(ty));
               tick.setAttribute("x2", String(yAxisX + 4));
               tick.setAttribute("y2", String(ty));
-              tick.setAttribute("stroke", "#9ca3af");
+              tick.setAttribute("stroke", "#9B9790");
               tick.setAttribute("stroke-width", "1");
               g.appendChild(tick);
 
@@ -596,7 +596,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               label.setAttribute("x", String(yAxisX - 10));
               label.setAttribute("y", String(ty + 4));
               label.setAttribute("text-anchor", "end");
-              label.setAttribute("fill", "#6b7280");
+              label.setAttribute("fill", "#9B9790");
               label.setAttribute("font-size", "11");
               label.textContent = Number(v.toFixed(1)).toString();
               g.appendChild(label);
@@ -692,7 +692,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                 animateCrossOut(
                   svgRef.current,
                   data.element,
-                  op.color ?? "#ef4444",
+                  op.color ?? "#E87B7B",
                   DURATION.fast
                 );
               }
@@ -906,7 +906,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                   x: step.x,
                   y: step.y,
                   font_size: step.font_size ?? 20,
-                  color: step.color ?? "#000000",
+                  color: step.color ?? "#E8E4DC",
                 };
                 tl.add(() => renderLatex(latexOp), "+=0.15");
               }
@@ -920,7 +920,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                 text: step.text ?? step.speech_cue ?? "",
                 x: step.x ?? 0,
                 y: step.y ?? 0,
-                color: step.color ?? "#000000",
+                color: step.color ?? "#E8E4DC",
                 font_size: step.font_size ?? 16,
                 font_family: step.font_family,
               };
@@ -956,7 +956,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             case "crossout":
               if (step.target_id) {
                 const coTargetId = step.target_id;
-                const coColor = step.color ?? "#ef4444";
+                const coColor = step.color ?? "#E87B7B";
                 tl.add(() => {
                   const targetData = elementsRef.current.get(coTargetId);
                   if (targetData && svgRef.current) {
@@ -1177,30 +1177,30 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           height={height}
           viewBox={`0 0 ${width} ${height}`}
           style={{
-            border: "1px solid #e5e7eb",
+            border: "1px solid rgba(74, 72, 67, 0.5)",
             borderRadius: "8px",
-            background: "#ffffff",
+            background: "#08080C",
           }}
         />
         {/* Toolbar */}
         <div className="absolute top-3 right-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={zoomIn}
-            className="p-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white/70 hover:text-white transition-all text-xs font-mono"
+            className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all text-xs font-mono"
             title="Zoom in"
           >
             +
           </button>
           <button
             onClick={resetZoom}
-            className="p-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white/70 hover:text-white transition-all text-xs font-mono min-w-[2.5rem] text-center"
+            className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all text-xs font-mono min-w-[2.5rem] text-center"
             title="Reset zoom"
           >
             {Math.round(zoomLevel * 100)}%
           </button>
           <button
             onClick={zoomOut}
-            className="p-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white/70 hover:text-white transition-all text-xs font-mono"
+            className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all text-xs font-mono"
             title="Zoom out"
           >
             -
@@ -1208,7 +1208,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           <div className="w-px h-4 bg-white/20 mx-1" />
           <button
             onClick={saveAsImage}
-            className="p-1.5 rounded-md bg-black/50 hover:bg-black/70 text-white/70 hover:text-white transition-all"
+            className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all"
             title="Save as PNG"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

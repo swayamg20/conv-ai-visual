@@ -33,13 +33,16 @@ export const EASING = {
  * Default animation durations (in seconds)
  */
 export const DURATION = {
+  micro: 0.15,
   instant: 0.15,
   fast: 0.3,
+  stateChange: 0.3,
   normal: 0.5,
   slow: 0.8,
   verySlow: 1.2,
   draw: 0.6,
   drawSlow: 1.0,
+  settle: 2.5,
 } as const;
 
 /**

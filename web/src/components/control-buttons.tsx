@@ -36,20 +36,20 @@ export function ControlButtons({
         whileTap={{ scale: disabled ? 1 : 0.95 }}
         className={cn(
           "relative flex items-center justify-center w-12 h-12 rounded-full",
-          "glass-card border border-white/10 transition-all duration-300",
-          "hover:shadow-glass hover:border-white/20",
+          "glass-card border border-chalk-faint/30 transition-all duration-300",
+          "hover:border-chalk-faint/50",
           "disabled:opacity-50 disabled:cursor-not-allowed",
           isMicMuted
-            ? "bg-red-500/20 border-red-500/30 hover:bg-red-500/30"
-            : "hover:bg-white/10"
+            ? "bg-ember/20 border-ember/30 hover:bg-ember/30"
+            : "hover:bg-white/5"
         )}
         aria-label={isMicMuted ? "Unmute microphone" : "Mute microphone"}
         title={isMicMuted ? "Unmute microphone" : "Mute microphone"}
       >
         {isMicMuted ? (
-          <MicOff className="w-5 h-5 text-red-400" />
+          <MicOff className="w-5 h-5 text-ember" />
         ) : (
-          <Mic className="w-5 h-5 text-green-400" />
+          <Mic className="w-5 h-5 text-sage" />
         )}
 
         {/* Status indicator dot */}
@@ -58,12 +58,12 @@ export function ControlButtons({
           animate={{ scale: 1 }}
           className={cn(
             "absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-background",
-            isMicMuted ? "bg-red-500" : "bg-green-500"
+            isMicMuted ? "bg-ember" : "bg-sage"
           )}
         >
           {!isMicMuted && (
             <motion.div
-              className="absolute inset-0 rounded-full bg-green-500"
+              className="absolute inset-0 rounded-full bg-sage"
               animate={{
                 scale: [1, 1.5, 1],
                 opacity: [0.8, 0, 0.8],
@@ -86,20 +86,20 @@ export function ControlButtons({
         whileTap={{ scale: disabled ? 1 : 0.95 }}
         className={cn(
           "relative flex items-center justify-center w-12 h-12 rounded-full",
-          "glass-card border border-white/10 transition-all duration-300",
-          "hover:shadow-glass hover:border-white/20",
+          "glass-card border border-chalk-faint/30 transition-all duration-300",
+          "hover:border-chalk-faint/50",
           "disabled:opacity-50 disabled:cursor-not-allowed",
           !isTTSEnabled
-            ? "bg-orange-500/20 border-orange-500/30 hover:bg-orange-500/30"
-            : "hover:bg-white/10"
+            ? "bg-amber/20 border-amber/30 hover:bg-amber/30"
+            : "hover:bg-white/5"
         )}
         aria-label={isTTSEnabled ? "Disable voice responses" : "Enable voice responses"}
         title={isTTSEnabled ? "Disable voice responses" : "Enable voice responses"}
       >
         {!isTTSEnabled ? (
-          <VolumeX className="w-5 h-5 text-orange-400" />
+          <VolumeX className="w-5 h-5 text-amber" />
         ) : (
-          <Volume2 className="w-5 h-5 text-blue-400" />
+          <Volume2 className="w-5 h-5 text-lavender" />
         )}
 
         {/* Status indicator dot */}
@@ -108,12 +108,12 @@ export function ControlButtons({
           animate={{ scale: 1 }}
           className={cn(
             "absolute -top-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-background",
-            !isTTSEnabled ? "bg-orange-500" : "bg-blue-500"
+            !isTTSEnabled ? "bg-amber" : "bg-lavender"
           )}
         >
           {isTTSEnabled && (
             <motion.div
-              className="absolute inset-0 rounded-full bg-blue-500"
+              className="absolute inset-0 rounded-full bg-lavender"
               animate={{
                 scale: [1, 1.5, 1],
                 opacity: [0.8, 0, 0.8],
@@ -131,11 +131,11 @@ export function ControlButtons({
       {/* Tooltip/Labels */}
       <div className="hidden md:flex flex-col gap-0.5 text-xs text-muted-foreground">
         <div className="flex items-center gap-1.5">
-          <div className={cn("w-1.5 h-1.5 rounded-full", isMicMuted ? "bg-red-500" : "bg-green-500")} />
+          <div className={cn("w-1.5 h-1.5 rounded-full", isMicMuted ? "bg-ember" : "bg-sage")} />
           <span>{isMicMuted ? "Mic muted" : "Mic active"}</span>
         </div>
         <div className="flex items-center gap-1.5">
-          <div className={cn("w-1.5 h-1.5 rounded-full", !isTTSEnabled ? "bg-orange-500" : "bg-blue-500")} />
+          <div className={cn("w-1.5 h-1.5 rounded-full", !isTTSEnabled ? "bg-amber" : "bg-lavender")} />
           <span>{isTTSEnabled ? "Voice on" : "Voice off"}</span>
         </div>
       </div>

@@ -17,6 +17,7 @@ import { TechnicalDrawer } from "@/components/technical-drawer";
 import { ControlButtons } from "@/components/control-buttons";
 import { ModeToggle, type AppMode } from "@/components/mode-toggle";
 import { ChatInterface } from "@/components/chat-interface";
+import { MurmurLogoMark, WaveformToSketch, BackgroundDoodles } from "@/components/murmur-doodles";
 
 export default function Home() {
   const [appMode, setAppMode] = useState<AppMode>("voice");
@@ -168,12 +169,12 @@ export default function Home() {
   return (
     <div className="relative min-h-screen bg-background">
       {/* Top Navigation Bar */}
-      <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-white/10">
+      <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-chalk-faint/30">
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <Mic className="h-6 w-6 text-primary" />
+            <MurmurLogoMark />
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">Voice AI</h1>
+              <h1 className="text-lg font-semibold tracking-tight">Murmur</h1>
               <p className="text-xs text-muted-foreground">Real-time assistant</p>
             </div>
           </div>
@@ -186,13 +187,13 @@ export default function Home() {
             />
             <Link
               href="/dashboard"
-              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              className="p-2 rounded-lg hover:bg-graphite transition-colors"
               aria-label="Dashboard"
             >
               <BarChart3 className="h-5 w-5 text-muted-foreground" />
             </Link>
             <button
-              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              className="p-2 rounded-lg hover:bg-graphite transition-colors"
               aria-label="Settings"
             >
               <Settings className="h-5 w-5 text-muted-foreground" />
@@ -210,8 +211,10 @@ export default function Home() {
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.5 }}
-              className="w-2/5 min-w-[400px] flex flex-col items-center justify-center gap-8 md:gap-12"
+              className="w-2/5 min-w-[400px] flex flex-col items-center justify-center gap-8 md:gap-12 relative"
             >
+              {/* Background math doodles */}
+              <BackgroundDoodles className="opacity-40" />
               {/* Voice Orb */}
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
@@ -252,6 +255,17 @@ export default function Home() {
                 />
               )}
 
+              {/* Waveform-to-sketch illustration (idle state) */}
+              {!isConnected && !isConnecting && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.5 }}
+                >
+                  <WaveformToSketch />
+                </motion.div>
+              )}
+
               {/* Connection Button (if not connected) */}
               {!isConnected && !isConnecting && (
                 <motion.div
@@ -265,7 +279,7 @@ export default function Home() {
                     onClick={handleConnect}
                     icon={<Mic className="h-5 w-5" />}
                   >
-                    Connect to Voice AI
+                    Connect to Murmur
                   </FloatingButton>
                 </motion.div>
               )}
@@ -366,7 +380,7 @@ export default function Home() {
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 1.2 }}
           onClick={() => setDrawerOpen(true)}
-          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass-card px-6 py-3 rounded-full text-sm font-medium hover:bg-white/10 transition-all flex items-center gap-2 shadow-glass"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-20 glass-card px-6 py-3 rounded-full text-sm font-medium hover:bg-graphite transition-all flex items-center gap-2"
         >
           <span>View Metrics & Logs</span>
           <ChevronUp className="h-4 w-4" />

@@ -62,8 +62,8 @@ function TabsTrigger({ value, children, className }: TabsTriggerProps) {
       className={cn(
         "relative flex-1 rounded-lg px-4 py-3 text-base font-medium transition-all duration-200 min-h-[44px]",
         isActive
-          ? "bg-background-elevated text-foreground shadow-glass"
-          : "text-muted-foreground hover:text-foreground/80 hover:bg-white/5",
+          ? "bg-slate text-foreground"
+          : "text-muted-foreground hover:text-foreground/80 hover:bg-graphite",
         className
       )}
     >

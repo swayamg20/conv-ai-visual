@@ -19,8 +19,8 @@ const Switch = React.forwardRef<HTMLInputElement, SwitchProps>(
           onChange={(e) => onCheckedChange?.(e.target.checked)}
           {...props}
         />
-        <span className="absolute inset-0 rounded-full border border-border bg-muted transition-all peer-checked:border-primary peer-checked:bg-primary" />
-        <span className="absolute bottom-[2px] left-[2px] h-4 w-4 rounded-full bg-muted-foreground transition-all peer-checked:translate-x-[18px] peer-checked:bg-white" />
+        <span className="absolute inset-0 rounded-full border border-chalk-faint bg-graphite transition-all peer-checked:border-amber peer-checked:bg-amber" />
+        <span className="absolute bottom-[2px] left-[2px] h-4 w-4 rounded-full bg-chalk-soft transition-all peer-checked:translate-x-[18px] peer-checked:bg-void" />
       </label>
     );
   }

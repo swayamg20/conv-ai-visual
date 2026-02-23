@@ -15,7 +15,7 @@ interface WaveformVisualizerProps extends HTMLAttributes<HTMLDivElement> {
 export function WaveformVisualizer({
   amplitude = 0.3,
   barCount = 5,
-  barColor = "rgba(255, 255, 255, 0.9)",
+  barColor = "rgba(232, 228, 220, 0.85)",
   barHeight = 40,
   animated = true,
   className,

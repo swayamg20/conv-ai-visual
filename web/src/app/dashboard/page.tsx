@@ -113,13 +113,13 @@ function StatCard({
 }
 
 const STAGE_COLORS: Record<string, string> = {
-  stt: "bg-cyan-500",
-  turn: "bg-teal-500",
-  llm: "bg-blue-500",
-  tool: "bg-amber-500",
-  tts: "bg-violet-500",
-  tts_ttfb: "bg-purple-400",
-  other: "bg-gray-500",
+  stt: "bg-sage",
+  turn: "bg-sage/70",
+  llm: "bg-lavender",
+  tool: "bg-amber",
+  tts: "bg-lavender/70",
+  tts_ttfb: "bg-lavender/50",
+  other: "bg-chalk-faint",
 };
 
 function PipelineBar({ log }: { log: VoiceLogEntry }) {
@@ -200,17 +200,17 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
-      <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-white/10">
+      <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-chalk-faint/30">
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-4">
             <Link
               href="/"
-              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              className="p-2 rounded-lg hover:bg-graphite transition-colors"
             >
               <ArrowLeft className="h-5 w-5 text-muted-foreground" />
             </Link>
             <div className="flex items-center gap-3">
-              <BarChart3 className="h-6 w-6 text-primary" />
+              <BarChart3 className="h-6 w-6 text-amber" />
               <div>
                 <h1 className="text-lg font-semibold tracking-tight">
                   Pipeline Observatory
@@ -223,11 +223,11 @@ export default function Dashboard() {
           </div>
           <div className="flex items-center gap-3">
             {/* Mode filter */}
-            <div className="flex items-center gap-1 bg-white/5 rounded-lg p-0.5">
+            <div className="flex items-center gap-1 bg-void rounded-lg p-0.5">
               <button
                 onClick={() => setModeFilter(null)}
                 className={`px-3 py-1 rounded-md text-xs font-medium transition-colors ${
-                  modeFilter === null ? "bg-white/10 text-foreground" : "text-muted-foreground hover:text-foreground"
+                  modeFilter === null ? "bg-graphite text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
               >
                 All
@@ -235,7 +235,7 @@ export default function Dashboard() {
               <button
                 onClick={() => setModeFilter("voice")}
                 className={`px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${
-                  modeFilter === "voice" ? "bg-white/10 text-foreground" : "text-muted-foreground hover:text-foreground"
+                  modeFilter === "voice" ? "bg-graphite text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
               >
                 <Mic className="h-3 w-3" />
@@ -244,7 +244,7 @@ export default function Dashboard() {
               <button
                 onClick={() => setModeFilter("chat")}
                 className={`px-3 py-1 rounded-md text-xs font-medium transition-colors flex items-center gap-1 ${
-                  modeFilter === "chat" ? "bg-white/10 text-foreground" : "text-muted-foreground hover:text-foreground"
+                  modeFilter === "chat" ? "bg-graphite text-foreground" : "text-muted-foreground hover:text-foreground"
                 }`}
               >
                 <MessageSquare className="h-3 w-3" />
@@ -257,7 +257,7 @@ export default function Dashboard() {
             </span>
             <button
               onClick={fetchData}
-              className="p-2 rounded-lg hover:bg-white/10 transition-colors"
+              className="p-2 rounded-lg hover:bg-graphite transition-colors"
             >
               <RefreshCw
                 className={`h-4 w-4 text-muted-foreground ${loading ? "animate-spin" : ""}`}
@@ -278,21 +278,21 @@ export default function Dashboard() {
             title="Total Turns"
             value={stats?.total_turns ?? 0}
             icon={Activity}
-            color="bg-blue-500/20 text-blue-400"
+            color="bg-lavender/20 text-lavender"
           />
           <StatCard
             title="Avg Total"
             value={stats?.avg_total_ms?.toFixed(0) ?? 0}
             unit="ms"
             icon={Clock}
-            color="bg-emerald-500/20 text-emerald-400"
+            color="bg-sage/20 text-sage"
           />
           <StatCard
             title="Avg STT"
             value={stats?.avg_stt_ms?.toFixed(0) ?? 0}
             unit="ms"
             icon={Mic}
-            color="bg-cyan-500/20 text-cyan-400"
+            color="bg-sage/20 text-sage"
           />
           <StatCard
             title="Avg LLM"
@@ -300,7 +300,7 @@ export default function Dashboard() {
             unit="ms"
             subtitle={stats?.avg_llm_ttft_ms ? `TTFT: ${stats.avg_llm_ttft_ms.toFixed(0)}ms` : undefined}
             icon={Zap}
-            color="bg-blue-500/20 text-blue-400"
+            color="bg-lavender/20 text-lavender"
           />
           <StatCard
             title="Avg TTS"
@@ -308,7 +308,7 @@ export default function Dashboard() {
             unit="ms"
             subtitle={stats?.avg_tts_ttfb_ms ? `TTFB: ${stats.avg_tts_ttfb_ms.toFixed(0)}ms` : undefined}
             icon={BarChart3}
-            color="bg-violet-500/20 text-violet-400"
+            color="bg-lavender/20 text-lavender"
           />
           <StatCard
             title="Error Rate"
@@ -318,8 +318,8 @@ export default function Dashboard() {
             icon={AlertTriangle}
             color={
               (stats?.error_rate ?? 0) > 10
-                ? "bg-red-500/20 text-red-400"
-                : "bg-emerald-500/20 text-emerald-400"
+                ? "bg-ember/20 text-ember"
+                : "bg-sage/20 text-sage"
             }
           />
         </motion.div>
@@ -348,7 +348,7 @@ export default function Dashboard() {
           transition={{ delay: 0.1 }}
         >
           <GlassmorphicCard variant="elevated" padding="none">
-            <div className="grid grid-cols-[40px_100px_1fr_140px_220px_70px] gap-3 px-4 py-3 border-b border-white/10 text-xs font-medium text-muted-foreground uppercase tracking-wider">
+            <div className="grid grid-cols-[40px_100px_1fr_140px_220px_70px] gap-3 px-4 py-3 border-b border-chalk-faint/30 text-xs font-medium text-muted-foreground uppercase tracking-wider">
               <span></span>
               <span>Time</span>
               <span>Message</span>
@@ -373,14 +373,14 @@ export default function Dashboard() {
               <div key={log.id}>
                 <button
                   onClick={() => toggleRow(log.id)}
-                  className="w-full grid grid-cols-[40px_100px_1fr_140px_220px_70px] gap-3 px-4 py-3 border-b border-white/5 hover:bg-white/5 transition-colors text-left items-center"
+                  className="w-full grid grid-cols-[40px_100px_1fr_140px_220px_70px] gap-3 px-4 py-3 border-b border-chalk-faint/15 hover:bg-graphite transition-colors text-left items-center"
                 >
                   {/* Mode icon */}
                   <span>
                     {log.mode === "voice" ? (
-                      <Mic className="h-3.5 w-3.5 text-emerald-400" />
+                      <Mic className="h-3.5 w-3.5 text-sage" />
                     ) : (
-                      <MessageSquare className="h-3.5 w-3.5 text-blue-400" />
+                      <MessageSquare className="h-3.5 w-3.5 text-lavender" />
                     )}
                   </span>
 
@@ -407,7 +407,7 @@ export default function Dashboard() {
                       log.tool_calls.slice(0, 3).map((tc, i) => (
                         <span
                           key={i}
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/20 text-amber-300"
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-amber/20 text-amber"
                         >
                           <Wrench className="h-2.5 w-2.5" />
                           {tc.name.replace("create_teaching_", "").replace("_element", "").replace("render_", "")}
@@ -427,15 +427,15 @@ export default function Dashboard() {
                   {/* Status */}
                   <span>
                     {log.error ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-red-500/20 text-red-400">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-ember/20 text-ember">
                         Error
                       </span>
                     ) : log.tts_interrupted ? (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-yellow-500/20 text-yellow-400">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-amber/20 text-amber">
                         Cut
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-400">
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-sage/20 text-sage">
                         OK
                       </span>
                     )}
@@ -448,7 +448,7 @@ export default function Dashboard() {
                     initial={{ height: 0, opacity: 0 }}
                     animate={{ height: "auto", opacity: 1 }}
                     exit={{ height: 0, opacity: 0 }}
-                    className="px-4 py-4 border-b border-white/10 bg-white/[0.02]"
+                    className="px-4 py-4 border-b border-chalk-faint/30 bg-white/[0.02]"
                   >
                     <div className="grid grid-cols-3 gap-6">
                       {/* Left: Full Latency Breakdown */}
@@ -458,14 +458,14 @@ export default function Dashboard() {
                         </p>
                         <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-xs">
                           {[
-                            { label: "STT (speech→transcript)", value: log.latency_stt_ms, color: "text-cyan-400" },
-                            { label: "Turn Detection", value: log.latency_turn_detection_ms, color: "text-teal-400" },
-                            { label: "STT → LLM gap", value: log.latency_stt_to_llm_ms, color: "text-gray-400" },
-                            { label: "LLM (inference+tools)", value: log.latency_llm_ms, color: "text-blue-400" },
-                            { label: "  └ Tool execution", value: log.latency_tool_ms, color: "text-amber-400" },
-                            { label: "  └ LLM first token", value: log.latency_llm_first_token_ms, color: "text-blue-300" },
-                            { label: "TTS (generation)", value: log.latency_tts_ms, color: "text-violet-400" },
-                            { label: "  └ TTS first chunk", value: log.latency_tts_first_chunk_ms, color: "text-purple-300" },
+                            { label: "STT (speech→transcript)", value: log.latency_stt_ms, color: "text-sage" },
+                            { label: "Turn Detection", value: log.latency_turn_detection_ms, color: "text-sage/80" },
+                            { label: "STT → LLM gap", value: log.latency_stt_to_llm_ms, color: "text-chalk-soft" },
+                            { label: "LLM (inference+tools)", value: log.latency_llm_ms, color: "text-lavender" },
+                            { label: "  └ Tool execution", value: log.latency_tool_ms, color: "text-amber" },
+                            { label: "  └ LLM first token", value: log.latency_llm_first_token_ms, color: "text-lavender/80" },
+                            { label: "TTS (generation)", value: log.latency_tts_ms, color: "text-lavender" },
+                            { label: "  └ TTS first chunk", value: log.latency_tts_first_chunk_ms, color: "text-lavender/70" },
                             { label: "Total end-to-end", value: log.latency_total_ms, color: "text-foreground font-semibold" },
                           ].map(({ label, value, color }) => (
                             <div key={label} className="contents">
@@ -494,7 +494,7 @@ export default function Dashboard() {
                           </div>
                           <div>
                             <span className="text-muted-foreground">Mode:</span>{" "}
-                            <span className={`font-mono ${log.mode === "voice" ? "text-emerald-400" : "text-blue-400"}`}>
+                            <span className={`font-mono ${log.mode === "voice" ? "text-sage" : "text-lavender"}`}>
                               {log.mode}
                             </span>
                           </div>
@@ -511,7 +511,7 @@ export default function Dashboard() {
                               <span className="text-muted-foreground">TTS chunks:</span>{" "}
                               <span className="font-mono">{log.tts_chunks_sent}</span>
                               {log.tts_interrupted && (
-                                <span className="text-yellow-400 ml-2">(interrupted)</span>
+                                <span className="text-amber ml-2">(interrupted)</span>
                               )}
                             </div>
                           )}
@@ -519,8 +519,8 @@ export default function Dashboard() {
                             <div>
                               <span className="text-muted-foreground">Smart Turn:</span>{" "}
                               <span className={`font-mono ${
-                                log.smart_turn_result === "complete" ? "text-emerald-400" :
-                                log.smart_turn_result === "fallback" ? "text-yellow-400" :
+                                log.smart_turn_result === "complete" ? "text-sage" :
+                                log.smart_turn_result === "fallback" ? "text-amber" :
                                 "text-muted-foreground"
                               }`}>
                                 {log.smart_turn_result}
@@ -529,8 +529,8 @@ export default function Dashboard() {
                           )}
                           {log.error && (
                             <div className="mt-2">
-                              <p className="text-[10px] uppercase tracking-wider text-red-400 mb-1">Error</p>
-                              <p className="text-xs text-red-300 font-mono bg-red-500/10 p-2 rounded">
+                              <p className="text-[10px] uppercase tracking-wider text-ember mb-1">Error</p>
+                              <p className="text-xs text-ember/80 font-mono bg-ember/10 p-2 rounded">
                                 {log.error}
                               </p>
                             </div>
@@ -551,13 +551,13 @@ export default function Dashboard() {
                                   e.stopPropagation();
                                   copyToolCalls(log.id, log.tool_calls);
                                 }}
-                                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] hover:bg-white/10 transition-colors text-muted-foreground hover:text-foreground"
+                                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] hover:bg-graphite transition-colors text-muted-foreground hover:text-foreground"
                                 title="Copy tool calls JSON"
                               >
                                 {copiedId === log.id ? (
                                   <>
-                                    <Check className="h-3 w-3 text-emerald-400" />
-                                    <span className="text-emerald-400">Copied</span>
+                                    <Check className="h-3 w-3 text-sage" />
+                                    <span className="text-sage">Copied</span>
                                   </>
                                 ) : (
                                   <>
@@ -567,7 +567,7 @@ export default function Dashboard() {
                                 )}
                               </button>
                             </div>
-                            <pre className="text-xs font-mono bg-black/30 p-3 rounded overflow-auto max-h-36 text-muted-foreground">
+                            <pre className="text-xs font-mono bg-void/80 p-3 rounded overflow-auto max-h-36 text-muted-foreground">
                               {JSON.stringify(log.tool_calls, null, 2)}
                             </pre>
                           </div>
@@ -577,7 +577,7 @@ export default function Dashboard() {
                             <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
                               Response
                             </p>
-                            <p className="text-xs bg-black/20 p-3 rounded max-h-28 overflow-auto text-foreground/80">
+                            <p className="text-xs bg-void/60 p-3 rounded max-h-28 overflow-auto text-foreground/80">
                               {log.response_text}
                             </p>
                           </div>

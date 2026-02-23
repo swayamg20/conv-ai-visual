@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Send, Trash2, User, Bot, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Message } from "@/hooks/use-chat";
+import { WaveformToSketch } from "@/components/murmur-doodles";
 
 interface ChatInterfaceProps {
   messages: Message[];
@@ -64,14 +65,14 @@ export function ChatInterface({
             animate={{ opacity: 1, y: 0 }}
             className="flex flex-col items-center justify-center h-full text-center px-4"
           >
-            <div className="w-20 h-20 rounded-full bg-primary/10 flex items-center justify-center mb-6">
-              <Bot className="h-10 w-10 text-primary/50" />
+            <div className="mb-6">
+              <WaveformToSketch />
             </div>
             <h2 className="text-2xl font-semibold text-foreground/90 mb-3">
               Start a conversation
             </h2>
             <p className="text-sm text-muted-foreground max-w-sm leading-relaxed">
-              Type a message below to chat with Voice AI. Your conversation will
+              Type a message below to chat with Murmur. Your conversation will
               be remembered during this session.
             </p>
           </motion.div>
@@ -90,23 +91,23 @@ export function ChatInterface({
                 )}
               >
                 {message.role === "assistant" && (
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-                    <Bot className="h-4 w-4 text-primary" />
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-lavender/15 flex items-center justify-center">
+                    <Bot className="h-4 w-4 text-lavender" />
                   </div>
                 )}
                 <div
                   className={cn(
-                    "max-w-[80%] rounded-2xl px-4 py-3 text-sm",
+                    "max-w-[80%] px-4 py-3 text-sm",
                     message.role === "user"
-                      ? "bg-primary text-primary-foreground rounded-br-md"
-                      : "glass-card rounded-bl-md"
+                      ? "glass-card rounded-2xl rounded-br-[6px]"
+                      : "bg-transparent border-l-2 border-amber rounded-none pl-4"
                   )}
                 >
                   <p className="whitespace-pre-wrap break-words">{message.content}</p>
                 </div>
                 {message.role === "user" && (
-                  <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary flex items-center justify-center">
-                    <User className="h-4 w-4 text-primary-foreground" />
+                  <div className="flex-shrink-0 w-8 h-8 rounded-full glass-card flex items-center justify-center">
+                    <User className="h-4 w-4 text-chalk" />
                   </div>
                 )}
               </motion.div>
@@ -121,10 +122,10 @@ export function ChatInterface({
             animate={{ opacity: 1 }}
             className="flex gap-3 justify-start"
           >
-            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-primary/20 flex items-center justify-center">
-              <Bot className="h-4 w-4 text-primary" />
+            <div className="flex-shrink-0 w-8 h-8 rounded-full bg-lavender/15 flex items-center justify-center">
+              <Bot className="h-4 w-4 text-lavender" />
             </div>
-            <div className="glass-card rounded-2xl rounded-bl-md px-4 py-3">
+            <div className="bg-transparent border-l-2 border-amber pl-4 py-3">
               <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             </div>
           </motion.div>
@@ -134,7 +135,7 @@ export function ChatInterface({
       </div>
 
       {/* Input Area */}
-      <div className="border-t border-white/10 p-4 bg-white/[0.02]">
+      <div className="border-t border-chalk-faint/30 p-4 bg-white/[0.02]">
         <form onSubmit={handleSubmit} className="flex gap-3 max-w-2xl mx-auto">
           <div className="flex-1 relative">
             <input
@@ -145,12 +146,12 @@ export function ChatInterface({
               onKeyDown={handleKeyDown}
               placeholder="Type your message..."
               disabled={isLoading}
-              className="w-full h-12 rounded-xl border border-white/10 bg-white/5 px-4 pr-12 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-primary transition-colors disabled:opacity-50"
+              className="w-full h-12 border-b border-chalk-faint bg-transparent px-2 pr-12 text-sm text-foreground placeholder:text-chalk-soft focus:outline-none focus:border-amber transition-colors disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!input.trim() || isLoading}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-lg bg-amber text-void hover:bg-amber/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Send className="h-4 w-4" />
             </button>
@@ -159,7 +160,7 @@ export function ChatInterface({
             <button
               type="button"
               onClick={onClearChat}
-              className="p-3 rounded-xl border border-white/10 bg-white/5 text-muted-foreground hover:text-destructive hover:border-destructive/50 transition-colors"
+              className="p-3 rounded-xl border border-chalk-faint/30 bg-transparent text-muted-foreground hover:text-ember hover:border-ember/50 transition-colors"
               title="Clear chat"
             >
               <Trash2 className="h-5 w-5" />

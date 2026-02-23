@@ -17,9 +17,9 @@ const statusConfig = {
     textColor: "text-state-idle",
   },
   connecting: {
-    color: "bg-primary",
-    shadowColor: "shadow-primary",
-    textColor: "text-primary",
+    color: "bg-lavender",
+    shadowColor: "shadow-[hsl(var(--lavender))]",
+    textColor: "text-lavender",
   },
   connected: {
     color: "bg-state-listening",
