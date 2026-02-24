@@ -44,9 +44,7 @@ interface UseWebRTCOptions {
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
-  onAnimation?: (data: any) => void;
-  onLatex?: (data: any) => void;
-  onTeachingSequence?: (data: any) => void;
+  onSDLScene?: (sdl: any) => void;
   onPipelineMetrics?: (metrics: Record<string, any>) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
@@ -60,9 +58,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
-    onAnimation,
-    onLatex,
-    onTeachingSequence,
+    onSDLScene,
     onPipelineMetrics,
     onError,
     onLog,
@@ -287,19 +283,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             onCanvasUpdate?.(data.operations);
             break;
 
-          case "animation":
-            log(`Animation: ${data.tool}`);
-            onAnimation?.(data);
-            break;
-
-          case "latex":
-            log(`LaTeX: ${data.element?.latex?.substring(0, 30)}...`);
-            onLatex?.(data);
-            break;
-
-          case "teaching_sequence":
-            log(`Teaching sequence: ${data.timeline?.steps?.length} steps`);
-            onTeachingSequence?.(data);
+          case "sdl_scene":
+            log(`SDL scene: ${data.sdl?.steps?.length} steps`);
+            onSDLScene?.(data.sdl);
             break;
 
           case "llm_response":
@@ -424,9 +410,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
-    onAnimation,
-    onLatex,
-    onTeachingSequence,
+    onSDLScene,
     onPipelineMetrics,
     onError,
     playChunkStreaming,

@@ -35,16 +35,21 @@ try:
     )
     logger.info("LLM pipeline initialized successfully")
     
-    tts_pipeline = TTSPipeline(
-        api_key=config.ELEVENLABS_API_KEY,
-        voice_id=config.ELEVENLABS_VOICE_ID,
-        model_id=config.ELEVENLABS_MODEL_ID,
-        stability=config.TTS_STABILITY,
-        similarity_boost=config.TTS_SIMILARITY_BOOST,
-        style=config.TTS_STYLE,
-        use_speaker_boost=config.TTS_USE_SPEAKER_BOOST
-    )
-    logger.info("TTS pipeline initialized successfully")
+    if config.TTS_PROVIDER == "kokoro":
+        from funcs.kokoro_tts import KokoroTTSPipeline
+        tts_pipeline = KokoroTTSPipeline(model_path=config.KOKORO_MODEL_PATH)
+        logger.info("Kokoro TTS pipeline initialized (local ONNX)")
+    else:
+        tts_pipeline = TTSPipeline(
+            api_key=config.ELEVENLABS_API_KEY,
+            voice_id=config.ELEVENLABS_VOICE_ID,
+            model_id=config.ELEVENLABS_MODEL_ID,
+            stability=config.TTS_STABILITY,
+            similarity_boost=config.TTS_SIMILARITY_BOOST,
+            style=config.TTS_STYLE,
+            use_speaker_boost=config.TTS_USE_SPEAKER_BOOST
+        )
+        logger.info("ElevenLabs TTS pipeline initialized")
 
     # Smart Turn analyzer (singleton, shared across sessions)
     smart_turn_analyzer: SmartTurnAnalyzer | None = None
@@ -217,27 +222,10 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
             ch = datachannels.get(pc_id)
             if ch and ch.readyState == "open":
                 tool_name = data.get("tool", "")
-                if tool_name == "create_teaching_sequence" and data.get("timeline"):
+                if tool_name == "teach_with_visuals" and data.get("sdl"):
                     ch.send(json.dumps({
-                        "type": "teaching_sequence",
-                        "timeline": data["timeline"],
-                    }))
-                elif tool_name == "render_latex" and data.get("element"):
-                    ch.send(json.dumps({
-                        "type": "latex",
-                        "element": data["element"],
-                    }))
-                elif tool_name == "animate_element" and data.get("animation_command"):
-                    ch.send(json.dumps({
-                        "type": "animation",
-                        "tool": tool_name,
-                        **data,
-                    }))
-                elif tool_name == "plot_function" and data.get("graph"):
-                    ch.send(json.dumps({
-                        "type": "animation",
-                        "tool": tool_name,
-                        **data,
+                        "type": "sdl_scene",
+                        "sdl": data["sdl"],
                     }))
 
         voice_pipeline.set_animation_callback(animation_broadcast)
@@ -300,6 +288,11 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
     ch = datachannels.get(pc_id)
     pipeline = await _ensure_voice_session(pc_id)
+
+    # Model routing: fast model by default, escalate for complex queries
+    from funcs.model_router import route_model
+    routed_provider, routed_key, routed_model = route_model(user_text)
+    pipeline.switch_provider(routed_provider, routed_key, routed_model)
 
     # Grab timing context from STT/turn detection phase
     timing = turn_timing.pop(pc_id, {})

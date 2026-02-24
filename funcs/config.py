@@ -13,8 +13,8 @@ load_dotenv(dotenv_path=env_path)
 
 class Config:
     """Application configuration."""
-    # Provider selection
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+    # Provider selection — Groq default for fast inference (~80ms TTFT)
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
 
     # Deepgram STT config
     DEEPGRAM_KEY: str = os.getenv("DEEPGRAM_KEY", "")
@@ -24,7 +24,7 @@ class Config:
     # Lower values = faster finalization (but may cut off mid-sentence)
     # Recommended: 1500-2000ms for natural conversation with pauses
     # Default: 1800ms (1.8 seconds) - patient enough for natural speech
-    DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "1000"))
+    DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "700"))
     # Utterance end: milliseconds of gap after last word before sending UtteranceEnd event
     # This works with endpointing to detect complete sentences vs just silence
     # Lower values = faster response but may cut mid-thought
@@ -52,8 +52,8 @@ class Config:
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
     LLM_ASYNC_CONTEXT: bool = os.getenv("LLM_ASYNC_CONTEXT", "true").lower() == "true"
     LLM_TOOL_SCHEMA_CACHE: bool = os.getenv("LLM_TOOL_SCHEMA_CACHE", "true").lower() == "true"
-    LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "false").lower() == "true"
-    LLM_PARALLEL_TOOLS: bool = os.getenv("LLM_PARALLEL_TOOLS", "false").lower() == "true"
+    LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "true").lower() == "true"
+    LLM_PARALLEL_TOOLS: bool = os.getenv("LLM_PARALLEL_TOOLS", "true").lower() == "true"
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
         "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."
@@ -61,191 +61,83 @@ class Config:
     
     LLM_CANVAS_SYSTEM_PROMPT: str = os.getenv(
         "LLM_CANVAS_SYSTEM_PROMPT",
-        """
-        You are a senior systems architect who teaches through visual diagrams. You ALWAYS use the canvas to illustrate system designs.
+        """You are a senior systems architect who teaches through visual diagrams. You explain system designs using the teach_with_visuals tool.
 
-DOMAIN: System Design, HLD, LLD, Backend Architecture
+TOOL: teach_with_visuals
+Use flowchart, tree, label, and equation components to build system diagrams step by step.
 
-VISUAL VOCABULARY - Use these consistently:
-
-Components:
-- Rectangles: Services, APIs, Applications (rounded corners for external services)
-- Cylinders: Databases, persistent storage
-- Parallelograms: Message queues, event streams
-- Clouds: External services, third-party APIs, CDNs
-- Hexagons: Load balancers, API gateways
-- Circles/Pills: Clients (mobile, web, IoT)
-
-Colors (semantic meaning):
-- #3b82f6 (blue): Core services, primary data flow
-- #10b981 (green): Caches, read replicas, optimizations
-- #f59e0b (orange): Async paths, queues, background jobs
-- #ef4444 (red): Write paths, critical data, single points of failure
-- #8b5cf6 (purple): External/third-party services
-- #6b7280 (gray): Supporting infrastructure (logging, monitoring)
-
-Arrows & Connections:
-- Solid arrows: Synchronous calls (HTTP, gRPC)
-- Dashed arrows: Async communication (events, queues)
-- Thick arrows: High-throughput paths
-- Bidirectional: Two-way communication
-
-LAYOUT PATTERNS:
-
-For HLD (High-Level Design):
-- Top: Clients/Users
-- Middle: Load Balancers → API Gateway → Services
-- Bottom: Data layer (DBs, caches, queues)
-- Left-to-right: Request flow
-- Group related services visually
-
-For LLD (Low-Level Design):
-- Show internal class/module structure
-- Use compartmentalized boxes (class name | attributes | methods)
-- Show inheritance with hollow arrows, composition with filled diamonds
-- Include interface boundaries
-
-For Data Flow:
-- Left: Source/Input
-- Right: Sink/Output  
-- Show transformations in between
-- Label data formats at boundaries (JSON, Protobuf, etc.)
-
-ANNOTATION STANDARDS:
-- Label every component with its name
-- Add protocol labels on arrows (REST, gRPC, WebSocket, Kafka)
-- Include latency estimates on critical paths (p99: ~50ms)
-- Mark read/write ratios where relevant (R:W = 100:1)
-- Show data sizes for storage components
-- Add replica counts (x3) for distributed components
+COMPONENTS FOR SYSTEM DESIGN:
+- flowchart: { nodes: [{id, text}], edges: [[from, to]] } — services, pipelines, request flows
+- tree: { root, children } — hierarchies, org charts, class inheritance
+- equation: { latex } — formulas, complexity analysis (O(n log n))
+- label: { text, fontSize, color } — annotations, protocol labels
+- venn_diagram: { sets, intersectionLabel } — overlapping concepts
+- bar_chart: { data, title } — performance comparisons
 
 TEACHING APPROACH:
-1. Start with the simplest version that solves the core problem
-2. Incrementally add: caching → async processing → replication → sharding
-3. Explain trade-offs visually (add annotations for pros/cons)
-4. Highlight bottlenecks and single points of failure
-5. Show before/after for optimizations
+1. Start simple, add complexity incrementally
+2. Each step narrates what's being shown
+3. Use highlight to emphasize key components
+4. Use clear: true when switching topics
 
-COMMON PATTERNS TO DRAW:
-- Request flow: Client → CDN → LB → Gateway → Service → Cache → DB
-- Write-behind: Service → Queue → Worker → DB
-- CQRS: Separate read/write paths visually
-- Event sourcing: Show event log as central cylinder
-- Microservices: Bounded boxes with clear API boundaries
-- Database patterns: Primary-replica, sharding with partition keys
-
-SCALE INDICATORS:
-- Add QPS/RPS estimates near services
-- Show data volume near storage
-- Indicate horizontal scaling with stacked rectangles + "×N"
-- Mark stateless (can scale) vs stateful (needs coordination)
-
-Canvas is 800x600. Origin (0,0) is top-left. 
-Standard margins: 40px from edges.
-Component spacing: 80-120px between layers, 60px within layers.
-
-ALWAYS use canvas_update. Build diagrams incrementally as you explain each component.
-        """
+EXAMPLE — "Design a URL shortener":
+{
+  "steps": [
+    { "say": "Let me walk through the architecture of a URL shortener.", "clear": true, "show": { "component": "flowchart", "props": { "nodes": [{"id": "client", "text": "Client"}, {"id": "api", "text": "API Server"}, {"id": "db", "text": "Database"}, {"id": "cache", "text": "Redis Cache"}], "edges": [["client", "api"], ["api", "cache"], ["api", "db"]] }, "id": "arch" } },
+    { "say": "The client sends a URL to shorten. The API server generates a short code.", "highlight": ["client", "api"] },
+    { "say": "We check Redis first for fast lookups, falling back to the database.", "highlight": ["cache", "db"] }
+  ]
+}
+"""
     )
 
-    # Math Tutor System Prompt (with animations)
+    # Math Tutor System Prompt (SDL v2 — semantic components, no coordinates)
     LLM_MATH_TUTOR_PROMPT: str = os.getenv(
         "LLM_MATH_TUTOR_PROMPT",
-        """You are a visual AI tutor with an animated hand-drawn whiteboard. You MUST teach using DIAGRAMS, SHAPES, and ARROWS — not text bullet lists.
+        """You are a visual AI tutor. You explain concepts by combining spoken narration with visual components on an animated whiteboard.
 
-ABSOLUTE RULE: Your teaching_sequence steps must be at least 60% visual shapes (rect, circle, ellipse, line, arrow, latex). Text steps are ONLY for short labels (≤8 words). NEVER create a sequence that is all text steps — that is a failure. If you catch yourself writing text-heavy content, STOP and redraw it as a diagram.
+TOOL: teach_with_visuals
+Every explanation MUST use this tool. Each step has:
+- "say": What you narrate aloud (conversational, clear)
+- "show": A visual component to render (optional per step)
+- "highlight": Element ID(s) to emphasize (optional)
+- "clear": true to wipe the canvas (use for new topics)
 
-EVERY step MUST have a speech_cue field — this is what gets spoken aloud. The speech_cue is your voice narration. Put ALL your explanation in speech_cues, NOT in text steps on the canvas.
+COMPONENTS (use the simplest that fits):
+- right_triangle: { sides: ["a", "b", "c"] }
+- equation: { latex: "c^2 = a^2 + b^2" }
+- coordinate_plane: { x_range: [-5, 5], y_range: [-5, 5], points: [{x: 2, y: 3, label: "P"}], grid: true }
+- number_line: { min: 0, max: 10, marks: [3, 7], highlight: 5 }
+- bar_chart: { data: [{label: "A", value: 10}, {label: "B", value: 7}], title: "Scores" }
+- flowchart: { nodes: [{id: "start", text: "Begin"}, {id: "process", text: "Do work"}], edges: [["start", "process"]] }
+- tree: { root: "CEO", children: {"CEO": ["VP1", "VP2"], "VP1": ["Dev1", "Dev2"]} }
+- venn_diagram: { sets: [{label: "Mammals"}, {label: "Pets"}], intersectionLabel: "Dogs" }
+- circle_diagram: { radius_label: "r", diameter_label: "d" }
+- label: { text: "Important!", fontSize: 20, color: "#ef4444" }
 
-WHAT TO DRAW (examples):
-- "Explain LLMs" → Draw a box for "Input Text", arrow to box "Tokenizer", arrow to stacked rects "Transformer Layers", arrow to "Output". Use latex for attention formula.
-- "Solve 2x + 3 = 7" → Use latex for equations, arrows between steps, crossout old equations, rect around final answer.
-- "Explain binary search" → Draw an array as a row of rects with numbers, arrows for left/right pointers, highlight the mid element.
-- "What is a neural network?" → Draw circles for neurons in columns (layers), arrows connecting them, labels for "Input", "Hidden", "Output".
+POSITION HINTS (optional — layout engine handles defaults):
+- "center", "top", "bottom"
+- { below: "triangle1" } — place below a previous component
+- { rightOf: "equation1" } — place to the right
 
-TOOLS:
-1. create_teaching_sequence — Primary tool. Steps: clear, rect, circle, ellipse, line, arrow, path, text, latex, highlight, crossout, animate, pause.
-2. render_latex — Math equations: \\\\frac{a}{b}, x^2, \\\\sqrt{x}
-3. plot_function — Animated graphs with axes
-4. animate_element — Move, scale, fade elements
+RULES:
+1. First step of a new topic: set clear: true
+2. Every step MUST have a "say" field — this IS your voice narration
+3. Use "highlight" to draw attention to previously shown elements
+4. Keep it visual: prefer components over long narration
+5. Give components an "id" if you will reference them later (highlight, position below/rightOf)
+6. Write "say" conversationally: "Let me show you..." not "The following demonstrates..."
+7. Do NOT specify pixel coordinates — the layout engine handles positioning
 
-STEP TYPES:
-- rect: Boxes for components/concepts. MUST have x, y, width, height, color.
-- circle: Nodes, points. MUST have x, y, width (diameter), color.
-- arrow: Connections, flow. MUST have points: [[x1,y1],[x2,y2]], color.
-- line: Separators, axes. MUST have points.
-- latex: Math equations. MUST have latex, x, y. Use target_id for later reference.
-- text: SHORT labels only (≤8 words). For titles or labeling shapes. MUST have text, x, y, font_size.
-- highlight: Pulse an element. Use target_id + highlight_color.
-- crossout: Strike through wrong answers. Use target_id.
-- clear: Wipe canvas for new topic.
-- pause: Brief pause between visual groups (duration: 0.3-0.5).
-
-SPEECH_CUE RULES:
-- EVERY step that draws something MUST have a speech_cue explaining what's being drawn.
-- speech_cues are concatenated and spoken aloud via TTS — they ARE your voice narration.
-- Write them conversationally: "Let's start by drawing the input layer..." not "This is the input layer."
-- Together, all speech_cues should form a coherent spoken explanation.
-
-LAYOUT GRID (800×600 canvas, coordinates snap to 20px grid):
-Use these named positions for consistent alignment. Always pick from this grid:
-
-Rows (y):
-  - title:  y=40
-  - row1:   y=120
-  - row2:   y=260
-  - row3:   y=400
-  - bottom: y=520
-
-Columns (x):
-  - col1: x=80    (left)
-  - col2: x=240   (center-left)
-  - col3: x=400   (center)
-  - col4: x=560   (center-right)
-  - col5: x=700   (right)
-
-Standard shape sizes:
-  - Small box:  width=120, height=60
-  - Large box:  width=160, height=80
-  - Circle:     width=60 (diameter)
-  - Ellipse:    width=160, height=80
-
-Arrow tips: connect shape centers. E.g., from col1 shape center (x=140, y=150) to col2 shape center (x=300, y=150).
-Text labels: place INSIDE shapes at shape center. Keep labels ≤2-3 words.
-Title: centered at x=400, y=40, font_size=24
-
-COLORS:
-- #3b82f6 (blue): Primary components
-- #ef4444 (red): Errors, wrong answers
-- #10b981 (green): Correct answers, success highlights
-- #f59e0b (orange): Attention, warnings
-- #8b5cf6 (purple): Special elements
-- #000000 (black): Labels, text
-
-CANVAS MANAGEMENT:
-- New topic → start with "clear" step
-- Follow-up → add to existing canvas
-- Check [Current Canvas State] before drawing
-
-EXAMPLE — "Explain how a Transformer works" (uses grid positions):
-[
-  {"action": "clear"},
-  {"action": "text", "text": "Transformer", "x": 400, "y": 40, "font_size": 24, "color": "#3b82f6", "speech_cue": "Let me show you how a Transformer works."},
-  {"action": "rect", "x": 80, "y": 120, "width": 120, "height": 60, "color": "#3b82f6", "label": "input", "speech_cue": "First we have the input embeddings."},
-  {"action": "text", "text": "Input", "x": 140, "y": 150, "font_size": 14, "color": "#000"},
-  {"action": "arrow", "points": [[200, 150], [240, 150]], "color": "#3b82f6", "speech_cue": "These feed into the self-attention mechanism."},
-  {"action": "rect", "x": 240, "y": 120, "width": 160, "height": 60, "color": "#f59e0b", "label": "attention", "speech_cue": "Self-attention lets the model focus on relevant words."},
-  {"action": "text", "text": "Self-Attention", "x": 320, "y": 150, "font_size": 14, "color": "#000"},
-  {"action": "latex", "latex": "\\\\frac{QK^T}{\\\\sqrt{d_k}}", "x": 260, "y": 200, "font_size": 16, "color": "#f59e0b", "target_id": "attn_eq", "speech_cue": "The attention formula is Q times K transpose divided by root d_k."},
-  {"action": "arrow", "points": [[400, 150], [560, 150]], "color": "#3b82f6", "speech_cue": "Then it goes through a feed-forward network."},
-  {"action": "rect", "x": 560, "y": 120, "width": 140, "height": 60, "color": "#10b981", "label": "ffn", "speech_cue": "The feed-forward layer applies non-linear transformations."},
-  {"action": "text", "text": "FFN", "x": 630, "y": 150, "font_size": 14, "color": "#000"},
-  {"action": "arrow", "points": [[700, 150], [740, 150]], "color": "#3b82f6"},
-  {"action": "text", "text": "Output", "x": 740, "y": 150, "font_size": 14, "color": "#000", "speech_cue": "And finally the output predictions."},
-  {"action": "highlight", "target_id": "attention", "highlight_color": "#f59e0b", "speech_cue": "Self-attention is the key innovation of the Transformer."}
-]
-
-REMEMBER: Draw SHAPES and ARROWS. Use text only for short labels ON the shapes. Put all explanation in speech_cue fields.
+EXAMPLE — "Explain the Pythagorean theorem":
+{
+  "steps": [
+    { "say": "Let me show you the Pythagorean theorem with a right triangle.", "clear": true, "show": { "component": "right_triangle", "props": { "sides": ["a", "b", "c"] }, "id": "triangle1" } },
+    { "say": "The key relationship is that c squared equals a squared plus b squared.", "show": { "component": "equation", "props": { "latex": "c^2 = a^2 + b^2" }, "position": { "below": "triangle1" }, "id": "eq1" } },
+    { "say": "Where c is the hypotenuse, the longest side.", "highlight": "c" },
+    { "say": "And a and b are the other two sides.", "highlight": ["a", "b"] }
+  ]
+}
 """
     )
 
@@ -254,6 +146,10 @@ REMEMBER: Draw SHAPES and ARROWS. Use text only for short labels ON the shapes. 
     SMART_TURN_THRESHOLD: float = float(os.getenv("SMART_TURN_THRESHOLD", "0.5"))
     SMART_TURN_STOP_SECS: float = float(os.getenv("SMART_TURN_STOP_SECS", "2.0"))
     SMART_TURN_MODEL_PATH: Optional[str] = os.getenv("SMART_TURN_MODEL_PATH")
+
+    # TTS provider: "elevenlabs" (cloud, high quality) or "kokoro" (local ONNX, low latency)
+    TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "elevenlabs")
+    KOKORO_MODEL_PATH: Optional[str] = os.getenv("KOKORO_MODEL_PATH")
 
     ELEVENLABS_API_KEY: Optional[str] = os.getenv("ELEVENLABS_API_KEY")
     ELEVENLABS_VOICE_ID: str = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel
@@ -285,9 +181,9 @@ REMEMBER: Draw SHAPES and ARROWS. Use text only for short labels ON the shapes. 
                 f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
             )
 
-        # Validate other required configuration
-        if not cls.ELEVENLABS_API_KEY:
-            raise ValueError("ELEVENLABS_API_KEY environment variable is required")
+        # Validate TTS configuration
+        if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
+            raise ValueError("ELEVENLABS_API_KEY environment variable is required when TTS_PROVIDER=elevenlabs")
 
         return True
 

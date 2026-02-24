@@ -13,11 +13,11 @@ interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
-  onAnimationEvent?: (data: any) => void;
+  onSDLScene?: (sdl: any) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate, onAnimationEvent } = options;
+  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate, onSDLScene } = options;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -70,7 +70,9 @@ export function useChat(options: UseChatOptions = {}) {
               } else if (data.type === "canvas_update") {
                 onCanvasUpdate?.(data.operations);
               } else if (data.type === "animation_event") {
-                onAnimationEvent?.(data);
+                if (data.tool === "teach_with_visuals" && data.sdl) {
+                  onSDLScene?.(data.sdl);
+                }
               } else if (data.type === "chunk") {
                 fullContent += data.text;
                 if (!assistantId) {
@@ -115,7 +117,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [apiUrl, canvasMode, onCanvasUpdate, onAnimationEvent]);
+  }, [apiUrl, canvasMode, onCanvasUpdate, onSDLScene]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {
