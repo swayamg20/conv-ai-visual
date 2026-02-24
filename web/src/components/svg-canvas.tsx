@@ -24,6 +24,26 @@ import type { CanvasOperation } from "@/hooks/use-webrtc";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 
+// ============= Theme-Aware Canvas Palette =============
+
+function getCanvasPalette() {
+  if (typeof window === "undefined") {
+    return { stroke: "#E8E4DC", grid: "#4A4843", axis: "#9B9790", error: "#E87B7B", bg: "#08080C" };
+  }
+  const style = getComputedStyle(document.documentElement);
+  const hsl = (v: string) => {
+    const val = style.getPropertyValue(v).trim();
+    return val ? `hsl(${val})` : "";
+  };
+  return {
+    stroke: hsl("--chalk") || "#E8E4DC",
+    grid: hsl("--chalk-faint") || "#4A4843",
+    axis: hsl("--chalk-soft") || "#9B9790",
+    error: hsl("--ember") || "#E87B7B",
+    bg: hsl("--void") || "#08080C",
+  };
+}
+
 // ============= Types =============
 
 export interface AnimationOperation {
@@ -236,7 +256,7 @@ function renderGrid(
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
     line.setAttribute("y2", String(height));
-    line.setAttribute("stroke", "#4A4843");
+    line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.5");
     line.setAttribute("opacity", "0.3");
     g.appendChild(line);
@@ -247,7 +267,7 @@ function renderGrid(
     line.setAttribute("y1", String(y));
     line.setAttribute("x2", String(width));
     line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#4A4843");
+    line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.5");
     line.setAttribute("opacity", "0.3");
     g.appendChild(line);
@@ -261,7 +281,7 @@ function renderGrid(
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
     line.setAttribute("y2", String(height));
-    line.setAttribute("stroke", "#4A4843");
+    line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.8");
     line.setAttribute("opacity", "0.5");
     g.appendChild(line);
@@ -272,7 +292,7 @@ function renderGrid(
     line.setAttribute("y1", String(y));
     line.setAttribute("x2", String(width));
     line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", "#4A4843");
+    line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.8");
     line.setAttribute("opacity", "0.5");
     g.appendChild(line);
@@ -293,8 +313,26 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const isPlayingRef = useRef(false);
     const [, setForceUpdate] = useState(0);
     const [zoomLevel, setZoomLevel] = useState(1);
+    const paletteRef = useRef(getCanvasPalette());
+
+    // Refresh palette + grid when theme changes
+    useEffect(() => {
+      const html = document.documentElement;
+      const refresh = () => {
+        paletteRef.current = getCanvasPalette();
+        if (svgRef.current && showGrid) renderGrid(svgRef.current, width, height);
+      };
+      const observer = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          if (m.attributeName === "class") { refresh(); break; }
+        }
+      });
+      observer.observe(html, { attributes: true });
+      return () => observer.disconnect();
+    }, [width, height, showGrid]);
 
     useEffect(() => {
+      paletteRef.current = getCanvasPalette();
       if (svgRef.current) {
         roughRef.current = rough.svg(svgRef.current);
         if (showGrid) renderGrid(svgRef.current, width, height);
@@ -345,7 +383,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const getRoughOptions = useCallback(
       (op: CanvasOperation & { roughness?: number }) => ({
-        stroke: op.color ?? "#E8E4DC",
+        stroke: op.color ?? paletteRef.current.stroke,
         strokeWidth: op.stroke_width ?? 1.5,
         fill: op.fill || undefined,
         roughness: op.roughness ?? 1.2,
@@ -438,7 +476,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           end[1],
           getRoughOptions(op)
         );
-        const markerId = createArrowhead(op.id || generateId(), op.color ?? "#E8E4DC");
+        const markerId = createArrowhead(op.id || generateId(), op.color ?? paletteRef.current.stroke);
         const p = node.querySelector("path");
         if (p && markerId) p.setAttribute("marker-end", `url(#${markerId})`);
         g.appendChild(node);
@@ -454,7 +492,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
         text.setAttribute("x", String(op.x ?? 0));
         text.setAttribute("y", String(op.y ?? 0));
-        text.setAttribute("fill", op.color ?? "#E8E4DC");
+        text.setAttribute("fill", op.color ?? paletteRef.current.stroke);
         text.setAttribute("font-size", String(op.font_size ?? 16));
         text.setAttribute("font-family", op.font_family ?? "var(--font-handwriting), var(--font-handwriting-alt), cursive, sans-serif");
         if ((op as any)._centered) {
@@ -538,7 +576,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             xLine.setAttribute("y1", String(xAxisY));
             xLine.setAttribute("x2", String(canvasW - margin));
             xLine.setAttribute("y2", String(xAxisY));
-            xLine.setAttribute("stroke", "#9B9790");
+            xLine.setAttribute("stroke", paletteRef.current.axis);
             xLine.setAttribute("stroke-width", "1.5");
             g.appendChild(xLine);
 
@@ -552,7 +590,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               tick.setAttribute("y1", String(xAxisY - 4));
               tick.setAttribute("x2", String(tx));
               tick.setAttribute("y2", String(xAxisY + 4));
-              tick.setAttribute("stroke", "#9B9790");
+              tick.setAttribute("stroke", paletteRef.current.axis);
               tick.setAttribute("stroke-width", "1");
               g.appendChild(tick);
 
@@ -560,7 +598,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               label.setAttribute("x", String(tx));
               label.setAttribute("y", String(xAxisY + 18));
               label.setAttribute("text-anchor", "middle");
-              label.setAttribute("fill", "#9B9790");
+              label.setAttribute("fill", paletteRef.current.axis);
               label.setAttribute("font-size", "11");
               label.textContent = Number(v.toFixed(1)).toString();
               g.appendChild(label);
@@ -575,7 +613,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             yLine.setAttribute("y1", String(margin));
             yLine.setAttribute("x2", String(yAxisX));
             yLine.setAttribute("y2", String(canvasH - margin));
-            yLine.setAttribute("stroke", "#9B9790");
+            yLine.setAttribute("stroke", paletteRef.current.axis);
             yLine.setAttribute("stroke-width", "1.5");
             g.appendChild(yLine);
 
@@ -588,7 +626,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               tick.setAttribute("y1", String(ty));
               tick.setAttribute("x2", String(yAxisX + 4));
               tick.setAttribute("y2", String(ty));
-              tick.setAttribute("stroke", "#9B9790");
+              tick.setAttribute("stroke", paletteRef.current.axis);
               tick.setAttribute("stroke-width", "1");
               g.appendChild(tick);
 
@@ -596,7 +634,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               label.setAttribute("x", String(yAxisX - 10));
               label.setAttribute("y", String(ty + 4));
               label.setAttribute("text-anchor", "end");
-              label.setAttribute("fill", "#9B9790");
+              label.setAttribute("fill", paletteRef.current.axis);
               label.setAttribute("font-size", "11");
               label.textContent = Number(v.toFixed(1)).toString();
               g.appendChild(label);
@@ -692,7 +730,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                 animateCrossOut(
                   svgRef.current,
                   data.element,
-                  op.color ?? "#E87B7B",
+                  op.color ?? paletteRef.current.error,
                   DURATION.fast
                 );
               }
@@ -906,7 +944,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                   x: step.x,
                   y: step.y,
                   font_size: step.font_size ?? 20,
-                  color: step.color ?? "#E8E4DC",
+                  color: step.color ?? paletteRef.current.stroke,
                 };
                 tl.add(() => renderLatex(latexOp), "+=0.15");
               }
@@ -920,7 +958,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
                 text: step.text ?? step.speech_cue ?? "",
                 x: step.x ?? 0,
                 y: step.y ?? 0,
-                color: step.color ?? "#E8E4DC",
+                color: step.color ?? paletteRef.current.stroke,
                 font_size: step.font_size ?? 16,
                 font_family: step.font_family,
               };
@@ -956,7 +994,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             case "crossout":
               if (step.target_id) {
                 const coTargetId = step.target_id;
-                const coColor = step.color ?? "#E87B7B";
+                const coColor = step.color ?? paletteRef.current.error;
                 tl.add(() => {
                   const targetData = elementsRef.current.get(coTargetId);
                   if (targetData && svgRef.current) {
@@ -1177,9 +1215,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           height={height}
           viewBox={`0 0 ${width} ${height}`}
           style={{
-            border: "1px solid rgba(74, 72, 67, 0.5)",
+            border: "1px solid hsl(var(--chalk-faint) / 0.5)",
             borderRadius: "8px",
-            background: "#08080C",
+            background: "hsl(var(--void))",
           }}
         />
         {/* Toolbar */}

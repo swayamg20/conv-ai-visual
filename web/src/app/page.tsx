@@ -17,6 +17,7 @@ import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
 import { TechnicalDrawer } from "@/components/technical-drawer";
 import { ControlButtons } from "@/components/control-buttons";
 import { ModeToggle, type AppMode } from "@/components/mode-toggle";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatInterface } from "@/components/chat-interface";
 import { MurmurLogoMark, WaveformToSketch, BackgroundDoodles } from "@/components/murmur-doodles";
 
@@ -171,6 +172,7 @@ export default function Home() {
             >
               <BarChart3 className="h-5 w-5 text-muted-foreground" />
             </Link>
+            <ThemeToggle />
             <button
               className="p-2 rounded-lg hover:bg-graphite transition-colors"
               aria-label="Settings"

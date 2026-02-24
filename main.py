@@ -537,6 +537,10 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
     # Smart Turn session for this peer (if enabled)
     st_session: SmartTurnSession | None = None
+    # Watchdog: force turn if is_final fires but speech_final never arrives
+    _watchdog_task: Optional[asyncio.Task] = None
+    _WATCHDOG_TIMEOUT = 3.0  # seconds after last is_final before forcing turn
+
     if smart_turn_analyzer:
         st_session = SmartTurnSession(smart_turn_analyzer)
         smart_turn_sessions[pc_id] = st_session
@@ -571,6 +575,12 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             transcript = alts[0].get("transcript", "")
             is_final = data.get("is_final", False)
             speech_final = data.get("speech_final", False)
+
+            if transcript.strip() and (is_final or speech_final):
+                logger.debug(
+                    "[%s] DG event: is_final=%s speech_final=%s text='%s'",
+                    pc_id, is_final, speech_final, transcript[:40],
+                )
 
             ch = datachannels.get(pc_id)
             tts_was_active = tts_interrupt_flags.get(pc_id, False)
@@ -607,7 +617,36 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     # Record STT final timestamp
                     timing["stt_final_ts"] = _time.perf_counter()
 
+                    # Start/restart watchdog: if speech_final never arrives,
+                    # force the turn after _WATCHDOG_TIMEOUT seconds.
+                    nonlocal _watchdog_task
+                    if _watchdog_task is not None:
+                        _watchdog_task.cancel()
+
+                    async def _watchdog_force_turn():
+                        try:
+                            await asyncio.sleep(_WATCHDOG_TIMEOUT)
+                            text = st_session.accumulated_transcript.strip()
+                            if text:
+                                logger.warning(
+                                    "[%s] Watchdog: speech_final never fired, forcing turn (text='%s')",
+                                    pc_id, text[:60],
+                                )
+                                timing = turn_timing.setdefault(pc_id, {})
+                                timing["smart_turn_result"] = "watchdog"
+                                st_session._reset_turn()
+                                await _process_user_turn(pc_id, text)
+                        except asyncio.CancelledError:
+                            pass
+
+                    _watchdog_task = asyncio.create_task(_watchdog_force_turn())
+
                 if speech_final and st_session.accumulated_transcript.strip():
+                    # Cancel watchdog — speech_final arrived normally
+                    if _watchdog_task is not None:
+                        _watchdog_task.cancel()
+                        _watchdog_task = None
+
                     logger.info("[%s] Speech final → Smart Turn (text='%s')",
                                 pc_id, st_session.accumulated_transcript[:60])
 

@@ -4,7 +4,70 @@
 
 @layer base {
   :root {
-    /* Murmur Design Language — Chalk on Blackboard */
+    /* Murmur Design Language — Light: Ink on Paper */
+
+    /* Paper backgrounds (warm off-white) */
+    --void: 40 20% 97%;
+    --slate: 40 15% 93%;
+    --graphite: 40 10% 88%;
+
+    /* Ink text (near-black, blue undertone) */
+    --chalk: 240 15% 15%;
+    --chalk-soft: 240 8% 45%;
+    --chalk-faint: 40 5% 78%;
+
+    /* Signal colors (deeper for light-bg contrast) */
+    --amber: 38 91% 48%;
+    --lavender: 252 40% 55%;
+    --sage: 128 45% 42%;
+    --ember: 0 86% 55%;
+
+    /* Semantic mappings */
+    --background: var(--void);
+    --background-elevated: var(--slate);
+    --foreground: var(--chalk);
+
+    --card: var(--slate);
+    --card-foreground: var(--chalk);
+
+    --popover: var(--slate);
+    --popover-foreground: var(--chalk);
+
+    --primary: var(--amber);
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: var(--graphite);
+    --secondary-foreground: var(--chalk);
+
+    --muted: var(--graphite);
+    --muted-foreground: var(--chalk-soft);
+
+    --accent: var(--amber);
+    --accent-foreground: 0 0% 100%;
+    --accent-start: var(--lavender);
+    --accent-end: var(--amber);
+
+    --destructive: var(--ember);
+    --destructive-foreground: 0 0% 100%;
+
+    --border: var(--chalk-faint);
+    --input: var(--chalk-faint);
+    --ring: var(--amber);
+
+    /* State colors */
+    --state-idle: var(--chalk-soft);
+    --state-listening: var(--sage);
+    --state-processing: var(--amber);
+    --state-speaking: var(--lavender);
+
+    /* Border radius */
+    --radius: 10px;
+    --radius-xl: 14px;
+    --radius-2xl: 16px;
+  }
+
+  .dark {
+    /* Murmur Design Language — Dark: Chalk on Blackboard */
 
     /* Blackboard backgrounds (blue undertone) */
     --void: 240 20% 3%;
@@ -22,48 +85,10 @@
     --sage: 128 52% 61%;
     --ember: 0 86% 60%;
 
-    /* Semantic mappings (so existing tailwind classes still work) */
-    --background: var(--void);
-    --background-elevated: var(--slate);
-    --foreground: var(--chalk);
-
-    --card: var(--slate);
-    --card-foreground: var(--chalk);
-
-    --popover: var(--slate);
-    --popover-foreground: var(--chalk);
-
-    --primary: var(--amber);
+    /* Overrides for dark foregrounds */
     --primary-foreground: var(--void);
-
-    --secondary: var(--graphite);
-    --secondary-foreground: var(--chalk);
-
-    --muted: var(--graphite);
-    --muted-foreground: var(--chalk-soft);
-
-    --accent: var(--amber);
     --accent-foreground: var(--void);
-    --accent-start: var(--lavender);
-    --accent-end: var(--amber);
-
-    --destructive: var(--ember);
     --destructive-foreground: var(--chalk);
-
-    --border: var(--chalk-faint);
-    --input: var(--chalk-faint);
-    --ring: var(--amber);
-
-    /* State colors */
-    --state-idle: var(--chalk-soft);
-    --state-listening: var(--sage);
-    --state-processing: var(--amber);
-    --state-speaking: var(--lavender);
-
-    /* Border radius */
-    --radius: 10px;
-    --radius-xl: 14px;
-    --radius-2xl: 16px;
   }
 }
 
@@ -82,20 +107,35 @@
 
 /* Glassmorphic utility classes */
 .glass-card {
-  background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(24px) saturate(150%);
   -webkit-backdrop-filter: blur(24px) saturate(150%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 16px;
+}
+
+/* Dark: white-tinted glass */
+.dark .glass-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Light: dark-tinted glass */
+:root:not(.dark) .glass-card {
+  background: rgba(0, 0, 0, 0.02);
+  border: 1px solid rgba(0, 0, 0, 0.06);
 }
 
 .glass-card-hover {
   transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.glass-card-hover:hover {
+.dark .glass-card-hover:hover {
   background: rgba(255, 255, 255, 0.05);
   border-color: rgba(255, 255, 255, 0.10);
+}
+
+:root:not(.dark) .glass-card-hover:hover {
+  background: rgba(0, 0, 0, 0.04);
+  border-color: rgba(0, 0, 0, 0.10);
 }
 
 /* Voice orb glow animation — lavender */
@@ -153,7 +193,7 @@
 .waveform-bar:nth-child(4) { animation-delay: 0.3s; }
 .waveform-bar:nth-child(5) { animation-delay: 0.4s; }
 
-/* Scrollbar — chalk-tinted */
+/* Scrollbar */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -163,13 +203,22 @@
   background: transparent;
 }
 
-::-webkit-scrollbar-thumb {
+.dark ::-webkit-scrollbar-thumb {
   background: rgba(232, 228, 220, 0.12);
   border-radius: 8px;
 }
 
-::-webkit-scrollbar-thumb:hover {
+.dark ::-webkit-scrollbar-thumb:hover {
   background: rgba(232, 228, 220, 0.20);
+}
+
+:root:not(.dark) ::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+}
+
+:root:not(.dark) ::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.20);
 }
 
 /* Loading dots animation */

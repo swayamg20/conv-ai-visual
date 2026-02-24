@@ -10,17 +10,12 @@ def audio_frame_to_base64(frame: AudioFrame) -> str:
     arr dtype will reflect that and we'll use the bytes directly.
     """
 
-    arr = frame.to_ndarray()  # shape = (samples, channels) or (samples,) for mono
+    arr = frame.to_ndarray()
 
-    # If float data in [-1, 1], map to int16
     if np.issubdtype(arr.dtype, np.floating):
         arr = (arr * 32767).astype("int16")
     elif arr.dtype != np.int16:
-        # convert other integer formats to int16 (safe fallback)
         arr = arr.astype("int16")
-
-    # aiortc's to_ndarray returns channel axis as last dimension for multichannel
-    # If arr is 1D (mono) it's fine. Interleaving is row-major, .tobytes() is interleaved samples.
     pcm_bytes = arr.tobytes()
     b64 = base64.b64encode(pcm_bytes).decode("ascii")
     return b64
