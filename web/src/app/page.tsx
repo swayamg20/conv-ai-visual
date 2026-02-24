@@ -5,9 +5,10 @@ import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
 import Link from "next/link";
 // Switch removed - canvas is always enabled
-import { SVGCanvas, type SVGCanvasHandle, type AnimationOperation, type LatexOperation, type TeachingSequence, type FunctionPlotData } from "@/components/svg-canvas";
+import { SVGCanvas, type SVGCanvasHandle, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
+import { compileScene, type SDLScene } from "@/lib/scene-kit";
 import { cn } from "@/lib/utils";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
 import { StatusIndicator } from "@/components/status-indicator";
@@ -32,35 +33,15 @@ export default function Home() {
     canvasRef.current?.render(operations);
   }, []);
 
-  const handleAnimation = useCallback((animation: AnimationOperation) => {
-    canvasRef.current?.animate(animation);
-  }, []);
-
-  const handleLatex = useCallback((latex: LatexOperation) => {
-    canvasRef.current?.renderLatex(latex);
-  }, []);
-
-  const handleTeachingSequence = useCallback((sequence: TeachingSequence) => {
-    canvasRef.current?.createSequence(sequence);
-  }, []);
-
-  const handleFunctionPlot = useCallback((plot: FunctionPlotData) => {
-    canvasRef.current?.renderFunctionPlot(plot);
-  }, []);
-
-  // Dispatch animation events from SSE to the correct SVGCanvas method
-  const handleAnimationEvent = useCallback((data: any) => {
-    const tool = data.tool;
-    if (tool === "animate_element" && data.animation_command) {
-      handleAnimation(data.animation_command);
-    } else if (tool === "render_latex" && data.element) {
-      handleLatex(data.element);
-    } else if (tool === "create_teaching_sequence" && data.timeline) {
-      handleTeachingSequence(data.timeline);
-    } else if (tool === "plot_function" && data.graph) {
-      handleFunctionPlot(data.graph);
+  // SDL scene handler — compiles SDL to render commands and feeds to SVGCanvas
+  const handleSDLScene = useCallback((sdl: SDLScene) => {
+    const plan = compileScene(sdl, { width: 800, height: 600 });
+    for (const step of plan.steps) {
+      if (step.commands.length > 0) {
+        canvasRef.current?.createSequence({ steps: step.commands as TeachingSequence["steps"] });
+      }
     }
-  }, [handleAnimation, handleLatex, handleTeachingSequence, handleFunctionPlot]);
+  }, []);
 
   // Chat mode hook
   const {
@@ -71,7 +52,7 @@ export default function Home() {
   } = useChat({
     canvasMode: true,
     onCanvasUpdate: handleCanvasUpdate,
-    onAnimationEvent: handleAnimationEvent,
+    onSDLScene: handleSDLScene,
   });
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
@@ -122,9 +103,7 @@ export default function Home() {
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
-    onAnimation: handleAnimationEvent,
-    onLatex: (data: any) => data.element && handleLatex(data.element),
-    onTeachingSequence: (data: any) => data.timeline && handleTeachingSequence(data.timeline),
+    onSDLScene: handleSDLScene,
     onPipelineMetrics: handlePipelineMetrics,
     onError: handleError,
     onLog: handleLog,

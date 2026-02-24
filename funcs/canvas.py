@@ -383,22 +383,10 @@ CANVAS_TOOL_DEFINITION = {
 
 
 # ============= Animation Tool Schemas =============
-# Import animation tool schemas from animation_pipeline
 try:
-    from funcs.animation_pipeline import (
-        ANIMATE_ELEMENT_SCHEMA,
-        RENDER_LATEX_SCHEMA,
-        CREATE_TEACHING_SEQUENCE_SCHEMA,
-        PLOT_FUNCTION_SCHEMA
-    )
+    from funcs.animation_pipeline import TEACH_WITH_VISUALS_SCHEMA
 
-    # Export for use by LLM pipeline
-    ANIMATION_TOOLS = [
-        ANIMATE_ELEMENT_SCHEMA,
-        RENDER_LATEX_SCHEMA,
-        CREATE_TEACHING_SEQUENCE_SCHEMA,
-        PLOT_FUNCTION_SCHEMA
-    ]
+    ANIMATION_TOOLS = [TEACH_WITH_VISUALS_SCHEMA]
 except ImportError:
     logger.warning("Animation tools not available - animation_pipeline module not found")
     ANIMATION_TOOLS = []
