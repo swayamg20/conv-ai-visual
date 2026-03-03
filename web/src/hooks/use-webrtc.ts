@@ -45,6 +45,10 @@ interface UseWebRTCOptions {
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
   onSDLScene?: (sdl: any) => void;
+  onSDLStart?: (sdl: any, sequenceId: string, totalSteps: number) => void;
+  onSDLStepAudioStart?: (sequenceId: string, stepIndex: number) => void;
+  onSDLStepComplete?: (sequenceId: string, stepIndex: number, audioDurationMs: number) => void;
+  onSDLComplete?: (sequenceId: string) => void;
   onPipelineMetrics?: (metrics: Record<string, any>) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
@@ -59,6 +63,10 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onLLMResponse,
     onCanvasUpdate,
     onSDLScene,
+    onSDLStart,
+    onSDLStepAudioStart,
+    onSDLStepComplete,
+    onSDLComplete,
     onPipelineMetrics,
     onError,
     onLog,
@@ -76,6 +84,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const localStreamRef = useRef<MediaStream | null>(null);
   const isFirstTTSChunkRef = useRef(true);  // Track if this is first chunk of TTS session
   const isTTSEnabledRef = useRef(true);  // Ref for TTS enabled state
+  const sdlStepChunkTrackerRef = useRef<{ sequenceId: string; stepIndex: number; firstChunkSent: boolean } | null>(null);
 
   const log = useCallback((msg: string) => {
     onLog?.(msg);
@@ -288,6 +297,36 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             onSDLScene?.(data.sdl);
             break;
 
+          case "sdl_start":
+            log(`SDL sequence started: ${data.total_steps} steps`);
+            sdlStepChunkTrackerRef.current = null;
+            isFirstTTSChunkRef.current = true;
+            onSDLStart?.(data.sdl, data.sequence_id, data.total_steps);
+            updatePipelineState("speaking");
+            break;
+
+          case "sdl_step":
+            log(`SDL step ${data.step_index}`);
+            sdlStepChunkTrackerRef.current = {
+              sequenceId: data.sequence_id,
+              stepIndex: data.step_index,
+              firstChunkSent: false,
+            };
+            break;
+
+          case "tts_step_complete":
+            log(`SDL step ${data.step_index} audio done (${data.audio_duration_ms}ms)`);
+            onSDLStepComplete?.(data.sequence_id, data.step_index, data.audio_duration_ms);
+            sdlStepChunkTrackerRef.current = null;
+            break;
+
+          case "sdl_complete":
+            log("SDL sequence complete");
+            sdlStepChunkTrackerRef.current = null;
+            isFirstTTSChunkRef.current = true;
+            onSDLComplete?.(data.sequence_id);
+            break;
+
           case "llm_response":
             log(`LLM: ${data.text.substring(0, 50)}...`);
             onLLMResponse?.(data.text);
@@ -310,7 +349,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             }
             break;
 
-          case "tts_chunk":
+          case "tts_chunk": {
             // Skip TTS playback if TTS is disabled
             if (!isTTSEnabledRef.current) {
               console.log("[TTS] Skipping chunk (TTS disabled)");
@@ -328,12 +367,20 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             }
 
             if (isFirstChunk) {
-              isFirstTTSChunkRef.current = false;  // Mark that we've received first chunk
+              isFirstTTSChunkRef.current = false;
               console.log(`[TTS] First chunk: ${bytes.length} bytes`);
             }
-            console.log(`[TTS] Playing chunk: ${bytes.length} bytes, isFirst=${isFirstChunk}, state=${pipelineStateRef.current}`);
+
+            // Fire onSDLStepAudioStart on first chunk for each SDL step
+            const tracker = sdlStepChunkTrackerRef.current;
+            if (tracker && !tracker.firstChunkSent && data.sequence_id) {
+              tracker.firstChunkSent = true;
+              onSDLStepAudioStart?.(tracker.sequenceId, tracker.stepIndex);
+            }
+
             playChunkStreaming(bytes, 16000, isFirstChunk);
             break;
+          }
 
           case "tts_complete":
             log("TTS complete (backend done sending)");
@@ -347,6 +394,11 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             log(`TTS interrupted (${data.chunks_sent} chunks sent)`);
             stopAudio();
             isFirstTTSChunkRef.current = true;  // Reset for next session
+            sdlStepChunkTrackerRef.current = null;
+            // Clean up any active SDL sequence timelines
+            if (data.sequence_id) {
+              onSDLComplete?.(data.sequence_id);
+            }
             updatePipelineState("listening");
             break;
 
@@ -411,6 +463,10 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onLLMResponse,
     onCanvasUpdate,
     onSDLScene,
+    onSDLStart,
+    onSDLStepAudioStart,
+    onSDLStepComplete,
+    onSDLComplete,
     onPipelineMetrics,
     onError,
     playChunkStreaming,

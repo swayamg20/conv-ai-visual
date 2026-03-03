@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
+import { ThemeToggle } from "@/components/theme-toggle";
 
 interface VoiceLogEntry {
   id: number;
@@ -255,6 +256,7 @@ export default function Dashboard() {
             <span className="text-xs text-muted-foreground">
               Updated {lastRefresh.toLocaleTimeString()}
             </span>
+            <ThemeToggle />
             <button
               onClick={fetchData}
               className="p-2 rounded-lg hover:bg-graphite transition-colors"

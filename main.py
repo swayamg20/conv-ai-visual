@@ -103,6 +103,7 @@ datachannels: Dict[str, Any] = {}
 voice_sessions: Dict[str, LLMPipeline] = {}
 peer_user_ids: Dict[str, str] = {}
 tts_interrupt_flags: Dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
+_pending_sdl: Dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
 smart_turn_sessions: Dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
 turn_processing_tasks: Dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
 
@@ -219,14 +220,10 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
         voice_pipeline.set_canvas_callback(canvas_broadcast)
 
         async def animation_broadcast(data):
-            ch = datachannels.get(pc_id)
-            if ch and ch.readyState == "open":
-                tool_name = data.get("tool", "")
-                if tool_name == "teach_with_visuals" and data.get("sdl"):
-                    ch.send(json.dumps({
-                        "type": "sdl_scene",
-                        "sdl": data["sdl"],
-                    }))
+            tool_name = data.get("tool", "")
+            if tool_name == "teach_with_visuals" and data.get("sdl"):
+                # Capture SDL for step-pipelined sync — _run_llm_tts will handle it
+                _pending_sdl[pc_id] = data["sdl"]
 
         voice_pipeline.set_animation_callback(animation_broadcast)
         voice_sessions[pc_id] = voice_pipeline
@@ -272,6 +269,93 @@ def _split_sentence(buf: str):
     return None, buf
 
 
+async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
+    """
+    Step-pipelined SDL: stream per-step TTS + visual commands.
+
+    For each SDL step, sends the visual commands and TTS audio together,
+    creating a 'person drawing while talking' effect.
+    """
+    import base64
+    import uuid
+
+    ch = datachannels.get(pc_id)
+    steps = sdl.get("steps", [])
+    seq_id = f"seq_{uuid.uuid4().hex[:8]}"
+
+    if ch and ch.readyState == "open":
+        ch.send(json.dumps({
+            "type": "sdl_start",
+            "sequence_id": seq_id,
+            "total_steps": len(steps),
+            "sdl": sdl,
+        }))
+
+    tts_interrupt_flags[pc_id] = True
+
+    for step_idx, step in enumerate(steps):
+        if not tts_interrupt_flags.get(pc_id, False):
+            break  # interrupted
+
+        say_text = step.get("say", "").strip()
+
+        # Generate TTS for this step's say text
+        if say_text and tts_pipeline:
+            total_audio_bytes = 0
+            async for audio_chunk in tts_pipeline.text_to_speech_stream(say_text):
+                if not tts_interrupt_flags.get(pc_id, False):
+                    break
+
+                # Send sdl_step on first chunk so frontend starts animation with audio
+                if total_audio_bytes == 0 and ch and ch.readyState == "open":
+                    ch.send(json.dumps({
+                        "type": "sdl_step",
+                        "sequence_id": seq_id,
+                        "step_index": step_idx,
+                    }))
+
+                total_audio_bytes += len(audio_chunk)
+                if ch and ch.readyState == "open":
+                    ch.send(json.dumps({
+                        "type": "tts_chunk",
+                        "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                        "sequence_id": seq_id,
+                        "step_index": step_idx,
+                    }))
+
+            # Audio duration from PCM byte count: 16-bit (2 bytes) @ 16kHz
+            audio_duration_ms = round(total_audio_bytes / 32) if total_audio_bytes > 0 else 0
+            if ch and ch.readyState == "open":
+                ch.send(json.dumps({
+                    "type": "tts_step_complete",
+                    "sequence_id": seq_id,
+                    "step_index": step_idx,
+                    "audio_duration_ms": audio_duration_ms,
+                }))
+        else:
+            # No speech for this step — send sdl_step and complete immediately
+            if ch and ch.readyState == "open":
+                ch.send(json.dumps({
+                    "type": "sdl_step",
+                    "sequence_id": seq_id,
+                    "step_index": step_idx,
+                }))
+                ch.send(json.dumps({
+                    "type": "tts_step_complete",
+                    "sequence_id": seq_id,
+                    "step_index": step_idx,
+                    "audio_duration_ms": 0,
+                }))
+
+    # Sequence complete
+    tts_interrupt_flags[pc_id] = False
+    if ch and ch.readyState == "open":
+        ch.send(json.dumps({
+            "type": "sdl_complete",
+            "sequence_id": seq_id,
+        }))
+
+
 async def _run_llm_tts(pc_id: str, user_text: str):
     """
     LLM → TTS pipeline with sentence-pipelined audio.
@@ -283,6 +367,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     Drawings (tool calls) are dispatched during the LLM tool-calling rounds,
     which happen BEFORE text streaming, so the user sees whiteboard activity
     even while waiting for audio.
+
+    If the LLM calls teach_with_visuals (SDL), after text TTS completes,
+    the SDL steps are streamed with per-step TTS for voice-visual sync.
     """
     import base64
 
@@ -293,6 +380,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     from funcs.model_router import route_model
     routed_provider, routed_key, routed_model = route_model(user_text)
     pipeline.switch_provider(routed_provider, routed_key, routed_model)
+
+    # Clear any stale SDL from previous turns
+    _pending_sdl.pop(pc_id, None)
 
     # Grab timing context from STT/turn detection phase
     timing = turn_timing.pop(pc_id, {})
@@ -406,8 +496,14 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "llm_response", "text": llm_response}))
 
-        # Wait for TTS to finish
+        # Wait for sentence TTS to finish
         await tts_task
+
+        # If SDL was captured during tool execution, run step-pipelined sync
+        pending_sdl = _pending_sdl.pop(pc_id, None)
+        if pending_sdl and pending_sdl.get("steps"):
+            logger.info("[%s] Starting SDL step pipeline (%d steps)", pc_id, len(pending_sdl["steps"]))
+            await _run_sdl_step_pipeline(pc_id, pending_sdl)
 
     except asyncio.CancelledError:
         logger.info("[%s] Turn processing cancelled (new turn arrived)", pc_id)
@@ -537,6 +633,10 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
     # Smart Turn session for this peer (if enabled)
     st_session: SmartTurnSession | None = None
+    # Watchdog: force turn if is_final fires but speech_final never arrives
+    _watchdog_task: Optional[asyncio.Task] = None
+    _WATCHDOG_TIMEOUT = 3.0  # seconds after last is_final before forcing turn
+
     if smart_turn_analyzer:
         st_session = SmartTurnSession(smart_turn_analyzer)
         smart_turn_sessions[pc_id] = st_session
@@ -571,6 +671,12 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             transcript = alts[0].get("transcript", "")
             is_final = data.get("is_final", False)
             speech_final = data.get("speech_final", False)
+
+            if transcript.strip() and (is_final or speech_final):
+                logger.debug(
+                    "[%s] DG event: is_final=%s speech_final=%s text='%s'",
+                    pc_id, is_final, speech_final, transcript[:40],
+                )
 
             ch = datachannels.get(pc_id)
             tts_was_active = tts_interrupt_flags.get(pc_id, False)
@@ -607,7 +713,36 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     # Record STT final timestamp
                     timing["stt_final_ts"] = _time.perf_counter()
 
+                    # Start/restart watchdog: if speech_final never arrives,
+                    # force the turn after _WATCHDOG_TIMEOUT seconds.
+                    nonlocal _watchdog_task
+                    if _watchdog_task is not None:
+                        _watchdog_task.cancel()
+
+                    async def _watchdog_force_turn():
+                        try:
+                            await asyncio.sleep(_WATCHDOG_TIMEOUT)
+                            text = st_session.accumulated_transcript.strip()
+                            if text:
+                                logger.warning(
+                                    "[%s] Watchdog: speech_final never fired, forcing turn (text='%s')",
+                                    pc_id, text[:60],
+                                )
+                                timing = turn_timing.setdefault(pc_id, {})
+                                timing["smart_turn_result"] = "watchdog"
+                                st_session._reset_turn()
+                                await _process_user_turn(pc_id, text)
+                        except asyncio.CancelledError:
+                            pass
+
+                    _watchdog_task = asyncio.create_task(_watchdog_force_turn())
+
                 if speech_final and st_session.accumulated_transcript.strip():
+                    # Cancel watchdog — speech_final arrived normally
+                    if _watchdog_task is not None:
+                        _watchdog_task.cancel()
+                        _watchdog_task = None
+
                     logger.info("[%s] Speech final → Smart Turn (text='%s')",
                                 pc_id, st_session.accumulated_transcript[:60])
 

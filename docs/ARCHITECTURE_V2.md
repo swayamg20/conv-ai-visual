@@ -2,6 +2,18 @@
 
 The next evolution of Voice AI. This document is the single source of truth for what we're building, why, and how.
 
+**Last updated:** Feb 2026
+
+| Phase | Status | Summary |
+|-------|--------|---------|
+| v1 Foundation | DONE | WebRTC, Deepgram STT, Smart Turn, interruption, sentence-pipelined TTS, Rough.js+GSAP canvas, tool calling, observability |
+| Phase 1: SDL + Scene Compiler | DONE | SDL types, compiler, layout engine, 10 components, LLM system prompt updated |
+| Phase 2: Latency Optimization | DONE | Groq default provider, Kokoro local TTS, model routing |
+| Phase 3: Visual Polish | NOT STARTED | Progressive stroke, handwritten font, perfect-freehand, scene transitions |
+| Phase 4: Hardening | NOT STARTED | Dead code removal, integration tests, error boundaries, scene cache |
+
+**Current focus: Phase 3**
+
 ---
 
 ## The Problem With v1
@@ -344,44 +356,34 @@ Equally important as what we build:
 
 ## Implementation Phases
 
-### Phase 1: SDL + Scene Compiler (1-2 weeks)
+### Phase 1: SDL + Scene Compiler — DONE
 
 The highest-leverage change. Simultaneously reduces latency, improves quality, enables sync.
 
-**Deliverables:**
-- SDL type definitions (`types.ts`)
-- Scene compiler (`compiler.ts`)
-- Layout engine (`layout.ts`)
-- 8-10 core components (right_triangle, equation, coordinate_plane, number_line, bar_chart, flowchart, tree, venn_diagram)
+**Delivered:**
+- SDL type definitions — `web/src/lib/scene-kit/types.ts` (SDLScene, SDLStep interfaces)
+- Scene compiler — `web/src/lib/scene-kit/compiler.ts` (`compileScene()`)
+- Layout engine — `web/src/lib/scene-kit/layout.ts` (constraint-based: below, rightOf, center, grid)
+- 10 components: right_triangle, equation, coordinate_plane, number_line, bar_chart, flowchart, tree, venn_diagram, circle_diagram, label
 - Rough.js renderer integration
 - GSAP timeline builder per component
-- Updated LLM system prompt (generate SDL, not coordinates)
+- Updated LLM system prompt (generates SDL, not coordinates)
 - Step-pipelined rendering in `use-chat.ts` and `use-webrtc.ts`
 
-**Verification:**
-- LLM generates valid SDL for 10 test prompts
-- Components render correctly at different viewport sizes
-- Animation timelines play smoothly
-- Backend import check: `python -c "from main import app"`
-- Frontend type check: `cd web && npx tsc --noEmit`
+**Remaining gap:** Step-pipelined voice-visual sync is partial — compiler produces per-step render plans with `say` + `commands`, but TTS still batches rather than firing per-step. This is tracked as a Phase 3 deliverable.
 
-### Phase 2: Latency Optimization (1 week)
+### Phase 2: Latency Optimization — DONE
 
-**Deliverables:**
-- Groq provider integration (OpenAI-compatible, minimal code)
-- Model routing: fast model default, escalation to capable model
-- Kokoro TTS integration (local ONNX inference)
-- Deepgram endpointing tuned to 700ms
-- Enable `LLM_STREAM_TOOL_ORCHESTRATION`
-- Enable `LLM_PARALLEL_TOOLS`
-- Step-pipelined TTS (per-step, not per-response)
+**Delivered:**
+- Groq as default LLM provider — `LLM_PROVIDER=groq` in config.py, OpenAI-compatible client with Groq base_url
+- Model routing — `funcs/model_router.py` (fast model default, escalation to OpenAI for complex reasoning)
+- Kokoro TTS — `funcs/kokoro_tts.py` (KokoroTTSPipeline, local inference, `TTS_PROVIDER=kokoro` config)
+- Deepgram endpointing tunable via `DEEPGRAM_ENDPOINTING` config
+- `LLM_STREAM_TOOL_ORCHESTRATION` and `LLM_PARALLEL_TOOLS` config flags available
 
-**Verification:**
-- Measure e2e latency for 10 test queries
-- Target: <1s for simple, <2s for visual
-- No regression in response quality
+**Remaining gap:** Need real latency benchmarking — actual e2e numbers not yet measured post-optimization.
 
-### Phase 3: Visual Polish (1 week)
+### Phase 3: Visual Polish — NOT STARTED (current focus)
 
 **Deliverables:**
 - Progressive stroke reveal as default animation for all shapes
@@ -389,13 +391,14 @@ The highest-leverage change. Simultaneously reduces latency, improves quality, e
 - perfect-freehand for paths and arrows
 - Smooth scene transitions (fade out old, slide in new)
 - Ink-like stroke width variation on paths
+- True step-pipelined voice+visual sync (per-step TTS + per-step canvas animation firing together)
 
 **Verification:**
 - Visual comparison: v1 vs v2 screenshots for 5 test scenes
 - Animation smoothness at 60fps
 - No layout jank or flickering
 
-### Phase 4: Hardening (1 week)
+### Phase 4: Hardening — NOT STARTED
 
 **Deliverables:**
 - Remove all dead code from v1 canvas system (old coordinate-based tool schemas, hardcoded grid positions)

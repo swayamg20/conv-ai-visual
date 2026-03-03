@@ -43,6 +43,7 @@ Components available:
 - right_triangle: props { sides: ["a", "b", "c"] }
 - equation: props { latex: "c^2 = a^2 + b^2" }
 - coordinate_plane: props { x_range, y_range, points: [{x, y, label}], grid: true }
+- function_plot: props { x_range, y_range, points: [{x, y}, ...], color: "#38bdf8", grid: true } — for curves like y=x^2. Provide 15-25 evenly spaced points.
 - number_line: props { min, max, marks: [3, 7], highlight: 5 }
 - bar_chart: props { data: [{label: "A", value: 10}], title: "Scores" }
 - flowchart: props { nodes: [{id: "start", text: "Begin"}], edges: [["start", "process"]] }
@@ -74,7 +75,8 @@ Position hints (optional): "center", "top", "bottom", { below: "id" }, { rightOf
                                         "type": "string",
                                         "enum": [
                                             "right_triangle", "equation",
-                                            "coordinate_plane", "number_line",
+                                            "coordinate_plane", "function_plot",
+                                            "number_line",
                                             "bar_chart", "flowchart", "tree",
                                             "venn_diagram", "circle_diagram", "label"
                                         ]

@@ -303,4 +303,69 @@ export function animateFadeOut(
   return gsap.to(target, { opacity: 0, duration, ease: EASING.teaching, onComplete });
 }
 
+/**
+ * Reveal a filled ink-stroke path using a clip-path wipe animation.
+ * Used for perfect-freehand paths that use fill instead of stroke.
+ */
+export function animateInkReveal(
+  group: SVGElement,
+  duration: number = DURATION.draw,
+  ease: string = EASING.draw
+): gsap.core.Tween {
+  const svgRoot = group.closest("svg");
+  if (!svgRoot) {
+    return gsap.fromTo(group, { opacity: 0 }, { opacity: 1, duration, ease });
+  }
+
+  const bbox = (group as SVGGraphicsElement).getBBox();
+  const clipId = `clip_${Math.random().toString(36).substring(2, 8)}`;
+
+  let defs = svgRoot.querySelector("defs");
+  if (!defs) {
+    defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    svgRoot.appendChild(defs);
+  }
+
+  const clipPath = document.createElementNS("http://www.w3.org/2000/svg", "clipPath");
+  clipPath.setAttribute("id", clipId);
+  const clipRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  clipRect.setAttribute("x", String(bbox.x));
+  clipRect.setAttribute("y", String(bbox.y));
+  clipRect.setAttribute("width", "0");
+  clipRect.setAttribute("height", String(bbox.height + 4));
+  clipPath.appendChild(clipRect);
+  defs.appendChild(clipPath);
+
+  group.setAttribute("clip-path", `url(#${clipId})`);
+  gsap.set(group, { opacity: 1 });
+
+  return gsap.to(clipRect, {
+    attr: { width: bbox.width + 4 },
+    duration,
+    ease,
+    onComplete: () => {
+      group.removeAttribute("clip-path");
+      clipPath.remove();
+    },
+  });
+}
+
+/**
+ * Fade out all content elements of an SVG container (excludes grid and defs).
+ * Caller should remove elements from DOM in the timeline's onComplete.
+ */
+export function animateSceneFadeOut(
+  svgRoot: SVGSVGElement,
+  duration: number = DURATION.fast,
+  ease: string = EASING.smooth
+): gsap.core.Timeline {
+  const tl = gsap.timeline();
+  const children = Array.from(svgRoot.children).filter(
+    (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
+  );
+  if (children.length === 0) return tl;
+  tl.to(children, { opacity: 0, duration, ease, stagger: 0.02 });
+  return tl;
+}
+
 export default gsap;

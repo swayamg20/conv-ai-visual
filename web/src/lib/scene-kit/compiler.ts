@@ -33,6 +33,13 @@ export function compileScene(sdl: SDLScene, viewport: Viewport): RenderPlan {
       }
     }
 
+    // Stamp default animate_style so the renderer doesn't have to guess
+    for (const cmd of commands) {
+      if (!cmd.animate_style && cmd.action !== "clear" && cmd.action !== "highlight") {
+        cmd.animate_style = (cmd.action === "text" || cmd.action === "latex") ? "fade" : "draw";
+      }
+    }
+
     // Handle highlight
     if (sdlStep.highlight) {
       const targets = Array.isArray(sdlStep.highlight)
