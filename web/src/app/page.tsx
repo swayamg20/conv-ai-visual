@@ -5,10 +5,11 @@ import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
 import Link from "next/link";
 // Switch removed - canvas is always enabled
+import { gsap } from "gsap";
 import { SVGCanvas, type SVGCanvasHandle, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
-import { compileScene, type SDLScene } from "@/lib/scene-kit";
+import { compileScene, type SDLScene, type RenderPlan } from "@/lib/scene-kit";
 import { cn } from "@/lib/utils";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
 import { StatusIndicator } from "@/components/status-indicator";
@@ -34,12 +35,80 @@ export default function Home() {
     canvasRef.current?.render(operations);
   }, []);
 
-  // SDL scene handler — compiles SDL to render commands and feeds to SVGCanvas
+  // SDL scene handler — compiles SDL to render commands and feeds to SVGCanvas (chat mode / legacy)
   const handleSDLScene = useCallback((sdl: SDLScene) => {
     const plan = compileScene(sdl, { width: 800, height: 600 });
     for (const step of plan.steps) {
       if (step.commands.length > 0) {
         canvasRef.current?.createSequence({ steps: step.commands as TeachingSequence["steps"] });
+      }
+    }
+  }, []);
+
+  // ── Step-pipelined voice+visual sync ──
+  // Tracks per-step paused timelines keyed by "sequenceId:stepIndex"
+  const stepTimelinesRef = useRef<Map<string, { tl: gsap.core.Timeline; started: boolean }>>(new Map());
+
+  const handleSDLStart = useCallback((sdl: SDLScene, sequenceId: string, totalSteps: number) => {
+    // Compile entire scene once (preserves cross-step layout positioning)
+    const plan = compileScene(sdl, { width: 800, height: 600 });
+
+    // Create a paused timeline for each step
+    stepTimelinesRef.current.clear();
+    for (let i = 0; i < plan.steps.length; i++) {
+      const step = plan.steps[i];
+      if (step.commands.length > 0) {
+        const tl = canvasRef.current?.createPausedSequence({
+          steps: step.commands as TeachingSequence["steps"],
+        });
+        if (tl) {
+          stepTimelinesRef.current.set(`${sequenceId}:${i}`, { tl, started: false });
+        }
+      }
+    }
+  }, []);
+
+  const handleSDLStepAudioStart = useCallback((sequenceId: string, stepIndex: number) => {
+    const key = `${sequenceId}:${stepIndex}`;
+    const entry = stepTimelinesRef.current.get(key);
+    if (entry && !entry.started) {
+      entry.started = true;
+      entry.tl.play();
+    }
+  }, []);
+
+  const handleSDLStepComplete = useCallback((sequenceId: string, stepIndex: number, audioDurationMs: number) => {
+    const key = `${sequenceId}:${stepIndex}`;
+    const entry = stepTimelinesRef.current.get(key);
+    if (entry && audioDurationMs > 0) {
+      // Speed up animation if it's running slower than the audio
+      const elapsed = entry.tl.time();
+      const animRemaining = entry.tl.duration() - elapsed;
+      const audioTotalSec = audioDurationMs / 1000;
+
+      if (animRemaining > 0 && audioTotalSec > 0) {
+        const scale = animRemaining / audioTotalSec;
+        // Only speed up (don't slow down animations that are already faster than audio)
+        if (scale > 1.0) {
+          entry.tl.timeScale(Math.min(3.0, scale));
+        }
+      }
+    }
+    stepTimelinesRef.current.delete(key);
+  }, []);
+
+  const handleSDLComplete = useCallback((sequenceId: string) => {
+    // Kill all timelines for this sequence (cleanup on completion or interruption)
+    const keys = Array.from(stepTimelinesRef.current.keys());
+    for (const key of keys) {
+      if (key.startsWith(`${sequenceId}:`)) {
+        const entry = stepTimelinesRef.current.get(key);
+        if (entry) {
+          if (!entry.started) {
+            entry.tl.play(); // Play any un-started steps on normal completion
+          }
+        }
+        stepTimelinesRef.current.delete(key);
       }
     }
   }, []);
@@ -105,6 +174,10 @@ export default function Home() {
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
     onSDLScene: handleSDLScene,
+    onSDLStart: handleSDLStart,
+    onSDLStepAudioStart: handleSDLStepAudioStart,
+    onSDLStepComplete: handleSDLStepComplete,
+    onSDLComplete: handleSDLComplete,
     onPipelineMetrics: handlePipelineMetrics,
     onError: handleError,
     onLog: handleLog,

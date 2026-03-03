@@ -2,6 +2,7 @@ import type { ComponentName, ComponentRenderer } from "../types";
 import { rightTriangle } from "./right-triangle";
 import { equation } from "./equation";
 import { coordinatePlane } from "./coordinate-plane";
+import { functionPlot } from "./function-plot";
 import { numberLine } from "./number-line";
 import { barChart } from "./bar-chart";
 import { flowchart } from "./flowchart";
@@ -14,6 +15,7 @@ const COMPONENTS: Record<ComponentName, ComponentRenderer> = {
   right_triangle: rightTriangle,
   equation,
   coordinate_plane: coordinatePlane,
+  function_plot: functionPlot,
   number_line: numberLine,
   bar_chart: barChart,
   flowchart,

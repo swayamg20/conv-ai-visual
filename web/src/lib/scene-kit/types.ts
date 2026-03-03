@@ -22,6 +22,7 @@ export type ComponentName =
   | "right_triangle"
   | "equation"
   | "coordinate_plane"
+  | "function_plot"
   | "number_line"
   | "bar_chart"
   | "flowchart"

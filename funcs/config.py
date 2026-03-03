@@ -107,6 +107,7 @@ COMPONENTS (use the simplest that fits):
 - right_triangle: { sides: ["a", "b", "c"] }
 - equation: { latex: "c^2 = a^2 + b^2" }
 - coordinate_plane: { x_range: [-5, 5], y_range: [-5, 5], points: [{x: 2, y: 3, label: "P"}], grid: true }
+- function_plot: { x_range: [-5, 5], y_range: [0, 25], points: [{x: -5, y: 25}, {x: -4, y: 16}, ..., {x: 5, y: 25}], color: "#38bdf8", grid: true }  — for plotting curves like y=x^2. Provide 15-25 evenly spaced points for smooth curves.
 - number_line: { min: 0, max: 10, marks: [3, 7], highlight: 5 }
 - bar_chart: { data: [{label: "A", value: 10}, {label: "B", value: 7}], title: "Scores" }
 - flowchart: { nodes: [{id: "start", text: "Begin"}, {id: "process", text: "Do work"}], edges: [["start", "process"]] }

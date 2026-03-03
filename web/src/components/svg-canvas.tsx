@@ -17,9 +17,12 @@ import {
   animateProgressivePath,
   animateColorPulse,
   animateCrossOut,
+  animateSceneFadeOut,
+  animateInkReveal,
   EASING,
   DURATION,
 } from "@/lib/gsap-setup";
+import { getInkStrokePath } from "@/lib/freehand-stroke";
 import type { CanvasOperation } from "@/hooks/use-webrtc";
 import katex from "katex";
 import "katex/dist/katex.min.css";
@@ -126,6 +129,7 @@ export interface SVGCanvasHandle {
   animate(animation: AnimationOperation): gsap.core.Tween | null;
   renderLatex(latex: LatexOperation): void;
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
+  createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
   clear(): void;
   saveAsImage(): void;
@@ -465,24 +469,36 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const drawArrow = useCallback(
       (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current || !op.points || op.points.length < 2) return null;
+        if (!svgRef.current || !op.points || op.points.length < 2) return null;
         const g = createGroup(op.id || generateId());
         const start = op.points[0];
         const end = op.points[op.points.length - 1];
-        const node = roughRef.current.line(
-          start[0],
-          start[1],
-          end[0],
-          end[1],
-          getRoughOptions(op)
-        );
-        const markerId = createArrowhead(op.id || generateId(), op.color ?? paletteRef.current.stroke);
-        const p = node.querySelector("path");
-        if (p && markerId) p.setAttribute("marker-end", `url(#${markerId})`);
-        g.appendChild(node);
+        const color = op.color ?? paletteRef.current.stroke;
+        const strokeWidth = op.stroke_width ?? 1.5;
+
+        // Ink stroke body (variable-width filled path)
+        const inkD = getInkStrokePath(op.points, { size: strokeWidth * 2 });
+        const inkPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        inkPath.setAttribute("d", inkD);
+        inkPath.setAttribute("fill", color);
+        inkPath.setAttribute("stroke", "none");
+        g.appendChild(inkPath);
+
+        // Arrowhead via invisible marker line
+        const markerId = createArrowhead(op.id || generateId(), color);
+        const markerLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        markerLine.setAttribute("x1", String(start[0]));
+        markerLine.setAttribute("y1", String(start[1]));
+        markerLine.setAttribute("x2", String(end[0]));
+        markerLine.setAttribute("y2", String(end[1]));
+        markerLine.setAttribute("stroke", "transparent");
+        markerLine.setAttribute("stroke-width", "1");
+        if (markerId) markerLine.setAttribute("marker-end", `url(#${markerId})`);
+        g.appendChild(markerLine);
+
         return g;
       },
-      [createGroup, generateId, getRoughOptions, createArrowhead]
+      [createGroup, generateId, createArrowhead]
     );
 
     const drawText = useCallback(
@@ -508,19 +524,68 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const drawPath = useCallback(
       (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current || !op.points || op.points.length < 2) return null;
+        if (!svgRef.current || !op.points || op.points.length < 2) return null;
         const g = createGroup(op.id || generateId());
-        const pathString = op.points
-          .map((p, i) => `${i === 0 ? "M" : "L"}${p[0]},${p[1]}`)
-          .join(" ");
-        const node = roughRef.current.path(pathString, {
-          ...getRoughOptions(op),
-          roughness: (op as any).roughness ?? 0.5,
-        });
-        g.appendChild(node);
+        const color = op.color ?? paletteRef.current.stroke;
+        const strokeWidth = op.stroke_width ?? 1.5;
+
+        // Ink stroke (variable-width filled path)
+        const inkD = getInkStrokePath(op.points, { size: strokeWidth * 2 });
+        const inkPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        inkPath.setAttribute("d", inkD);
+        inkPath.setAttribute("fill", color);
+        inkPath.setAttribute("stroke", "none");
+        g.appendChild(inkPath);
+
         return g;
       },
-      [createGroup, generateId, getRoughOptions]
+      [createGroup, generateId]
+    );
+
+    /** Smooth stroked curve through points (for function plots, not hand-drawn ink) */
+    const drawCurve = useCallback(
+      (op: CanvasOperation): SVGElement | null => {
+        if (!svgRef.current || !op.points || op.points.length < 2) return null;
+        const g = createGroup(op.id || generateId());
+        const color = op.color ?? paletteRef.current.stroke;
+        const strokeWidth = op.stroke_width ?? 2.5;
+
+        const pts = op.points;
+        let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
+
+        if (pts.length === 2) {
+          d += ` L${pts[1][0].toFixed(1)},${pts[1][1].toFixed(1)}`;
+        } else {
+          // Quadratic Bezier through midpoints for smooth curve
+          for (let i = 0; i < pts.length - 1; i++) {
+            const [x0, y0] = pts[i];
+            const [x1, y1] = pts[i + 1];
+            if (i === 0) {
+              const mx = (x0 + x1) / 2;
+              const my = (y0 + y1) / 2;
+              d += ` L${mx.toFixed(1)},${my.toFixed(1)}`;
+            } else if (i === pts.length - 2) {
+              d += ` Q${x0.toFixed(1)},${y0.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`;
+            } else {
+              const mx = (x0 + x1) / 2;
+              const my = (y0 + y1) / 2;
+              d += ` Q${x0.toFixed(1)},${y0.toFixed(1)} ${mx.toFixed(1)},${my.toFixed(1)}`;
+            }
+          }
+        }
+
+        const curvePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        curvePath.setAttribute("d", d);
+        curvePath.setAttribute("fill", "none");
+        curvePath.setAttribute("stroke", color);
+        curvePath.setAttribute("stroke-width", String(strokeWidth));
+        curvePath.setAttribute("stroke-linecap", "round");
+        curvePath.setAttribute("stroke-linejoin", "round");
+        g.appendChild(curvePath);
+
+        return g;
+      },
+      [createGroup, generateId]
     );
 
     const drawLatex = useCallback(
@@ -697,11 +762,16 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             ? rawOp
             : normalizeOp(rawOp);
           if (op.action === "clear") {
-            elementsRef.current.clear();
             if (svgRef.current) {
-              svgRef.current.innerHTML = "";
-              if (showGrid) renderGrid(svgRef.current, width, height);
+              const svg = svgRef.current;
+              const fadeOut = animateSceneFadeOut(svg);
+              fadeOut.then(() => {
+                Array.from(svg.children)
+                  .filter((el) => el.id !== "canvas-grid" && el.tagName !== "defs")
+                  .forEach((el) => el.remove());
+              });
             }
+            elementsRef.current.clear();
             continue;
           }
 
@@ -764,6 +834,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             case "path":
               element = drawPath({ ...op, id: elemId });
               break;
+            case "curve":
+              element = drawCurve({ ...op, id: elemId });
+              break;
             case "highlight": {
               const hTargetId = op.id || op.target_id;
               if (hTargetId && elementsRef.current.has(hTargetId)) {
@@ -792,8 +865,21 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             gsap.set(element, { opacity: 0 });
             svgRef.current.appendChild(element);
 
-            // Use draw-on animation for shapes, fade for text/latex
-            if (
+            // Use draw-on for shapes, ink reveal for arrows/paths, progressive for curves, fade for text
+            const hasStrokePaths = element.querySelectorAll("path[stroke]:not([stroke='none'])").length > 0;
+            const isInkElement = (op.action === "arrow" || op.action === "path") && !hasStrokePaths;
+            const isCurve = op.action === "curve";
+
+            if (isCurve) {
+              // Progressive stroke reveal for smooth curves
+              gsap.set(element, { opacity: 1 });
+              const curvePath = element.querySelector("path");
+              if (curvePath) {
+                animateProgressivePath(curvePath as SVGPathElement, DURATION.verySlow, EASING.draw);
+              }
+            } else if (animateStyle === "draw" && isInkElement) {
+              animateInkReveal(element, DURATION.draw, EASING.draw);
+            } else if (
               animateStyle === "draw" &&
               op.action !== "text" &&
               element.querySelectorAll("path").length > 0
@@ -827,8 +913,8 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         setForceUpdate((n) => n + 1);
       },
       [
-        drawRect, drawCircle, drawEllipse, drawLine, drawArrow, drawText, drawPath,
-        generateId, showGrid, width, height,
+        drawRect, drawCircle, drawEllipse, drawLine, drawArrow, drawText, drawPath, drawCurve,
+        generateId,
       ]
     );
 
@@ -905,12 +991,24 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           switch (step.action) {
             case "clear":
               tl.add(() => {
-                elementsRef.current.clear();
                 if (svgRef.current) {
-                  svgRef.current.innerHTML = "";
-                  if (showGrid) renderGrid(svgRef.current, width, height);
+                  const children = Array.from(svgRef.current.children).filter(
+                    (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
+                  );
+                  gsap.to(children, {
+                    opacity: 0,
+                    duration: DURATION.fast,
+                    ease: EASING.smooth,
+                    stagger: 0.02,
+                    onComplete: () => {
+                      children.forEach((el) => el.remove());
+                    },
+                  });
                 }
+                elementsRef.current.clear();
               });
+              // Spacer so next steps wait for fade-out to finish
+              tl.to({}, { duration: DURATION.fast + 0.1 });
               break;
 
             case "draw":
@@ -1042,7 +1140,132 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
         return tl;
       },
-      [render, renderLatex, generateId, playNextSequence, showGrid, width, height]
+      [render, renderLatex, generateId, playNextSequence]
+    );
+
+    // ============= Paused Sequence (for step-pipelined sync) =============
+
+    const createPausedSequence = useCallback(
+      (sequence: TeachingSequence): gsap.core.Timeline => {
+        const tl = createTimeline({ paused: true });
+        const timelineId = `tl_${Math.random().toString(36).substring(2, 10)}`;
+        const normalizedSteps = normalizeSteps(sequence.steps);
+
+        for (const step of normalizedSteps) {
+          const entryStyle = step.animate_style ?? "draw";
+
+          switch (step.action) {
+            case "clear":
+              tl.add(() => {
+                if (svgRef.current) {
+                  const children = Array.from(svgRef.current.children).filter(
+                    (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
+                  );
+                  gsap.to(children, {
+                    opacity: 0,
+                    duration: DURATION.fast,
+                    ease: EASING.smooth,
+                    stagger: 0.02,
+                    onComplete: () => children.forEach((el) => el.remove()),
+                  });
+                }
+                elementsRef.current.clear();
+              });
+              tl.to({}, { duration: DURATION.fast + 0.1 });
+              break;
+
+            case "draw":
+              if (step.element) {
+                tl.add(() => {
+                  render([{ ...step.element!, animate_style: entryStyle } as any]);
+                }, "+=0.15");
+              }
+              break;
+
+            case "latex":
+              if (step.latex && step.x !== undefined && step.y !== undefined) {
+                const latexOp: LatexOperation = {
+                  type: "latex",
+                  id: step.target_id || `latex_${generateId()}`,
+                  latex: step.latex,
+                  x: step.x,
+                  y: step.y,
+                  font_size: step.font_size ?? 20,
+                  color: step.color ?? paletteRef.current.stroke,
+                };
+                tl.add(() => renderLatex(latexOp), "+=0.15");
+              }
+              break;
+
+            case "text": {
+              const textOp: CanvasOperation = {
+                action: "text",
+                id: step.target_id || `text_${generateId()}`,
+                text: step.text ?? step.speech_cue ?? "",
+                x: step.x ?? 0,
+                y: step.y ?? 0,
+                color: step.color ?? paletteRef.current.stroke,
+                font_size: step.font_size ?? 16,
+                font_family: step.font_family,
+              };
+              tl.add(() => render([textOp]), "+=0.15");
+              break;
+            }
+
+            case "highlight":
+              if (step.target_id) {
+                const hTargetId = step.target_id;
+                const hDuration = step.duration ?? 0.3;
+                const hColor = step.highlight_color;
+                tl.add(() => {
+                  const targetData = elementsRef.current.get(hTargetId);
+                  if (targetData) {
+                    if (hColor) {
+                      animateColorPulse(targetData.element, hColor, hDuration, 2);
+                    } else {
+                      gsap.set(targetData.element, { transformOrigin: "center center" });
+                      gsap.to(targetData.element, {
+                        scale: 1.15,
+                        duration: hDuration,
+                        yoyo: true,
+                        repeat: 1,
+                        ease: EASING.teaching,
+                      });
+                    }
+                  }
+                }, ">");
+              }
+              break;
+
+            default: {
+              const shapeOp = {
+                action: step.action,
+                id: step.target_id || generateId(),
+                x: step.x,
+                y: step.y,
+                width: step.width,
+                height: step.height,
+                color: step.color,
+                fill: step.fill,
+                stroke_width: step.stroke_width,
+                points: step.points,
+                text: step.text,
+                font_size: step.font_size,
+                font_family: step.font_family,
+                roughness: step.roughness,
+                animate_style: entryStyle,
+              };
+              tl.add(() => render([shapeOp as CanvasOperation]), "+=0.15");
+              break;
+            }
+          }
+        }
+
+        timelinesRef.current.set(timelineId, tl);
+        // NOT queued — caller controls playback via .play()
+        return tl;
+      },
+      [render, renderLatex, generateId]
     );
 
     // ============= Clear =============
@@ -1053,13 +1276,31 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       isPlayingRef.current = false;
       timelinesRef.current.forEach((tl) => tl.kill());
       timelinesRef.current.clear();
-      elementsRef.current.clear();
+
       if (svgRef.current) {
-        svgRef.current.innerHTML = "";
-        if (showGrid) renderGrid(svgRef.current, width, height);
+        const children = Array.from(svgRef.current.children).filter(
+          (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
+        );
+        if (children.length > 0) {
+          gsap.to(children, {
+            opacity: 0,
+            duration: DURATION.fast,
+            ease: EASING.smooth,
+            onComplete: () => {
+              children.forEach((el) => el.remove());
+              elementsRef.current.clear();
+              setForceUpdate((n) => n + 1);
+            },
+          });
+        } else {
+          elementsRef.current.clear();
+          setForceUpdate((n) => n + 1);
+        }
+      } else {
+        elementsRef.current.clear();
+        setForceUpdate((n) => n + 1);
       }
-      setForceUpdate((n) => n + 1);
-    }, [showGrid, width, height]);
+    }, []);
 
     // ============= Zoom =============
 
@@ -1197,6 +1438,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         animate,
         renderLatex,
         createSequence,
+        createPausedSequence,
         renderFunctionPlot,
         clear,
         saveAsImage,
@@ -1204,7 +1446,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         zoomOut,
         resetZoom,
       }),
-      [render, animate, renderLatex, createSequence, renderFunctionPlot, clear, saveAsImage, zoomIn, zoomOut, resetZoom]
+      [render, animate, renderLatex, createSequence, createPausedSequence, renderFunctionPlot, clear, saveAsImage, zoomIn, zoomOut, resetZoom]
     );
 
     return (
