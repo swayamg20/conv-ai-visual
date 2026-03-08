@@ -2,6 +2,10 @@
 
 Real-time voice assistant: WebRTC → Deepgram STT → Silero VAD → LLM (OpenAI/Gemini) → ElevenLabs TTS → Audio Response
 
+## Launch Status
+
+**The product has NOT launched.** See `docs/LAUNCH_STATUS.md` for the full launch readiness tracker — what's built, what's missing, launch criteria, and blockers. All agents (CEO, CTO, PM) must read it before making roadmap or prioritization decisions.
+
 ## Working Style
 
 - **Clarify before building.** When a feature can be implemented multiple ways, present 2-3 approaches in bullet points and wait for approval before writing code. Prefer the simplest approach unless told otherwise. Do not assume complex solutions (git-based sync, static generation, extra abstraction layers) when a direct API or DB call would work.

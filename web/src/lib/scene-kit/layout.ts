@@ -101,12 +101,6 @@ export class LayoutState {
   private nextAvailable(): { x: number; y: number } {
     const x = this.viewport.width / 2 - 100;
     const y = this.cursorY;
-
-    // If y would overflow, shift to the right half
-    if (y + 120 > this.viewport.height - MARGIN) {
-      return { x: this.viewport.width / 2 + 80, y: MARGIN };
-    }
-
     return { x, y };
   }
 }

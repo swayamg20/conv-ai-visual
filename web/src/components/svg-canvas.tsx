@@ -136,6 +136,7 @@ export interface SVGCanvasHandle {
   zoomIn(): void;
   zoomOut(): void;
   resetZoom(): void;
+  panTo(x: number, y: number): void;
 }
 
 interface SVGCanvasProps {
@@ -240,10 +241,13 @@ function normalizeOp(op: CanvasOperation): CanvasOperation {
 
 // ============= Grid Background =============
 
+// Grid covers a large area so it's visible when panning
+const GRID_EXTENT = 4000;
+
 function renderGrid(
   svg: SVGSVGElement,
-  width: number,
-  height: number,
+  _width: number,
+  _height: number,
   gridSize: number = 40
 ) {
   const existing = svg.querySelector("#canvas-grid");
@@ -253,23 +257,25 @@ function renderGrid(
   g.setAttribute("id", "canvas-grid");
   g.setAttribute("pointer-events", "none");
 
+  const extent = GRID_EXTENT;
+
   // Minor gridlines
-  for (let x = gridSize; x < width; x += gridSize) {
+  for (let x = gridSize; x < extent; x += gridSize) {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", String(x));
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
-    line.setAttribute("y2", String(height));
+    line.setAttribute("y2", String(extent));
     line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.5");
     line.setAttribute("opacity", "0.3");
     g.appendChild(line);
   }
-  for (let y = gridSize; y < height; y += gridSize) {
+  for (let y = gridSize; y < extent; y += gridSize) {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", "0");
     line.setAttribute("y1", String(y));
-    line.setAttribute("x2", String(width));
+    line.setAttribute("x2", String(extent));
     line.setAttribute("y2", String(y));
     line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.5");
@@ -279,22 +285,22 @@ function renderGrid(
 
   // Major gridlines (every 4th)
   const majorSize = gridSize * 4;
-  for (let x = majorSize; x < width; x += majorSize) {
+  for (let x = majorSize; x < extent; x += majorSize) {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", String(x));
     line.setAttribute("y1", "0");
     line.setAttribute("x2", String(x));
-    line.setAttribute("y2", String(height));
+    line.setAttribute("y2", String(extent));
     line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.8");
     line.setAttribute("opacity", "0.5");
     g.appendChild(line);
   }
-  for (let y = majorSize; y < height; y += majorSize) {
+  for (let y = majorSize; y < extent; y += majorSize) {
     const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
     line.setAttribute("x1", "0");
     line.setAttribute("y1", String(y));
-    line.setAttribute("x2", String(width));
+    line.setAttribute("x2", String(extent));
     line.setAttribute("y2", String(y));
     line.setAttribute("stroke", getCanvasPalette().grid);
     line.setAttribute("stroke-width", "0.8");
@@ -318,6 +324,87 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const [, setForceUpdate] = useState(0);
     const [zoomLevel, setZoomLevel] = useState(1);
     const paletteRef = useRef(getCanvasPalette());
+
+    // ============= Pan State =============
+    const panRef = useRef({ x: 0, y: 0 });
+    const isPanningRef = useRef(false);
+    const [isPanning, setIsPanning] = useState(false);
+    const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
+
+    const applyViewBox = useCallback(
+      (zoom: number, pan: { x: number; y: number }, animate = false) => {
+        if (!svgRef.current) return;
+        const vbW = width / zoom;
+        const vbH = height / zoom;
+        const vb = `${pan.x} ${pan.y} ${vbW} ${vbH}`;
+        if (animate) {
+          gsap.to(svgRef.current, {
+            attr: { viewBox: vb },
+            duration: DURATION.fast,
+            ease: EASING.smooth,
+          });
+        } else {
+          svgRef.current.setAttribute("viewBox", vb);
+        }
+      },
+      [width, height]
+    );
+
+    const panTo = useCallback(
+      (x: number, y: number, zoom?: number) => {
+        const z = zoom ?? zoomLevel;
+        const vbW = width / z;
+        const vbH = height / z;
+        // Center the target point in the viewport
+        panRef.current = { x: x - vbW / 2, y: y - vbH / 2 };
+        applyViewBox(z, panRef.current, true);
+      },
+      [width, height, zoomLevel, applyViewBox]
+    );
+
+    // ============= Pan Handlers =============
+
+    const handlePointerDown = useCallback(
+      (e: React.PointerEvent) => {
+        // Only pan with left mouse button or touch
+        if (e.button !== 0) return;
+        isPanningRef.current = true;
+        setIsPanning(true);
+        panStartRef.current = {
+          x: e.clientX,
+          y: e.clientY,
+          panX: panRef.current.x,
+          panY: panRef.current.y,
+        };
+        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      },
+      []
+    );
+
+    const handlePointerMove = useCallback(
+      (e: React.PointerEvent) => {
+        if (!isPanningRef.current) return;
+        const svg = svgRef.current;
+        if (!svg) return;
+        // Convert screen pixels to SVG coordinate delta
+        const rect = svg.getBoundingClientRect();
+        const scaleX = (width / zoomLevel) / rect.width;
+        const scaleY = (height / zoomLevel) / rect.height;
+        const dx = (e.clientX - panStartRef.current.x) * scaleX;
+        const dy = (e.clientY - panStartRef.current.y) * scaleY;
+        panRef.current = {
+          x: panStartRef.current.panX - dx,
+          y: panStartRef.current.panY - dy,
+        };
+        applyViewBox(zoomLevel, panRef.current);
+      },
+      [width, height, zoomLevel, applyViewBox]
+    );
+
+    const handlePointerUp = useCallback(() => {
+      isPanningRef.current = false;
+      setIsPanning(false);
+    }, []);
 
     // Refresh palette + grid when theme changes
     useEffect(() => {
@@ -1134,13 +1221,31 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         timelinesRef.current.set(timelineId, tl);
         sequenceQueueRef.current.push(tl);
 
+        // Auto-pan to new content if it's outside the current view
+        const firstStep = normalizedSteps.find(
+          (s) => s.y !== undefined || s.element?.y !== undefined
+        );
+        if (firstStep) {
+          const targetY = firstStep.y ?? firstStep.element?.y ?? 0;
+          const targetX = firstStep.x ?? firstStep.element?.x ?? 0;
+          const vbH = height / zoomLevel;
+          const vbW = width / zoomLevel;
+          const pan = panRef.current;
+          const outOfView =
+            targetY < pan.y || targetY > pan.y + vbH - 80 ||
+            targetX < pan.x || targetX > pan.x + vbW - 80;
+          if (outOfView) {
+            panTo(targetX, targetY);
+          }
+        }
+
         if (!isPlayingRef.current) {
           playNextSequence();
         }
 
         return tl;
       },
-      [render, renderLatex, generateId, playNextSequence]
+      [render, renderLatex, generateId, playNextSequence, width, height, zoomLevel, panTo]
     );
 
     // ============= Paused Sequence (for step-pipelined sync) =============
@@ -1276,6 +1381,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       isPlayingRef.current = false;
       timelinesRef.current.forEach((tl) => tl.kill());
       timelinesRef.current.clear();
+      // Reset pan to origin
+      panRef.current = { x: 0, y: 0 };
+      applyViewBox(zoomLevel, { x: 0, y: 0 }, true);
 
       if (svgRef.current) {
         const children = Array.from(svgRef.current.children).filter(
@@ -1300,56 +1408,46 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         elementsRef.current.clear();
         setForceUpdate((n) => n + 1);
       }
-    }, []);
+    }, [zoomLevel, applyViewBox]);
 
     // ============= Zoom =============
 
     const zoomIn = useCallback(() => {
       setZoomLevel((z) => {
         const next = Math.min(z + 0.25, 3);
-        if (svgRef.current) {
-          const vbW = width / next;
-          const vbH = height / next;
-          const ox = (width - vbW) / 2;
-          const oy = (height - vbH) / 2;
-          gsap.to(svgRef.current, {
-            attr: { viewBox: `${ox} ${oy} ${vbW} ${vbH}` },
-            duration: DURATION.fast,
-            ease: EASING.smooth,
-          });
-        }
+        // Zoom toward current view center
+        const oldVbW = width / z;
+        const oldVbH = height / z;
+        const centerX = panRef.current.x + oldVbW / 2;
+        const centerY = panRef.current.y + oldVbH / 2;
+        const newVbW = width / next;
+        const newVbH = height / next;
+        panRef.current = { x: centerX - newVbW / 2, y: centerY - newVbH / 2 };
+        applyViewBox(next, panRef.current, true);
         return next;
       });
-    }, [width, height]);
+    }, [width, height, applyViewBox]);
 
     const zoomOut = useCallback(() => {
       setZoomLevel((z) => {
         const next = Math.max(z - 0.25, 0.5);
-        if (svgRef.current) {
-          const vbW = width / next;
-          const vbH = height / next;
-          const ox = (width - vbW) / 2;
-          const oy = (height - vbH) / 2;
-          gsap.to(svgRef.current, {
-            attr: { viewBox: `${ox} ${oy} ${vbW} ${vbH}` },
-            duration: DURATION.fast,
-            ease: EASING.smooth,
-          });
-        }
+        const oldVbW = width / z;
+        const oldVbH = height / z;
+        const centerX = panRef.current.x + oldVbW / 2;
+        const centerY = panRef.current.y + oldVbH / 2;
+        const newVbW = width / next;
+        const newVbH = height / next;
+        panRef.current = { x: centerX - newVbW / 2, y: centerY - newVbH / 2 };
+        applyViewBox(next, panRef.current, true);
         return next;
       });
-    }, [width, height]);
+    }, [width, height, applyViewBox]);
 
     const resetZoom = useCallback(() => {
       setZoomLevel(1);
-      if (svgRef.current) {
-        gsap.to(svgRef.current, {
-          attr: { viewBox: `0 0 ${width} ${height}` },
-          duration: DURATION.fast,
-          ease: EASING.smooth,
-        });
-      }
-    }, [width, height]);
+      panRef.current = { x: 0, y: 0 };
+      applyViewBox(1, { x: 0, y: 0 }, true);
+    }, [applyViewBox]);
 
     // ============= Save As Image =============
 
@@ -1445,8 +1543,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         zoomIn,
         zoomOut,
         resetZoom,
+        panTo,
       }),
-      [render, animate, renderLatex, createSequence, createPausedSequence, renderFunctionPlot, clear, saveAsImage, zoomIn, zoomOut, resetZoom]
+      [render, animate, renderLatex, createSequence, createPausedSequence, renderFunctionPlot, clear, saveAsImage, zoomIn, zoomOut, resetZoom, panTo]
     );
 
     return (
@@ -1456,10 +1555,16 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           width={width}
           height={height}
           viewBox={`0 0 ${width} ${height}`}
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={handlePointerUp}
           style={{
             border: "1px solid hsl(var(--chalk-faint) / 0.5)",
             borderRadius: "8px",
             background: "hsl(var(--void))",
+            cursor: isPanning ? "grabbing" : "grab",
+            touchAction: "none",
           }}
         />
         {/* Toolbar */}
