@@ -11,7 +11,7 @@ Built with WebRTC for sub-second latency, Rough.js for a hand-drawn aesthetic, a
   <img src="docs/assets/screenshot1.png" alt="Live canvas with hand-drawn diagrams" width="80%" />
 </p>
 <p align="center"><em>Live canvas — diagrams drawn in real-time as the AI speaks</em></p>
-
+q
 ---
 
 ## How It Works
