@@ -16,7 +16,7 @@ export default function EditAgentPage() {
           Agent editing is coming soon. Agent ID: {agentId}
         </p>
         <button
-          onClick={() => router.push("/")}
+          onClick={() => router.push("/dashboard")}
           className="inline-flex items-center gap-2 text-amber hover:underline font-medium text-sm"
         >
           <ArrowLeft className="h-4 w-4" />

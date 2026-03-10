@@ -128,7 +128,7 @@ export default function CreateAgentPage() {
       setDirection(-1);
       setStep((s) => s - 1);
     } else {
-      router.push("/");
+      router.push("/dashboard");
     }
   };
 
@@ -147,7 +147,7 @@ export default function CreateAgentPage() {
         goals: state.goals.trim(),
         learning_style: state.learningStyle,
       });
-      router.push("/");
+      router.push("/dashboard");
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to create agent";
       setError(message);

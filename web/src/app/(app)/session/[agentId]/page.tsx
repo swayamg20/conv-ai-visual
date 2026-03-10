@@ -274,7 +274,7 @@ export default function AgentSessionPage() {
         <div className="glass-card rounded-2xl p-8 text-center max-w-sm">
           <p className="text-ember mb-4">{agentError || "Agent not found"}</p>
           <button
-            onClick={() => router.push("/")}
+            onClick={() => router.push("/dashboard")}
             className="text-amber hover:underline font-medium text-sm"
           >
             Back to Dashboard
@@ -291,7 +291,7 @@ export default function AgentSessionPage() {
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => router.push("/")}
+              onClick={() => router.push("/dashboard")}
               className="p-2 -ml-2 rounded-lg hover:bg-graphite transition-colors"
               aria-label="Back to dashboard"
             >

@@ -251,7 +251,7 @@ export default function ResourcesPage() {
       {/* Header */}
       <nav className="px-6 py-4 flex items-center justify-between">
         <button
-          onClick={() => router.push("/")}
+          onClick={() => router.push("/dashboard")}
           className="inline-flex items-center gap-2 text-sm text-chalk-soft hover:text-foreground transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />

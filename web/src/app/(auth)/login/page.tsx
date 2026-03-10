@@ -37,7 +37,7 @@ export default function LoginPage() {
         setToken(data.access_token);
       }
 
-      router.push("/");
+      router.push("/dashboard");
     } catch (err: any) {
       setError(err.message || "Something went wrong");
     } finally {
