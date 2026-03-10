@@ -7,6 +7,7 @@ import { Loader2 } from "lucide-react";
 import { MurmurLogoMark } from "@/components/murmur-doodles";
 import { Input } from "@/components/ui/input";
 import { setToken } from "@/hooks/use-auth";
+import { API_BASE } from "@/lib/api";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -21,7 +22,7 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, password }),

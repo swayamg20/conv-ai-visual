@@ -1,6 +1,8 @@
 import { getToken } from "@/hooks/use-auth";
 import type { Agent, AgentCreatePayload, Session, SessionWithMessages, Resource, MasteryData } from "./types";
 
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
 function authHeaders(): Record<string, string> {
   const token = getToken();
   const headers: Record<string, string> = {
@@ -13,19 +15,19 @@ function authHeaders(): Record<string, string> {
 }
 
 export async function fetchAgents(): Promise<Agent[]> {
-  const res = await fetch("/api/agents", { headers: authHeaders() });
+  const res = await fetch(`${API_BASE}/api/agents`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch agents");
   return res.json();
 }
 
 export async function fetchAgent(agentId: string): Promise<Agent> {
-  const res = await fetch(`/api/agents/${agentId}`, { headers: authHeaders() });
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch agent");
   return res.json();
 }
 
 export async function createAgent(payload: AgentCreatePayload): Promise<Agent> {
-  const res = await fetch("/api/agents", {
+  const res = await fetch(`${API_BASE}/api/agents`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify(payload),
@@ -38,7 +40,7 @@ export async function createAgent(payload: AgentCreatePayload): Promise<Agent> {
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
-  const res = await fetch(`/api/agents/${agentId}`, {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, {
     method: "DELETE",
     headers: authHeaders(),
   });
@@ -48,14 +50,14 @@ export async function deleteAgent(agentId: string): Promise<void> {
 // --- Sessions ---
 
 export async function fetchSessions(agentId?: string): Promise<Session[]> {
-  const url = agentId ? `/api/sessions?agent_id=${agentId}` : "/api/sessions";
+  const url = agentId ? `${API_BASE}/api/sessions?agent_id=${agentId}` : `${API_BASE}/api/sessions`;
   const res = await fetch(url, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch sessions");
   return res.json();
 }
 
 export async function createSession(agentId: string): Promise<Session> {
-  const res = await fetch("/api/sessions", {
+  const res = await fetch(`${API_BASE}/api/sessions`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ agent_id: agentId }),
@@ -68,13 +70,13 @@ export async function createSession(agentId: string): Promise<Session> {
 }
 
 export async function fetchSession(sessionId: string): Promise<SessionWithMessages> {
-  const res = await fetch(`/api/sessions/${sessionId}`, { headers: authHeaders() });
+  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch session");
   return res.json();
 }
 
 export async function endSession(sessionId: string): Promise<void> {
-  await fetch(`/api/sessions/${sessionId}/end`, {
+  await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
     method: "POST",
     headers: authHeaders(),
   }).catch(() => {
@@ -85,7 +87,7 @@ export async function endSession(sessionId: string): Promise<void> {
 // --- Resources ---
 
 export async function fetchResources(agentId: string): Promise<Resource[]> {
-  const res = await fetch(`/api/agents/${agentId}/resources`, { headers: authHeaders() });
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch resources");
   return res.json();
 }
@@ -98,7 +100,7 @@ export async function uploadResource(agentId: string, file: File): Promise<Resou
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
-  const res = await fetch(`/api/agents/${agentId}/resources/upload`, {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources/upload`, {
     method: "POST",
     headers,
     body: formData,
@@ -111,7 +113,7 @@ export async function uploadResource(agentId: string, file: File): Promise<Resou
 }
 
 export async function addResourceUrl(agentId: string, url: string): Promise<Resource> {
-  const res = await fetch(`/api/agents/${agentId}/resources/url`, {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources/url`, {
     method: "POST",
     headers: authHeaders(),
     body: JSON.stringify({ url }),
@@ -124,7 +126,7 @@ export async function addResourceUrl(agentId: string, url: string): Promise<Reso
 }
 
 export async function deleteResource(agentId: string, resourceId: string): Promise<void> {
-  const res = await fetch(`/api/agents/${agentId}/resources/${resourceId}`, {
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources/${resourceId}`, {
     method: "DELETE",
     headers: authHeaders(),
   });
@@ -134,7 +136,7 @@ export async function deleteResource(agentId: string, resourceId: string): Promi
 // --- Mastery ---
 
 export async function fetchMastery(agentId: string): Promise<MasteryData> {
-  const res = await fetch(`/api/agents/${agentId}/mastery`, { headers: authHeaders() });
+  const res = await fetch(`${API_BASE}/api/agents/${agentId}/mastery`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch mastery data");
   return res.json();
 }

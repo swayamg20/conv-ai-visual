@@ -19,7 +19,7 @@ import { ModeToggle, type AppMode } from "@/components/mode-toggle";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatInterface } from "@/components/chat-interface";
 import { BackgroundDoodles, WaveformToSketch } from "@/components/murmur-doodles";
-import { fetchAgent, createSession, endSession } from "@/lib/api";
+import { fetchAgent, createSession, endSession, API_BASE } from "@/lib/api";
 import type { Agent } from "@/lib/types";
 
 export default function AgentSessionPage() {
@@ -64,7 +64,7 @@ export default function AgentSessionPage() {
     const handleBeforeUnload = () => {
       if (sessionIdRef.current) {
         // Use sendBeacon for reliability on tab close
-        const url = `/api/sessions/${sessionIdRef.current}/end`;
+        const url = `${API_BASE}/api/sessions/${sessionIdRef.current}/end`;
         navigator.sendBeacon(url);
       }
     };
