@@ -17,10 +17,14 @@ export interface AgentCreatePayload {
   name: string;
   icon: string;
   description: string;
-  subject: string;
-  level: string;
-  goals: string;
-  learning_style: string;
+  persona: {
+    role?: string;
+    subject: string;
+    level: string;
+    goals: string;
+    learning_style: string;
+  };
+  capabilities?: string[];
 }
 
 export interface Session {

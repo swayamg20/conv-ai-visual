@@ -17,7 +17,8 @@ function authHeaders(): Record<string, string> {
 export async function fetchAgents(): Promise<Agent[]> {
   const res = await fetch(`${API_BASE}/api/agents`, { headers: authHeaders() });
   if (!res.ok) throw new Error("Failed to fetch agents");
-  return res.json();
+  const data = await res.json();
+  return data.agents || data;
 }
 
 export async function fetchAgent(agentId: string): Promise<Agent> {

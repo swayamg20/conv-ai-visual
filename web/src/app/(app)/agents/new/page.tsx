@@ -95,24 +95,37 @@ export default function CreateAgentPage() {
     []
   );
 
+  const isStepRequired = (s: number): boolean => s === 1 || s === 7;
+
   const canProceed = (): boolean => {
     switch (step) {
       case 1:
         return state.name.trim().length >= 2;
       case 2:
-        return state.subject !== "" && (state.subject !== "Other" || state.customSubject.trim().length > 0);
+        return true; // skippable
       case 3:
-        return state.level !== "";
+        return true; // skippable
       case 4:
-        return state.goals.trim().length >= 5;
+        return true; // skippable
       case 5:
-        return state.learningStyle !== "";
+        return true; // skippable
       case 6:
-        return state.icon !== "";
+        return true; // skippable
       case 7:
         return true;
       default:
         return false;
+    }
+  };
+
+  const isStepEmpty = (): boolean => {
+    switch (step) {
+      case 2: return state.subject === "";
+      case 3: return state.level === "";
+      case 4: return state.goals.trim() === "";
+      case 5: return state.learningStyle === "";
+      case 6: return false; // icon has default
+      default: return false;
     }
   };
 
@@ -142,10 +155,14 @@ export default function CreateAgentPage() {
         name: state.name.trim(),
         icon: state.icon,
         description,
-        subject,
-        level: state.level,
-        goals: state.goals.trim(),
-        learning_style: state.learningStyle,
+        persona: {
+          role: "student",
+          subject,
+          level: state.level,
+          goals: state.goals.trim(),
+          learning_style: state.learningStyle,
+        },
+        capabilities: ["canvas"],
       });
       router.push("/dashboard");
     } catch (err: unknown) {
@@ -397,14 +414,24 @@ export default function CreateAgentPage() {
         </button>
 
         {step < TOTAL_STEPS ? (
-          <button
-            onClick={goNext}
-            disabled={!canProceed()}
-            className="inline-flex items-center gap-2 bg-amber text-void font-semibold px-6 py-3 rounded-xl text-sm hover:brightness-110 transition-all active:scale-[0.97] disabled:opacity-30 disabled:pointer-events-none"
-          >
-            Continue
-            <ArrowRight className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            {!isStepRequired(step) && isStepEmpty() && (
+              <button
+                onClick={goNext}
+                className="text-sm text-chalk-soft hover:text-foreground transition-colors"
+              >
+                Skip
+              </button>
+            )}
+            <button
+              onClick={goNext}
+              disabled={!canProceed()}
+              className="inline-flex items-center gap-2 bg-amber text-void font-semibold px-6 py-3 rounded-xl text-sm hover:brightness-110 transition-all active:scale-[0.97] disabled:opacity-30 disabled:pointer-events-none"
+            >
+              Continue
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
         ) : (
           <button
             onClick={handleSubmit}
