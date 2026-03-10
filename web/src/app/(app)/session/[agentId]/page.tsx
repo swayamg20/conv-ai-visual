@@ -1,16 +1,14 @@
 "use client";
 
-import { useState, useRef, useCallback, useMemo } from "react";
+import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
-import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
-import Link from "next/link";
-// Switch removed - canvas is always enabled
+import { Mic, ArrowLeft, ChevronUp, Loader2 } from "lucide-react";
 import { gsap } from "gsap";
 import { SVGCanvas, type SVGCanvasHandle, type TeachingSequence } from "@/components/svg-canvas";
 import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
-import { compileScene, type SDLScene, type RenderPlan } from "@/lib/scene-kit";
-import { cn } from "@/lib/utils";
+import { compileScene, type SDLScene } from "@/lib/scene-kit";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
 import { StatusIndicator } from "@/components/status-indicator";
 import { FloatingButton } from "@/components/ui/floating-button";
@@ -20,11 +18,69 @@ import { ControlButtons } from "@/components/control-buttons";
 import { ModeToggle, type AppMode } from "@/components/mode-toggle";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatInterface } from "@/components/chat-interface";
-import { MurmurLogoMark, WaveformToSketch, BackgroundDoodles } from "@/components/murmur-doodles";
+import { BackgroundDoodles, WaveformToSketch } from "@/components/murmur-doodles";
+import { fetchAgent, createSession, endSession } from "@/lib/api";
+import type { Agent } from "@/lib/types";
 
-export default function Home() {
+export default function AgentSessionPage() {
+  const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const agentId = params.agentId as string;
+  const existingSessionId = searchParams.get("session");
+
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [agentLoading, setAgentLoading] = useState(true);
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(existingSessionId);
+  const sessionIdRef = useRef<string | null>(existingSessionId);
+
+  useEffect(() => {
+    fetchAgent(agentId)
+      .then(setAgent)
+      .catch((err) => setAgentError(err.message))
+      .finally(() => setAgentLoading(false));
+  }, [agentId]);
+
+  // Create a new session if no session param was provided
+  useEffect(() => {
+    if (existingSessionId) return; // Already have a session to resume
+    let cancelled = false;
+    createSession(agentId)
+      .then((session) => {
+        if (!cancelled) {
+          setSessionId(session.id);
+          sessionIdRef.current = session.id;
+        }
+      })
+      .catch(() => {
+        // Non-blocking — session tracking is optional
+      });
+    return () => { cancelled = true; };
+  }, [agentId, existingSessionId]);
+
+  // End session on unmount or tab close
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      if (sessionIdRef.current) {
+        // Use sendBeacon for reliability on tab close
+        const url = `/api/sessions/${sessionIdRef.current}/end`;
+        navigator.sendBeacon(url);
+      }
+    };
+
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      // Fire end-session on component unmount (navigation away)
+      if (sessionIdRef.current) {
+        endSession(sessionIdRef.current);
+      }
+    };
+  }, []);
+
   const [appMode, setAppMode] = useState<AppMode>("voice");
-  // Canvas is always enabled for math tutor
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -35,7 +91,6 @@ export default function Home() {
     canvasRef.current?.render(operations);
   }, []);
 
-  // SDL scene handler — compiles SDL to render commands and feeds to SVGCanvas (chat mode / legacy)
   const handleSDLScene = useCallback((sdl: SDLScene) => {
     const plan = compileScene(sdl, { width: 800, height: 600 });
     for (const step of plan.steps) {
@@ -45,15 +100,10 @@ export default function Home() {
     }
   }, []);
 
-  // ── Step-pipelined voice+visual sync ──
-  // Tracks per-step paused timelines keyed by "sequenceId:stepIndex"
   const stepTimelinesRef = useRef<Map<string, { tl: gsap.core.Timeline; started: boolean }>>(new Map());
 
-  const handleSDLStart = useCallback((sdl: SDLScene, sequenceId: string, totalSteps: number) => {
-    // Compile entire scene once (preserves cross-step layout positioning)
+  const handleSDLStart = useCallback((sdl: SDLScene, sequenceId: string, _totalSteps: number) => {
     const plan = compileScene(sdl, { width: 800, height: 600 });
-
-    // Create a paused timeline for each step
     stepTimelinesRef.current.clear();
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
@@ -81,14 +131,11 @@ export default function Home() {
     const key = `${sequenceId}:${stepIndex}`;
     const entry = stepTimelinesRef.current.get(key);
     if (entry && audioDurationMs > 0) {
-      // Speed up animation if it's running slower than the audio
       const elapsed = entry.tl.time();
       const animRemaining = entry.tl.duration() - elapsed;
       const audioTotalSec = audioDurationMs / 1000;
-
       if (animRemaining > 0 && audioTotalSec > 0) {
         const scale = animRemaining / audioTotalSec;
-        // Only speed up (don't slow down animations that are already faster than audio)
         if (scale > 1.0) {
           entry.tl.timeScale(Math.min(3.0, scale));
         }
@@ -98,22 +145,18 @@ export default function Home() {
   }, []);
 
   const handleSDLComplete = useCallback((sequenceId: string) => {
-    // Kill all timelines for this sequence (cleanup on completion or interruption)
     const keys = Array.from(stepTimelinesRef.current.keys());
     for (const key of keys) {
       if (key.startsWith(`${sequenceId}:`)) {
         const entry = stepTimelinesRef.current.get(key);
-        if (entry) {
-          if (!entry.started) {
-            entry.tl.play(); // Play any un-started steps on normal completion
-          }
+        if (entry && !entry.started) {
+          entry.tl.play();
         }
         stepTimelinesRef.current.delete(key);
       }
     }
   }, []);
 
-  // Chat mode hook
   const {
     messages: chatMessages,
     isLoading: chatLoading,
@@ -121,6 +164,7 @@ export default function Home() {
     clearChat,
   } = useChat({
     canvasMode: true,
+    sessionId,
     onCanvasUpdate: handleCanvasUpdate,
     onSDLScene: handleSDLScene,
   });
@@ -145,10 +189,10 @@ export default function Home() {
   }, [handleLog]);
 
   const handleStateChange = useCallback((state: PipelineState) => {
-    handleLog(`State → ${state}`);
+    handleLog(`State -> ${state}`);
   }, [handleLog]);
 
-  const handlePipelineMetrics = useCallback((metrics: Record<string, any>) => {
+  const handlePipelineMetrics = useCallback((metrics: Record<string, unknown>) => {
     const parts = [];
     if (metrics.latency_stt_ms) parts.push(`STT:${metrics.latency_stt_ms}ms`);
     if (metrics.latency_llm_ms) parts.push(`LLM:${metrics.latency_llm_ms}ms`);
@@ -192,25 +236,21 @@ export default function Home() {
   const isConnected = status === "connected";
   const isConnecting = status === "connecting";
 
-  // Map pipeline state to voice orb state
   const voiceState: VoiceState = useMemo(() => {
     if (status === "error") return "error";
     if (status === "connecting") return "connecting";
     if (status === "idle" || status === "disconnected") return "idle";
-    // Map pipeline states directly
     if (pipelineState === "listening") return "listening";
     if (pipelineState === "processing") return "processing";
     if (pipelineState === "speaking") return "speaking";
     return "listening";
   }, [status, pipelineState]);
 
-  // Get latest non-empty transcript
   const latestTranscript = useMemo(() => {
     const nonEmpty = transcripts.filter(t => t.trim() !== "" && !t.startsWith("Assistant:"));
     return nonEmpty[nonEmpty.length - 1] || "";
   }, [transcripts]);
 
-  // Status label
   const statusLabel = useMemo(() => {
     if (status === "idle") return "Ready";
     if (status === "connecting") return "Connecting...";
@@ -219,16 +259,50 @@ export default function Home() {
     return "Disconnected";
   }, [status]);
 
+  // Loading state for agent
+  if (agentLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-chalk-soft" />
+      </div>
+    );
+  }
+
+  if (agentError || !agent) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center px-6">
+        <div className="glass-card rounded-2xl p-8 text-center max-w-sm">
+          <p className="text-ember mb-4">{agentError || "Agent not found"}</p>
+          <button
+            onClick={() => router.push("/")}
+            className="text-amber hover:underline font-medium text-sm"
+          >
+            Back to Dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="relative min-h-screen bg-background">
       {/* Top Navigation Bar */}
       <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-chalk-faint/30">
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <MurmurLogoMark />
+            <button
+              onClick={() => router.push("/")}
+              className="p-2 -ml-2 rounded-lg hover:bg-graphite transition-colors"
+              aria-label="Back to dashboard"
+            >
+              <ArrowLeft className="h-5 w-5 text-muted-foreground" />
+            </button>
+            <span className="text-2xl">{agent.icon}</span>
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">Murmur</h1>
-              <p className="text-xs text-muted-foreground">Real-time assistant</p>
+              <h1 className="text-lg font-semibold tracking-tight">{agent.name}</h1>
+              <p className="text-xs text-muted-foreground">
+                {[agent.subject, agent.level].filter(Boolean).join(" / ")}
+              </p>
             </div>
           </div>
 
@@ -238,25 +312,12 @@ export default function Home() {
               onChange={setAppMode}
               disabled={isConnected || isConnecting}
             />
-            <Link
-              href="/dashboard"
-              className="p-2 rounded-lg hover:bg-graphite transition-colors"
-              aria-label="Dashboard"
-            >
-              <BarChart3 className="h-5 w-5 text-muted-foreground" />
-            </Link>
             <ThemeToggle />
-            <button
-              className="p-2 rounded-lg hover:bg-graphite transition-colors"
-              aria-label="Settings"
-            >
-              <Settings className="h-5 w-5 text-muted-foreground" />
-            </button>
           </div>
         </div>
       </nav>
 
-      {/* Main Content Area - Always Split Screen */}
+      {/* Main Content Area */}
       <main className="pt-24 min-h-screen flex gap-8 px-8 pb-4">
         {appMode === "voice" ? (
           <>
@@ -267,9 +328,7 @@ export default function Home() {
               transition={{ duration: 0.5 }}
               className="w-2/5 min-w-[400px] flex flex-col items-center justify-center gap-8 md:gap-12 relative"
             >
-              {/* Background math doodles */}
               <BackgroundDoodles className="opacity-40" />
-              {/* Voice Orb */}
               <motion.div
                 initial={{ opacity: 0, scale: 0.8 }}
                 animate={{ opacity: 1, scale: 1 }}
@@ -284,7 +343,6 @@ export default function Home() {
                 />
               </motion.div>
 
-              {/* Status Badge */}
               <motion.div
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
@@ -298,7 +356,6 @@ export default function Home() {
                 />
               </motion.div>
 
-              {/* Control Buttons (when connected) */}
               {isConnected && (
                 <ControlButtons
                   isMicMuted={isMicMuted}
@@ -309,7 +366,6 @@ export default function Home() {
                 />
               )}
 
-              {/* Waveform-to-sketch illustration (idle state) */}
               {!isConnected && !isConnecting && (
                 <motion.div
                   initial={{ opacity: 0 }}
@@ -320,7 +376,6 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {/* Connection Button (if not connected) */}
               {!isConnected && !isConnecting && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
@@ -333,12 +388,11 @@ export default function Home() {
                     onClick={handleConnect}
                     icon={<Mic className="h-5 w-5" />}
                   >
-                    Connect to Murmur
+                    Start talking to {agent.name}
                   </FloatingButton>
                 </motion.div>
               )}
 
-              {/* Latest Transcript Preview */}
               {isConnected && latestTranscript && (
                 <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
@@ -346,11 +400,7 @@ export default function Home() {
                   transition={{ delay: 0.8 }}
                   className="w-full max-w-md"
                 >
-                  <GlassmorphicCard
-                    variant="elevated"
-                    padding="lg"
-                    className="text-center"
-                  >
+                  <GlassmorphicCard variant="elevated" padding="lg" className="text-center">
                     <p className="text-base md:text-lg text-foreground/90 leading-relaxed">
                       {latestTranscript.replace(/^\d{2}:\d{2}:\d{2}\s+\[.*?\]\s+/, "")}
                     </p>
@@ -358,7 +408,6 @@ export default function Home() {
                 </motion.div>
               )}
 
-              {/* Prompt Suggestion */}
               {isConnected && transcripts.length === 0 && (
                 <motion.p
                   initial={{ opacity: 0 }}
@@ -366,12 +415,12 @@ export default function Home() {
                   transition={{ delay: 1 }}
                   className="text-sm text-muted-foreground text-center"
                 >
-                  Try saying: "Tell me about your capabilities"
+                  Try asking {agent.name} about {agent.subject || "a topic"}
                 </motion.p>
               )}
             </motion.section>
 
-            {/* Math Whiteboard (Always Visible) */}
+            {/* Canvas */}
             <motion.section
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -379,17 +428,11 @@ export default function Home() {
               className="flex-1 flex items-center justify-center"
             >
               <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
-                <SVGCanvas
-                  ref={canvasRef}
-                  width={800}
-                  height={600}
-                  className="w-full h-full"
-                />
+                <SVGCanvas ref={canvasRef} width={800} height={600} className="w-full h-full" />
               </GlassmorphicCard>
             </motion.section>
           </>
         ) : (
-          /* Chat Mode - Always Split Screen */
           <>
             <motion.section
               initial={{ opacity: 0, y: 20 }}
@@ -407,7 +450,6 @@ export default function Home() {
               </div>
             </motion.section>
 
-            {/* Math Whiteboard for Chat Mode */}
             <motion.section
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -415,19 +457,14 @@ export default function Home() {
               className="flex-1 flex items-center justify-center"
             >
               <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
-                <SVGCanvas
-                  ref={canvasRef}
-                  width={800}
-                  height={600}
-                  className="w-full h-full"
-                />
+                <SVGCanvas ref={canvasRef} width={800} height={600} className="w-full h-full" />
               </GlassmorphicCard>
             </motion.section>
           </>
         )}
       </main>
 
-      {/* Technical Drawer Toggle (Bottom Fixed) - Voice Mode Only */}
+      {/* Technical Drawer Toggle */}
       {appMode === "voice" && !drawerOpen && (
         <motion.button
           initial={{ opacity: 0, y: 20 }}
@@ -441,7 +478,6 @@ export default function Home() {
         </motion.button>
       )}
 
-      {/* Technical Drawer - Voice Mode Only */}
       {appMode === "voice" && (
         <TechnicalDrawer
           isOpen={drawerOpen}

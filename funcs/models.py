@@ -5,6 +5,7 @@ import os
 import json
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple
+from uuid import uuid4
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy import Column, JSON, func
 
@@ -82,6 +83,69 @@ class DecisionMemoryModel(SQLModel, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
+class UserModel(SQLModel, table=True):
+    """Registered user accounts."""
+    __tablename__ = "users"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    email: str = Field(unique=True, index=True)
+    password_hash: str
+    name: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    is_active: bool = True
+
+
+class AgentModel(SQLModel, table=True):
+    """User-created AI agents with compiled system prompts."""
+    __tablename__ = "agents"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: str = Field(index=True, foreign_key="users.id")
+    name: str
+    description: Optional[str] = None
+    system_prompt: str
+    persona_json: Optional[str] = None
+    capabilities_json: str = '["canvas"]'
+    icon: Optional[str] = None
+    is_default: bool = False
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def get_persona(self) -> Dict:
+        return json.loads(self.persona_json) if self.persona_json else {}
+
+    def get_capabilities(self) -> List[str]:
+        return json.loads(self.capabilities_json) if self.capabilities_json else ["canvas"]
+
+
+class SessionModel(SQLModel, table=True):
+    """Persistent chat sessions for cross-session memory."""
+    __tablename__ = "sessions"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    user_id: str = Field(index=True, foreign_key="users.id")
+    agent_id: str = Field(index=True, foreign_key="agents.id")
+    title: Optional[str] = None
+    summary: Optional[str] = None
+    message_count: int = 0
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ConversationMessageModel(SQLModel, table=True):
+    """Persisted conversation messages for session replay and cross-session context."""
+    __tablename__ = "conversation_messages"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: str = Field(index=True)
+    agent_id: str = Field(index=True)
+    user_id: str = Field(index=True)
+    role: str  # "user", "assistant", "system", "tool"
+    content: str
+    tool_calls_json: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class LLMCallLogModel(SQLModel, table=True):
     """End-to-end logging for LLM API calls."""
     __tablename__ = "llm_call_log"
@@ -150,6 +214,48 @@ class VoicePipelineLogModel(SQLModel, table=True):
 
     def get_tool_calls(self) -> list:
         return json.loads(self.tool_calls_json) if self.tool_calls_json else []
+
+
+class ResourceModel(SQLModel, table=True):
+    """Uploaded resources (PDFs, URLs, text) attached to an agent."""
+    __tablename__ = "resources"
+
+    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    agent_id: str = Field(index=True, foreign_key="agents.id")
+    user_id: str = Field(index=True, foreign_key="users.id")
+    name: str                # Original filename or URL
+    resource_type: str       # "pdf", "url", "text"
+    content_text: str = ""   # Extracted full text
+    chunk_count: int = 0
+    size_bytes: Optional[int] = None
+    status: str = "processing"  # "processing", "ready", "failed"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
+class ResourceChunkModel(SQLModel, table=True):
+    """Chunked text from a resource for retrieval."""
+    __tablename__ = "resource_chunks"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    resource_id: str = Field(index=True, foreign_key="resources.id")
+    chunk_index: int
+    content: str             # ~500 token chunk (~2000 chars)
+    page_number: Optional[int] = None
+
+
+class TopicMasteryModel(SQLModel, table=True):
+    """Per-session topic mastery signals for the struggle heatmap."""
+    __tablename__ = "topic_mastery"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: str = Field(index=True, foreign_key="users.id")
+    agent_id: str = Field(index=True, foreign_key="agents.id")
+    session_id: str = Field(index=True, foreign_key="sessions.id")
+    topic: str               # "Newton's Second Law"
+    chapter: Optional[str] = None  # "Laws of Motion"
+    signal_type: str         # "understood", "struggled", "unclear"
+    details: Optional[str] = None  # Brief note on what happened
+    created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ToolModel(SQLModel, table=True):
@@ -454,6 +560,229 @@ class ToolRepo:
         return [t.to_anthropic_schema() for t in tools]
 
 
+class UserRepo:
+    """Repository for user account operations."""
+
+    @staticmethod
+    def create(email: str, password_hash: str, name: Optional[str] = None) -> UserModel:
+        with get_session() as session:
+            user = UserModel(
+                email=email,
+                password_hash=password_hash,
+                name=name,
+            )
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            return user
+
+    @staticmethod
+    def get_by_email(email: str) -> Optional[UserModel]:
+        with get_session() as session:
+            stmt = select(UserModel).where(UserModel.email == email)
+            return session.exec(stmt).first()
+
+    @staticmethod
+    def get_by_id(user_id: str) -> Optional[UserModel]:
+        with get_session() as session:
+            return session.get(UserModel, user_id)
+
+
+class AgentRepo:
+    """Repository for agent CRUD operations."""
+
+    @staticmethod
+    def create(**kwargs) -> AgentModel:
+        with get_session() as session:
+            agent = AgentModel(**kwargs)
+            session.add(agent)
+            session.commit()
+            session.refresh(agent)
+            return agent
+
+    @staticmethod
+    def get_by_id(agent_id: str) -> Optional[AgentModel]:
+        with get_session() as session:
+            return session.get(AgentModel, agent_id)
+
+    @staticmethod
+    def list_by_user(user_id: str) -> List[AgentModel]:
+        with get_session() as session:
+            stmt = (
+                select(AgentModel)
+                .where(AgentModel.user_id == user_id)
+                .order_by(AgentModel.created_at.desc())
+            )
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def update(agent_id: str, **kwargs) -> Optional[AgentModel]:
+        with get_session() as session:
+            agent = session.get(AgentModel, agent_id)
+            if not agent:
+                return None
+            for key, value in kwargs.items():
+                if hasattr(agent, key):
+                    setattr(agent, key, value)
+            agent.updated_at = datetime.utcnow()
+            session.add(agent)
+            session.commit()
+            session.refresh(agent)
+            return agent
+
+    @staticmethod
+    def delete(agent_id: str) -> bool:
+        with get_session() as session:
+            agent = session.get(AgentModel, agent_id)
+            if not agent:
+                return False
+            session.delete(agent)
+            session.commit()
+            return True
+
+    @staticmethod
+    def set_default(agent_id: str, user_id: str) -> None:
+        """Unset all other defaults for this user, then set the given agent as default."""
+        with get_session() as session:
+            # Unset all defaults for this user
+            stmt = (
+                select(AgentModel)
+                .where(AgentModel.user_id == user_id)
+                .where(AgentModel.is_default == True)
+            )
+            for agent in session.exec(stmt).all():
+                agent.is_default = False
+                session.add(agent)
+            # Set the target agent as default
+            target = session.get(AgentModel, agent_id)
+            if target and target.user_id == user_id:
+                target.is_default = True
+                target.updated_at = datetime.utcnow()
+                session.add(target)
+            session.commit()
+
+
+class SessionRepo:
+    """Repository for session operations."""
+
+    @staticmethod
+    def create(user_id: str, agent_id: str) -> SessionModel:
+        with get_session() as session:
+            record = SessionModel(user_id=user_id, agent_id=agent_id)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    @staticmethod
+    def get_by_id(session_id: str) -> Optional[SessionModel]:
+        with get_session() as session:
+            return session.get(SessionModel, session_id)
+
+    @staticmethod
+    def list_by_agent(user_id: str, agent_id: str) -> List[SessionModel]:
+        with get_session() as session:
+            stmt = (
+                select(SessionModel)
+                .where(SessionModel.user_id == user_id)
+                .where(SessionModel.agent_id == agent_id)
+                .order_by(SessionModel.updated_at.desc())
+            )
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def list_by_user(user_id: str, agent_id: Optional[str] = None) -> List[SessionModel]:
+        with get_session() as session:
+            stmt = (
+                select(SessionModel)
+                .where(SessionModel.user_id == user_id)
+                .order_by(SessionModel.updated_at.desc())
+            )
+            if agent_id:
+                stmt = stmt.where(SessionModel.agent_id == agent_id)
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def update_summary(session_id: str, summary: str) -> None:
+        with get_session() as session:
+            record = session.get(SessionModel, session_id)
+            if record:
+                record.summary = summary
+                record.updated_at = datetime.utcnow()
+                session.add(record)
+                session.commit()
+
+    @staticmethod
+    def update_title(session_id: str, title: str) -> None:
+        with get_session() as session:
+            record = session.get(SessionModel, session_id)
+            if record:
+                record.title = title
+                record.updated_at = datetime.utcnow()
+                session.add(record)
+                session.commit()
+
+    @staticmethod
+    def increment_message_count(session_id: str) -> None:
+        with get_session() as session:
+            record = session.get(SessionModel, session_id)
+            if record:
+                record.message_count += 1
+                record.updated_at = datetime.utcnow()
+                session.add(record)
+                session.commit()
+
+
+class ConversationMessageRepo:
+    """Repository for conversation message operations."""
+
+    @staticmethod
+    def save(
+        session_id: str,
+        agent_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        tool_calls_json: Optional[str] = None,
+    ) -> ConversationMessageModel:
+        with get_session() as session:
+            record = ConversationMessageModel(
+                session_id=session_id,
+                agent_id=agent_id,
+                user_id=user_id,
+                role=role,
+                content=content,
+                tool_calls_json=tool_calls_json,
+            )
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    @staticmethod
+    def get_recent(session_id: str, limit: int = 20) -> List[ConversationMessageModel]:
+        with get_session() as session:
+            stmt = (
+                select(ConversationMessageModel)
+                .where(ConversationMessageModel.session_id == session_id)
+                .order_by(ConversationMessageModel.created_at.desc())
+                .limit(limit)
+            )
+            results = list(session.exec(stmt).all())
+            # Return in chronological order
+            results.reverse()
+            return results
+
+    @staticmethod
+    def count_by_session(session_id: str) -> int:
+        with get_session() as session:
+            stmt = (
+                select(func.count(ConversationMessageModel.id))
+                .where(ConversationMessageModel.session_id == session_id)
+            )
+            return session.exec(stmt).one() or 0
+
+
 class LLMCallLogRepo:
     """Repository for LLM call log operations."""
 
@@ -636,6 +965,173 @@ class VoicePipelineLogRepo:
                 "interrupted_count": interrupted_count,
                 "interrupt_rate": round(interrupted_count / total * 100, 2) if total else 0,
             }
+
+
+class ResourceRepo:
+    """Repository for resource operations."""
+
+    @staticmethod
+    def create(**kwargs) -> ResourceModel:
+        with get_session() as session:
+            resource = ResourceModel(**kwargs)
+            session.add(resource)
+            session.commit()
+            session.refresh(resource)
+            return resource
+
+    @staticmethod
+    def get_by_id(resource_id: str) -> Optional[ResourceModel]:
+        with get_session() as session:
+            return session.get(ResourceModel, resource_id)
+
+    @staticmethod
+    def list_by_agent(agent_id: str) -> List[ResourceModel]:
+        with get_session() as session:
+            stmt = (
+                select(ResourceModel)
+                .where(ResourceModel.agent_id == agent_id)
+                .order_by(ResourceModel.created_at.desc())
+            )
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def update_status(resource_id: str, status: str, **kwargs) -> Optional[ResourceModel]:
+        with get_session() as session:
+            resource = session.get(ResourceModel, resource_id)
+            if not resource:
+                return None
+            resource.status = status
+            for key, value in kwargs.items():
+                if hasattr(resource, key):
+                    setattr(resource, key, value)
+            session.add(resource)
+            session.commit()
+            session.refresh(resource)
+            return resource
+
+    @staticmethod
+    def delete(resource_id: str) -> bool:
+        with get_session() as session:
+            resource = session.get(ResourceModel, resource_id)
+            if not resource:
+                return False
+            # Delete associated chunks first
+            chunks_stmt = select(ResourceChunkModel).where(
+                ResourceChunkModel.resource_id == resource_id
+            )
+            for chunk in session.exec(chunks_stmt).all():
+                session.delete(chunk)
+            session.delete(resource)
+            session.commit()
+            return True
+
+
+class ResourceChunkRepo:
+    """Repository for resource chunk operations."""
+
+    @staticmethod
+    def create_batch(chunks: List[ResourceChunkModel]) -> None:
+        with get_session() as session:
+            for chunk in chunks:
+                session.add(chunk)
+            session.commit()
+
+    @staticmethod
+    def search(agent_id: str, query: str, limit: int = 5) -> List[ResourceChunkModel]:
+        """Simple keyword search using LIKE across chunks for the given agent."""
+        with get_session() as session:
+            # Get resource IDs for this agent
+            resource_ids_stmt = select(ResourceModel.id).where(
+                ResourceModel.agent_id == agent_id,
+                ResourceModel.status == "ready",
+            )
+            resource_ids = list(session.exec(resource_ids_stmt).all())
+            if not resource_ids:
+                return []
+
+            # Search chunks with LIKE for each query word
+            stmt = select(ResourceChunkModel).where(
+                ResourceChunkModel.resource_id.in_(resource_ids)
+            )
+            # Match any word from the query
+            words = [w.strip() for w in query.split() if len(w.strip()) > 2]
+            if words:
+                from sqlalchemy import or_
+                conditions = [
+                    ResourceChunkModel.content.contains(word)
+                    for word in words
+                ]
+                stmt = stmt.where(or_(*conditions))
+
+            stmt = stmt.limit(limit)
+            return list(session.exec(stmt).all())
+
+
+class TopicMasteryRepo:
+    """Repository for topic mastery / struggle heatmap operations."""
+
+    @staticmethod
+    def save_batch(entries: List[TopicMasteryModel]) -> None:
+        with get_session() as session:
+            for entry in entries:
+                session.add(entry)
+            session.commit()
+
+    @staticmethod
+    def get_by_agent(user_id: str, agent_id: str) -> List[TopicMasteryModel]:
+        with get_session() as session:
+            stmt = (
+                select(TopicMasteryModel)
+                .where(
+                    TopicMasteryModel.user_id == user_id,
+                    TopicMasteryModel.agent_id == agent_id,
+                )
+                .order_by(TopicMasteryModel.created_at.desc())
+            )
+            return list(session.exec(stmt).all())
+
+    @staticmethod
+    def get_summary(user_id: str, agent_id: str) -> Dict:
+        """Aggregate mastery data by topic and chapter."""
+        entries = TopicMasteryRepo.get_by_agent(user_id, agent_id)
+        if not entries:
+            return {"topics": [], "chapters": []}
+
+        # Latest signal per topic + session count
+        topic_latest: Dict[str, Dict] = {}
+        topic_sessions: Dict[str, set] = {}
+        for e in entries:
+            topic_sessions.setdefault(e.topic, set()).add(e.session_id)
+            # Keep the most recent signal (entries are desc by created_at)
+            if e.topic not in topic_latest:
+                topic_latest[e.topic] = {
+                    "topic": e.topic,
+                    "chapter": e.chapter,
+                    "signal_type": e.signal_type,
+                }
+
+        topics = []
+        for topic, info in topic_latest.items():
+            topics.append({
+                **info,
+                "session_count": len(topic_sessions[topic]),
+            })
+
+        # Aggregate by chapter
+        chapter_stats: Dict[str, Dict[str, int]] = {}
+        for t in topics:
+            ch = t.get("chapter") or "Uncategorized"
+            stats = chapter_stats.setdefault(ch, {"understood": 0, "struggled": 0, "unclear": 0})
+            sig = t["signal_type"]
+            if sig in stats:
+                stats[sig] += 1
+
+        chapters = [
+            {"name": name, **counts}
+            for name, counts in chapter_stats.items()
+        ]
+
+        return {"topics": topics, "chapters": chapters}
 
 
 # Initialize DB on import

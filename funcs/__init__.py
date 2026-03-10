@@ -5,7 +5,14 @@ from .llm_pipeline import LLMPipeline
 from .tts_pipeline import TTSPipeline
 from .vad_gate import SileroVADGate
 from .config import config, Config
-from .auth import get_current_user_id
+from .auth import (
+    get_current_user_id,
+    get_current_user,
+    get_current_user_optional,
+    hash_password,
+    verify_password,
+    create_access_token,
+)
 from .llm_clients import (
     LLMClient,
     OpenAIClient,
@@ -19,11 +26,28 @@ from .models import (
     UserProfileModel,
     DecisionMemoryModel,
     ToolModel,
+    UserModel,
+    AgentModel,
+    SessionModel,
+    ConversationMessageModel,
+    ResourceModel,
+    ResourceChunkModel,
+    TopicMasteryModel,
     EpisodicMemoryRepo,
     UserProfileRepo,
     DecisionMemoryRepo,
     ToolRepo,
+    UserRepo,
+    AgentRepo,
+    SessionRepo,
+    ConversationMessageRepo,
+    ResourceRepo,
+    ResourceChunkRepo,
+    TopicMasteryRepo,
 )
+from .agents import compile_agent_prompt, get_agent_tools, append_resource_context
+from .resources import ingest_pdf, ingest_url, search_chunks
+from .search import web_search, register_web_search_tool
 from .memory import (
     MemoryManager,
     ConversationContext,
@@ -68,6 +92,11 @@ __all__ = [
     "config",
     "Config",
     "get_current_user_id",
+    "get_current_user",
+    "get_current_user_optional",
+    "hash_password",
+    "verify_password",
+    "create_access_token",
     # LLM Clients
     "LLMClient",
     "OpenAIClient",
@@ -80,10 +109,35 @@ __all__ = [
     "UserProfileModel",
     "DecisionMemoryModel",
     "ToolModel",
+    "UserModel",
     "EpisodicMemoryRepo",
     "UserProfileRepo",
     "DecisionMemoryRepo",
     "ToolRepo",
+    "UserRepo",
+    "AgentModel",
+    "AgentRepo",
+    "SessionModel",
+    "ConversationMessageModel",
+    "SessionRepo",
+    "ConversationMessageRepo",
+    "ResourceModel",
+    "ResourceChunkModel",
+    "TopicMasteryModel",
+    "ResourceRepo",
+    "ResourceChunkRepo",
+    "TopicMasteryRepo",
+    # Agents
+    "compile_agent_prompt",
+    "get_agent_tools",
+    "append_resource_context",
+    # Resources
+    "ingest_pdf",
+    "ingest_url",
+    "search_chunks",
+    # Search
+    "web_search",
+    "register_web_search_tool",
     # Memory
     "MemoryManager",
     "ConversationContext",

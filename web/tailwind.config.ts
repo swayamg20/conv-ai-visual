@@ -124,6 +124,10 @@ const config: Config = {
           "0%": { boxShadow: "0 0 20px rgba(245,166,35,0.15), 0 0 40px rgba(245,166,35,0.05)" },
           "100%": { boxShadow: "0 0 0px rgba(245,166,35,0), 0 0 0px rgba(245,166,35,0)" },
         },
+        "fade-in-up": {
+          "0%": { opacity: "0", transform: "translateY(8px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
       },
       animation: {
         "pulse-glow": "pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite",
@@ -132,6 +136,7 @@ const config: Config = {
         "scale-in": "scale-in 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
         "card-enter": "card-enter 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
         "settle-glow": "settle-glow 2.5s ease-out forwards",
+        "fade-in-up": "fade-in-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both",
       },
     },
   },

@@ -12,16 +12,22 @@ export interface Message {
 interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
+  sessionId?: string | null;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
   onSDLScene?: (sdl: any) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate, onSDLScene } = options;
+  const { apiUrl = "http://localhost:8000", canvasMode = false, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const sessionIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(externalSessionId ?? null);
+
+  // Sync external sessionId into the ref when it changes
+  if (externalSessionId !== undefined && externalSessionId !== null) {
+    sessionIdRef.current = externalSessionId;
+  }
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return;
@@ -117,7 +123,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [apiUrl, canvasMode, onCanvasUpdate, onSDLScene]);
+  }, [apiUrl, canvasMode, externalSessionId, onCanvasUpdate, onSDLScene]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {

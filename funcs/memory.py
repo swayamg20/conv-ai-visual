@@ -10,6 +10,8 @@ from funcs.models import (
     UserProfileRepo,
     DecisionMemoryRepo,
     ToolRepo,
+    SessionRepo,
+    ConversationMessageRepo,
     init_db,
 )
 
@@ -335,21 +337,74 @@ class DecisionMemory:
 class MemoryManager:
     """
     Unified Memory Manager - orchestrates all 4 layers.
+    Now supports cross-session persistence via SessionModel and ConversationMessageModel.
     """
-    
-    def __init__(self, user_id: str, session_id: Optional[str] = None):
+
+    def __init__(
+        self,
+        user_id: str,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ):
         self.user_id = user_id
         self.session_id = session_id or datetime.now().strftime("%Y%m%d_%H%M%S")
-        
+        self.agent_id = agent_id
+
         # Initialize all layers
         self.context = ConversationContext()
         self.episodic = EpisodicMemory(user_id)
         self.semantic = SemanticMemory(user_id)
         self.profile = UserProfile(user_id)
         self.decisions = DecisionMemory(user_id, self.session_id)
-        
-        logger.info(f"MemoryManager initialized for user={user_id}, session={self.session_id}")
+
+        logger.info(f"MemoryManager initialized for user={user_id}, session={self.session_id}, agent={agent_id}")
     
+    def load_session_messages(self, session_id: str, limit: int = 20) -> None:
+        """Load persisted messages from a previous session into the conversation context."""
+        try:
+            messages = ConversationMessageRepo.get_recent(session_id, limit=limit)
+            for msg in messages:
+                self.context.add(msg.role, msg.content)
+            if messages:
+                logger.info(f"Loaded {len(messages)} messages from session {session_id}")
+        except Exception as e:
+            logger.warning(f"Failed to load session messages: {e}")
+
+    def persist_message(self, role: str, content: str, tool_calls_json: Optional[str] = None) -> None:
+        """Persist a single message to the database."""
+        if not self.agent_id:
+            return
+        try:
+            ConversationMessageRepo.save(
+                session_id=self.session_id,
+                agent_id=self.agent_id,
+                user_id=self.user_id,
+                role=role,
+                content=content,
+                tool_calls_json=tool_calls_json,
+            )
+            SessionRepo.increment_message_count(self.session_id)
+        except Exception as e:
+            logger.warning(f"Failed to persist message: {e}")
+
+    def get_cross_session_context(self, agent_id: str, limit: int = 3) -> str:
+        """Load summaries from the last N sessions with this agent for cross-session context."""
+        try:
+            sessions = SessionRepo.list_by_agent(self.user_id, agent_id)
+            # Exclude current session and limit
+            sessions = [s for s in sessions if s.id != self.session_id and s.summary][:limit]
+            if not sessions:
+                return ""
+            lines = ["Previous session summaries:"]
+            for s in sessions:
+                date = s.updated_at.strftime("%Y-%m-%d") if s.updated_at else ""
+                title = f" ({s.title})" if s.title else ""
+                lines.append(f"- [{date}]{title} {s.summary}")
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"Failed to load cross-session context: {e}")
+            return ""
+
     def build_context_sync(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
         """Build context sequentially (legacy path)."""
         prompt_parts = [base_system_prompt]
@@ -365,6 +420,12 @@ class MemoryManager:
         episodic_ctx = self.episodic.get_context_string(limit=2)
         if episodic_ctx:
             prompt_parts.append(f"\n{episodic_ctx}")
+
+        # Cross-session context from previous sessions with this agent
+        if self.agent_id:
+            cross_ctx = self.get_cross_session_context(self.agent_id)
+            if cross_ctx:
+                prompt_parts.append(f"\n{cross_ctx}")
 
         enriched_prompt = "\n".join(prompt_parts)
         self.context.set_system_prompt(enriched_prompt)
@@ -419,21 +480,28 @@ class MemoryManager:
             prompt_parts.append(f"\n{semantic_ctx}")
         if episodic_ctx:
             prompt_parts.append(f"\n{episodic_ctx}")
-        
+
+        # Cross-session context from previous sessions with this agent
+        if self.agent_id:
+            cross_ctx = self.get_cross_session_context(self.agent_id)
+            if cross_ctx:
+                prompt_parts.append(f"\n{cross_ctx}")
+
         # Set enriched system prompt
         enriched_prompt = "\n".join(prompt_parts)
         self.context.set_system_prompt(enriched_prompt)
-        
+
         # Return Layer 1: Conversation context
         return self.context.get_messages()
     
     def add_turn(self, role: str, content: str):
-        """Add a message to conversation context."""
+        """Add a message to conversation context and persist to DB."""
         self.context.add(role, content)
+        self.persist_message(role, content)
     
     def process_for_memory(
-        self, 
-        user_message: str, 
+        self,
+        user_message: str,
         assistant_response: str,
         save_semantic: bool = True
     ):
@@ -444,7 +512,11 @@ class MemoryManager:
         # Add to short-term context
         self.context.add("user", user_message)
         self.context.add("assistant", assistant_response)
-        
+
+        # Persist to DB for cross-session memory
+        self.persist_message("user", user_message)
+        self.persist_message("assistant", assistant_response)
+
         # Save to semantic memory (Mem0 extracts facts)
         if save_semantic and self.semantic.client:
             self.semantic.add([

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 import uvicorn
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.mediastreams import AudioFrame
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -16,7 +16,11 @@ from aiortc.contrib.media import MediaBlackhole
 from funcs.llm_pipeline import LLMPipeline
 from funcs.tts_pipeline import TTSPipeline
 from funcs.config import config
-from funcs.auth import get_current_user_id
+from funcs.auth import get_current_user_id, get_current_user, hash_password, verify_password, create_access_token
+from funcs.models import UserRepo, AgentRepo, SessionRepo, ConversationMessageRepo, ResourceRepo, TopicMasteryRepo, TopicMasteryModel
+from funcs.agents import compile_agent_prompt, get_agent_tools, append_resource_context
+from funcs.resources import ingest_pdf, ingest_url, search_chunks
+from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
 
 app = FastAPI()
@@ -34,6 +38,12 @@ try:
         max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES
     )
     logger.info("LLM pipeline initialized successfully")
+
+    # Register web_search tool in DB so it's available for agents with web_search capability
+    try:
+        register_web_search_tool()
+    except Exception as e:
+        logger.warning("Failed to register web_search tool: %s", e)
     
     if config.TTS_PROVIDER == "kokoro":
         from funcs.kokoro_tts import KokoroTTSPipeline
@@ -91,10 +101,41 @@ class ChatMessage(BaseModel):
     session_id: Optional[str] = None
     user_id: Optional[str] = None
     canvas_mode: Optional[bool] = None
+    agent_id: Optional[str] = None
 
 class CanvasModeRequest(BaseModel):
     enabled: bool
     custom_prompt: Optional[str] = None
+
+class CreateSessionRequest(BaseModel):
+    agent_id: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class CreateAgentRequest(BaseModel):
+    name: str
+    description: Optional[str] = None
+    persona: Optional[Dict[str, Any]] = None
+    capabilities: list[str] = ["canvas"]
+    icon: Optional[str] = None
+
+class UpdateAgentRequest(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    persona: Optional[Dict[str, Any]] = None
+    capabilities: Optional[list[str]] = None
+    icon: Optional[str] = None
+    is_default: Optional[bool] = None
+
+class AddResourceURLRequest(BaseModel):
+    url: str
 
 chat_sessions: Dict[str, LLMPipeline] = {}
 peer_canvas_modes: Dict[str, bool] = {}
@@ -874,37 +915,133 @@ async def chat(chat_msg: ChatMessage, request: Request):
     """
     Chat mode endpoint with SSE streaming.
     Each session gets its own LLMPipeline with 4-layer memory.
+    Supports cross-session persistence when agent_id is provided.
     """
     import uuid
-    session_id = chat_msg.session_id or str(uuid.uuid4())
     # user_id from middleware (auth) or request body
     user_id = chat_msg.user_id or get_current_user_id(request)
-    
+
     # Queues for events during this request
     canvas_events = []
     animation_events = []
 
+    # Resolve agent if provided
+    agent = None
+    agent_id = chat_msg.agent_id
+    if agent_id:
+        agent = AgentRepo.get_by_id(agent_id)
+        if not agent:
+            return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    # Resolve or create a persistent session when we have an agent
+    session_id = chat_msg.session_id
+    is_new_session = False
+    if not session_id:
+        if agent_id and user_id:
+            # Create a persistent DB session
+            db_session = SessionRepo.create(user_id=user_id, agent_id=agent_id)
+            session_id = db_session.id
+            is_new_session = True
+        else:
+            session_id = str(uuid.uuid4())
+
     # Get or create session pipeline with memory and tools
     if session_id not in chat_sessions:
         try:
-            pipeline = LLMPipeline(
-                provider=config.LLM_PROVIDER,
-                api_key=None,  # Factory will get from config based on provider
-                model=None,    # Factory will get from config based on provider
-                system_prompt=config.LLM_SYSTEM_PROMPT,
-                max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
-                user_id=user_id,
-                session_id=session_id,
-                enable_memory=True,
-                canvas_mode=True,  # Always enabled for math tutor
-                canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT
-            )
+            # Use agent system prompt and capabilities when available
+            if agent:
+                capabilities = agent.get_capabilities()
+                has_canvas = "canvas" in capabilities
+
+                # Enrich system prompt with resource names if agent has resources
+                agent_prompt = agent.system_prompt
+                agent_resources = ResourceRepo.list_by_agent(agent.id)
+                ready_resources = [r for r in agent_resources if r.status == "ready"]
+                if ready_resources:
+                    agent_prompt = append_resource_context(
+                        agent_prompt,
+                        [r.name for r in ready_resources],
+                    )
+
+                pipeline = LLMPipeline(
+                    provider=config.LLM_PROVIDER,
+                    api_key=None,
+                    model=None,
+                    system_prompt=agent_prompt,
+                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                    user_id=user_id,
+                    session_id=session_id,
+                    enable_memory=True,
+                    canvas_mode=has_canvas,
+                    canvas_system_prompt=agent_prompt if has_canvas else None,
+                )
+            else:
+                pipeline = LLMPipeline(
+                    provider=config.LLM_PROVIDER,
+                    api_key=None,
+                    model=None,
+                    system_prompt=config.LLM_SYSTEM_PROMPT,
+                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                    user_id=user_id,
+                    session_id=session_id,
+                    enable_memory=True,
+                    canvas_mode=True,
+                    canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT,
+                )
+
+            # Set agent_id on the memory manager for cross-session context
+            if pipeline.memory and agent_id:
+                pipeline.memory.agent_id = agent_id
+
+            # If resuming an existing session, load persisted messages
+            if not is_new_session and pipeline.memory:
+                existing = SessionRepo.get_by_id(session_id)
+                if existing and existing.message_count > 0:
+                    pipeline.memory.load_session_messages(session_id)
+                    logger.info("Resumed session %s with %d persisted messages", session_id, existing.message_count)
+
             pipeline.load_tools_from_db()
+
+            # Register search_resources tool if this agent has resources
+            if agent and agent_resources and ready_resources:
+                _agent_id_for_search = agent.id
+                def _search_resources_handler(query: str, limit: int = 5) -> str:
+                    chunks = search_chunks(_agent_id_for_search, query, limit=limit)
+                    if not chunks:
+                        return "No relevant content found in the resources."
+                    results = []
+                    for c in chunks:
+                        page_info = f" (page {c.page_number})" if c.page_number else ""
+                        results.append(f"[Chunk {c.chunk_index}{page_info}]\n{c.content}")
+                    return "\n\n---\n\n".join(results)
+
+                pipeline.register_tool(
+                    name="search_resources",
+                    description="Search the agent's uploaded resources (PDFs, URLs) for relevant content. Use this when the student asks about topics covered in their materials.",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query to find relevant content"},
+                            "limit": {"type": "integer", "description": "Max results to return", "default": 5},
+                        },
+                        "required": ["query"],
+                    },
+                    func=_search_resources_handler,
+                )
+
             chat_sessions[session_id] = pipeline
-            logger.info("Created chat session %s with %d tools (canvas_mode=%s)", session_id, len(pipeline.get_tools_schema()), pipeline.canvas_mode)
+            logger.info("Created chat session %s with %d tools (canvas_mode=%s, agent=%s)", session_id, len(pipeline.get_tools_schema()), pipeline.canvas_mode, agent_id)
         except Exception as e:
             logger.exception("Failed to create chat session: %s", e)
             return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
+
+    # Auto-title the session from the first user message
+    if is_new_session and agent_id:
+        title = chat_msg.message[:80].strip()
+        try:
+            SessionRepo.update_title(session_id, title)
+        except Exception:
+            pass
     
     pipeline = chat_sessions[session_id]
     
@@ -1046,6 +1183,497 @@ async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
         "session_id": session_id,
         "canvas_mode": pipeline.canvas_mode,
         "tools_count": len(pipeline.get_tools_schema())
+    })
+
+
+@app.post("/api/auth/register")
+async def register(body: RegisterRequest):
+    """Register a new user account."""
+    if not body.email or not body.password:
+        return JSONResponse({"error": "Email and password are required"}, status_code=400)
+    if len(body.password) < 6:
+        return JSONResponse({"error": "Password must be at least 6 characters"}, status_code=400)
+
+    existing = UserRepo.get_by_email(body.email)
+    if existing:
+        return JSONResponse({"error": "Email already registered"}, status_code=409)
+
+    hashed = hash_password(body.password)
+    user = UserRepo.create(email=body.email, password_hash=hashed, name=body.name)
+    token = create_access_token(user.id)
+    return JSONResponse({
+        "user": {"id": user.id, "email": user.email, "name": user.name},
+        "token": token,
+    })
+
+
+@app.post("/api/auth/login")
+async def login(body: LoginRequest):
+    """Authenticate and return a JWT."""
+    if not body.email or not body.password:
+        return JSONResponse({"error": "Email and password are required"}, status_code=400)
+
+    user = UserRepo.get_by_email(body.email)
+    if not user or not verify_password(body.password, user.password_hash):
+        return JSONResponse({"error": "Invalid email or password"}, status_code=401)
+    if not user.is_active:
+        return JSONResponse({"error": "Account is deactivated"}, status_code=401)
+
+    token = create_access_token(user.id)
+    return JSONResponse({
+        "user": {"id": user.id, "email": user.email, "name": user.name},
+        "token": token,
+    })
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    """Return the currently authenticated user."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+    return JSONResponse({
+        "user": {
+            "id": user.id,
+            "email": user.email,
+            "name": user.name,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+        }
+    })
+
+
+# ============== Agent CRUD Endpoints ==============
+
+
+def _agent_to_dict(agent) -> dict:
+    """Serialize an AgentModel to a JSON-safe dict."""
+    return {
+        "id": agent.id,
+        "user_id": agent.user_id,
+        "name": agent.name,
+        "description": agent.description,
+        "system_prompt": agent.system_prompt,
+        "persona": agent.get_persona(),
+        "capabilities": agent.get_capabilities(),
+        "icon": agent.icon,
+        "is_default": agent.is_default,
+        "created_at": agent.created_at.isoformat() if agent.created_at else None,
+        "updated_at": agent.updated_at.isoformat() if agent.updated_at else None,
+    }
+
+
+@app.post("/api/agents")
+async def create_agent(body: CreateAgentRequest, request: Request):
+    """Create a new agent for the authenticated user."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    persona = body.persona or {}
+    system_prompt = compile_agent_prompt(persona, body.capabilities)
+
+    agent = AgentRepo.create(
+        user_id=user.id,
+        name=body.name,
+        description=body.description,
+        system_prompt=system_prompt,
+        persona_json=json.dumps(persona) if persona else None,
+        capabilities_json=json.dumps(body.capabilities),
+        icon=body.icon,
+    )
+    return JSONResponse(_agent_to_dict(agent), status_code=201)
+
+
+@app.get("/api/agents")
+async def list_agents(request: Request):
+    """List all agents for the authenticated user."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agents = AgentRepo.list_by_user(user.id)
+    return JSONResponse({"agents": [_agent_to_dict(a) for a in agents]})
+
+
+@app.get("/api/agents/{agent_id}")
+async def get_agent(agent_id: str, request: Request):
+    """Get a single agent by ID (must be owned by current user)."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    return JSONResponse(_agent_to_dict(agent))
+
+
+@app.put("/api/agents/{agent_id}")
+async def update_agent(agent_id: str, body: UpdateAgentRequest, request: Request):
+    """Update an existing agent. Recompiles system prompt if persona or capabilities change."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    updates: Dict[str, Any] = {}
+
+    if body.name is not None:
+        updates["name"] = body.name
+    if body.description is not None:
+        updates["description"] = body.description
+    if body.icon is not None:
+        updates["icon"] = body.icon
+
+    # Determine if we need to recompile the prompt
+    needs_recompile = body.persona is not None or body.capabilities is not None
+    if needs_recompile:
+        persona = body.persona if body.persona is not None else agent.get_persona()
+        capabilities = body.capabilities if body.capabilities is not None else agent.get_capabilities()
+        updates["system_prompt"] = compile_agent_prompt(persona, capabilities)
+        if body.persona is not None:
+            updates["persona_json"] = json.dumps(persona)
+        if body.capabilities is not None:
+            updates["capabilities_json"] = json.dumps(capabilities)
+
+    if body.is_default is True:
+        AgentRepo.set_default(agent_id, user.id)
+
+    updated = AgentRepo.update(agent_id, **updates) if updates else AgentRepo.get_by_id(agent_id)
+    return JSONResponse(_agent_to_dict(updated))
+
+
+@app.delete("/api/agents/{agent_id}")
+async def delete_agent(agent_id: str, request: Request):
+    """Delete an agent (must be owned by current user)."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    AgentRepo.delete(agent_id)
+    return JSONResponse({"status": "deleted"})
+
+
+# ============== Resource Endpoints ==============
+
+
+def _resource_to_dict(r) -> dict:
+    """Serialize a ResourceModel to a JSON-safe dict."""
+    return {
+        "id": r.id,
+        "agent_id": r.agent_id,
+        "name": r.name,
+        "resource_type": r.resource_type,
+        "chunk_count": r.chunk_count,
+        "size_bytes": r.size_bytes,
+        "status": r.status,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    }
+
+
+@app.post("/api/agents/{agent_id}/resources")
+async def add_resource(
+    agent_id: str,
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+):
+    """Upload a PDF file or provide a URL to ingest as a resource for this agent."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    if file and file.filename:
+        # File upload path
+        import os
+        from uuid import uuid4 as _uuid4
+
+        resource_id = str(_uuid4())
+        upload_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "data", "uploads", user.id
+        )
+        os.makedirs(upload_dir, exist_ok=True)
+        file_path = os.path.join(upload_dir, f"{resource_id}.pdf")
+
+        content = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+        resource = ingest_pdf(file_path, agent_id=agent_id, user_id=user.id)
+        return JSONResponse(_resource_to_dict(resource))
+
+    elif url:
+        resource = await ingest_url(url, agent_id=agent_id, user_id=user.id)
+        return JSONResponse(_resource_to_dict(resource))
+
+    else:
+        return JSONResponse(
+            {"error": "Provide either a file upload or a url parameter"},
+            status_code=400,
+        )
+
+
+@app.get("/api/agents/{agent_id}/resources")
+async def list_resources(agent_id: str, request: Request):
+    """List resources for an agent."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    resources = ResourceRepo.list_by_agent(agent_id)
+    return JSONResponse([_resource_to_dict(r) for r in resources])
+
+
+@app.delete("/api/agents/{agent_id}/resources/{resource_id}")
+async def delete_resource(agent_id: str, resource_id: str, request: Request):
+    """Delete a resource and its chunks."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    deleted = ResourceRepo.delete(resource_id)
+    if not deleted:
+        return JSONResponse({"error": "Resource not found"}, status_code=404)
+    return JSONResponse({"status": "deleted"})
+
+
+# ============== Mastery / Struggle Heatmap Endpoints ==============
+
+
+@app.get("/api/agents/{agent_id}/mastery")
+async def get_mastery(agent_id: str, request: Request):
+    """Get concept mastery data (struggle heatmap) for the current user + agent."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    summary = TopicMasteryRepo.get_summary(user.id, agent_id)
+    return JSONResponse(summary)
+
+
+# ============== Session Endpoints ==============
+
+@app.post("/api/sessions")
+async def create_session(body: CreateSessionRequest, request: Request):
+    """Create a new persistent session for an agent."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    agent = AgentRepo.get_by_id(body.agent_id)
+    if not agent:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+
+    session = SessionRepo.create(user_id=user.id, agent_id=body.agent_id)
+    return JSONResponse({
+        "id": session.id,
+        "user_id": session.user_id,
+        "agent_id": session.agent_id,
+        "title": session.title,
+        "summary": session.summary,
+        "message_count": session.message_count,
+        "created_at": session.created_at.isoformat(),
+    })
+
+
+@app.get("/api/sessions")
+async def list_sessions(request: Request, agent_id: Optional[str] = None):
+    """List sessions for the current user, optionally filtered by agent_id."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    sessions = SessionRepo.list_by_user(user.id, agent_id=agent_id)
+    return JSONResponse([
+        {
+            "id": s.id,
+            "agent_id": s.agent_id,
+            "title": s.title,
+            "summary": s.summary,
+            "message_count": s.message_count,
+            "created_at": s.created_at.isoformat(),
+            "updated_at": s.updated_at.isoformat(),
+        }
+        for s in sessions
+    ])
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session_detail(session_id: str, request: Request):
+    """Get session details and recent messages."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    session = SessionRepo.get_by_id(session_id)
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if session.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    messages = ConversationMessageRepo.get_recent(session_id, limit=50)
+    return JSONResponse({
+        "id": session.id,
+        "agent_id": session.agent_id,
+        "title": session.title,
+        "summary": session.summary,
+        "message_count": session.message_count,
+        "created_at": session.created_at.isoformat(),
+        "updated_at": session.updated_at.isoformat(),
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in messages
+        ],
+    })
+
+
+@app.post("/api/sessions/{session_id}/end")
+async def end_session(session_id: str, request: Request):
+    """End a session and generate an LLM summary."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    session = SessionRepo.get_by_id(session_id)
+    if not session:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if session.user_id != user.id:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    # Load recent messages for summarization
+    messages = ConversationMessageRepo.get_recent(session_id, limit=30)
+    if not messages:
+        return JSONResponse({"id": session_id, "summary": None, "status": "ended"})
+
+    # Build conversation text for the summarizer
+    convo_text = "\n".join([f"{m.role}: {m.content}" for m in messages])
+
+    # Generate summary using Groq for speed
+    from funcs.llm_clients import create_llm_client
+    try:
+        summary_client = create_llm_client(provider="groq")
+        summary = await summary_client.complete(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize this tutoring session in 2-3 sentences. "
+                        "Focus on what topics were covered, what the student understood, "
+                        "and what they struggled with."
+                    ),
+                },
+                {"role": "user", "content": convo_text},
+            ],
+            temperature=0.3,
+            max_tokens=150,
+        )
+    except Exception as e:
+        logger.warning("Failed to generate session summary via LLM: %s", e)
+        summary = None
+
+    if summary:
+        SessionRepo.update_summary(session_id, summary)
+
+    # Extract topic mastery signals (struggle heatmap)
+    mastery_entries = []
+    try:
+        mastery_client = create_llm_client(provider="groq")
+        mastery_response = await mastery_client.complete(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "From this tutoring conversation, identify concepts/topics discussed. "
+                        "For each, classify the student's understanding. "
+                        'Return a JSON array: [{"topic": "...", "chapter": "...", '
+                        '"signal_type": "understood|struggled|unclear", "details": "..."}]. '
+                        "Only include topics that were actually discussed. "
+                        "Be specific about topic names. Return ONLY valid JSON, no markdown."
+                    ),
+                },
+                {"role": "user", "content": convo_text},
+            ],
+            temperature=0.2,
+            max_tokens=500,
+        )
+        import re as _re
+        # Strip markdown code fences if present
+        cleaned = _re.sub(r"^```(?:json)?\s*", "", mastery_response.strip())
+        cleaned = _re.sub(r"\s*```$", "", cleaned)
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict) and "topic" in item and "signal_type" in item:
+                    mastery_entries.append(TopicMasteryModel(
+                        user_id=user.id,
+                        agent_id=session.agent_id,
+                        session_id=session_id,
+                        topic=item["topic"],
+                        chapter=item.get("chapter"),
+                        signal_type=item["signal_type"],
+                        details=item.get("details"),
+                    ))
+        if mastery_entries:
+            TopicMasteryRepo.save_batch(mastery_entries)
+    except Exception as e:
+        logger.warning("Failed to extract topic mastery: %s", e)
+
+    # Also clean up in-memory pipeline if it exists
+    pipeline = chat_sessions.pop(session_id, None)
+    if pipeline and summary:
+        try:
+            pipeline.end_session(summary)
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "id": session_id,
+        "summary": summary,
+        "mastery_count": len(mastery_entries),
+        "status": "ended",
     })
 
 

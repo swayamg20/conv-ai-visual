@@ -44,6 +44,9 @@ class Config:
     GEMINI_API_KEY: Optional[str] = os.getenv("GEMINI_API_KEY")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
 
+    # Web search (Tavily)
+    TAVILY_API_KEY: Optional[str] = os.getenv("TAVILY_API_KEY")
+
     # Memory config
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY")
     MEMORY_SEMANTIC_TIMEOUT_SECS: float = float(os.getenv("MEMORY_SEMANTIC_TIMEOUT_SECS", "1.0"))
@@ -159,6 +162,11 @@ EXAMPLE — "Explain the Pythagorean theorem":
     TTS_SIMILARITY_BOOST: float = float(os.getenv("TTS_SIMILARITY_BOOST", "0.75"))
     TTS_STYLE: float = float(os.getenv("TTS_STYLE", "0.0"))
     TTS_USE_SPEAKER_BOOST: bool = os.getenv("TTS_USE_SPEAKER_BOOST", "true").lower() == "true"
+    # Auth / JWT
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    JWT_EXPIRE_MINUTES: int = int(os.getenv("JWT_EXPIRE_MINUTES", "10080"))  # 7 days
+
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
     
