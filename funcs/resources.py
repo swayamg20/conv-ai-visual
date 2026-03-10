@@ -4,7 +4,7 @@ Resource ingestion — PDF and URL extraction, chunking, and search.
 import logging
 from typing import List
 
-import fitz  # pymupdf
+import pymupdf  # pymupdf (import as pymupdf, not fitz, to avoid conflicts)
 import httpx
 from bs4 import BeautifulSoup
 
@@ -73,7 +73,7 @@ def ingest_pdf(file_path: str, agent_id: str, user_id: str) -> ResourceModel:
     )
 
     try:
-        doc = fitz.open(file_path)
+        doc = pymupdf.open(file_path)
         full_text_parts: List[str] = []
         page_texts: List[tuple] = []  # (page_number, text)
 
