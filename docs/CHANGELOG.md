@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-03-11 — Post-Build Fixes + Next Plan
+
+**Branch:** `feat/full-platform-launch`
+
+After the initial build, fixed several integration issues discovered during testing:
+
+### Bug Fixes
+- **pymupdf import conflict** — `import fitz` conflicted with `frontend` package; changed to `import pymupdf`
+- **passlib + bcrypt incompatibility** — dropped passlib, use `bcrypt` directly (hashpw/checkpw)
+- **API base URL** — all frontend fetch calls were hitting Next.js at :3000 instead of FastAPI at :8000; added `API_BASE` constant (`NEXT_PUBLIC_API_URL` env var)
+- **Token key mismatch** — backend returns `token` but frontend checked `access_token`; fixed in login + register pages
+- **Route conflicts** — `(app)/page.tsx` + `(marketing)/page.tsx` both resolved to `/`; moved dashboard to `/dashboard`. Old observability dashboard moved from `/dashboard` to `/obs`
+- **Agent creation payload** — frontend sent flat fields but backend expected `persona: {...}` wrapper; fixed payload structure
+- **fetchAgents response parsing** — backend returns `{ agents: [...] }` but frontend expected bare array; now unwraps correctly
+- **Error field handling** — backend returns `error` not `detail`; auth pages now check both
+
+### Improvements
+- Wizard steps 2-6 now skippable (only agent name is required)
+- "Skip" button appears when a step has no selection
+
+### Planning
+- Created `docs/NEXT_PLAN.md` — 4-phase plan for core engineering & AI/ML quality
+- CTO assessment identified 20 issues (5 P0, 7 P1, 8 P2)
+- PM prioritized: context window, embedding search, adaptive difficulty, physics-specific prompts
+- Creative feature: **Adaptive Difficulty Detection** — agent detects confusion in real-time and silently adjusts pace, vocabulary, and examples
+
+---
+
 ## 2026-03-11 — Full Platform Launch Build
 
 **Branch:** `feat/full-platform-launch`
@@ -94,7 +122,7 @@ Executed the entire launch roadmap in a single session using a 5-agent team (PM,
 /agents/[id]/edit           Agent edit (placeholder)
 /session/[agentId]          Voice+canvas session
 /canvas                     Legacy canvas page
-/dashboard (old)            Observability dashboard
+/obs                        Observability dashboard
 ```
 
 ### New Files (22)
