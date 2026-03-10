@@ -31,12 +31,12 @@ export default function RegisterPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "Registration failed");
+        throw new Error(data.detail || data.error || "Registration failed");
       }
 
       const data = await res.json();
-      if (data.access_token) {
-        setToken(data.access_token);
+      if (data.token) {
+        setToken(data.token);
       }
 
       router.push("/dashboard");

@@ -30,12 +30,12 @@ export default function LoginPage() {
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "Invalid credentials");
+        throw new Error(data.detail || data.error || "Invalid credentials");
       }
 
       const data = await res.json();
-      if (data.access_token) {
-        setToken(data.access_token);
+      if (data.token) {
+        setToken(data.token);
       }
 
       router.push("/dashboard");
