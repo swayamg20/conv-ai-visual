@@ -4,25 +4,23 @@ Authentication and user identity middleware.
 from datetime import datetime, timedelta
 from typing import Optional
 
+import bcrypt
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from .config import config
 from .models import UserModel, UserRepo
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password."""
-    return pwd_context.hash(password)
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Verify a plaintext password against its hash."""
-    return pwd_context.verify(plain, hashed)
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
 
 
 def create_access_token(user_id: str) -> str:
