@@ -4,7 +4,7 @@ SQLModel database models.
 import os
 import json
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any
 from uuid import uuid4
 from sqlmodel import SQLModel, Field, create_engine, Session, select
 from sqlalchemy import Column, JSON, func
@@ -17,25 +17,32 @@ DATABASE_URL = f"sqlite:///{DB_PATH}"
 engine = create_engine(DATABASE_URL, echo=False)
 
 
+def _load_json(value: str | None, default: Any = None) -> Any:
+    """Deserialize a JSON string field, returning `default` if None or empty."""
+    if not value:
+        return default
+    return json.loads(value)
+
+
 # ============== Models ==============
 
 class EpisodicMemoryModel(SQLModel, table=True):
     """Layer 2: Conversation summaries."""
     __tablename__ = "episodic_memory"
     
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
-    session_id: Optional[str] = None
+    session_id: str | None = None
     summary: str
-    turn_count: Optional[int] = None
-    meta_json: Optional[str] = Field(default=None, sa_column_kwargs={"name": "metadata"})
+    turn_count: int | None = None
+    meta_json: str | None = Field(default=None, sa_column_kwargs={"name": "metadata"})
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
-    def get_meta(self) -> Dict:
+    def get_meta(self) -> dict:
         """Get metadata dict."""
-        return json.loads(self.meta_json) if self.meta_json else {}
-    
-    def set_meta(self, value: Dict):
+        return _load_json(self.meta_json, {})
+
+    def set_meta(self, value: dict) -> None:
         """Set metadata dict."""
         self.meta_json = json.dumps(value) if value else None
 
@@ -45,27 +52,27 @@ class UserProfileModel(SQLModel, table=True):
     __tablename__ = "user_profile"
     
     user_id: str = Field(primary_key=True)
-    name: Optional[str] = None
-    timezone: Optional[str] = None
-    preferences_json: Optional[str] = Field(default="{}", sa_column_kwargs={"name": "preferences"})
-    facts_json: Optional[str] = Field(default="{}", sa_column_kwargs={"name": "facts"})
+    name: str | None = None
+    timezone: str | None = None
+    preferences_json: str | None = Field(default="{}", sa_column_kwargs={"name": "preferences"})
+    facts_json: str | None = Field(default="{}", sa_column_kwargs={"name": "facts"})
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     @property
-    def preferences(self) -> Dict:
-        return json.loads(self.preferences_json) if self.preferences_json else {}
-    
+    def preferences(self) -> dict:
+        return _load_json(self.preferences_json, {})
+
     @preferences.setter
-    def preferences(self, value: Dict):
+    def preferences(self, value: dict) -> None:
         self.preferences_json = json.dumps(value) if value else "{}"
-    
+
     @property
-    def facts(self) -> Dict:
-        return json.loads(self.facts_json) if self.facts_json else {}
-    
+    def facts(self) -> dict:
+        return _load_json(self.facts_json, {})
+
     @facts.setter
-    def facts(self, value: Dict):
+    def facts(self, value: dict) -> None:
         self.facts_json = json.dumps(value) if value else "{}"
 
 
@@ -73,13 +80,13 @@ class DecisionMemoryModel(SQLModel, table=True):
     """Agentic decision tracking."""
     __tablename__ = "decision_memory"
     
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
-    session_id: Optional[str] = None
+    session_id: str | None = None
     action: str
-    tool_used: Optional[str] = None
+    tool_used: str | None = None
     success: bool = True
-    context: Optional[str] = None
+    context: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -90,7 +97,7 @@ class UserModel(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     email: str = Field(unique=True, index=True)
     password_hash: str
-    name: Optional[str] = None
+    name: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
 
@@ -102,20 +109,20 @@ class AgentModel(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     user_id: str = Field(index=True, foreign_key="users.id")
     name: str
-    description: Optional[str] = None
+    description: str | None = None
     system_prompt: str
-    persona_json: Optional[str] = None
+    persona_json: str | None = None
     capabilities_json: str = '["canvas"]'
-    icon: Optional[str] = None
+    icon: str | None = None
     is_default: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
-    def get_persona(self) -> Dict:
-        return json.loads(self.persona_json) if self.persona_json else {}
+    def get_persona(self) -> dict:
+        return _load_json(self.persona_json, {})
 
-    def get_capabilities(self) -> List[str]:
-        return json.loads(self.capabilities_json) if self.capabilities_json else ["canvas"]
+    def get_capabilities(self) -> list[str]:
+        return _load_json(self.capabilities_json, ["canvas"])
 
 
 class SessionModel(SQLModel, table=True):
@@ -125,8 +132,8 @@ class SessionModel(SQLModel, table=True):
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     user_id: str = Field(index=True, foreign_key="users.id")
     agent_id: str = Field(index=True, foreign_key="agents.id")
-    title: Optional[str] = None
-    summary: Optional[str] = None
+    title: str | None = None
+    summary: str | None = None
     message_count: int = 0
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
@@ -136,13 +143,13 @@ class ConversationMessageModel(SQLModel, table=True):
     """Persisted conversation messages for session replay and cross-session context."""
     __tablename__ = "conversation_messages"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
     agent_id: str = Field(index=True)
     user_id: str = Field(index=True)
     role: str  # "user", "assistant", "system", "tool"
     content: str
-    tool_calls_json: Optional[str] = None
+    tool_calls_json: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -150,25 +157,25 @@ class LLMCallLogModel(SQLModel, table=True):
     """End-to-end logging for LLM API calls."""
     __tablename__ = "llm_call_log"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
-    user_id: Optional[str] = Field(default=None, index=True)
+    user_id: str | None = Field(default=None, index=True)
     user_message: str
     llm_provider: str
     llm_model: str
-    tool_calls_json: Optional[str] = None
-    response_text: Optional[str] = None
-    latency_total_ms: Optional[float] = None
-    latency_llm_ms: Optional[float] = None
-    latency_tool_ms: Optional[float] = None
-    latency_stream_ms: Optional[float] = None
-    tokens_in: Optional[int] = None
-    tokens_out: Optional[int] = None
-    error: Optional[str] = None
+    tool_calls_json: str | None = None
+    response_text: str | None = None
+    latency_total_ms: float | None = None
+    latency_llm_ms: float | None = None
+    latency_tool_ms: float | None = None
+    latency_stream_ms: float | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    error: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def get_tool_calls(self) -> list:
-        return json.loads(self.tool_calls_json) if self.tool_calls_json else []
+        return _load_json(self.tool_calls_json, [])
 
 
 class VoicePipelineLogModel(SQLModel, table=True):
@@ -178,42 +185,42 @@ class VoicePipelineLogModel(SQLModel, table=True):
     """
     __tablename__ = "voice_pipeline_log"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     session_id: str = Field(index=True)
-    user_id: Optional[str] = Field(default=None, index=True)
+    user_id: str | None = Field(default=None, index=True)
     mode: str = Field(default="voice")  # "voice" or "chat"
 
     user_message: str = ""
-    response_text: Optional[str] = None
-    llm_provider: Optional[str] = None
-    llm_model: Optional[str] = None
+    response_text: str | None = None
+    llm_provider: str | None = None
+    llm_model: str | None = None
 
     # Stage latencies (milliseconds)
-    latency_vad_ms: Optional[float] = None           # VAD speech detection time
-    latency_stt_ms: Optional[float] = None            # Time from audio start to final transcript
-    latency_turn_detection_ms: Optional[float] = None # Smart Turn analysis time
-    latency_stt_to_llm_ms: Optional[float] = None     # Gap between STT final and LLM call start
-    latency_llm_ms: Optional[float] = None             # LLM inference (incl tool call rounds)
-    latency_llm_first_token_ms: Optional[float] = None # Time to first LLM token (TTFT)
-    latency_tool_ms: Optional[float] = None            # Total tool execution time
-    latency_tts_ms: Optional[float] = None             # TTS generation time (all chunks)
-    latency_tts_first_chunk_ms: Optional[float] = None # Time to first TTS audio chunk (TTFB)
-    latency_total_ms: Optional[float] = None           # End-to-end: speech start → last TTS chunk
+    latency_vad_ms: float | None = None           # VAD speech detection time
+    latency_stt_ms: float | None = None            # Time from audio start to final transcript
+    latency_turn_detection_ms: float | None = None # Smart Turn analysis time
+    latency_stt_to_llm_ms: float | None = None     # Gap between STT final and LLM call start
+    latency_llm_ms: float | None = None             # LLM inference (incl tool call rounds)
+    latency_llm_first_token_ms: float | None = None # Time to first LLM token (TTFT)
+    latency_tool_ms: float | None = None            # Total tool execution time
+    latency_tts_ms: float | None = None             # TTS generation time (all chunks)
+    latency_tts_first_chunk_ms: float | None = None # Time to first TTS audio chunk (TTFB)
+    latency_total_ms: float | None = None           # End-to-end: speech start → last TTS chunk
 
     # Pipeline metadata
-    tool_calls_json: Optional[str] = None
-    tokens_in: Optional[int] = None
-    tokens_out: Optional[int] = None
-    tts_chunks_sent: Optional[int] = None
+    tool_calls_json: str | None = None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    tts_chunks_sent: int | None = None
     tts_interrupted: bool = False
     smart_turn_used: bool = False
-    smart_turn_result: Optional[str] = None  # "complete", "incomplete", "fallback"
+    smart_turn_result: str | None = None  # "complete", "incomplete", "fallback"
 
-    error: Optional[str] = None
+    error: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
     def get_tool_calls(self) -> list:
-        return json.loads(self.tool_calls_json) if self.tool_calls_json else []
+        return _load_json(self.tool_calls_json, [])
 
 
 class ResourceModel(SQLModel, table=True):
@@ -227,7 +234,7 @@ class ResourceModel(SQLModel, table=True):
     resource_type: str       # "pdf", "url", "text"
     content_text: str = ""   # Extracted full text
     chunk_count: int = 0
-    size_bytes: Optional[int] = None
+    size_bytes: int | None = None
     status: str = "processing"  # "processing", "ready", "failed"
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -236,25 +243,25 @@ class ResourceChunkModel(SQLModel, table=True):
     """Chunked text from a resource for retrieval."""
     __tablename__ = "resource_chunks"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     resource_id: str = Field(index=True, foreign_key="resources.id")
     chunk_index: int
     content: str             # ~500 token chunk (~2000 chars)
-    page_number: Optional[int] = None
+    page_number: int | None = None
 
 
 class TopicMasteryModel(SQLModel, table=True):
     """Per-session topic mastery signals for the struggle heatmap."""
     __tablename__ = "topic_mastery"
 
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True, foreign_key="users.id")
     agent_id: str = Field(index=True, foreign_key="agents.id")
     session_id: str = Field(index=True, foreign_key="sessions.id")
     topic: str               # "Newton's Second Law"
-    chapter: Optional[str] = None  # "Laws of Motion"
+    chapter: str | None = None  # "Laws of Motion"
     signal_type: str         # "understood", "struggled", "unclear"
-    details: Optional[str] = None  # Brief note on what happened
+    details: str | None = None  # Brief note on what happened
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -265,22 +272,22 @@ class ToolModel(SQLModel, table=True):
     name: str = Field(primary_key=True)
     description: str
     parameters_json: str = Field(sa_column_kwargs={"name": "parameters"})
-    handler_module: Optional[str] = None
-    handler_function: Optional[str] = None
-    code: Optional[str] = None  # Python code for the function (alternative to module/function)
+    handler_module: str | None = None
+    handler_function: str | None = None
+    code: str | None = None  # Python code for the function (alternative to module/function)
     enabled: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     
     @property
-    def parameters(self) -> Dict:
-        return json.loads(self.parameters_json)
-    
+    def parameters(self) -> dict:
+        return _load_json(self.parameters_json, {})
+
     @parameters.setter
-    def parameters(self, value: Dict):
+    def parameters(self, value: dict) -> None:
         self.parameters_json = json.dumps(value)
-    
-    def to_openai_schema(self) -> Dict:
+
+    def to_openai_schema(self) -> dict:
         """OpenAI function calling format."""
         return {
             "type": "function",
@@ -290,8 +297,8 @@ class ToolModel(SQLModel, table=True):
                 "parameters": self.parameters
             }
         }
-    
-    def to_anthropic_schema(self) -> Dict:
+
+    def to_anthropic_schema(self) -> dict:
         """Anthropic tool format."""
         return {
             "name": self.name,
@@ -318,8 +325,8 @@ class EpisodicMemoryRepo:
     """Repository for episodic memory operations."""
     
     @staticmethod
-    def save(user_id: str, summary: str, session_id: Optional[str] = None,
-             turn_count: int = 0, metadata: Optional[Dict] = None) -> EpisodicMemoryModel:
+    def save(user_id: str, summary: str, session_id: str | None = None,
+             turn_count: int = 0, metadata: dict | None = None) -> EpisodicMemoryModel:
         with get_session() as session:
             record = EpisodicMemoryModel(
                 user_id=user_id,
@@ -334,7 +341,7 @@ class EpisodicMemoryRepo:
             return record
     
     @staticmethod
-    def get_recent(user_id: str, limit: int = 5) -> List[EpisodicMemoryModel]:
+    def get_recent(user_id: str, limit: int = 5) -> list[EpisodicMemoryModel]:
         with get_session() as session:
             stmt = (
                 select(EpisodicMemoryModel)
@@ -360,12 +367,12 @@ class UserProfileRepo:
             return profile
     
     @staticmethod
-    def get(user_id: str) -> Optional[UserProfileModel]:
+    def get(user_id: str) -> UserProfileModel | None:
         with get_session() as session:
             return session.get(UserProfileModel, user_id)
     
     @staticmethod
-    def update(user_id: str, **kwargs) -> Optional[UserProfileModel]:
+    def update(user_id: str, **kwargs) -> UserProfileModel | None:
         with get_session() as session:
             profile = session.get(UserProfileModel, user_id)
             if not profile:
@@ -390,9 +397,9 @@ class DecisionMemoryRepo:
     """Repository for decision memory operations."""
     
     @staticmethod
-    def log(user_id: str, action: str, session_id: Optional[str] = None,
-            tool_used: Optional[str] = None, success: bool = True,
-            context: Optional[str] = None) -> DecisionMemoryModel:
+    def log(user_id: str, action: str, session_id: str | None = None,
+            tool_used: str | None = None, success: bool = True,
+            context: str | None = None) -> DecisionMemoryModel:
         with get_session() as session:
             record = DecisionMemoryModel(
                 user_id=user_id,
@@ -408,7 +415,7 @@ class DecisionMemoryRepo:
             return record
     
     @staticmethod
-    def get_recent_failures(user_id: str, limit: int = 5) -> List[DecisionMemoryModel]:
+    def get_recent_failures(user_id: str, limit: int = 5) -> list[DecisionMemoryModel]:
         with get_session() as session:
             stmt = (
                 select(DecisionMemoryModel)
@@ -441,8 +448,8 @@ class DecisionMemoryRepo:
 
 class ToolRepo:
     """Repository for tool operations."""
-    _openai_schema_cache: Optional[List[Dict]] = None
-    _openai_schema_cache_key: Optional[Tuple[int, Optional[datetime]]] = None
+    _openai_schema_cache: list[dict] | None = None
+    _openai_schema_cache_key: tuple[int, datetime | None] | None = None
 
     @staticmethod
     def _invalidate_schema_cache():
@@ -450,7 +457,7 @@ class ToolRepo:
         ToolRepo._openai_schema_cache_key = None
 
     @staticmethod
-    def _get_enabled_schema_cache_key() -> Tuple[int, Optional[datetime]]:
+    def _get_enabled_schema_cache_key() -> tuple[int, datetime | None]:
         with get_session() as session:
             stmt = select(
                 func.count(ToolModel.name),
@@ -460,10 +467,10 @@ class ToolRepo:
             return int(count or 0), latest_updated_at
     
     @staticmethod
-    def upsert(name: str, description: str, parameters: Dict,
-               handler_module: Optional[str] = None,
-               handler_function: Optional[str] = None,
-               code: Optional[str] = None,
+    def upsert(name: str, description: str, parameters: dict,
+               handler_module: str | None = None,
+               handler_function: str | None = None,
+               code: str | None = None,
                enabled: bool = True) -> ToolModel:
         with get_session() as session:
             tool = session.get(ToolModel, name)
@@ -492,18 +499,18 @@ class ToolRepo:
             return tool
     
     @staticmethod
-    def get(name: str) -> Optional[ToolModel]:
+    def get(name: str) -> ToolModel | None:
         with get_session() as session:
             return session.get(ToolModel, name)
     
     @staticmethod
-    def get_enabled(name: str) -> Optional[ToolModel]:
+    def get_enabled(name: str) -> ToolModel | None:
         with get_session() as session:
             tool = session.get(ToolModel, name)
             return tool if tool and tool.enabled else None
     
     @staticmethod
-    def list_all(enabled_only: bool = True) -> List[ToolModel]:
+    def list_all(enabled_only: bool = True) -> list[ToolModel]:
         with get_session() as session:
             stmt = select(ToolModel).order_by(ToolModel.name)
             if enabled_only:
@@ -535,7 +542,7 @@ class ToolRepo:
             return False
     
     @staticmethod
-    def to_openai_format() -> List[Dict]:
+    def to_openai_format() -> list[dict]:
         """
         Get all enabled tools in OpenAI format.
         Uses an in-memory cache invalidated on tool mutations.
@@ -554,7 +561,7 @@ class ToolRepo:
         return formatted
     
     @staticmethod
-    def to_anthropic_format() -> List[Dict]:
+    def to_anthropic_format() -> list[dict]:
         """Get all enabled tools in Anthropic format."""
         tools = ToolRepo.list_all(enabled_only=True)
         return [t.to_anthropic_schema() for t in tools]
@@ -564,7 +571,7 @@ class UserRepo:
     """Repository for user account operations."""
 
     @staticmethod
-    def create(email: str, password_hash: str, name: Optional[str] = None) -> UserModel:
+    def create(email: str, password_hash: str, name: str | None = None) -> UserModel:
         with get_session() as session:
             user = UserModel(
                 email=email,
@@ -577,13 +584,13 @@ class UserRepo:
             return user
 
     @staticmethod
-    def get_by_email(email: str) -> Optional[UserModel]:
+    def get_by_email(email: str) -> UserModel | None:
         with get_session() as session:
             stmt = select(UserModel).where(UserModel.email == email)
             return session.exec(stmt).first()
 
     @staticmethod
-    def get_by_id(user_id: str) -> Optional[UserModel]:
+    def get_by_id(user_id: str) -> UserModel | None:
         with get_session() as session:
             return session.get(UserModel, user_id)
 
@@ -601,12 +608,12 @@ class AgentRepo:
             return agent
 
     @staticmethod
-    def get_by_id(agent_id: str) -> Optional[AgentModel]:
+    def get_by_id(agent_id: str) -> AgentModel | None:
         with get_session() as session:
             return session.get(AgentModel, agent_id)
 
     @staticmethod
-    def list_by_user(user_id: str) -> List[AgentModel]:
+    def list_by_user(user_id: str) -> list[AgentModel]:
         with get_session() as session:
             stmt = (
                 select(AgentModel)
@@ -616,7 +623,7 @@ class AgentRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def update(agent_id: str, **kwargs) -> Optional[AgentModel]:
+    def update(agent_id: str, **kwargs) -> AgentModel | None:
         with get_session() as session:
             agent = session.get(AgentModel, agent_id)
             if not agent:
@@ -675,12 +682,12 @@ class SessionRepo:
             return record
 
     @staticmethod
-    def get_by_id(session_id: str) -> Optional[SessionModel]:
+    def get_by_id(session_id: str) -> SessionModel | None:
         with get_session() as session:
             return session.get(SessionModel, session_id)
 
     @staticmethod
-    def list_by_agent(user_id: str, agent_id: str) -> List[SessionModel]:
+    def list_by_agent(user_id: str, agent_id: str) -> list[SessionModel]:
         with get_session() as session:
             stmt = (
                 select(SessionModel)
@@ -691,7 +698,7 @@ class SessionRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def list_by_user(user_id: str, agent_id: Optional[str] = None) -> List[SessionModel]:
+    def list_by_user(user_id: str, agent_id: str | None = None) -> list[SessionModel]:
         with get_session() as session:
             stmt = (
                 select(SessionModel)
@@ -743,7 +750,7 @@ class ConversationMessageRepo:
         user_id: str,
         role: str,
         content: str,
-        tool_calls_json: Optional[str] = None,
+        tool_calls_json: str | None = None,
     ) -> ConversationMessageModel:
         with get_session() as session:
             record = ConversationMessageModel(
@@ -760,7 +767,7 @@ class ConversationMessageRepo:
             return record
 
     @staticmethod
-    def get_recent(session_id: str, limit: int = 20) -> List[ConversationMessageModel]:
+    def get_recent(session_id: str, limit: int = 20) -> list[ConversationMessageModel]:
         with get_session() as session:
             stmt = (
                 select(ConversationMessageModel)
@@ -792,16 +799,16 @@ class LLMCallLogRepo:
         user_message: str,
         llm_provider: str,
         llm_model: str,
-        user_id: Optional[str] = None,
-        tool_calls_json: Optional[str] = None,
-        response_text: Optional[str] = None,
-        latency_total_ms: Optional[float] = None,
-        latency_llm_ms: Optional[float] = None,
-        latency_tool_ms: Optional[float] = None,
-        latency_stream_ms: Optional[float] = None,
-        tokens_in: Optional[int] = None,
-        tokens_out: Optional[int] = None,
-        error: Optional[str] = None
+        user_id: str | None = None,
+        tool_calls_json: str | None = None,
+        response_text: str | None = None,
+        latency_total_ms: float | None = None,
+        latency_llm_ms: float | None = None,
+        latency_tool_ms: float | None = None,
+        latency_stream_ms: float | None = None,
+        tokens_in: int | None = None,
+        tokens_out: int | None = None,
+        error: str | None = None
     ) -> LLMCallLogModel:
         with get_session() as session:
             record = LLMCallLogModel(
@@ -826,7 +833,7 @@ class LLMCallLogRepo:
             return record
 
     @staticmethod
-    def get_recent(limit: int = 50, offset: int = 0) -> List[LLMCallLogModel]:
+    def get_recent(limit: int = 50, offset: int = 0) -> list[LLMCallLogModel]:
         with get_session() as session:
             stmt = (
                 select(LLMCallLogModel)
@@ -837,7 +844,7 @@ class LLMCallLogRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def get_stats() -> Dict:
+    def get_stats() -> dict:
         """Get aggregated stats."""
         with get_session() as db:
             total = db.exec(
@@ -856,7 +863,7 @@ class LLMCallLogRepo:
                 select(func.count(LLMCallLogModel.id)).where(LLMCallLogModel.error.isnot(None))
             ).one()
 
-            def _percentile(col, p: float) -> Optional[float]:
+            def _percentile(col, p: float) -> float | None:
                 values = [v for v in db.exec(select(col).where(col.isnot(None))).all() if v is not None]
                 if not values:
                     return None
@@ -893,7 +900,7 @@ class VoicePipelineLogRepo:
             return record
 
     @staticmethod
-    def get_recent(limit: int = 50, offset: int = 0, mode: Optional[str] = None) -> List[VoicePipelineLogModel]:
+    def get_recent(limit: int = 50, offset: int = 0, mode: str | None = None) -> list[VoicePipelineLogModel]:
         with get_session() as session:
             stmt = (
                 select(VoicePipelineLogModel)
@@ -906,7 +913,7 @@ class VoicePipelineLogRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def get_stats(mode: Optional[str] = None) -> Dict:
+    def get_stats(mode: str | None = None) -> dict:
         """Get aggregated pipeline stats."""
         with get_session() as db:
             base = select(func.count(VoicePipelineLogModel.id))
@@ -921,7 +928,7 @@ class VoicePipelineLogRepo:
                     q = q.where(VoicePipelineLogModel.mode == mode)
                 return round(db.exec(q).one() or 0, 2)
 
-            def _percentile(col, p: float) -> Optional[float]:
+            def _percentile(col, p: float) -> float | None:
                 q = select(col).where(col.isnot(None))
                 if mode:
                     q = q.where(VoicePipelineLogModel.mode == mode)
@@ -980,12 +987,12 @@ class ResourceRepo:
             return resource
 
     @staticmethod
-    def get_by_id(resource_id: str) -> Optional[ResourceModel]:
+    def get_by_id(resource_id: str) -> ResourceModel | None:
         with get_session() as session:
             return session.get(ResourceModel, resource_id)
 
     @staticmethod
-    def list_by_agent(agent_id: str) -> List[ResourceModel]:
+    def list_by_agent(agent_id: str) -> list[ResourceModel]:
         with get_session() as session:
             stmt = (
                 select(ResourceModel)
@@ -995,7 +1002,7 @@ class ResourceRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def update_status(resource_id: str, status: str, **kwargs) -> Optional[ResourceModel]:
+    def update_status(resource_id: str, status: str, **kwargs) -> ResourceModel | None:
         with get_session() as session:
             resource = session.get(ResourceModel, resource_id)
             if not resource:
@@ -1030,14 +1037,14 @@ class ResourceChunkRepo:
     """Repository for resource chunk operations."""
 
     @staticmethod
-    def create_batch(chunks: List[ResourceChunkModel]) -> None:
+    def create_batch(chunks: list[ResourceChunkModel]) -> None:
         with get_session() as session:
             for chunk in chunks:
                 session.add(chunk)
             session.commit()
 
     @staticmethod
-    def search(agent_id: str, query: str, limit: int = 5) -> List[ResourceChunkModel]:
+    def search(agent_id: str, query: str, limit: int = 5) -> list[ResourceChunkModel]:
         """Simple keyword search using LIKE across chunks for the given agent."""
         with get_session() as session:
             # Get resource IDs for this agent
@@ -1071,14 +1078,14 @@ class TopicMasteryRepo:
     """Repository for topic mastery / struggle heatmap operations."""
 
     @staticmethod
-    def save_batch(entries: List[TopicMasteryModel]) -> None:
+    def save_batch(entries: list[TopicMasteryModel]) -> None:
         with get_session() as session:
             for entry in entries:
                 session.add(entry)
             session.commit()
 
     @staticmethod
-    def get_by_agent(user_id: str, agent_id: str) -> List[TopicMasteryModel]:
+    def get_by_agent(user_id: str, agent_id: str) -> list[TopicMasteryModel]:
         with get_session() as session:
             stmt = (
                 select(TopicMasteryModel)
@@ -1091,15 +1098,15 @@ class TopicMasteryRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def get_summary(user_id: str, agent_id: str) -> Dict:
+    def get_summary(user_id: str, agent_id: str) -> dict:
         """Aggregate mastery data by topic and chapter."""
         entries = TopicMasteryRepo.get_by_agent(user_id, agent_id)
         if not entries:
             return {"topics": [], "chapters": []}
 
         # Latest signal per topic + session count
-        topic_latest: Dict[str, Dict] = {}
-        topic_sessions: Dict[str, set] = {}
+        topic_latest: dict[str, dict] = {}
+        topic_sessions: dict[str, set] = {}
         for e in entries:
             topic_sessions.setdefault(e.topic, set()).add(e.session_id)
             # Keep the most recent signal (entries are desc by created_at)
@@ -1118,7 +1125,7 @@ class TopicMasteryRepo:
             })
 
         # Aggregate by chapter
-        chapter_stats: Dict[str, Dict[str, int]] = {}
+        chapter_stats: dict[str, dict[str, int]] = {}
         for t in topics:
             ch = t.get("chapter") or "Uncategorized"
             stats = chapter_stats.setdefault(ch, {"understood": 0, "struggled": 0, "unclear": 0})

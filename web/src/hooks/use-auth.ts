@@ -3,6 +3,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 
+if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_API_URL) {
+  console.warn("[Auth] NEXT_PUBLIC_API_URL is not set — falling back to http://localhost:8000");
+}
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export interface User {
@@ -45,7 +48,7 @@ export function useAuth() {
         if (!res.ok) throw new Error("Unauthorized");
         return res.json();
       })
-      .then((data: User) => setUser(data))
+      .then((data: { user: User }) => setUser(data.user))
       .catch(() => {
         clearToken();
         setUser(null);

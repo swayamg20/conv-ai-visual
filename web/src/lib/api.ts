@@ -5,82 +5,69 @@ export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:800
 
 function authHeaders(): Record<string, string> {
   const token = getToken();
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
-  }
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
   return headers;
 }
 
+async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...opts,
+    headers: { ...authHeaders(), ...opts.headers },
+  });
+  if (!res.ok) {
+    let message = `Request failed: ${res.status}`;
+    try {
+      const body = await res.json();
+      message = body.detail || body.error || body.message || message;
+    } catch {
+      // Response body is not JSON — use status text
+    }
+    throw new Error(message);
+  }
+  return res.json() as Promise<T>;
+}
+
 export async function fetchAgents(): Promise<Agent[]> {
-  const res = await fetch(`${API_BASE}/api/agents`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch agents");
-  const data = await res.json();
-  return data.agents || data;
+  const data = await request<{ agents: Agent[] }>("/api/agents");
+  return data.agents;
 }
 
 export async function fetchAgent(agentId: string): Promise<Agent> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch agent");
-  return res.json();
+  return request<Agent>(`/api/agents/${agentId}`);
 }
 
 export async function createAgent(payload: AgentCreatePayload): Promise<Agent> {
-  const res = await fetch(`${API_BASE}/api/agents`, {
+  return request<Agent>("/api/agents", {
     method: "POST",
-    headers: authHeaders(),
     body: JSON.stringify(payload),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || "Failed to create agent");
-  }
-  return res.json();
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
-  if (!res.ok) throw new Error("Failed to delete agent");
+  await request<{ status: string }>(`/api/agents/${agentId}`, { method: "DELETE" });
 }
 
 // --- Sessions ---
 
 export async function fetchSessions(agentId?: string): Promise<Session[]> {
-  const url = agentId ? `${API_BASE}/api/sessions?agent_id=${agentId}` : `${API_BASE}/api/sessions`;
-  const res = await fetch(url, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch sessions");
-  return res.json();
+  const path = agentId ? `/api/sessions?agent_id=${agentId}` : "/api/sessions";
+  return request<Session[]>(path);
 }
 
 export async function createSession(agentId: string): Promise<Session> {
-  const res = await fetch(`${API_BASE}/api/sessions`, {
+  return request<Session>("/api/sessions", {
     method: "POST",
-    headers: authHeaders(),
     body: JSON.stringify({ agent_id: agentId }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || "Failed to create session");
-  }
-  return res.json();
 }
 
 export async function fetchSession(sessionId: string): Promise<SessionWithMessages> {
-  const res = await fetch(`${API_BASE}/api/sessions/${sessionId}`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch session");
-  return res.json();
+  return request<SessionWithMessages>(`/api/sessions/${sessionId}`);
 }
 
 export async function endSession(sessionId: string): Promise<void> {
-  await fetch(`${API_BASE}/api/sessions/${sessionId}/end`, {
-    method: "POST",
-    headers: authHeaders(),
-  }).catch(() => {
+  await request<{ status: string }>(`/api/sessions/${sessionId}/end`, { method: "POST" }).catch(() => {
     // Fire and forget — don't block navigation
   });
 }
@@ -88,9 +75,7 @@ export async function endSession(sessionId: string): Promise<void> {
 // --- Resources ---
 
 export async function fetchResources(agentId: string): Promise<Resource[]> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch resources");
-  return res.json();
+  return request<Resource[]>(`/api/agents/${agentId}/resources`);
 }
 
 export async function uploadResource(agentId: string, file: File): Promise<Resource> {
@@ -98,6 +83,7 @@ export async function uploadResource(agentId: string, file: File): Promise<Resou
   const formData = new FormData();
   formData.append("file", file);
 
+  // Omit Content-Type so the browser sets the correct multipart boundary
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
@@ -107,37 +93,31 @@ export async function uploadResource(agentId: string, file: File): Promise<Resou
     body: formData,
   });
   if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || "Failed to upload resource");
+    let message = "Failed to upload resource";
+    try {
+      const body = await res.json();
+      message = body.detail || body.error || message;
+    } catch {
+      // Response body is not JSON
+    }
+    throw new Error(message);
   }
-  return res.json();
+  return res.json() as Promise<Resource>;
 }
 
 export async function addResourceUrl(agentId: string, url: string): Promise<Resource> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources/url`, {
+  return request<Resource>(`/api/agents/${agentId}/resources/url`, {
     method: "POST",
-    headers: authHeaders(),
     body: JSON.stringify({ url }),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || "Failed to add resource URL");
-  }
-  return res.json();
 }
 
 export async function deleteResource(agentId: string, resourceId: string): Promise<void> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}/resources/${resourceId}`, {
-    method: "DELETE",
-    headers: authHeaders(),
-  });
-  if (!res.ok) throw new Error("Failed to delete resource");
+  await request<{ status: string }>(`/api/agents/${agentId}/resources/${resourceId}`, { method: "DELETE" });
 }
 
 // --- Mastery ---
 
 export async function fetchMastery(agentId: string): Promise<MasteryData> {
-  const res = await fetch(`${API_BASE}/api/agents/${agentId}/mastery`, { headers: authHeaders() });
-  if (!res.ok) throw new Error("Failed to fetch mastery data");
-  return res.json();
+  return request<MasteryData>(`/api/agents/${agentId}/mastery`);
 }

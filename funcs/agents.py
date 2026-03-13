@@ -4,11 +4,9 @@ Agent prompt compilation and capability mapping.
 Compiles structured persona data into actionable system prompts
 and maps capability strings to tool names.
 """
-import json
-from typing import Dict, List
 
 
-def compile_agent_prompt(persona: Dict, capabilities: List[str]) -> str:
+def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
     """
     Compile a structured persona dict + capabilities into a full system prompt.
 
@@ -86,7 +84,7 @@ def compile_agent_prompt(persona: Dict, capabilities: List[str]) -> str:
     return "\n".join(lines)
 
 
-def append_resource_context(system_prompt: str, resource_names: List[str]) -> str:
+def append_resource_context(system_prompt: str, resource_names: list[str]) -> str:
     """
     Append resource-awareness instructions to an agent system prompt.
 
@@ -111,7 +109,7 @@ def append_resource_context(system_prompt: str, resource_names: List[str]) -> st
     return system_prompt + "\n".join(lines)
 
 
-def get_agent_tools(capabilities: List[str]) -> List[str]:
+def get_agent_tools(capabilities: list[str]) -> list[str]:
     """
     Map capability strings to tool names.
 

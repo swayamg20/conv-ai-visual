@@ -19,6 +19,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
 
   const loadAgents = useCallback(async () => {
@@ -38,8 +39,8 @@ export default function DashboardPage() {
     loadAgents();
   }, [loadAgents]);
 
-  const handleDelete = async (agentId: string) => {
-    if (!confirm("Delete this agent? This cannot be undone.")) return;
+  const handleDeleteConfirm = async (agentId: string) => {
+    setConfirmDeleteId(null);
     setDeletingId(agentId);
     try {
       await deleteAgent(agentId);
@@ -338,19 +339,38 @@ export default function DashboardPage() {
                       <Pencil className="h-4 w-4 text-chalk-soft" />
                     </button>
 
-                    {/* Delete */}
-                    <button
-                      onClick={() => handleDelete(agent.id)}
-                      disabled={deletingId === agent.id}
-                      className="h-10 w-10 shrink-0 inline-flex items-center justify-center rounded-xl hover:bg-ember/10 transition-colors disabled:opacity-50"
-                      aria-label="Delete agent"
-                    >
-                      {deletingId === agent.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin text-ember" />
-                      ) : (
-                        <Trash2 className="h-4 w-4 text-ember/70" />
-                      )}
-                    </button>
+                    {/* Delete — inline confirm to avoid browser dialog */}
+                    {confirmDeleteId === agent.id ? (
+                      <>
+                        <button
+                          onClick={() => handleDeleteConfirm(agent.id)}
+                          className="h-10 px-3 shrink-0 inline-flex items-center justify-center rounded-xl bg-ember/15 text-ember text-xs font-semibold hover:bg-ember/25 transition-colors"
+                          aria-label="Confirm delete"
+                        >
+                          Delete
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteId(null)}
+                          className="h-10 w-10 shrink-0 inline-flex items-center justify-center rounded-xl hover:bg-graphite transition-colors text-chalk-soft text-xs font-semibold"
+                          aria-label="Cancel delete"
+                        >
+                          ✕
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteId(agent.id)}
+                        disabled={deletingId === agent.id}
+                        className="h-10 w-10 shrink-0 inline-flex items-center justify-center rounded-xl hover:bg-ember/10 transition-colors disabled:opacity-50"
+                        aria-label="Delete agent"
+                      >
+                        {deletingId === agent.id ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-ember" />
+                        ) : (
+                          <Trash2 className="h-4 w-4 text-ember/70" />
+                        )}
+                      </button>
+                    )}
                   </div>
                 </motion.div>
               ))}

@@ -2,6 +2,7 @@
 
 import { useState, useRef, useCallback } from "react";
 import type { CanvasOperation } from "./use-webrtc";
+import type { SDLScene } from "@/lib/scene-kit";
 
 export interface Message {
   id: string;
@@ -9,12 +10,20 @@ export interface Message {
   content: string;
 }
 
+type SSEEvent =
+  | { type: "session"; session_id: string }
+  | { type: "canvas_update"; operations: CanvasOperation[] }
+  | { type: "animation_event"; tool: string; sdl?: SDLScene; [key: string]: unknown }
+  | { type: "chunk"; text: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
 interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
   sessionId?: string | null;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
-  onSDLScene?: (sdl: any) => void;
+  onSDLScene?: (sdl: SDLScene) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
@@ -69,7 +78,7 @@ export function useChat(options: UseChatOptions = {}) {
         for (const line of lines) {
           if (line.startsWith("data: ")) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const data = JSON.parse(line.slice(6)) as SSEEvent;
 
               if (data.type === "session") {
                 sessionIdRef.current = data.session_id;
@@ -105,7 +114,7 @@ export function useChat(options: UseChatOptions = {}) {
                 ]);
               }
             } catch {
-              // Ignore parse errors
+              console.warn("[Chat] Failed to parse SSE event:", line);
             }
           }
         }

@@ -1,8 +1,8 @@
 """
 Resource ingestion — PDF and URL extraction, chunking, and search.
 """
+import os
 import logging
-from typing import List
 
 import pymupdf  # pymupdf (import as pymupdf, not fitz, to avoid conflicts)
 import httpx
@@ -20,10 +20,10 @@ logger = logging.getLogger(__name__)
 CHUNK_TARGET_CHARS = 2000
 
 
-def _chunk_text(text: str, target_chars: int = CHUNK_TARGET_CHARS) -> List[str]:
+def _chunk_text(text: str, target_chars: int = CHUNK_TARGET_CHARS) -> list[str]:
     """Split text into chunks of roughly `target_chars` by merging paragraphs."""
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks: List[str] = []
+    chunks: list[str] = []
     current = ""
 
     for para in paragraphs:
@@ -37,7 +37,7 @@ def _chunk_text(text: str, target_chars: int = CHUNK_TARGET_CHARS) -> List[str]:
         chunks.append(current)
 
     # If a single chunk is still too large, split on newlines
-    final: List[str] = []
+    final: list[str] = []
     for chunk in chunks:
         if len(chunk) <= target_chars * 1.5:
             final.append(chunk)
@@ -58,8 +58,6 @@ def _chunk_text(text: str, target_chars: int = CHUNK_TARGET_CHARS) -> List[str]:
 
 def ingest_pdf(file_path: str, agent_id: str, user_id: str) -> ResourceModel:
     """Extract text from a PDF, chunk it, and store in the database."""
-    import os
-
     file_size = os.path.getsize(file_path)
     filename = os.path.basename(file_path)
 
@@ -74,8 +72,8 @@ def ingest_pdf(file_path: str, agent_id: str, user_id: str) -> ResourceModel:
 
     try:
         doc = pymupdf.open(file_path)
-        full_text_parts: List[str] = []
-        page_texts: List[tuple] = []  # (page_number, text)
+        full_text_parts: list[str] = []
+        page_texts: list[tuple] = []  # (page_number, text)
 
         for page_num in range(len(doc)):
             page = doc[page_num]
@@ -88,7 +86,7 @@ def ingest_pdf(file_path: str, agent_id: str, user_id: str) -> ResourceModel:
         full_text = "\n\n".join(full_text_parts)
 
         # Chunk by paragraphs, tracking page numbers
-        chunk_models: List[ResourceChunkModel] = []
+        chunk_models: list[ResourceChunkModel] = []
         chunk_index = 0
 
         for page_num, page_text in page_texts:
@@ -174,6 +172,6 @@ async def ingest_url(url: str, agent_id: str, user_id: str) -> ResourceModel:
     return resource
 
 
-def search_chunks(agent_id: str, query: str, limit: int = 5) -> List[ResourceChunkModel]:
+def search_chunks(agent_id: str, query: str, limit: int = 5) -> list[ResourceChunkModel]:
     """Search resource chunks for the given agent using keyword matching."""
     return ResourceChunkRepo.search(agent_id, query, limit=limit)

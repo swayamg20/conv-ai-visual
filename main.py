@@ -1,27 +1,39 @@
 import asyncio
 asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+import base64
 import json
-from typing import Any, Dict, Optional
+import logging
+import os
+import re
+import time
+import uuid
+from typing import Any
+from uuid import uuid4 as _uuid4
+import numpy as np
 import uvicorn
+import websockets
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc.contrib.media import MediaBlackhole
 from aiortc.mediastreams import AudioFrame
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-import logging
-import websockets
-import numpy as np
-from aiortc.contrib.media import MediaBlackhole
-from funcs.llm_pipeline import LLMPipeline
-from funcs.tts_pipeline import TTSPipeline
-from funcs.config import config
-from funcs.auth import get_current_user_id, get_current_user, hash_password, verify_password, create_access_token
-from funcs.models import UserRepo, AgentRepo, SessionRepo, ConversationMessageRepo, ResourceRepo, TopicMasteryRepo, TopicMasteryModel
 from funcs.agents import compile_agent_prompt, get_agent_tools, append_resource_context
+from funcs.auth import get_current_user_id, get_current_user, hash_password, verify_password, create_access_token
+from funcs.config import config
+from funcs.llm_clients import create_llm_client
+from funcs.llm_pipeline import LLMPipeline
+from funcs.models import (
+    UserRepo, AgentRepo, SessionRepo, ConversationMessageRepo, ResourceRepo,
+    TopicMasteryRepo, TopicMasteryModel, LLMCallLogRepo, VoicePipelineLogRepo,
+)
+from collections.abc import Sequence
+from funcs.model_router import route_model
 from funcs.resources import ingest_pdf, ingest_url, search_chunks
 from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
+from funcs.tts_pipeline import TTSPipeline
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +91,7 @@ try:
         logger.info("Smart Turn disabled, using Deepgram endpointing only")
     
 except Exception as e:
-    logger.error(f"Failed to initialize pipelines: {e}")
+    logger.error("Failed to initialize pipelines: %s", e)
     llm_pipeline = None
     tts_pipeline = None
     smart_turn_analyzer = None
@@ -98,14 +110,14 @@ class Offer(BaseModel):
 
 class ChatMessage(BaseModel):
     message: str
-    session_id: Optional[str] = None
-    user_id: Optional[str] = None
-    canvas_mode: Optional[bool] = None
-    agent_id: Optional[str] = None
+    session_id: str | None = None
+    user_id: str | None = None
+    canvas_mode: bool | None = None
+    agent_id: str | None = None
 
 class CanvasModeRequest(BaseModel):
     enabled: bool
-    custom_prompt: Optional[str] = None
+    custom_prompt: str | None = None
 
 class CreateSessionRequest(BaseModel):
     agent_id: str
@@ -113,7 +125,7 @@ class CreateSessionRequest(BaseModel):
 class RegisterRequest(BaseModel):
     email: str
     password: str
-    name: Optional[str] = None
+    name: str | None = None
 
 class LoginRequest(BaseModel):
     email: str
@@ -121,38 +133,36 @@ class LoginRequest(BaseModel):
 
 class CreateAgentRequest(BaseModel):
     name: str
-    description: Optional[str] = None
-    persona: Optional[Dict[str, Any]] = None
+    description: str | None = None
+    persona: dict[str, Any] | None = None
     capabilities: list[str] = ["canvas"]
-    icon: Optional[str] = None
+    icon: str | None = None
 
 class UpdateAgentRequest(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    persona: Optional[Dict[str, Any]] = None
-    capabilities: Optional[list[str]] = None
-    icon: Optional[str] = None
-    is_default: Optional[bool] = None
+    name: str | None = None
+    description: str | None = None
+    persona: dict[str, Any] | None = None
+    capabilities: list[str] | None = None
+    icon: str | None = None
+    is_default: bool | None = None
 
 class AddResourceURLRequest(BaseModel):
     url: str
 
-chat_sessions: Dict[str, LLMPipeline] = {}
-peer_canvas_modes: Dict[str, bool] = {}
-pcs = set[Any]()
-datachannels: Dict[str, Any] = {}
-voice_sessions: Dict[str, LLMPipeline] = {}
-peer_user_ids: Dict[str, str] = {}
-tts_interrupt_flags: Dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
-_pending_sdl: Dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
-smart_turn_sessions: Dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
-turn_processing_tasks: Dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
-
-import time as _time
+chat_sessions: dict[str, LLMPipeline] = {}
+peer_canvas_modes: dict[str, bool] = {}
+pcs: set[Any] = set()
+datachannels: dict[str, Any] = {}
+voice_sessions: dict[str, LLMPipeline] = {}
+peer_user_ids: dict[str, str] = {}
+tts_interrupt_flags: dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
+_pending_sdl: dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
+smart_turn_sessions: dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
+turn_processing_tasks: dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
 
 # Per-peer turn timing data. Populated by consume_audio_track, consumed by _run_llm_tts.
 # Keys: speech_start_ts, stt_final_ts, turn_confirmed_ts, smart_turn_result, vad_detect_ts
-turn_timing: Dict[str, Dict[str, Any]] = {}
+turn_timing: dict[str, dict[str, Any]] = {}
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
@@ -292,7 +302,7 @@ async def _process_user_turn(pc_id: str, user_text: str):
     """
     # Stamp turn-confirmed time
     timing = turn_timing.setdefault(pc_id, {})
-    timing["turn_confirmed_ts"] = _time.perf_counter()
+    timing["turn_confirmed_ts"] = time.perf_counter()
     await _cancel_active_turn(pc_id)
     task = asyncio.create_task(_run_llm_tts(pc_id, user_text))
     turn_processing_tasks[pc_id] = task
@@ -301,7 +311,6 @@ async def _process_user_turn(pc_id: str, user_text: str):
 def _split_sentence(buf: str):
     """Split buffer at the first sentence boundary, returning (sentence, remainder).
     Returns (None, buf) if no boundary found yet."""
-    import re
     # Match sentence-ending punctuation followed by a space, newline, or end-of-string
     m = re.search(r'[.!?](?:\s|$)', buf)
     if m:
@@ -317,9 +326,6 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
     For each SDL step, sends the visual commands and TTS audio together,
     creating a 'person drawing while talking' effect.
     """
-    import base64
-    import uuid
-
     ch = datachannels.get(pc_id)
     steps = sdl.get("steps", [])
     seq_id = f"seq_{uuid.uuid4().hex[:8]}"
@@ -412,13 +418,10 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     If the LLM calls teach_with_visuals (SDL), after text TTS completes,
     the SDL steps are streamed with per-step TTS for voice-visual sync.
     """
-    import base64
-
     ch = datachannels.get(pc_id)
     pipeline = await _ensure_voice_session(pc_id)
 
     # Model routing: fast model by default, escalate for complex queries
-    from funcs.model_router import route_model
     routed_provider, routed_key, routed_model = route_model(user_text)
     pipeline.switch_provider(routed_provider, routed_key, routed_model)
 
@@ -429,11 +432,11 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     timing = turn_timing.pop(pc_id, {})
     t_speech_start = timing.get("speech_start_ts")
     t_stt_final = timing.get("stt_final_ts")
-    t_turn_confirmed = timing.get("turn_confirmed_ts", _time.perf_counter())
+    t_turn_confirmed = timing.get("turn_confirmed_ts", time.perf_counter())
     smart_turn_result = timing.get("smart_turn_result")
     t_turn_detection = timing.get("turn_detection_ms")
 
-    t_pipeline_start = _time.perf_counter()
+    t_pipeline_start = time.perf_counter()
     t_llm_start = None
     t_llm_end = None
     t_tts_start = None
@@ -465,7 +468,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 continue
 
             if not tts_started_sent:
-                t_tts_start = _time.perf_counter()
+                t_tts_start = time.perf_counter()
                 tts_interrupt_flags[pc_id] = True
                 if ch and ch.readyState == "open":
                     ch.send(json.dumps({"type": "tts_started"}))
@@ -482,7 +485,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
                     if ch and ch.readyState == "open":
                         if tts_chunks_sent == 0:
-                            t_tts_first_chunk = _time.perf_counter()
+                            t_tts_first_chunk = time.perf_counter()
                             logger.info("[%s] First TTS chunk (%d bytes)", pc_id, len(audio_chunk))
                         ch.send(json.dumps({
                             "type": "tts_chunk",
@@ -493,7 +496,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 logger.exception("[%s] TTS error on sentence: %s", pc_id, tts_err)
 
         # All sentences processed
-        t_tts_end = _time.perf_counter()
+        t_tts_end = time.perf_counter()
         tts_interrupt_flags[pc_id] = False
         if tts_started_sent and not tts_interrupted:
             logger.info("[%s] TTS complete (%d chunks)", pc_id, tts_chunks_sent)
@@ -502,7 +505,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
     try:
         logger.info("[%s] → LLM: '%s'", pc_id, user_text[:60])
-        t_llm_start = _time.perf_counter()
+        t_llm_start = time.perf_counter()
 
         # Start TTS sender task — it blocks on the queue until sentences arrive
         tts_task = asyncio.create_task(_tts_sender())
@@ -523,7 +526,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                     break
                 await sentence_queue.put(sentence)
 
-        t_llm_end = _time.perf_counter()
+        t_llm_end = time.perf_counter()
         logger.info("[%s] ← LLM (%d chars)", pc_id, len(llm_response))
 
         # Flush remaining text to TTS
@@ -562,7 +565,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "error", "message": error_msg}))
     finally:
-        t_end = _time.perf_counter()
+        t_end = time.perf_counter()
         turn_processing_tasks.pop(pc_id, None)
         tts_interrupt_flags.pop(pc_id, None)
 
@@ -675,7 +678,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     # Smart Turn session for this peer (if enabled)
     st_session: SmartTurnSession | None = None
     # Watchdog: force turn if is_final fires but speech_final never arrives
-    _watchdog_task: Optional[asyncio.Task] = None
+    _watchdog_task: asyncio.Task | None = None
     _WATCHDOG_TIMEOUT = 3.0  # seconds after last is_final before forcing turn
 
     if smart_turn_analyzer:
@@ -725,7 +728,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             # ── Timing: record first speech detection ──
             timing = turn_timing.setdefault(pc_id, {})
             if transcript.strip() and "speech_start_ts" not in timing:
-                timing["speech_start_ts"] = _time.perf_counter()
+                timing["speech_start_ts"] = time.perf_counter()
 
             if ch and ch.readyState == "open":
                 # Interruption: stop TTS if user speaks during playback
@@ -752,7 +755,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 if is_final and transcript.strip():
                     st_session.accumulate_transcript(transcript)
                     # Record STT final timestamp
-                    timing["stt_final_ts"] = _time.perf_counter()
+                    timing["stt_final_ts"] = time.perf_counter()
 
                     # Start/restart watchdog: if speech_final never arrives,
                     # force the turn after _WATCHDOG_TIMEOUT seconds.
@@ -787,9 +790,9 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     logger.info("[%s] Speech final → Smart Turn (text='%s')",
                                 pc_id, st_session.accumulated_transcript[:60])
 
-                    t_smart_start = _time.perf_counter()
+                    t_smart_start = time.perf_counter()
                     is_complete, accumulated_text = await st_session.on_speech_final("")
-                    t_smart_end = _time.perf_counter()
+                    t_smart_end = time.perf_counter()
 
                     timing["turn_detection_ms"] = round((t_smart_end - t_smart_start) * 1000, 2)
                     timing["smart_turn_result"] = "complete" if is_complete else "incomplete"
@@ -808,10 +811,10 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 # ── Legacy path (no Smart Turn) ──────────────────
                 if (is_final or speech_final) and transcript.strip():
                     logger.info("[%s] Final: '%s'", pc_id, transcript)
-                    timing["stt_final_ts"] = _time.perf_counter()
+                    timing["stt_final_ts"] = time.perf_counter()
                     await _process_user_turn(pc_id, transcript)
 
-    dg_stream_task: Optional[asyncio.Task] = None
+    dg_stream_task: asyncio.Task | None = None
 
     try:
         # Get audio parameters from first frame
@@ -826,7 +829,6 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         if channel_count is None:
             channel_count = getattr(first_frame, "channels", None)
 
-        from collections.abc import Sequence
         if isinstance(channel_count, Sequence) and not isinstance(channel_count, (str, bytes)):
             channel_count = len(channel_count)
 
@@ -917,7 +919,6 @@ async def chat(chat_msg: ChatMessage, request: Request):
     Each session gets its own LLMPipeline with 4-layer memory.
     Supports cross-session persistence when agent_id is provided.
     """
-    import uuid
     # user_id from middleware (auth) or request body
     user_id = chat_msg.user_id or get_current_user_id(request)
 
@@ -1094,7 +1095,6 @@ async def chat(chat_msg: ChatMessage, request: Request):
 
             # Save observability log (legacy + unified)
             try:
-                from funcs.models import LLMCallLogRepo, VoicePipelineLogRepo
                 metrics = pipeline.get_last_call_metrics()
                 if metrics:
                     LLMCallLogRepo.save(
@@ -1139,7 +1139,6 @@ async def chat(chat_msg: ChatMessage, request: Request):
         except Exception as e:
             logger.exception("Chat stream error: %s", e)
             try:
-                from funcs.models import LLMCallLogRepo
                 LLMCallLogRepo.save(
                     session_id=session_id,
                     user_id=user_id,
@@ -1324,7 +1323,7 @@ async def update_agent(agent_id: str, body: UpdateAgentRequest, request: Request
     if agent.user_id != user.id:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
-    updates: Dict[str, Any] = {}
+    updates: dict[str, Any] = {}
 
     if body.name is not None:
         updates["name"] = body.name
@@ -1389,8 +1388,8 @@ def _resource_to_dict(r) -> dict:
 async def add_resource(
     agent_id: str,
     request: Request,
-    file: Optional[UploadFile] = File(None),
-    url: Optional[str] = Form(None),
+    file: UploadFile | None = File(None),
+    url: str | None = Form(None),
 ):
     """Upload a PDF file or provide a URL to ingest as a resource for this agent."""
     user = get_current_user(request)
@@ -1405,9 +1404,6 @@ async def add_resource(
 
     if file and file.filename:
         # File upload path
-        import os
-        from uuid import uuid4 as _uuid4
-
         resource_id = str(_uuid4())
         upload_dir = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "data", "uploads", user.id
@@ -1515,7 +1511,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
 
 
 @app.get("/api/sessions")
-async def list_sessions(request: Request, agent_id: Optional[str] = None):
+async def list_sessions(request: Request, agent_id: str | None = None):
     """List sessions for the current user, optionally filtered by agent_id."""
     user = get_current_user(request)
     if user is None:
@@ -1592,7 +1588,6 @@ async def end_session(session_id: str, request: Request):
     convo_text = "\n".join([f"{m.role}: {m.content}" for m in messages])
 
     # Generate summary using Groq for speed
-    from funcs.llm_clients import create_llm_client
     try:
         summary_client = create_llm_client(provider="groq")
         summary = await summary_client.complete(
@@ -1639,10 +1634,9 @@ async def end_session(session_id: str, request: Request):
             temperature=0.2,
             max_tokens=500,
         )
-        import re as _re
         # Strip markdown code fences if present
-        cleaned = _re.sub(r"^```(?:json)?\s*", "", mastery_response.strip())
-        cleaned = _re.sub(r"\s*```$", "", cleaned)
+        cleaned = re.sub(r"^```(?:json)?\s*", "", mastery_response.strip())
+        cleaned = re.sub(r"\s*```$", "", cleaned)
         parsed = json.loads(cleaned)
         if isinstance(parsed, list):
             for item in parsed:
@@ -1680,7 +1674,6 @@ async def end_session(session_id: str, request: Request):
 @app.get("/api/logs")
 async def get_logs(limit: int = 50, offset: int = 0):
     """Get recent LLM call logs with pagination."""
-    from funcs.models import LLMCallLogRepo
     logs = LLMCallLogRepo.get_recent(limit=min(limit, 200), offset=offset)
     return JSONResponse({
         "logs": [
@@ -1712,15 +1705,13 @@ async def get_logs(limit: int = 50, offset: int = 0):
 @app.get("/api/logs/stats")
 async def get_logs_stats():
     """Get aggregated LLM call stats."""
-    from funcs.models import LLMCallLogRepo
     stats = LLMCallLogRepo.get_stats()
     return JSONResponse(stats)
 
 
 @app.get("/api/voice-logs")
-async def get_voice_logs(limit: int = 50, offset: int = 0, mode: Optional[str] = None):
+async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = None):
     """Get recent voice pipeline logs with full stage latencies."""
-    from funcs.models import VoicePipelineLogRepo
     logs = VoicePipelineLogRepo.get_recent(limit=min(limit, 200), offset=offset, mode=mode)
     return JSONResponse({
         "logs": [
@@ -1761,16 +1752,15 @@ async def get_voice_logs(limit: int = 50, offset: int = 0, mode: Optional[str] =
 
 
 @app.get("/api/voice-logs/stats")
-async def get_voice_logs_stats(mode: Optional[str] = None):
+async def get_voice_logs_stats(mode: str | None = None):
     """Get aggregated voice pipeline stats with per-stage averages."""
-    from funcs.models import VoicePipelineLogRepo
     stats = VoicePipelineLogRepo.get_stats(mode=mode)
     return JSONResponse(stats)
 
 
 @app.post("/offer")
 async def offer(request: Request):
-    data: Dict = await request.json()
+    data: dict = await request.json()
     offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
     pc = RTCPeerConnection()
     pc_id = f"pc-{id(pc)}"

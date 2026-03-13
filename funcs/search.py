@@ -3,6 +3,7 @@ Web search integration via Tavily.
 """
 import logging
 from funcs.config import config
+from funcs.models import ToolRepo
 
 logger = logging.getLogger("search")
 
@@ -26,14 +27,12 @@ async def web_search(query: str, max_results: int = 5) -> str:
 
         return "\n---\n".join(formatted) if formatted else "No results found."
     except Exception as e:
-        logger.error(f"Web search error: {e}")
+        logger.error("Web search error: %s", e, exc_info=True)
         return f"Web search failed: {e}"
 
 
 def register_web_search_tool() -> None:
     """Register the web_search tool in the DB tool registry."""
-    from funcs.models import ToolRepo
-
     ToolRepo.upsert(
         name="web_search",
         description=(

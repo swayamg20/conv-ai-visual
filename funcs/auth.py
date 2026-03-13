@@ -2,11 +2,9 @@
 Authentication and user identity middleware.
 """
 from datetime import datetime, timedelta
-from typing import Optional
 
 import bcrypt
 from fastapi import Request
-from fastapi.responses import JSONResponse
 from jose import JWTError, jwt
 
 from .config import config
@@ -30,7 +28,7 @@ def create_access_token(user_id: str) -> str:
     return jwt.encode(payload, config.JWT_SECRET, algorithm=config.JWT_ALGORITHM)
 
 
-def _extract_user_from_request(request: Request) -> Optional[UserModel]:
+def _extract_user_from_request(request: Request) -> UserModel | None:
     """Parse the Authorization header and return the user, or None."""
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
@@ -46,18 +44,16 @@ def _extract_user_from_request(request: Request) -> Optional[UserModel]:
     return UserRepo.get_by_id(user_id)
 
 
-def get_current_user(request: Request) -> UserModel:
+def get_current_user(request: Request) -> UserModel | None:
     """
     FastAPI dependency — requires a valid JWT.
-    Returns the authenticated UserModel or a 401 JSONResponse.
+    Returns the authenticated UserModel, or None if the token is missing/invalid.
+    Callers must check for None and return a 401 response.
     """
-    user = _extract_user_from_request(request)
-    if user is None:
-        return None  # Caller checks and returns 401
-    return user
+    return _extract_user_from_request(request)
 
 
-def get_current_user_optional(request: Request) -> Optional[UserModel]:
+def get_current_user_optional(request: Request) -> UserModel | None:
     """
     FastAPI dependency — returns the user if a valid token is present, else None.
     """
@@ -80,4 +76,4 @@ def get_current_user_id(request: Request) -> str:
     user_id = request.query_params.get("user_id")
     if user_id:
         return user_id
-    return "default_user"
+    return "default_user"  # Intentional fallback for unauthenticated/legacy clients

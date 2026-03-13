@@ -6,7 +6,8 @@ import json
 import asyncio
 import logging
 import importlib
-from typing import Dict, List, Callable, Any, Optional
+from collections.abc import Callable
+from typing import Any
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 
@@ -20,7 +21,7 @@ class ToolCall:
     """Represents a tool call from the model."""
     id: str
     name: str
-    arguments: Dict[str, Any]
+    arguments: dict[str, Any]
 
 
 @dataclass
@@ -36,10 +37,10 @@ class Tool:
     """Tool definition."""
     name: str
     description: str
-    parameters: Dict  # JSON Schema
+    parameters: dict  # JSON Schema
     func: Callable
     
-    def to_openai_schema(self) -> Dict:
+    def to_openai_schema(self) -> dict:
         """OpenAI/standard format."""
         return {
             "type": "function",
@@ -50,7 +51,7 @@ class Tool:
             }
         }
     
-    def to_anthropic_schema(self) -> Dict:
+    def to_anthropic_schema(self) -> dict:
         """Anthropic format."""
         return {
             "name": self.name,
@@ -63,13 +64,13 @@ class ToolRegistry:
     """In-memory registry for tools with execution support."""
     
     def __init__(self):
-        self._tools: Dict[str, Tool] = {}
+        self._tools: dict[str, Tool] = {}
     
     def register(
         self,
         name: str,
         description: str,
-        parameters: Dict,
+        parameters: dict,
         func: Callable
     ) -> "ToolRegistry":
         """
@@ -92,7 +93,7 @@ class ToolRegistry:
         self,
         name: str,
         description: str,
-        parameters: Dict
+        parameters: dict
     ) -> Callable:
         """Decorator for registering tools."""
         def decorator(func: Callable) -> Callable:
@@ -100,21 +101,21 @@ class ToolRegistry:
             return func
         return decorator
     
-    def get(self, name: str) -> Optional[Tool]:
+    def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
     
-    def list_names(self) -> List[str]:
+    def list_names(self) -> list[str]:
         return list(self._tools.keys())
     
-    def to_openai_format(self) -> List[Dict]:
+    def to_openai_format(self) -> list[dict]:
         """Get all tools in OpenAI format."""
         return [t.to_openai_schema() for t in self._tools.values()]
     
-    def to_anthropic_format(self) -> List[Dict]:
+    def to_anthropic_format(self) -> list[dict]:
         """Get all tools in Anthropic format."""
         return [t.to_anthropic_schema() for t in self._tools.values()]
     
-    async def execute(self, name: str, arguments: Dict) -> Any:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool by name."""
         tool = self._tools.get(name)
         if not tool:
@@ -152,17 +153,17 @@ class ModelAdapter(ABC):
         pass
     
     @abstractmethod
-    def parse_tool_calls(self, response: Any) -> List[ToolCall]:
+    def parse_tool_calls(self, response: Any) -> list[ToolCall]:
         """Extract tool calls from model response."""
         pass
     
     @abstractmethod
-    def format_tool_result(self, result: ToolResult) -> Dict:
+    def format_tool_result(self, result: ToolResult) -> dict:
         """Format tool result for this provider."""
         pass
     
     @abstractmethod
-    def get_response_content(self, response: Any) -> Optional[str]:
+    def get_response_content(self, response: Any) -> str | None:
         """Get text content from response (None if tool call)."""
         pass
     
@@ -175,31 +176,32 @@ class ModelAdapter(ABC):
 class OpenAIAdapter(ModelAdapter):
     """Adapter for OpenAI API format (also works for Groq, Together, etc)."""
     
-    def format_tools(self, registry: ToolRegistry) -> List[Dict]:
+    def format_tools(self, registry: ToolRegistry) -> list[dict]:
         return registry.to_openai_format()
     
-    def parse_tool_calls(self, response) -> List[ToolCall]:
+    def parse_tool_calls(self, response) -> list[ToolCall]:
         message = response.choices[0].message
         if not message.tool_calls:
             return []
-        
-        return [
-            ToolCall(
-                id=tc.id,
-                name=tc.function.name,
-                arguments=json.loads(tc.function.arguments)
-            )
-            for tc in message.tool_calls
-        ]
+
+        tool_calls = []
+        for tc in message.tool_calls:
+            try:
+                arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Malformed tool call arguments for %s: %s", tc.function.name, tc.function.arguments)
+                arguments = {}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
+        return tool_calls
     
-    def format_tool_result(self, result: ToolResult) -> Dict:
+    def format_tool_result(self, result: ToolResult) -> dict:
         return {
             "role": "tool",
             "tool_call_id": result.tool_call_id,
             "content": result.content
         }
     
-    def get_response_content(self, response) -> Optional[str]:
+    def get_response_content(self, response) -> str | None:
         message = response.choices[0].message
         if message.tool_calls:
             return None
@@ -208,7 +210,7 @@ class OpenAIAdapter(ModelAdapter):
     def has_tool_calls(self, response) -> bool:
         return bool(response.choices[0].message.tool_calls)
     
-    def get_assistant_message(self, response) -> Dict:
+    def get_assistant_message(self, response) -> dict:
         """Get the raw message to append to context."""
         return response.choices[0].message
 
@@ -216,10 +218,10 @@ class OpenAIAdapter(ModelAdapter):
 class AnthropicAdapter(ModelAdapter):
     """Adapter for Anthropic API format."""
     
-    def format_tools(self, registry: ToolRegistry) -> List[Dict]:
+    def format_tools(self, registry: ToolRegistry) -> list[dict]:
         return registry.to_anthropic_format()
     
-    def parse_tool_calls(self, response) -> List[ToolCall]:
+    def parse_tool_calls(self, response) -> list[ToolCall]:
         tool_calls = []
         for block in response.content:
             if block.type == "tool_use":
@@ -230,7 +232,7 @@ class AnthropicAdapter(ModelAdapter):
                 ))
         return tool_calls
     
-    def format_tool_result(self, result: ToolResult) -> Dict:
+    def format_tool_result(self, result: ToolResult) -> dict:
         return {
             "role": "user",
             "content": [{
@@ -240,7 +242,7 @@ class AnthropicAdapter(ModelAdapter):
             }]
         }
     
-    def get_response_content(self, response) -> Optional[str]:
+    def get_response_content(self, response) -> str | None:
         for block in response.content:
             if block.type == "text":
                 return block.text
@@ -251,7 +253,7 @@ class AnthropicAdapter(ModelAdapter):
     def has_tool_calls(self, response) -> bool:
         return any(block.type == "tool_use" for block in response.content)
     
-    def get_assistant_message(self, response) -> Dict:
+    def get_assistant_message(self, response) -> dict:
         """Get the raw message to append to context."""
         return {"role": "assistant", "content": response.content}
 
@@ -260,7 +262,7 @@ class AnthropicAdapter(ModelAdapter):
 default_registry = ToolRegistry()
 
 
-def tool(name: str, description: str, parameters: Dict):
+def tool(name: str, description: str, parameters: dict):
     """Convenience decorator using default registry."""
     return default_registry.tool(name, description, parameters)
 
@@ -272,15 +274,15 @@ class ToolStore:
     """
     
     def __init__(self):
-        self._handler_cache: Dict[str, Callable] = {}
+        self._handler_cache: dict[str, Callable] = {}
     
     def register(
         self,
         name: str,
         description: str,
-        parameters: Dict,
-        handler_module: Optional[str] = None,
-        handler_function: Optional[str] = None,
+        parameters: dict,
+        handler_module: str | None = None,
+        handler_function: str | None = None,
         enabled: bool = True
     ) -> ToolModel:
         """
@@ -303,11 +305,11 @@ class ToolStore:
             enabled=enabled
         )
     
-    def get(self, name: str) -> Optional[ToolModel]:
+    def get(self, name: str) -> ToolModel | None:
         """Get a tool definition by name."""
         return ToolRepo.get_enabled(name)
     
-    def list_all(self, enabled_only: bool = True) -> List[ToolModel]:
+    def list_all(self, enabled_only: bool = True) -> list[ToolModel]:
         """List all tools."""
         return ToolRepo.list_all(enabled_only)
     
@@ -320,7 +322,7 @@ class ToolStore:
         """Enable or disable a tool."""
         return ToolRepo.set_enabled(name, enabled)
     
-    def _resolve_handler(self, tool: ToolModel) -> Optional[Callable]:
+    def _resolve_handler(self, tool: ToolModel) -> Callable | None:
         """Dynamically import and resolve the handler function."""
         name = tool.name
         
@@ -344,7 +346,7 @@ class ToolStore:
             logger.error(f"Failed to resolve handler for {name}: {e}")
             return None
     
-    async def execute(self, name: str, arguments: Dict) -> Any:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> Any:
         """Execute a tool by name."""
         tool = self.get(name)
         if not tool:
@@ -392,11 +394,11 @@ class ToolStore:
                 )
         return registry
     
-    def to_openai_format(self) -> List[Dict]:
+    def to_openai_format(self) -> list[dict]:
         """Get all enabled tools in OpenAI format."""
         return ToolRepo.to_openai_format()
     
-    def to_anthropic_format(self) -> List[Dict]:
+    def to_anthropic_format(self) -> list[dict]:
         """Get all enabled tools in Anthropic format."""
         return ToolRepo.to_anthropic_format()
 

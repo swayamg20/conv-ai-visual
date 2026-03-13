@@ -36,10 +36,12 @@ export default function AgentSessionPage() {
   const sessionIdRef = useRef<string | null>(existingSessionId);
 
   useEffect(() => {
+    let cancelled = false;
     fetchAgent(agentId)
-      .then(setAgent)
-      .catch((err) => setAgentError(err.message))
-      .finally(() => setAgentLoading(false));
+      .then((a) => { if (!cancelled) setAgent(a); })
+      .catch((err) => { if (!cancelled) setAgentError(err.message); })
+      .finally(() => { if (!cancelled) setAgentLoading(false); });
+    return () => { cancelled = true; };
   }, [agentId]);
 
   // Create a new session if no session param was provided
@@ -155,6 +157,14 @@ export default function AgentSessionPage() {
         stepTimelinesRef.current.delete(key);
       }
     }
+  }, []);
+
+  // Kill any in-flight GSAP timelines on unmount to prevent memory leaks
+  useEffect(() => {
+    return () => {
+      stepTimelinesRef.current.forEach(({ tl }) => tl.kill());
+      stepTimelinesRef.current.clear();
+    };
   }, []);
 
   const {
