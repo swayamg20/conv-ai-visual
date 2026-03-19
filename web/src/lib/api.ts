@@ -1,10 +1,10 @@
-import { getToken } from "@/hooks/use-auth";
+import { getIdToken } from "@/hooks/use-auth";
 import type { Agent, AgentCreatePayload, Session, SessionWithMessages, Resource, MasteryData } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-function authHeaders(): Record<string, string> {
-  const token = getToken();
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getIdToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (token) headers["Authorization"] = `Bearer ${token}`;
   return headers;
@@ -13,7 +13,7 @@ function authHeaders(): Record<string, string> {
 async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     ...opts,
-    headers: { ...authHeaders(), ...opts.headers },
+    headers: { ...(await authHeaders()), ...opts.headers },
   });
   if (!res.ok) {
     let message = `Request failed: ${res.status}`;
@@ -79,7 +79,7 @@ export async function fetchResources(agentId: string): Promise<Resource[]> {
 }
 
 export async function uploadResource(agentId: string, file: File): Promise<Resource> {
-  const token = getToken();
+  const token = await getIdToken();
   const formData = new FormData();
   formData.append("file", file);
 

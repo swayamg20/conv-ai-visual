@@ -1,63 +1,93 @@
 """
 Authentication and user identity middleware.
+Uses Firebase Admin SDK for token verification.
 """
-from datetime import datetime, timedelta
+import logging
 
-import bcrypt
-from fastapi import Request
-from jose import JWTError, jwt
+import firebase_admin
+from firebase_admin import auth as firebase_auth, credentials
+from fastapi import HTTPException, Request
 
 from .config import config
-from .models import UserModel, UserRepo
+from .models import UserRepo
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Lazy Firebase Admin SDK initialisation
+# ---------------------------------------------------------------------------
+_firebase_app: firebase_admin.App | None = None
+_firebase_init_attempted: bool = False
 
 
-def hash_password(password: str) -> str:
-    """Hash a plaintext password."""
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+def _ensure_firebase() -> firebase_admin.App | None:
+    """Initialise the Firebase Admin SDK once.  Returns the app or None."""
+    global _firebase_app, _firebase_init_attempted
+    if _firebase_init_attempted:
+        return _firebase_app
+    _firebase_init_attempted = True
+    try:
+        if config.FIREBASE_SERVICE_ACCOUNT_PATH:
+            cred = credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
+            _firebase_app = firebase_admin.initialize_app(cred)
+        elif config.FIREBASE_PROJECT_ID:
+            # Application Default Credentials (Cloud Run, etc.)
+            _firebase_app = firebase_admin.initialize_app(options={"projectId": config.FIREBASE_PROJECT_ID})
+        else:
+            # Try default credentials (useful in GCP environments)
+            _firebase_app = firebase_admin.initialize_app()
+        logger.info("Firebase Admin SDK initialised successfully")
+    except Exception as exc:
+        logger.warning("Firebase Admin SDK init failed — auth will be unavailable: %s", exc)
+        _firebase_app = None
+    return _firebase_app
 
 
-def verify_password(plain: str, hashed: str) -> bool:
-    """Verify a plaintext password against its hash."""
-    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+# ---------------------------------------------------------------------------
+# Token helpers
+# ---------------------------------------------------------------------------
+
+def verify_firebase_token(token: str) -> dict | None:
+    """Verify a Firebase ID token.  Returns decoded claims dict or None."""
+    if _ensure_firebase() is None:
+        logger.warning("Firebase not initialised — cannot verify token")
+        return None
+    try:
+        decoded = firebase_auth.verify_id_token(token)
+        return decoded
+    except Exception as exc:
+        logger.debug("Firebase token verification failed: %s", exc)
+        return None
 
 
-def create_access_token(user_id: str) -> str:
-    """Create a JWT access token with an expiry claim."""
-    expire = datetime.utcnow() + timedelta(minutes=config.JWT_EXPIRE_MINUTES)
-    payload = {"sub": user_id, "exp": expire}
-    return jwt.encode(payload, config.JWT_SECRET, algorithm=config.JWT_ALGORITHM)
+# ---------------------------------------------------------------------------
+# FastAPI dependencies
+# ---------------------------------------------------------------------------
 
-
-def _extract_user_from_request(request: Request) -> UserModel | None:
-    """Parse the Authorization header and return the user, or None."""
+def get_current_user(request: Request) -> dict | None:
+    """
+    FastAPI dependency — verifies the Bearer token via Firebase.
+    Returns a dict with keys {id, email, name} or None.
+    On first valid token, auto-provisions the user in the DB.
+    """
     auth_header = request.headers.get("Authorization", "")
     if not auth_header.startswith("Bearer "):
         return None
     token = auth_header[7:]
-    try:
-        payload = jwt.decode(token, config.JWT_SECRET, algorithms=[config.JWT_ALGORITHM])
-        user_id: str = payload.get("sub", "")
-        if not user_id:
-            return None
-    except JWTError:
+    claims = verify_firebase_token(token)
+    if claims is None:
         return None
-    return UserRepo.get_by_id(user_id)
 
+    uid = claims.get("uid") or claims.get("user_id") or ""
+    email = claims.get("email", "")
+    name = claims.get("name")
 
-def get_current_user(request: Request) -> UserModel | None:
-    """
-    FastAPI dependency — requires a valid JWT.
-    Returns the authenticated UserModel, or None if the token is missing/invalid.
-    Callers must check for None and return a 401 response.
-    """
-    return _extract_user_from_request(request)
+    if not uid:
+        return None
 
-
-def get_current_user_optional(request: Request) -> UserModel | None:
-    """
-    FastAPI dependency — returns the user if a valid token is present, else None.
-    """
-    return _extract_user_from_request(request)
+    # Auto-provision user in DB
+    user = UserRepo.get_or_create(uid=uid, email=email, name=name)
+    return {"id": user.id, "email": user.email, "name": user.name}
 
 
 def get_current_user_id(request: Request) -> str:
@@ -65,9 +95,9 @@ def get_current_user_id(request: Request) -> str:
     Backwards-compatible helper.
     Returns the authenticated user's ID, falling back to header/query/default.
     """
-    user = _extract_user_from_request(request)
+    user = get_current_user(request)
     if user:
-        return user.id
+        return user["id"]
 
     # Legacy fallbacks
     user_id = request.headers.get("X-User-ID")
@@ -76,4 +106,12 @@ def get_current_user_id(request: Request) -> str:
     user_id = request.query_params.get("user_id")
     if user_id:
         return user_id
-    return "default_user"  # Intentional fallback for unauthenticated/legacy clients
+    return "default_user"
+
+
+def require_auth(request: Request) -> str:
+    """FastAPI Depends — raises 401 if not authenticated.  Returns user uid."""
+    user = get_current_user(request)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user["id"]

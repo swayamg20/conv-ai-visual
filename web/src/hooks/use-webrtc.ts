@@ -4,6 +4,7 @@ import { useState, useRef, useCallback } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
+import { getAuthHeaders } from "@/lib/firebase";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
@@ -435,9 +436,10 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
       setTimeout(resolve, 2000);
     });
 
+    const authHeaders = await getAuthHeaders();
     const response = await fetch(`${apiUrl}/offer`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify({
         sdp: pc.localDescription?.sdp,
         type: pc.localDescription?.type,

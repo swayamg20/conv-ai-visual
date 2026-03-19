@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback } from "react";
 import type { CanvasOperation } from "./use-webrtc";
 import type { SDLScene } from "@/lib/scene-kit";
+import { getAuthHeaders } from "@/lib/firebase";
 
 export interface Message {
   id: string;

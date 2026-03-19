@@ -6,8 +6,7 @@ import { useRouter } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { MurmurLogoMark } from "@/components/murmur-doodles";
 import { Input } from "@/components/ui/input";
-import { setToken } from "@/hooks/use-auth";
-import { API_BASE } from "@/lib/api";
+import { signUp } from "@/hooks/use-auth";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -23,25 +22,10 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      const res = await fetch(`${API_BASE}/api/auth/register`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password }),
-      });
-
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || data.error || "Registration failed");
-      }
-
-      const data = await res.json();
-      if (data.token) {
-        setToken(data.token);
-      }
-
+      await signUp(email, password, name);
       router.push("/dashboard");
     } catch (err: any) {
-      setError(err.message || "Something went wrong");
+      setError(err.message || "Registration failed");
     } finally {
       setLoading(false);
     }

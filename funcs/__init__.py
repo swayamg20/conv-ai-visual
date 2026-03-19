@@ -8,10 +8,7 @@ from .config import config, Config
 from .auth import (
     get_current_user_id,
     get_current_user,
-    get_current_user_optional,
-    hash_password,
-    verify_password,
-    create_access_token,
+    require_auth,
 )
 from .llm_clients import (
     LLMClient,
@@ -93,10 +90,7 @@ __all__ = [
     "Config",
     "get_current_user_id",
     "get_current_user",
-    "get_current_user_optional",
-    "hash_password",
-    "verify_password",
-    "create_access_token",
+    "require_auth",
     # LLM Clients
     "LLMClient",
     "OpenAIClient",

@@ -2,11 +2,16 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-
-if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_API_URL) {
-  console.warn("[Auth] NEXT_PUBLIC_API_URL is not set — falling back to http://localhost:8000");
-}
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+import {
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signInWithPopup,
+  GoogleAuthProvider,
+  signOut as firebaseSignOut,
+  updateProfile,
+} from "firebase/auth";
+import { auth } from "@/lib/firebase";
 
 export interface User {
   id: string;
@@ -14,19 +19,25 @@ export interface User {
   name: string | null;
 }
 
-const TOKEN_KEY = "murmur_token";
-
-export function getToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return localStorage.getItem(TOKEN_KEY);
+export async function signIn(email: string, password: string) {
+  return signInWithEmailAndPassword(auth, email, password);
 }
 
-export function setToken(token: string): void {
-  localStorage.setItem(TOKEN_KEY, token);
+export async function signUp(email: string, password: string, name: string) {
+  const cred = await createUserWithEmailAndPassword(auth, email, password);
+  await updateProfile(cred.user, { displayName: name });
+  return cred;
 }
 
-export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
+export async function signInWithGoogle() {
+  const provider = new GoogleAuthProvider();
+  return signInWithPopup(auth, provider);
+}
+
+export async function getIdToken(): Promise<string | null> {
+  const user = auth.currentUser;
+  if (!user) return null;
+  return user.getIdToken();
 }
 
 export function useAuth() {
@@ -35,29 +46,23 @@ export function useAuth() {
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    const token = getToken();
-    if (!token) {
-      setIsLoading(false);
-      return;
-    }
-
-    fetch(`${API_BASE}/api/auth/me`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-      .then((res) => {
-        if (!res.ok) throw new Error("Unauthorized");
-        return res.json();
-      })
-      .then((data: { user: User }) => setUser(data.user))
-      .catch(() => {
-        clearToken();
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser) {
+        setUser({
+          id: firebaseUser.uid,
+          email: firebaseUser.email || "",
+          name: firebaseUser.displayName,
+        });
+      } else {
         setUser(null);
-      })
-      .finally(() => setIsLoading(false));
+      }
+      setIsLoading(false);
+    });
+    return unsubscribe;
   }, []);
 
-  const logout = useCallback(() => {
-    clearToken();
+  const logout = useCallback(async () => {
+    await firebaseSignOut(auth);
     setUser(null);
     router.push("/login");
   }, [router]);

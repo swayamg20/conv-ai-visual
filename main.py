@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from funcs.agents import compile_agent_prompt, get_agent_tools, append_resource_context
-from funcs.auth import get_current_user_id, get_current_user, hash_password, verify_password, create_access_token
+from funcs.auth import get_current_user_id, get_current_user, require_auth
 from funcs.config import config
 from funcs.llm_clients import create_llm_client
 from funcs.llm_pipeline import LLMPipeline
@@ -121,15 +121,6 @@ class CanvasModeRequest(BaseModel):
 
 class CreateSessionRequest(BaseModel):
     agent_id: str
-
-class RegisterRequest(BaseModel):
-    email: str
-    password: str
-    name: str | None = None
-
-class LoginRequest(BaseModel):
-    email: str
-    password: str
 
 class CreateAgentRequest(BaseModel):
     name: str
@@ -1185,58 +1176,17 @@ async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
     })
 
 
-@app.post("/api/auth/register")
-async def register(body: RegisterRequest):
-    """Register a new user account."""
-    if not body.email or not body.password:
-        return JSONResponse({"error": "Email and password are required"}, status_code=400)
-    if len(body.password) < 6:
-        return JSONResponse({"error": "Password must be at least 6 characters"}, status_code=400)
-
-    existing = UserRepo.get_by_email(body.email)
-    if existing:
-        return JSONResponse({"error": "Email already registered"}, status_code=409)
-
-    hashed = hash_password(body.password)
-    user = UserRepo.create(email=body.email, password_hash=hashed, name=body.name)
-    token = create_access_token(user.id)
-    return JSONResponse({
-        "user": {"id": user.id, "email": user.email, "name": user.name},
-        "token": token,
-    })
-
-
-@app.post("/api/auth/login")
-async def login(body: LoginRequest):
-    """Authenticate and return a JWT."""
-    if not body.email or not body.password:
-        return JSONResponse({"error": "Email and password are required"}, status_code=400)
-
-    user = UserRepo.get_by_email(body.email)
-    if not user or not verify_password(body.password, user.password_hash):
-        return JSONResponse({"error": "Invalid email or password"}, status_code=401)
-    if not user.is_active:
-        return JSONResponse({"error": "Account is deactivated"}, status_code=401)
-
-    token = create_access_token(user.id)
-    return JSONResponse({
-        "user": {"id": user.id, "email": user.email, "name": user.name},
-        "token": token,
-    })
-
-
 @app.get("/api/auth/me")
 async def auth_me(request: Request):
-    """Return the currently authenticated user."""
+    """Return the currently authenticated user (Firebase token)."""
     user = get_current_user(request)
     if user is None:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
     return JSONResponse({
         "user": {
-            "id": user.id,
-            "email": user.email,
-            "name": user.name,
-            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "id": user["id"],
+            "email": user["email"],
+            "name": user["name"],
         }
     })
 
@@ -1272,7 +1222,7 @@ async def create_agent(body: CreateAgentRequest, request: Request):
     system_prompt = compile_agent_prompt(persona, body.capabilities)
 
     agent = AgentRepo.create(
-        user_id=user.id,
+        user_id=user["id"],
         name=body.name,
         description=body.description,
         system_prompt=system_prompt,
@@ -1290,7 +1240,7 @@ async def list_agents(request: Request):
     if user is None:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
-    agents = AgentRepo.list_by_user(user.id)
+    agents = AgentRepo.list_by_user(user["id"])
     return JSONResponse({"agents": [_agent_to_dict(a) for a in agents]})
 
 
@@ -1304,7 +1254,7 @@ async def get_agent(agent_id: str, request: Request):
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     return JSONResponse(_agent_to_dict(agent))
@@ -1320,7 +1270,7 @@ async def update_agent(agent_id: str, body: UpdateAgentRequest, request: Request
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     updates: dict[str, Any] = {}
@@ -1344,7 +1294,7 @@ async def update_agent(agent_id: str, body: UpdateAgentRequest, request: Request
             updates["capabilities_json"] = json.dumps(capabilities)
 
     if body.is_default is True:
-        AgentRepo.set_default(agent_id, user.id)
+        AgentRepo.set_default(agent_id, user["id"])
 
     updated = AgentRepo.update(agent_id, **updates) if updates else AgentRepo.get_by_id(agent_id)
     return JSONResponse(_agent_to_dict(updated))
@@ -1360,7 +1310,7 @@ async def delete_agent(agent_id: str, request: Request):
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     AgentRepo.delete(agent_id)
@@ -1399,14 +1349,14 @@ async def add_resource(
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     if file and file.filename:
         # File upload path
         resource_id = str(_uuid4())
         upload_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data", "uploads", user.id
+            os.path.dirname(os.path.abspath(__file__)), "data", "uploads", user["id"]
         )
         os.makedirs(upload_dir, exist_ok=True)
         file_path = os.path.join(upload_dir, f"{resource_id}.pdf")
@@ -1415,11 +1365,11 @@ async def add_resource(
         with open(file_path, "wb") as f:
             f.write(content)
 
-        resource = ingest_pdf(file_path, agent_id=agent_id, user_id=user.id)
+        resource = ingest_pdf(file_path, agent_id=agent_id, user_id=user["id"])
         return JSONResponse(_resource_to_dict(resource))
 
     elif url:
-        resource = await ingest_url(url, agent_id=agent_id, user_id=user.id)
+        resource = await ingest_url(url, agent_id=agent_id, user_id=user["id"])
         return JSONResponse(_resource_to_dict(resource))
 
     else:
@@ -1439,7 +1389,7 @@ async def list_resources(agent_id: str, request: Request):
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     resources = ResourceRepo.list_by_agent(agent_id)
@@ -1456,7 +1406,7 @@ async def delete_resource(agent_id: str, resource_id: str, request: Request):
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     deleted = ResourceRepo.delete(resource_id)
@@ -1478,10 +1428,10 @@ async def get_mastery(agent_id: str, request: Request):
     agent = AgentRepo.get_by_id(agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    if agent.user_id != user.id:
+    if agent.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
-    summary = TopicMasteryRepo.get_summary(user.id, agent_id)
+    summary = TopicMasteryRepo.get_summary(user["id"], agent_id)
     return JSONResponse(summary)
 
 
@@ -1498,7 +1448,7 @@ async def create_session(body: CreateSessionRequest, request: Request):
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
-    session = SessionRepo.create(user_id=user.id, agent_id=body.agent_id)
+    session = SessionRepo.create(user_id=user["id"], agent_id=body.agent_id)
     return JSONResponse({
         "id": session.id,
         "user_id": session.user_id,
@@ -1517,7 +1467,7 @@ async def list_sessions(request: Request, agent_id: str | None = None):
     if user is None:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
-    sessions = SessionRepo.list_by_user(user.id, agent_id=agent_id)
+    sessions = SessionRepo.list_by_user(user["id"], agent_id=agent_id)
     return JSONResponse([
         {
             "id": s.id,
@@ -1542,7 +1492,7 @@ async def get_session_detail(session_id: str, request: Request):
     session = SessionRepo.get_by_id(session_id)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    if session.user_id != user.id:
+    if session.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     messages = ConversationMessageRepo.get_recent(session_id, limit=50)
@@ -1576,7 +1526,7 @@ async def end_session(session_id: str, request: Request):
     session = SessionRepo.get_by_id(session_id)
     if not session:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    if session.user_id != user.id:
+    if session.user_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     # Load recent messages for summarization
@@ -1642,7 +1592,7 @@ async def end_session(session_id: str, request: Request):
             for item in parsed:
                 if isinstance(item, dict) and "topic" in item and "signal_type" in item:
                     mastery_entries.append(TopicMasteryModel(
-                        user_id=user.id,
+                        user_id=user["id"],
                         agent_id=session.agent_id,
                         session_id=session_id,
                         topic=item["topic"],

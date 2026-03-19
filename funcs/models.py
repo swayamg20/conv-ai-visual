@@ -91,12 +91,11 @@ class DecisionMemoryModel(SQLModel, table=True):
 
 
 class UserModel(SQLModel, table=True):
-    """Registered user accounts."""
+    """Registered user accounts.  id is the Firebase uid."""
     __tablename__ = "users"
 
-    id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
+    id: str = Field(primary_key=True)
     email: str = Field(unique=True, index=True)
-    password_hash: str
     name: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
@@ -571,13 +570,13 @@ class UserRepo:
     """Repository for user account operations."""
 
     @staticmethod
-    def create(email: str, password_hash: str, name: str | None = None) -> UserModel:
+    def get_or_create(uid: str, email: str, name: str | None = None) -> UserModel:
+        """Return existing user by uid, or create a new one (Firebase auto-provision)."""
         with get_session() as session:
-            user = UserModel(
-                email=email,
-                password_hash=password_hash,
-                name=name,
-            )
+            user = session.get(UserModel, uid)
+            if user:
+                return user
+            user = UserModel(id=uid, email=email, name=name)
             session.add(user)
             session.commit()
             session.refresh(user)
