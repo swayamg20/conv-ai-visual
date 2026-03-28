@@ -4,13 +4,18 @@ import time
 import copy
 import asyncio
 import logging
-from typing import List, Dict, Optional, AsyncGenerator, Callable, Any, Tuple
+from collections.abc import AsyncGenerator, Callable
+from typing import Any
 from funcs.memory import MemoryManager
-from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall
+from funcs.tools import ToolRegistry, ToolStore, OpenAIAdapter, AnthropicAdapter, ModelAdapter, ToolCall, ToolResult
 from funcs.tool_executor import ToolExecutor, SandboxConfig, default_executor
-from funcs.canvas import get_canvas_state, CANVAS_TOOL_SCHEMA, ANIMATION_TOOLS
+from funcs.canvas import get_canvas_state, canvas_update, CANVAS_TOOL_SCHEMA, ANIMATION_TOOLS
+from funcs.animation_pipeline import teach_with_visuals
 from funcs.llm_clients import LLMClient, create_llm_client
 from funcs.config import config
+
+# Number of recent messages used when generating a session summary
+_SUMMARY_RECENT_MESSAGES = 10
 
 logger = logging.getLogger("llm-pipeline")
 
@@ -32,16 +37,17 @@ class LLMPipeline:
     
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        provider: Optional[str] = None,
-        system_prompt: Optional[str] = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        system_prompt: str | None = None,
         max_context_messages: int = 20,
         user_id: str = "default_user",
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
+        agent_id: str | None = None,
         enable_memory: bool = True,
         canvas_mode: bool = False,
-        canvas_system_prompt: Optional[str] = None
+        canvas_system_prompt: str | None = None
     ):
         """
         Initialize LLM pipeline with memory.
@@ -54,6 +60,7 @@ class LLMPipeline:
             max_context_messages: Max messages in context window
             user_id: User ID for memory isolation
             session_id: Session ID for episodic tracking
+            agent_id: Agent ID for cross-session memory scoping
             enable_memory: Whether to enable memory layers
             canvas_mode: Whether canvas visual mode is enabled (uses canvas for all responses)
             canvas_system_prompt: Custom canvas mode prompt (uses default if not provided)
@@ -70,6 +77,7 @@ class LLMPipeline:
         )
 
         self.user_id = user_id
+        self.agent_id = agent_id
         self.enable_memory = enable_memory
         
         # Canvas mode settings
@@ -82,19 +90,19 @@ class LLMPipeline:
         )
         
         # Initialize unified memory manager (all 4 layers)
-        self.memory: Optional[MemoryManager] = None
+        self.memory: MemoryManager | None = None
         if enable_memory:
             try:
-                self.memory = MemoryManager(user_id=user_id, session_id=session_id)
+                self.memory = MemoryManager(user_id=user_id, session_id=session_id, agent_id=agent_id)
                 self.memory.context.max_messages = max_context_messages
                 logger.info("4-layer memory initialized")
             except Exception as e:
-                logger.warning(f"Failed to initialize memory: {e}. Continuing without.")
+                logger.warning("Failed to initialize memory: %s. Continuing without.", e)
                 self.enable_memory = False
         
         # Tool calling support
         self.tools = ToolRegistry()
-        self.tool_store: Optional[ToolStore] = None
+        self.tool_store: ToolStore | None = None
         self.tool_executor: ToolExecutor = default_executor
 
         # Set adapter based on provider (for tool schema formatting)
@@ -108,16 +116,16 @@ class LLMPipeline:
 
         # Canvas support
         self.session_id = session_id or "default"
-        self.canvas_callback: Optional[Callable[[List[Dict]], Any]] = None
-        self.animation_callback: Optional[Callable[[Dict], Any]] = None
+        self.canvas_callback: Callable[[list[dict]], Any] | None = None
+        self.animation_callback: Callable[[dict], Any] | None = None
 
         # Call metrics (populated after each chat_with_tools_stream call)
-        self._last_call_timing: Optional[Dict] = None
-        self._last_call_tool_calls: List[Dict] = []
-        self._last_call_response: Optional[str] = None
-        self._last_call_error: Optional[str] = None
+        self._last_call_timing: dict | None = None
+        self._last_call_tool_calls: list[dict] = []
+        self._last_call_response: str | None = None
+        self._last_call_error: str | None = None
 
-        logger.info(f"LLM pipeline initialized: provider={self.provider}, model={self.model or 'default'}, memory={enable_memory}, canvas_mode={canvas_mode}")
+        logger.info("LLM pipeline initialized: provider=%s, model=%s, memory=%s, canvas_mode=%s", self.provider, self.model or "default", enable_memory, canvas_mode)
     
     @property
     def active_system_prompt(self) -> str:
@@ -129,7 +137,7 @@ class LLMPipeline:
             return config.LLM_MATH_TUTOR_PROMPT
         return self.base_system_prompt
     
-    def set_canvas_mode(self, enabled: bool, custom_prompt: Optional[str] = None):
+    def set_canvas_mode(self, enabled: bool, custom_prompt: str | None = None):
         """
         Toggle canvas mode on/off.
         
@@ -140,9 +148,9 @@ class LLMPipeline:
         self.canvas_mode = enabled
         if custom_prompt:
             self._canvas_system_prompt = custom_prompt
-        logger.info(f"Canvas mode {'enabled' if enabled else 'disabled'}")
+        logger.info("Canvas mode %s", "enabled" if enabled else "disabled")
     
-    async def get_context(self, current_query: Optional[str] = None, include_canvas: bool = True) -> List[Dict[str, str]]:
+    async def get_context(self, current_query: str | None = None, include_canvas: bool = True) -> list[dict[str, str]]:
         """
         Get conversation context enriched with all memory layers.
         
@@ -174,9 +182,9 @@ class LLMPipeline:
     
     async def get_completion(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None
+        max_tokens: int | None = None
     ) -> str:
         """Get completion from LLM using provider-agnostic client."""
         try:
@@ -186,14 +194,14 @@ class LLMPipeline:
                 max_tokens=max_tokens
             )
         except Exception as e:
-            logger.exception(f"LLM completion error: {e}")
+            logger.exception("LLM completion error")
             raise
     
     async def chat(
         self,
         user_message: str,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         save_to_memory: bool = True
     ) -> str:
         """
@@ -227,7 +235,7 @@ class LLMPipeline:
         self,
         user_message: str,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         save_to_memory: bool = True
     ) -> AsyncGenerator[str, None]:
         """
@@ -252,7 +260,7 @@ class LLMPipeline:
                 yield chunk
 
         except Exception as e:
-            logger.exception(f"LLM stream error: {e}")
+            logger.exception("LLM stream error")
             raise
 
         # Process for memory after stream completes
@@ -281,25 +289,25 @@ class LLMPipeline:
         if self.memory:
             self.memory.profile.add_preference(key, value)
     
-    def get_user_profile(self) -> Dict:
+    def get_user_profile(self) -> dict:
         """Get full user profile."""
         if self.memory:
             return self.memory.profile.get()
         return {}
     
-    def search_memories(self, query: str, limit: int = 5) -> List[Dict]:
+    def search_memories(self, query: str, limit: int = 5) -> list[dict]:
         """Search semantic memory (Layer 3)."""
         if self.memory:
             return self.memory.semantic.search(query, limit)
         return []
     
-    def get_conversation_summaries(self, limit: int = 5) -> List[Dict]:
+    def get_conversation_summaries(self, limit: int = 5) -> list[dict]:
         """Get episodic summaries (Layer 2)."""
         if self.memory:
             return self.memory.episodic.get_recent(limit)
         return []
     
-    def end_session(self, summary: Optional[str] = None):
+    def end_session(self, summary: str | None = None):
         """
         End conversation session.
         Optionally provide a summary to save to episodic memory.
@@ -315,7 +323,7 @@ class LLMPipeline:
         if not self.memory:
             return ""
         
-        recent_text = self.memory.context.get_recent_text(n=10)
+        recent_text = self.memory.context.get_recent_text(n=_SUMMARY_RECENT_MESSAGES)
         if not recent_text:
             return ""
         
@@ -326,7 +334,7 @@ class LLMPipeline:
         
         return await self.get_completion(summary_prompt, temperature=0.3, max_tokens=100)
     
-    def log_decision(self, action: str, tool: Optional[str] = None, success: bool = True):
+    def log_decision(self, action: str, tool: str | None = None, success: bool = True):
         """Log a decision/action for agentic memory."""
         if self.memory:
             try:
@@ -346,7 +354,7 @@ class LLMPipeline:
         self,
         name: str,
         description: str,
-        parameters: Dict,
+        parameters: dict,
         func: Callable
     ) -> "LLMPipeline":
         """
@@ -364,7 +372,7 @@ class LLMPipeline:
         self.tools.register(name, description, parameters, func)
         return self
     
-    def tool(self, name: str, description: str, parameters: Dict):
+    def tool(self, name: str, description: str, parameters: dict):
         """Decorator to register a tool."""
         return self.tools.tool(name, description, parameters)
     
@@ -379,15 +387,15 @@ class LLMPipeline:
         """
         self.tool_store = ToolStore()
         tools = self.tool_store.list_all()
-        logger.info(f"Loaded {len(tools)} tool schemas from DB")
+        logger.info("Loaded %d tool schemas from DB", len(tools))
         for t in tools:
-            logger.info(f"  - Tool: {t.name} (enabled={t.enabled})")
+            logger.info("  - Tool: %s (enabled=%s)", t.name, t.enabled)
     
     def set_executor(self, executor: ToolExecutor):
         """Set custom tool executor with sandbox config."""
         self.tool_executor = executor
     
-    def set_canvas_callback(self, callback: Callable[[List[Dict]], Any]):
+    def set_canvas_callback(self, callback: Callable[[list[dict]], Any]):
         """
         Set callback for canvas events.
         Called whenever canvas_update tool is executed.
@@ -397,7 +405,7 @@ class LLMPipeline:
         """
         self.canvas_callback = callback
 
-    def set_animation_callback(self, callback: Callable[[Dict], Any]):
+    def set_animation_callback(self, callback: Callable[[dict], Any]):
         """
         Set callback for animation events (teach_with_visuals SDL tool).
 
@@ -406,14 +414,14 @@ class LLMPipeline:
         """
         self.animation_callback = callback
 
-    def switch_provider(self, provider: str, api_key: Optional[str] = None, model: Optional[str] = None):
+    def switch_provider(self, provider: str, api_key: str | None = None, model: str | None = None):
         """Hot-swap LLM provider for this pipeline. Used for model routing."""
         if provider == self.provider and model is None:
             return  # No change needed
         self.provider = provider
         self.client = create_llm_client(provider, api_key, model)
 
-    def get_last_call_metrics(self) -> Optional[Dict]:
+    def get_last_call_metrics(self) -> dict | None:
         """Get timing and tool call data from the most recent chat_with_tools_stream call."""
         if not self._last_call_timing:
             return None
@@ -429,7 +437,7 @@ class LLMPipeline:
         state = get_canvas_state(self.session_id)
         return state.get_context_summary()
     
-    def get_tools_schema(self, include_canvas: Optional[bool] = None) -> List[Dict]:
+    def get_tools_schema(self, include_canvas: bool | None = None) -> list[dict]:
         """
         Get tools schema for LLM.
         Prefers DB tools, falls back to in-memory registry.
@@ -437,7 +445,7 @@ class LLMPipeline:
         Args:
             include_canvas: Whether to include canvas tool. If None, uses canvas_mode setting.
         """
-        tools: List[Dict] = []
+        tools: list[dict] = []
 
         if self.tool_store:
             if config.LLM_TOOL_SCHEMA_CACHE:
@@ -464,12 +472,12 @@ class LLMPipeline:
                 tool_name = anim_tool.get("function", {}).get("name")
                 if tool_name and tool_name not in existing_tool_names:
                     tools.append(anim_tool)
-                    logger.debug(f"Added animation tool: {tool_name}")
+                    logger.debug("Added animation tool: %s", tool_name)
 
         return tools
 
     @staticmethod
-    def _tool_calls_to_assistant_message(tool_calls: List[ToolCall], content: Optional[str] = None) -> Dict[str, Any]:
+    def _tool_calls_to_assistant_message(tool_calls: list[ToolCall], content: str | None = None) -> dict[str, Any]:
         """Build OpenAI-style assistant message containing tool calls."""
         return {
             "role": "assistant",
@@ -490,13 +498,18 @@ class LLMPipeline:
     def _is_mutating_tool(self, tool_name: str) -> bool:
         return tool_name in self.MUTATING_TOOL_NAMES
 
+    async def _build_context_and_tools(
+        self, user_message: str
+    ) -> tuple[list[dict], list[dict] | None]:
+        """Assemble conversation context and tool schemas for one turn."""
+        context = await self.get_context(user_message)
+        context.append({"role": "user", "content": user_message})
+        tools_schema = self.get_tools_schema() or None
+        return context, tools_schema
+
     async def _execute_single_tool_call(self, tc: ToolCall):
         """Execute one tool call, including canvas/animation side effects."""
-        from funcs.tools import ToolResult
-
         if tc.name == "canvas_update":
-            from funcs.canvas import canvas_update
-
             operations = tc.arguments.get("operations", [])
             result = canvas_update(operations, session_id=self.session_id)
 
@@ -514,8 +527,6 @@ class LLMPipeline:
 
         # SDL v2 tool — teach_with_visuals
         if tc.name == "teach_with_visuals":
-            from funcs.animation_pipeline import teach_with_visuals
-
             result = teach_with_visuals(**tc.arguments, session_id=self.session_id)
 
             if self.animation_callback and result.get("success"):
@@ -533,14 +544,14 @@ class LLMPipeline:
 
         return await self.tool_executor.execute_tool_call(tc)
 
-    async def _execute_tool_calls_with_policy(self, tool_calls: List[ToolCall]) -> Tuple[List[Any], float]:
+    async def _execute_tool_calls_with_policy(self, tool_calls: list[ToolCall]) -> tuple[list[Any], float]:
         """
         Execute tool calls with deterministic policy:
         - mutating tools execute sequentially
         - non-mutating tools may run in parallel
         """
         t_start = time.perf_counter()
-        ordered_results: List[Any] = [None] * len(tool_calls)
+        ordered_results: list[Any] = [None] * len(tool_calls)
 
         if not tool_calls:
             return [], 0.0
@@ -550,8 +561,8 @@ class LLMPipeline:
                 ordered_results[idx] = await self._execute_single_tool_call(tc)
             return ordered_results, time.perf_counter() - t_start
 
-        pending_indices: List[int] = []
-        pending_calls: List[ToolCall] = []
+        pending_indices: list[int] = []
+        pending_calls: list[ToolCall] = []
 
         async def _flush_parallel_batch():
             if not pending_calls:
@@ -577,7 +588,7 @@ class LLMPipeline:
         self,
         user_message: str,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         save_to_memory: bool = True,
         max_tool_rounds: int = 10
     ) -> str:
@@ -608,7 +619,7 @@ class LLMPipeline:
         
         # Debug: Log tools being sent
         if tools_schema:
-            logger.info(f"Sending {len(tools_schema)} tools to LLM: {[t['function']['name'] for t in tools_schema]}")
+            logger.info("Sending %d tools to LLM: %s", len(tools_schema), [t["function"]["name"] for t in tools_schema])
         else:
             logger.warning("No tools available to send to LLM")
         
@@ -631,11 +642,11 @@ class LLMPipeline:
             tool_calls = self.client.parse_tool_calls(response)
             context.append(self.client.get_assistant_message(response))
             
-            logger.info(f"Round {round_num + 1}: LLM requested {len(tool_calls)} tool call(s)")
+            logger.info("Round %d: LLM requested %d tool call(s)", round_num + 1, len(tool_calls))
 
             tool_results, _ = await self._execute_tool_calls_with_policy(tool_calls)
             for tc, tool_result in zip(tool_calls, tool_results):
-                logger.info(f"Tool {tc.name} result: {tool_result.content[:100]}...")
+                logger.info("Tool %s result: %s...", tc.name, tool_result.content[:100])
 
                 # Add result to context for LLM
                 context.append(self.client.format_tool_result(tool_result))
@@ -648,11 +659,11 @@ class LLMPipeline:
                 )
         
         # Exceeded max rounds
-        logger.warning(f"Exceeded max tool rounds ({max_tool_rounds})")
+        logger.warning("Exceeded max tool rounds (%d)", max_tool_rounds)
         return "I encountered an issue processing your request. Please try again."
     
     @staticmethod
-    def _extract_speech_cues(tool_calls_data: List[Dict]) -> Optional[str]:
+    def _extract_speech_cues(tool_calls_data: list[dict]) -> str | None:
         """Extract speech text from teach_with_visuals tool call arguments.
 
         Concatenates 'say' fields into a single TTS-ready string, letting us
@@ -677,7 +688,7 @@ class LLMPipeline:
         self,
         user_message: str,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         save_to_memory: bool = True,
         max_tool_rounds: int = 10
     ) -> AsyncGenerator[str, None]:
@@ -694,7 +705,7 @@ class LLMPipeline:
         t_start = time.perf_counter()
         t_llm_total = 0.0
         t_tool_total = 0.0
-        all_tool_calls: List[Dict] = []
+        all_tool_calls: list[dict] = []
         tokens_in = None
         tokens_out = None
         error_msg = None
@@ -705,14 +716,11 @@ class LLMPipeline:
         t_context_end = None
         t_tools_schema_end = None
 
-        context = await self.get_context(user_message)
+        context, tools_schema = await self._build_context_and_tools(user_message)
         t_context_end = time.perf_counter()
-        context.append({"role": "user", "content": user_message})
-
-        tools_schema = self.get_tools_schema() or None
         t_tools_schema_end = time.perf_counter()
         tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
-        logger.info(f"chat_with_tools_stream: {len(tool_names)} tools passed to LLM: {tool_names}")
+        logger.info("chat_with_tools_stream: %d tools passed to LLM: %s", len(tool_names), tool_names)
 
         # Execute tool calls (non-streaming) until we get a text response
         for round_num in range(max_tool_rounds):
@@ -735,7 +743,7 @@ class LLMPipeline:
                 break
 
             tool_calls = self.client.parse_tool_calls(response)
-            logger.info(f"Round {round_num+1}: LLM called {len(tool_calls)} tools: {[tc.name for tc in tool_calls]}")
+            logger.info("Round %d: LLM called %d tools: %s", round_num + 1, len(tool_calls), [tc.name for tc in tool_calls])
             context.append(self.client.get_assistant_message(response))
 
             round_tool_data = []
@@ -760,7 +768,7 @@ class LLMPipeline:
         if speech_cue_text:
             # We have speech cues from tool calls — use them directly as TTS text.
             # This skips the entire second LLM inference round.
-            logger.info(f"Using speech_cues as response ({len(speech_cue_text)} chars), skipping 2nd LLM round")
+            logger.info("Using speech_cues as response (%d chars), skipping 2nd LLM round", len(speech_cue_text))
             full_response = speech_cue_text
             if t_first_text_yield is None:
                 t_first_text_yield = time.perf_counter()
@@ -807,13 +815,13 @@ class LLMPipeline:
         self._last_call_response = full_response
         self._last_call_error = error_msg
         used_cues = "speech_cues" if speech_cue_text else "llm_stream"
-        logger.info(f"Call metrics ({used_cues}): total={self._last_call_timing['latency_total_ms']}ms, llm={self._last_call_timing['latency_llm_ms']}ms, tools={self._last_call_timing['latency_tool_ms']}ms, stream={self._last_call_timing['latency_stream_ms']}ms")
+        logger.info("Call metrics (%s): total=%sms, llm=%sms, tools=%sms, stream=%sms", used_cues, self._last_call_timing["latency_total_ms"], self._last_call_timing["latency_llm_ms"], self._last_call_timing["latency_tool_ms"], self._last_call_timing["latency_stream_ms"])
 
     async def chat_with_tools_stream(
         self,
         user_message: str,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         save_to_memory: bool = True,
         max_tool_rounds: int = 10
     ) -> AsyncGenerator[str, None]:
@@ -847,15 +855,12 @@ class LLMPipeline:
         tokens_out = None
         error_msg = None
         speech_cue_text = None
-        all_tool_calls: List[Dict] = []
+        all_tool_calls: list[dict] = []
         full_response = ""
 
         try:
-            context = await self.get_context(user_message)
+            context, tools_schema = await self._build_context_and_tools(user_message)
             t_context_end = time.perf_counter()
-            context.append({"role": "user", "content": user_message})
-
-            tools_schema = self.get_tools_schema() or None
             t_tools_schema_end = time.perf_counter()
             tool_names = [t.get("function", {}).get("name") for t in (tools_schema or [])]
             logger.info(
@@ -866,7 +871,7 @@ class LLMPipeline:
 
             exhausted_rounds = True
             for round_num in range(max_tool_rounds):
-                round_tool_calls: List[ToolCall] = []
+                round_tool_calls: list[ToolCall] = []
 
                 t_llm_start = time.perf_counter()
                 provider_stream = self.client.stream_with_tools(

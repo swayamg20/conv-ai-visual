@@ -366,7 +366,7 @@ export default function Home() {
                   transition={{ delay: 1 }}
                   className="text-sm text-muted-foreground text-center"
                 >
-                  Try saying: "Tell me about your capabilities"
+                  Try saying: &quot;Tell me about your capabilities&quot;
                 </motion.p>
               )}
             </motion.section>

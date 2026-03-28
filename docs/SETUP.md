@@ -43,11 +43,14 @@ Key dependencies:
 Create a `.env` file in the project root:
 
 ```bash
-# Required
+# Required: set LLM_PROVIDER to openai, groq, or gemini and provide the matching key
+# OpenAI example shown below
 OPENAI_API_KEY=sk-your-openai-api-key
+# Or use GROQ_API_KEY / GEMINI_API_KEY instead
 
 # Optional - Voic–e features
 DEEPGRAM_KEY=your-deepgram-key
+DEEPGRAM_ENDPOINTING=700
 ELEVENLABS_API_KEY=your-elevenlabs-key
 ELEVENLABS_VOICE_ID=your-voice-id
 
@@ -55,9 +58,12 @@ ELEVENLABS_VOICE_ID=your-voice-id
 MEM0_API_KEY=your-mem0-key
 
 # Server config (optional)
+ALLOWED_CORS_ORIGINS=http://localhost:3000
 HOST=0.0.0.0
 PORT=8000
 ```
+
+Local `.env` values override the defaults documented in this repo. If you copied an older `.env`, review `LLM_MAX_CONTEXT_MESSAGES`, `DEEPGRAM_ENDPOINTING`, and `ALLOWED_CORS_ORIGINS` before assuming the new defaults are active.
 
 ### Getting API Keys
 
@@ -147,12 +153,41 @@ uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Server runs at: http://localhost:8000
 
-## 7. Test the API
+## 7. Configure the Frontend
+
+Create `web/.env.local` from the checked-in example:
+
+```bash
+cd web
+cp .env.example .env.local
+```
+
+Required frontend variables:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000
+NEXT_PUBLIC_FIREBASE_API_KEY=...
+NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=omnisave-21c05.firebaseapp.com
+NEXT_PUBLIC_FIREBASE_PROJECT_ID=omnisave-21c05
+NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=omnisave-21c05.firebasestorage.app
+NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=459462156017
+NEXT_PUBLIC_FIREBASE_APP_ID=1:459462156017:web:5eb152d98390b4158dd350
+NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-BN2BQ7ZQ66
+```
+
+## 8. Test the API
+
+Protected routes now require a Firebase ID token:
+
+```bash
+export FIREBASE_ID_TOKEN=your-firebase-id-token
+```
 
 ### Chat Endpoint (SSE Streaming)
 
 ```bash
 curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello, what can you do?"}'
 ```
@@ -162,22 +197,25 @@ curl -X POST http://localhost:8000/chat \
 ```bash
 # First message - get session_id
 curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message": "My name is John", "user_id": "user123"}'
+  -d '{"message": "My name is John"}'
 
 # Subsequent messages - use same session
 curl -X POST http://localhost:8000/chat \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message": "What is my name?", "session_id": "SESSION_ID_FROM_RESPONSE", "user_id": "user123"}'
+  -d '{"message": "What is my name?", "session_id": "SESSION_ID_FROM_RESPONSE"}'
 ```
 
 ### End Session (Saves to Episodic Memory)
 
 ```bash
-curl -X DELETE http://localhost:8000/chat/SESSION_ID
+curl -X DELETE http://localhost:8000/chat/SESSION_ID \
+  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
 ```
 
-## 8. WebRTC Voice (Optional)
+## 9. WebRTC Voice (Optional)
 
 For voice interaction, open `client/test.html` in a browser after starting the server.
 
@@ -258,4 +296,3 @@ Mem0 is optional. If not configured, semantic memory is skipped. Set `MEM0_API_K
 
 - Check existing docs in `/docs`
 - Open an issue on GitHub
-

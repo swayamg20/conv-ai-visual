@@ -245,6 +245,44 @@
   animation-delay: -0.16s;
 }
 
+/* Micro-interactions — button hover glow */
+.btn-glow {
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-glow:hover {
+  transform: scale(1.03);
+  box-shadow: 0 0 16px hsl(var(--amber) / 0.15);
+}
+
+.btn-glow:active {
+  transform: scale(0.97);
+}
+
+/* Struggled node pulse */
+@keyframes node-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px hsl(var(--amber) / 0.2);
+  }
+  50% {
+    box-shadow: 0 0 16px hsl(var(--amber) / 0.35);
+  }
+}
+
+.node-pulse {
+  animation: node-pulse 2s ease-in-out infinite;
+}
+
+/* Skeleton shimmer */
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: -200px 0;
+  }
+  100% {
+    background-position: calc(200px + 100%) 0;
+  }
+}
+
 /* Grain texture overlay */
 body::after {
   content: '';

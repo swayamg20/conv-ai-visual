@@ -7,7 +7,11 @@ This module provides a unified interface for interacting with different LLM prov
 import json
 import logging
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional, AsyncGenerator, Any
+from collections.abc import AsyncGenerator
+from typing import Any
+
+from funcs.config import config
+from funcs.tools import ToolCall
 
 logger = logging.getLogger("llm-clients")
 
@@ -18,9 +22,9 @@ class LLMClient(ABC):
     @abstractmethod
     async def complete(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> str:
         """
@@ -40,9 +44,9 @@ class LLMClient(ABC):
     @abstractmethod
     async def stream(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """
@@ -62,10 +66,10 @@ class LLMClient(ABC):
     @abstractmethod
     async def complete_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> Any:
         """
@@ -86,10 +90,10 @@ class LLMClient(ABC):
     @abstractmethod
     async def stream_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[Any, None]:
         """
@@ -111,7 +115,7 @@ class LLMClient(ABC):
     async def iter_stream_tool_events(
         self,
         stream: AsyncGenerator[Any, None]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Normalize provider stream chunks into tool-aware events.
 
@@ -130,7 +134,7 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def parse_tool_calls(self, response: Any) -> List[Any]:
+    def parse_tool_calls(self, response: Any) -> list[Any]:
         """
         Extract tool calls from response.
 
@@ -140,7 +144,7 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def get_response_content(self, response: Any) -> Optional[str]:
+    def get_response_content(self, response: Any) -> str | None:
         """
         Get text content from response.
 
@@ -150,7 +154,7 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def get_assistant_message(self, response: Any) -> Dict:
+    def get_assistant_message(self, response: Any) -> dict:
         """
         Get assistant message to append to context.
 
@@ -160,7 +164,7 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def format_tool_result(self, result: Any) -> Dict:
+    def format_tool_result(self, result: Any) -> dict:
         """
         Format tool result for this provider.
 
@@ -180,7 +184,7 @@ class OpenAIClient(LLMClient):
         self,
         api_key: str,
         model: str,
-        base_url: Optional[str] = None,
+        base_url: str | None = None,
         **default_params
     ):
         """
@@ -194,21 +198,24 @@ class OpenAIClient(LLMClient):
         """
         from openai import AsyncOpenAI
 
-        client_kwargs: Dict[str, Any] = {"api_key": api_key}
+        client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
 
         self.client = AsyncOpenAI(**client_kwargs)
         self.model = model
         self.default_params = default_params
-        provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
+        try:
+            provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
+        except (IndexError, AttributeError):
+            provider_label = base_url or "openai"
         logger.info(f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}")
 
     async def complete(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> str:
         """Non-streaming completion."""
@@ -220,16 +227,16 @@ class OpenAIClient(LLMClient):
                 max_tokens=max_tokens,
                 **{**self.default_params, **kwargs}
             )
-            return response.choices[0].message.content.strip()
+            return (response.choices[0].message.content or "").strip()
         except Exception as e:
             logger.exception(f"OpenAI completion error: {e}")
             raise
 
     async def stream(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
@@ -252,10 +259,10 @@ class OpenAIClient(LLMClient):
 
     async def complete_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> Any:
         """Non-streaming completion with tools."""
@@ -275,10 +282,10 @@ class OpenAIClient(LLMClient):
 
     async def stream_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
@@ -302,11 +309,9 @@ class OpenAIClient(LLMClient):
     async def iter_stream_tool_events(
         self,
         stream: AsyncGenerator[Any, None]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Normalize OpenAI-compatible streamed chunks into events."""
-        from funcs.tools import ToolCall
-
-        tool_acc: Dict[int, Dict[str, str]] = {}
+        tool_acc: dict[int, dict[str, str]] = {}
 
         async for chunk in stream:
             usage = getattr(chunk, "usage", None)
@@ -381,35 +386,34 @@ class OpenAIClient(LLMClient):
         """Check if response contains tool calls."""
         return bool(response.choices[0].message.tool_calls)
 
-    def parse_tool_calls(self, response: Any) -> List[Any]:
+    def parse_tool_calls(self, response: Any) -> list[Any]:
         """Extract tool calls from OpenAI response."""
-        from funcs.tools import ToolCall
-
         message = response.choices[0].message
         if not message.tool_calls:
             return []
 
-        return [
-            ToolCall(
-                id=tc.id,
-                name=tc.function.name,
-                arguments=json.loads(tc.function.arguments)
-            )
-            for tc in message.tool_calls
-        ]
+        tool_calls = []
+        for tc in message.tool_calls:
+            try:
+                arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Malformed tool call arguments for %s: %s", tc.function.name, tc.function.arguments)
+                arguments = {}
+            tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
+        return tool_calls
 
-    def get_response_content(self, response: Any) -> Optional[str]:
+    def get_response_content(self, response: Any) -> str | None:
         """Get text content from response."""
         message = response.choices[0].message
         if message.tool_calls:
             return None
         return message.content.strip() if message.content else ""
 
-    def get_assistant_message(self, response: Any) -> Dict:
+    def get_assistant_message(self, response: Any) -> dict:
         """Get assistant message for context."""
         return response.choices[0].message
 
-    def format_tool_result(self, result: Any) -> Dict:
+    def format_tool_result(self, result: Any) -> dict:
         """Format tool result for OpenAI."""
         return {
             "role": "tool",
@@ -450,7 +454,7 @@ class GeminiClient(LLMClient):
         self.default_params = default_params
         logger.info(f"Gemini client initialized: model={model}")
 
-    def _convert_messages(self, messages: List[Dict]) -> tuple:
+    def _convert_messages(self, messages: list[dict]) -> tuple:
         """
         Convert OpenAI-style messages to Gemini format.
 
@@ -489,9 +493,9 @@ class GeminiClient(LLMClient):
 
     async def complete(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> str:
         """Non-streaming completion."""
@@ -531,9 +535,9 @@ class GeminiClient(LLMClient):
 
     async def stream(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
@@ -572,10 +576,10 @@ class GeminiClient(LLMClient):
 
     async def complete_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> Any:
         """Non-streaming completion with tools."""
@@ -631,10 +635,10 @@ class GeminiClient(LLMClient):
 
     async def stream_with_tools(
         self,
-        messages: List[Dict],
-        tools: Optional[List[Dict]],
+        messages: list[dict],
+        tools: list[dict] | None,
         temperature: float = 0.7,
-        max_tokens: Optional[int] = None,
+        max_tokens: int | None = None,
         **kwargs
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
@@ -684,11 +688,9 @@ class GeminiClient(LLMClient):
     async def iter_stream_tool_events(
         self,
         stream: AsyncGenerator[Any, None]
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """Normalize Gemini streamed chunks into tool-aware events."""
-        from funcs.tools import ToolCall
-
-        pending_tool_calls: Dict[str, ToolCall] = {}
+        pending_tool_calls: dict[str, ToolCall] = {}
 
         async for chunk in stream:
             usage = getattr(chunk, "usage_metadata", None)
@@ -753,7 +755,7 @@ class GeminiClient(LLMClient):
                 "tool_calls": list(pending_tool_calls.values()),
             }
 
-    def _convert_tools_to_gemini_format(self, tools: List[Dict]) -> List:
+    def _convert_tools_to_gemini_format(self, tools: list[dict]) -> list:
         """
         Convert OpenAI tool format to Gemini function declarations.
 
@@ -778,7 +780,7 @@ class GeminiClient(LLMClient):
 
         return gemini_tools
 
-    def _convert_json_schema_to_gemini(self, json_schema: Dict) -> Dict:
+    def _convert_json_schema_to_gemini(self, json_schema: dict) -> dict:
         """
         Convert JSON Schema to Gemini-compatible schema format.
 
@@ -839,10 +841,8 @@ class GeminiClient(LLMClient):
                     return True
         return False
 
-    def parse_tool_calls(self, response: Any) -> List[Any]:
+    def parse_tool_calls(self, response: Any) -> list[Any]:
         """Extract tool calls from Gemini response."""
-        from funcs.tools import ToolCall
-
         tool_calls = []
         if not response.candidates:
             return tool_calls
@@ -866,7 +866,7 @@ class GeminiClient(LLMClient):
 
         return tool_calls
 
-    def get_response_content(self, response: Any) -> Optional[str]:
+    def get_response_content(self, response: Any) -> str | None:
         """Get text content from response."""
         if self.has_tool_calls(response):
             return None
@@ -876,7 +876,7 @@ class GeminiClient(LLMClient):
         except Exception:
             return ""
 
-    def _convert_protobuf_to_dict(self, protobuf_struct) -> Dict:
+    def _convert_protobuf_to_dict(self, protobuf_struct) -> dict:
         """Convert protobuf Struct to regular Python dict with native types."""
         def _to_native(val):
             """Recursively convert protobuf/proto-plus values to native Python."""
@@ -909,7 +909,7 @@ class GeminiClient(LLMClient):
             except Exception:
                 return {}
 
-    def get_assistant_message(self, response: Any) -> Dict:
+    def get_assistant_message(self, response: Any) -> dict:
         """Get assistant message for context."""
         # For Gemini, we need to convert back to OpenAI format
         # This is tricky because Gemini's response structure is different
@@ -947,7 +947,7 @@ class GeminiClient(LLMClient):
                 "content": response.text if hasattr(response, 'text') else ""
             }
 
-    def format_tool_result(self, result: Any) -> Dict:
+    def format_tool_result(self, result: Any) -> dict:
         """Format tool result for Gemini."""
         # Gemini doesn't use the same tool result format as OpenAI
         # We'll format it as a user message with tool result context
@@ -959,8 +959,8 @@ class GeminiClient(LLMClient):
 
 def create_llm_client(
     provider: str,
-    api_key: Optional[str] = None,
-    model: Optional[str] = None,
+    api_key: str | None = None,
+    model: str | None = None,
     **kwargs
 ) -> LLMClient:
     """
@@ -978,8 +978,6 @@ def create_llm_client(
     Raises:
         ValueError: If provider is unsupported
     """
-    from funcs.config import config
-
     provider = provider.lower()
 
     if provider == "openai":

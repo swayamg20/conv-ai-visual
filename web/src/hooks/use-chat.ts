@@ -2,6 +2,8 @@
 
 import { useState, useRef, useCallback } from "react";
 import type { CanvasOperation } from "./use-webrtc";
+import type { SDLScene } from "@/lib/scene-kit";
+import { getAuthHeaders } from "@/lib/firebase";
 
 export interface Message {
   id: string;
@@ -9,19 +11,34 @@ export interface Message {
   content: string;
 }
 
+type SSEEvent =
+  | { type: "session"; session_id: string }
+  | { type: "canvas_update"; operations: CanvasOperation[] }
+  | { type: "animation_event"; tool: string; sdl?: SDLScene; [key: string]: unknown }
+  | { type: "chunk"; text: string }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
 interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
+  agentId?: string;
+  sessionId?: string | null;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
-  onSDLScene?: (sdl: any) => void;
+  onSDLScene?: (sdl: SDLScene) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, onCanvasUpdate, onSDLScene } = options;
+  const { apiUrl = "http://localhost:8000", canvasMode = false, agentId, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const sessionIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(externalSessionId ?? null);
+
+  // Sync external sessionId into the ref when it changes
+  if (externalSessionId !== undefined && externalSessionId !== null) {
+    sessionIdRef.current = externalSessionId;
+  }
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return;
@@ -40,11 +57,15 @@ export function useChat(options: UseChatOptions = {}) {
     try {
       const response = await fetch(`${apiUrl}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(await getAuthHeaders()),
+        },
         body: JSON.stringify({
           message: text,
           session_id: sessionIdRef.current,
           canvas_mode: canvasMode,
+          agent_id: agentId,
         }),
       });
 
@@ -63,7 +84,7 @@ export function useChat(options: UseChatOptions = {}) {
         for (const line of lines) {
           if (line.startsWith("data: ")) {
             try {
-              const data = JSON.parse(line.slice(6));
+              const data = JSON.parse(line.slice(6)) as SSEEvent;
 
               if (data.type === "session") {
                 sessionIdRef.current = data.session_id;
@@ -99,7 +120,7 @@ export function useChat(options: UseChatOptions = {}) {
                 ]);
               }
             } catch {
-              // Ignore parse errors
+              console.warn("[Chat] Failed to parse SSE event:", line);
             }
           }
         }
@@ -117,7 +138,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [apiUrl, canvasMode, onCanvasUpdate, onSDLScene]);
+  }, [agentId, apiUrl, canvasMode, externalSessionId, onCanvasUpdate, onSDLScene]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {

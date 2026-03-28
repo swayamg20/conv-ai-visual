@@ -23,29 +23,10 @@ import {
   DURATION,
 } from "@/lib/gsap-setup";
 import { getInkStrokePath } from "@/lib/freehand-stroke";
+import { getCanvasPalette, snap, snapPoints, GRID_SNAP, renderGrid } from "@/lib/canvas-utils";
 import type { CanvasOperation } from "@/hooks/use-webrtc";
 import katex from "katex";
 import "katex/dist/katex.min.css";
-
-// ============= Theme-Aware Canvas Palette =============
-
-function getCanvasPalette() {
-  if (typeof window === "undefined") {
-    return { stroke: "#E8E4DC", grid: "#4A4843", axis: "#9B9790", error: "#E87B7B", bg: "#08080C" };
-  }
-  const style = getComputedStyle(document.documentElement);
-  const hsl = (v: string) => {
-    const val = style.getPropertyValue(v).trim();
-    return val ? `hsl(${val})` : "";
-  };
-  return {
-    stroke: hsl("--chalk") || "#E8E4DC",
-    grid: hsl("--chalk-faint") || "#4A4843",
-    axis: hsl("--chalk-soft") || "#9B9790",
-    error: hsl("--ember") || "#E87B7B",
-    bg: hsl("--void") || "#08080C",
-  };
-}
 
 // ============= Types =============
 
@@ -148,16 +129,6 @@ interface SVGCanvasProps {
 
 // ============= Layout Normalization =============
 
-const GRID_SNAP = 20; // snap coordinates to 20px grid
-
-function snap(v: number): number {
-  return Math.round(v / GRID_SNAP) * GRID_SNAP;
-}
-
-function snapPoints(pts: [number, number][]): [number, number][] {
-  return pts.map(([x, y]) => [snap(x), snap(y)]);
-}
-
 type ShapeBounds = { x: number; y: number; w: number; h: number };
 
 /**
@@ -237,78 +208,6 @@ function normalizeOp(op: CanvasOperation): CanvasOperation {
   if (o.height != null) o.height = Math.max(snap(o.height), 40);
   if (o.points) o.points = snapPoints(o.points);
   return o;
-}
-
-// ============= Grid Background =============
-
-// Grid covers a large area so it's visible when panning
-const GRID_EXTENT = 4000;
-
-function renderGrid(
-  svg: SVGSVGElement,
-  _width: number,
-  _height: number,
-  gridSize: number = 40
-) {
-  const existing = svg.querySelector("#canvas-grid");
-  if (existing) existing.remove();
-
-  const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-  g.setAttribute("id", "canvas-grid");
-  g.setAttribute("pointer-events", "none");
-
-  const extent = GRID_EXTENT;
-
-  // Minor gridlines
-  for (let x = gridSize; x < extent; x += gridSize) {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", String(x));
-    line.setAttribute("y1", "0");
-    line.setAttribute("x2", String(x));
-    line.setAttribute("y2", String(extent));
-    line.setAttribute("stroke", getCanvasPalette().grid);
-    line.setAttribute("stroke-width", "0.5");
-    line.setAttribute("opacity", "0.3");
-    g.appendChild(line);
-  }
-  for (let y = gridSize; y < extent; y += gridSize) {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", "0");
-    line.setAttribute("y1", String(y));
-    line.setAttribute("x2", String(extent));
-    line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", getCanvasPalette().grid);
-    line.setAttribute("stroke-width", "0.5");
-    line.setAttribute("opacity", "0.3");
-    g.appendChild(line);
-  }
-
-  // Major gridlines (every 4th)
-  const majorSize = gridSize * 4;
-  for (let x = majorSize; x < extent; x += majorSize) {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", String(x));
-    line.setAttribute("y1", "0");
-    line.setAttribute("x2", String(x));
-    line.setAttribute("y2", String(extent));
-    line.setAttribute("stroke", getCanvasPalette().grid);
-    line.setAttribute("stroke-width", "0.8");
-    line.setAttribute("opacity", "0.5");
-    g.appendChild(line);
-  }
-  for (let y = majorSize; y < extent; y += majorSize) {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", "0");
-    line.setAttribute("y1", String(y));
-    line.setAttribute("x2", String(extent));
-    line.setAttribute("y2", String(y));
-    line.setAttribute("stroke", getCanvasPalette().grid);
-    line.setAttribute("stroke-width", "0.8");
-    line.setAttribute("opacity", "0.5");
-    g.appendChild(line);
-  }
-
-  svg.insertBefore(g, svg.firstChild);
 }
 
 // ============= Component =============
@@ -429,6 +328,16 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         if (showGrid) renderGrid(svgRef.current, width, height);
       }
     }, [width, height, showGrid]);
+
+    // Kill all in-flight GSAP timelines on unmount
+    useEffect(() => {
+      return () => {
+        timelinesRef.current.forEach((tl) => tl.kill());
+        timelinesRef.current.clear();
+        sequenceQueueRef.current.forEach((tl) => tl.kill());
+        sequenceQueueRef.current = [];
+      };
+    }, []);
 
     // ============= Helpers =============
 

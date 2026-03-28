@@ -30,17 +30,20 @@
 - Observability dashboard with LLM call logs
 - ~13,250 LOC, ~$97K engineering value
 
-## What's NOT Built Yet (for v2 Agent Platform)
-- Agent creation/management (CRUD, prompt generation, config)
-- Resource ingestion pipeline (PDFs, web content -> agent knowledge)
-- User accounts / auth
-- Web search integration
-- Enhanced sandbox (beyond RestrictedPython)
-- Background agent tasks
-- Export/PDF generation
-- Assessment/quiz mode
-- Cross-session memory persistence per agent
-- Share functionality
+## What's Actually Built (Verified March 2026 — post feature sprint)
+- Auth (JWT), Agent CRUD, creation wizard, landing page
+- Resource ingestion: PDF (pymupdf) + URL (httpx+BS4), chunked, keyword search
+- Web search (Tavily), wired as DB tool
+- Struggle heatmap: topic_mastery table + TopicMasteryRepo aggregation
+- Cross-session memory: agent_id scoped, session summaries, message persistence
+
+## Core Engineering Phase (March 2026) — Quality-First Pivot
+- Full analysis at: agent-memory/product-manager/core-engineering-priorities.md
+- **Biggest AI/ML gap**: Resource search is keyword-only (SQLite LIKE). Need embeddings.
+- **Possible pipeline bug**: LLMPipeline.__init__() may not pass agent_id to MemoryManager. Verify.
+- **Context window too short**: LLM_MAX_CONTEXT_MESSAGES defaults to 5. Should be 20 minimum for tutoring.
+- **Model router too naive**: Regex patterns only. Misses physics/math/SDL complexity signals.
+- **One mind-blowing ML feature**: Adaptive difficulty — detect confusion from voice/correction patterns, auto-reduce complexity.
 
 ## Design Language — "Murmur"
 - Blackboard aesthetic, not dashboard. Chalk on dark surface.

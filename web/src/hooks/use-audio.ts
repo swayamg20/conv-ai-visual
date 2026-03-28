@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback } from "react";
+import { useRef, useCallback, useEffect } from "react";
 
 interface UseAudioOptions {
   onPlaybackComplete?: () => void;
@@ -59,8 +59,6 @@ export function useAudio(options: UseAudioOptions = {}) {
 
     // If this is a new session, stop everything and start fresh
     if (isNewSession) {
-      const t0 = performance.now();
-
       // Stop all scheduled sources immediately - MUST disconnect to prevent future playback
       scheduledSourcesRef.current.forEach(source => {
         try {
@@ -80,17 +78,12 @@ export function useAudio(options: UseAudioOptions = {}) {
       nextStartTimeRef.current = ctx.currentTime;
       isActiveRef.current = true;
 
-      const t1 = performance.now();
-      console.log(`[Audio] 🆕 New TTS session ${currentSessionRef.current} started (cleanup took ${(t1-t0).toFixed(1)}ms)`);
     }
 
     // If not active, this is stale - ignore
     if (!isActiveRef.current) {
-      console.log(`[Audio] ⏭️ Ignoring stale chunk (session inactive)`);
       return;
     }
-
-    const sessionId = currentSessionRef.current;
 
     try {
       const samples = bytes.length / 2;
@@ -119,10 +112,6 @@ export function useAudio(options: UseAudioOptions = {}) {
       // Track source
       scheduledSourcesRef.current.push(source);
 
-      const isFirstChunk = scheduledSourcesRef.current.length === 1;
-      const delay = startTime - ctx.currentTime;
-      console.log(`[Audio] 🔊 Scheduled chunk (session=${sessionId}, first=${isFirstChunk}, delay=${(delay*1000).toFixed(0)}ms, duration=${(chunkDuration*1000).toFixed(0)}ms, queued=${scheduledSourcesRef.current.length})`);
-
       // Clean up on end
       source.onended = () => {
         const index = scheduledSourcesRef.current.indexOf(source);
@@ -133,8 +122,6 @@ export function useAudio(options: UseAudioOptions = {}) {
         // If no more sources scheduled, mark inactive and notify
         if (scheduledSourcesRef.current.length === 0) {
           isActiveRef.current = false;
-          console.log(`[Audio] ✅ Session ${sessionId} playback complete`);
-          // Notify that all audio has finished playing
           onPlaybackComplete?.();
         }
       };
@@ -146,35 +133,36 @@ export function useAudio(options: UseAudioOptions = {}) {
 
   const stopAudio = useCallback(() => {
     const ctx = audioContextRef.current;
-    const sourceCount = scheduledSourcesRef.current.length;
-    const currentTime = ctx?.currentTime || 0;
-
-    console.log(`[Audio] 🛑 STOPPING all audio (had ${sourceCount} scheduled sources, currentTime=${currentTime.toFixed(3)}s)`);
 
     // Mark session as inactive immediately to reject incoming chunks
     isActiveRef.current = false;
     currentSessionRef.current += 1;
 
     // Stop all scheduled sources - CRITICAL: disconnect BEFORE stop
-    scheduledSourcesRef.current.forEach((source, idx) => {
+    scheduledSourcesRef.current.forEach((source) => {
       try {
-        // DISCONNECT FIRST - this prevents scheduled sources from playing
         source.disconnect();
-        // Then stop (might throw if not started yet, that's OK)
         source.stop(0);
-        console.log(`[Audio]   ↳ Stopped source ${idx+1}/${sourceCount}`);
-      } catch (e) {
-        console.log(`[Audio]   ↳ Source ${idx+1}/${sourceCount} already stopped`);
+      } catch {
+        // Already stopped
       }
     });
     scheduledSourcesRef.current = [];
 
-    // Reset timing
     if (ctx) {
       nextStartTimeRef.current = ctx.currentTime;
     }
+  }, []);
 
-    console.log(`[Audio] ✓ Stop complete, session now ${currentSessionRef.current}`);
+  useEffect(() => {
+    return () => {
+      scheduledSourcesRef.current.forEach((source) => {
+        try { source.disconnect(); source.stop(); } catch { /* already stopped */ }
+      });
+      scheduledSourcesRef.current = [];
+      audioContextRef.current?.close();
+      audioContextRef.current = null;
+    };
   }, []);
 
   return { initAudio, playPCM, playChunkStreaming, stopAudio };

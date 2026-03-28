@@ -10,6 +10,7 @@ Real-time voice assistant: WebRTC → Deepgram STT → Silero VAD → LLM (OpenA
 
 - **Clarify before building.** When a feature can be implemented multiple ways, present 2-3 approaches in bullet points and wait for approval before writing code. Prefer the simplest approach unless told otherwise. Do not assume complex solutions (git-based sync, static generation, extra abstraction layers) when a direct API or DB call would work.
 - **Incremental over monolithic.** Break multi-file changes into small verified steps. After each step, confirm imports resolve and the server starts before moving on.
+- **Use ExecPlans for long-horizon work.** For complex features, major refactors, and multi-hour investigations, follow the `ExecPlan` convention in [AGENTS.md](../AGENTS.md) and [`.agent/PLANS.md`](../.agent/PLANS.md). Keep the live plan in `plans/`.
 
 ## Integration Guidelines
 

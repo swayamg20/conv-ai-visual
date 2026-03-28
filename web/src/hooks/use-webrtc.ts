@@ -4,9 +4,15 @@ import { useState, useRef, useCallback } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
+import { getAuthHeaders } from "@/lib/firebase";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
+
+interface ConnectOverrides {
+  agentId?: string;
+  sessionId?: string;
+}
 
 export interface TranscriptEvent {
   text: string;
@@ -41,6 +47,9 @@ export interface CanvasOperation {
 interface UseWebRTCOptions {
   apiUrl?: string;
   canvasMode?: boolean;
+  agentId?: string;
+  sessionId?: string;
+  onSessionReady?: (sessionId: string) => void;
   onTranscript?: (event: TranscriptEvent) => void;
   onLLMResponse?: (text: string) => void;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
@@ -59,6 +68,9 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const {
     apiUrl = "http://localhost:8000",
     canvasMode = false,
+    agentId,
+    sessionId,
+    onSessionReady,
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
@@ -178,12 +190,15 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     }
   }, [log, stopAudio, updatePipelineState]);
 
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (overrides: ConnectOverrides = {}) => {
     console.log("[Connection] Connect called, current state:", pipelineStateRef.current);
     if (pcRef.current) {
       console.log("[Connection] Already connected, ignoring");
       return;
     }
+
+    const effectiveAgentId = overrides.agentId ?? agentId;
+    const effectiveSessionId = overrides.sessionId ?? sessionId;
 
     setStatus("connecting");
     log("Connecting...");
@@ -435,13 +450,16 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
       setTimeout(resolve, 2000);
     });
 
+    const authHeaders = await getAuthHeaders();
     const response = await fetch(`${apiUrl}/offer`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders },
       body: JSON.stringify({
         sdp: pc.localDescription?.sdp,
         type: pc.localDescription?.type,
         canvas_mode: canvasMode,
+        agent_id: effectiveAgentId,
+        session_id: effectiveSessionId,
       }),
     });
 
@@ -452,13 +470,18 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     }
 
     const answer = await response.json();
-    await pc.setRemoteDescription(answer);
+    if (answer.session_id) {
+      onSessionReady?.(answer.session_id);
+    }
+    await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
 
     console.log("[Connection] Connection setup complete, waiting for datachannel to open...");
   }, [
     apiUrl,
+    agentId,
     canvasMode,
     log,
+    onSessionReady,
     onTranscript,
     onLLMResponse,
     onCanvasUpdate,
@@ -470,6 +493,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onPipelineMetrics,
     onError,
     playChunkStreaming,
+    sessionId,
     stopAudio,
     updatePipelineState,
   ]);
@@ -512,4 +536,3 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     toggleTTS,
   };
 }
-

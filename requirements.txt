@@ -61,7 +61,6 @@ propcache==0.4.1
 protobuf==4.25.8
 psutil==7.1.3
 pycparser==2.23
-python-dotenv==1.0.0
 pydantic==2.12.4
 pydantic-extra-types==2.10.6
 pydantic-settings==2.11.0
@@ -106,7 +105,11 @@ uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 yarl==1.22.0
+firebase-admin>=6.0.0
 sqlmodel>=0.0.22
 aiosqlite>=0.20.0
 mem0ai>=0.1.0
 RestrictedPython>=7.0
+tavily-python>=0.3.0
+pymupdf>=1.24.0
+beautifulsoup4>=4.12.0

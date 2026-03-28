@@ -11,7 +11,7 @@ Built with WebRTC for sub-second latency, Rough.js for a hand-drawn aesthetic, a
   <img src="docs/assets/screenshot1.png" alt="Live canvas with hand-drawn diagrams" width="80%" />
 </p>
 <p align="center"><em>Live canvas — diagrams drawn in real-time as the AI speaks</em></p>
-
+q
 ---
 
 ## How It Works
@@ -123,16 +123,24 @@ cp .env.example .env
 **Optional keys:**
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `openai` | `openai`, `gemini`, or `groq` |
+| `LLM_PROVIDER` | `groq` | `openai`, `gemini`, or `groq` |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Model identifier |
 | `ELEVENLABS_API_KEY` | — | ElevenLabs TTS (falls back to Kokoro local) |
+| `TTS_MAX_RETRIES` | `2` | Retries for transient ElevenLabs failures before fallback |
+| `TTS_RETRY_BASE_DELAY_SECS` | `0.35` | Base backoff delay for ElevenLabs retries |
+| `TTS_FALLBACK_TO_KOKORO` | `true` | Enable sentence-level Kokoro fallback when cloud TTS fails |
 | `SMART_TURN_ENABLED` | `true` | ML-based turn detection |
 | `SMART_TURN_THRESHOLD` | `0.5` | Turn completion confidence (0.0–1.0) |
-| `DEEPGRAM_ENDPOINTING` | `1800` | Silence timeout in ms |
+| `DEEPGRAM_ENDPOINTING` | `700` | Silence timeout in ms |
 | `LLM_TEMPERATURE` | `0.7` | LLM sampling temperature |
-| `LLM_MAX_CONTEXT_MESSAGES` | `5` | Conversation history window |
+| `LLM_MAX_CONTEXT_MESSAGES` | `20` | Conversation history window |
+| `ALLOWED_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated frontend origins allowed to call the backend |
 
 See [`.env.example`](.env.example) for the full list.
+
+Protected API routes expect a Firebase ID token in `Authorization: Bearer <token>`.
+Local `.env` values override the repo defaults shown above.
+The Next.js frontend reads its own env file from `web/.env.local`, using `NEXT_PUBLIC_*` variables for API and Firebase config. Start from `web/.env.example`.
 
 ### 3. Run
 
@@ -142,6 +150,7 @@ uvicorn main:app --reload --port 8000
 
 # Terminal 2 — Frontend
 cd web
+cp .env.example .env.local
 npm run dev
 ```
 

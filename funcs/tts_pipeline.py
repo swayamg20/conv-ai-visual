@@ -6,6 +6,29 @@ from elevenlabs.types import VoiceSettings
 
 logger = logging.getLogger("tts-pipeline")
 
+_RETRYABLE_TTS_MARKERS = (
+    "429",
+    "500",
+    "502",
+    "503",
+    "504",
+    "rate limit",
+    "timeout",
+    "temporarily unavailable",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "server error",
+    "service unavailable",
+    "remote protocol error",
+)
+
+
+def is_retryable_tts_error(exc: Exception) -> bool:
+    """Heuristic classification for transient ElevenLabs/network errors."""
+    message = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in message for marker in _RETRYABLE_TTS_MARKERS)
+
 
 class TTSPipeline:
     """
@@ -113,4 +136,3 @@ class TTSPipeline:
         except Exception as e:
             logger.exception(f"Error fetching voice info: {e}")
             raise
-
