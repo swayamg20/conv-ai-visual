@@ -49,6 +49,13 @@ export interface SessionWithMessages extends Session {
   messages: SessionMessage[];
 }
 
+export interface SessionEndResponse {
+  id: string;
+  summary: string | null;
+  mastery_count: number;
+  status: "ended";
+}
+
 export interface Resource {
   id: string;
   agent_id: string;

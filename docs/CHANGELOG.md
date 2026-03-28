@@ -1,5 +1,48 @@
 # Changelog
 
+## 2026-03-28 — Firebase Auth Hardening, Tutoring Reliability, and Frontend Cleanup
+
+**Branch:** `codex-multi-agent-execplan-2026-03-27`
+
+This branch consolidated the active education-first workstream on top of the full-platform launch baseline, with a focus on authentication correctness, tutoring continuity, and shipping the tutoring UX without the old duplicate auth paths.
+
+### Auth + Session Reliability
+- Switched the web app to a single active Firebase auth flow and removed duplicate `/login` routing
+- Removed unused frontend auth provider/context plumbing and kept the app on the hook-based Firebase path
+- Required Firebase-backed identity on protected backend routes, including the voice `/offer` path
+- Fixed frontend auth hydration races so protected requests wait for the Firebase user before calling the backend
+- Moved frontend Firebase config out of hardcoded source into `web/.env.local` / `NEXT_PUBLIC_FIREBASE_*`
+- Added backend Firebase project configuration and improved token-verification logging
+- Made Firebase auto-provisioning compatible with the legacy `users` table by handling `password_hash` and duplicate-email reuse
+
+### Tutoring + Memory Improvements
+- Raised the default context window and added token-budget trimming for conversation history
+- Hardened cross-session continuity by propagating `agent_id` into memory/pipeline state and validating resumed sessions
+- Added mastery-aware tutoring context so prior weak areas inform later sessions
+- Added tutoring-oriented session summaries and mastery extraction prompts
+- Improved tutoring retrieval with SQL candidate filtering plus lexical reranking
+- Added more explicit physics/canvas prompting for structured visual explanations
+
+### Voice + Runtime Hardening
+- Added session TTL cleanup, better disconnect cleanup, and best-effort summary persistence on abrupt ends
+- Added ElevenLabs retry/backoff, Kokoro fallback, and observability metadata for TTS resilience
+- Hardened SQLite for local concurrent usage with WAL, timeout, busy-timeout, and foreign-key pragmas
+
+### Frontend + UX Cleanup
+- Removed duplicate/unused auth pages and providers
+- Fixed the session history / mastery panel auth path and layout issues
+- Improved mastery tooltip behavior, readability, clipping, and edge-aware placement
+- Added a shareable product brief and multiple ExecPlan documents for the ongoing roadmap
+
+### Docs + Planning
+- Added `AGENTS.md`, `.agent/PLANS.md`, and `plans/` ExecPlan scaffolding
+- Rewrote `docs/NEXT_PLAN.md` around the education-first roadmap
+- Updated setup and environment documentation for backend + frontend Firebase configuration
+
+### Verification
+- `python3 -m py_compile main.py funcs/*.py`
+- `cd web && npx tsc --noEmit`
+
 ## 2026-03-11 — Post-Build Fixes + Next Plan
 
 **Branch:** `feat/full-platform-launch`
@@ -9,7 +52,7 @@ After the initial build, fixed several integration issues discovered during test
 ### Bug Fixes
 - **pymupdf import conflict** — `import fitz` conflicted with `frontend` package; changed to `import pymupdf`
 - **passlib + bcrypt incompatibility** — dropped passlib, use `bcrypt` directly (hashpw/checkpw)
-- **API base URL** — all frontend fetch calls were hitting Next.js at :3000 instead of FastAPI at :8000; added `API_BASE` constant (`NEXT_PUBLIC_API_URL` env var)
+- **API base URL** — all frontend fetch calls were hitting Next.js at :3000 instead of FastAPI at :8000; added `API_BASE` constant (`NEXT_PUBLIC_API_URL` env var)pa
 - **Token key mismatch** — backend returns `token` but frontend checked `access_token`; fixed in login + register pages
 - **Route conflicts** — `(app)/page.tsx` + `(marketing)/page.tsx` both resolved to `/`; moved dashboard to `/dashboard`. Old observability dashboard moved from `/dashboard` to `/obs`
 - **Agent creation payload** — frontend sent flat fields but backend expected `persona: {...}` wrapper; fixed payload structure

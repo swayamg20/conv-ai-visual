@@ -11,7 +11,7 @@ import {
   signOut as firebaseSignOut,
   updateProfile,
 } from "firebase/auth";
-import { auth } from "@/lib/firebase";
+import { auth, getCurrentUser } from "@/lib/firebase";
 
 export interface User {
   id: string;
@@ -23,9 +23,11 @@ export async function signIn(email: string, password: string) {
   return signInWithEmailAndPassword(auth, email, password);
 }
 
-export async function signUp(email: string, password: string, name: string) {
+export async function signUp(email: string, password: string, name?: string) {
   const cred = await createUserWithEmailAndPassword(auth, email, password);
-  await updateProfile(cred.user, { displayName: name });
+  if (name?.trim()) {
+    await updateProfile(cred.user, { displayName: name.trim() });
+  }
   return cred;
 }
 
@@ -35,7 +37,7 @@ export async function signInWithGoogle() {
 }
 
 export async function getIdToken(): Promise<string | null> {
-  const user = auth.currentUser;
+  const user = await getCurrentUser();
   if (!user) return null;
   return user.getIdToken();
 }

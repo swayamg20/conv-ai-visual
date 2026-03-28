@@ -1,5 +1,5 @@
 import { getIdToken } from "@/hooks/use-auth";
-import type { Agent, AgentCreatePayload, Session, SessionWithMessages, Resource, MasteryData } from "./types";
+import type { Agent, AgentCreatePayload, Session, SessionEndResponse, SessionWithMessages, Resource, MasteryData } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -66,10 +66,8 @@ export async function fetchSession(sessionId: string): Promise<SessionWithMessag
   return request<SessionWithMessages>(`/api/sessions/${sessionId}`);
 }
 
-export async function endSession(sessionId: string): Promise<void> {
-  await request<{ status: string }>(`/api/sessions/${sessionId}/end`, { method: "POST" }).catch(() => {
-    // Fire and forget — don't block navigation
-  });
+export async function endSession(sessionId: string): Promise<SessionEndResponse> {
+  return request<SessionEndResponse>(`/api/sessions/${sessionId}/end`, { method: "POST" });
 }
 
 // --- Resources ---

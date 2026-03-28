@@ -1,20 +1,86 @@
 """
 SQLModel database models.
 """
+import logging
 import os
 import json
+import re
+from collections import Counter
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
 from sqlmodel import SQLModel, Field, create_engine, Session, select
-from sqlalchemy import Column, JSON, func
+from sqlalchemy import Column, JSON, event, func
 
 # Database path - use absolute path to avoid readonly issues
 DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "memory.db"))
 DATABASE_URL = f"sqlite:///{DB_PATH}"
 
 # Create engine (sync for simplicity - can switch to async later)
-engine = create_engine(DATABASE_URL, echo=False)
+# SQLite benefits from an explicit timeout and WAL-backed connections for
+# small concurrent workloads.
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    connect_args={
+        "check_same_thread": False,
+        "timeout": 30,
+    },
+)
+
+
+@event.listens_for(engine, "connect")
+def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
+    """Apply SQLite pragmas for safer concurrent access."""
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cursor.close()
+
+
+logger = logging.getLogger(__name__)
+_RESOURCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_RESOURCE_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "i",
+    "in",
+    "is",
+    "it",
+    "of",
+    "on",
+    "or",
+    "our",
+    "please",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "was",
+    "we",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "why",
+    "with",
+    "you",
+}
 
 
 def _load_json(value: str | None, default: Any = None) -> Any:
@@ -96,6 +162,9 @@ class UserModel(SQLModel, table=True):
 
     id: str = Field(primary_key=True)
     email: str = Field(unique=True, index=True)
+    # Legacy SQLite schemas still require password_hash to be present.
+    # Firebase-auth users do not use local passwords, so we persist a sentinel.
+    password_hash: str = Field(default="__firebase_auth__")
     name: str | None = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_active: bool = True
@@ -222,6 +291,20 @@ class VoicePipelineLogModel(SQLModel, table=True):
         return _load_json(self.tool_calls_json, [])
 
 
+class TTSResilienceLogModel(SQLModel, table=True):
+    """Sidecar metadata for retries and fallback without altering existing voice log rows."""
+    __tablename__ = "tts_resilience_log"
+
+    id: int | None = Field(default=None, primary_key=True)
+    voice_log_id: int = Field(index=True, foreign_key="voice_pipeline_log.id")
+    provider_used: str | None = None
+    retry_count: int = 0
+    fallback_used: bool = False
+    fallback_provider: str | None = None
+    final_error: str | None = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+
 class ResourceModel(SQLModel, table=True):
     """Uploaded resources (PDFs, URLs, text) attached to an agent."""
     __tablename__ = "resources"
@@ -316,6 +399,54 @@ def init_db():
 def get_session() -> Session:
     """Get a database session."""
     return Session(engine)
+
+
+def _resource_query_terms(query: str) -> list[str]:
+    """Normalize a resource search query into lexical terms."""
+    terms: list[str] = []
+    for token in _RESOURCE_TOKEN_RE.findall(query.lower()):
+        if len(token) < 2 or token in _RESOURCE_STOPWORDS or token in terms:
+            continue
+        terms.append(token)
+    return terms
+
+
+def _score_resource_chunk(content: str, query_terms: list[str], normalized_query: str) -> float:
+    """Score a resource chunk using lightweight lexical signals."""
+    if not content or not query_terms:
+        return 0.0
+
+    content_lower = content.lower()
+    token_counts = Counter(_RESOURCE_TOKEN_RE.findall(content_lower))
+    if not token_counts:
+        return 0.0
+
+    matched_terms = 0
+    term_hits = 0.0
+    for term in query_terms:
+        occurrences = token_counts.get(term, 0)
+        if occurrences:
+            matched_terms += 1
+            term_hits += min(occurrences, 3)
+
+    if not matched_terms:
+        return 0.0
+
+    coverage = matched_terms / len(query_terms)
+    density = term_hits / max(1.0, len(token_counts) ** 0.5)
+    score = (coverage * 4.0) + (density * 2.0)
+
+    if normalized_query and normalized_query in content_lower:
+        score += 2.5
+
+    lead_window = content_lower[:400]
+    lead_hits = sum(1 for term in query_terms if term in lead_window)
+    score += min(lead_hits, 3) * 0.35
+
+    if len(content) < 400:
+        score += 0.25
+
+    return score
 
 
 # ============== Repository Classes ==============
@@ -575,8 +706,41 @@ class UserRepo:
         with get_session() as session:
             user = session.get(UserModel, uid)
             if user:
+                updated = False
+                if email and user.email != email:
+                    user.email = email
+                    updated = True
+                if name != user.name:
+                    user.name = name
+                    updated = True
+                if updated:
+                    session.add(user)
+                    session.commit()
+                    session.refresh(user)
                 return user
-            user = UserModel(id=uid, email=email, name=name)
+
+            if email:
+                stmt = select(UserModel).where(UserModel.email == email)
+                existing_by_email = session.exec(stmt).first()
+                if existing_by_email:
+                    if name != existing_by_email.name:
+                        existing_by_email.name = name
+                        session.add(existing_by_email)
+                        session.commit()
+                        session.refresh(existing_by_email)
+                    logger.info(
+                        "Reusing legacy user row %s for Firebase login %s based on email match",
+                        existing_by_email.id,
+                        uid,
+                    )
+                    return existing_by_email
+
+            user = UserModel(
+                id=uid,
+                email=email,
+                name=name,
+                password_hash="__firebase_auth__",
+            )
             session.add(user)
             session.commit()
             session.refresh(user)
@@ -953,6 +1117,8 @@ class VoicePipelineLogRepo:
                 interrupted_q = interrupted_q.where(VoicePipelineLogModel.mode == mode)
             interrupted_count = db.exec(interrupted_q).one() or 0
 
+            resilience = TTSResilienceLogRepo.get_stats_for_voice_logs(db, mode=mode)
+
             return {
                 "total_turns": total,
                 "avg_total_ms": _avg(VoicePipelineLogModel.latency_total_ms),
@@ -970,7 +1136,71 @@ class VoicePipelineLogRepo:
                 "error_rate": round(error_count / total * 100, 2) if total else 0,
                 "interrupted_count": interrupted_count,
                 "interrupt_rate": round(interrupted_count / total * 100, 2) if total else 0,
+                "retry_turns": resilience["retry_turns"],
+                "avg_tts_retry_count": resilience["avg_tts_retry_count"],
+                "fallback_count": resilience["fallback_count"],
+                "fallback_rate": resilience["fallback_rate"],
             }
+
+
+class TTSResilienceLogRepo:
+    """Repository for TTS retry/fallback metadata."""
+
+    @staticmethod
+    def save(**kwargs) -> TTSResilienceLogModel:
+        with get_session() as session:
+            record = TTSResilienceLogModel(**kwargs)
+            session.add(record)
+            session.commit()
+            session.refresh(record)
+            return record
+
+    @staticmethod
+    def get_by_voice_log_ids(voice_log_ids: list[int]) -> dict[int, TTSResilienceLogModel]:
+        if not voice_log_ids:
+            return {}
+        with get_session() as session:
+            stmt = select(TTSResilienceLogModel).where(
+                TTSResilienceLogModel.voice_log_id.in_(voice_log_ids)
+            )
+            rows = list(session.exec(stmt).all())
+            return {row.voice_log_id: row for row in rows}
+
+    @staticmethod
+    def get_stats_for_voice_logs(db: Session, mode: str | None = None) -> dict[str, float]:
+        log_ids_stmt = select(VoicePipelineLogModel.id)
+        if mode:
+            log_ids_stmt = log_ids_stmt.where(VoicePipelineLogModel.mode == mode)
+        voice_log_ids = list(db.exec(log_ids_stmt).all())
+        if not voice_log_ids:
+            return {
+                "retry_turns": 0,
+                "avg_tts_retry_count": 0.0,
+                "fallback_count": 0,
+                "fallback_rate": 0.0,
+            }
+
+        rows_stmt = select(TTSResilienceLogModel).where(
+            TTSResilienceLogModel.voice_log_id.in_(voice_log_ids)
+        )
+        rows = list(db.exec(rows_stmt).all())
+        if not rows:
+            return {
+                "retry_turns": 0,
+                "avg_tts_retry_count": 0.0,
+                "fallback_count": 0,
+                "fallback_rate": 0.0,
+            }
+
+        retry_turns = sum(1 for row in rows if row.retry_count > 0)
+        fallback_count = sum(1 for row in rows if row.fallback_used)
+        avg_retry_count = round(sum(row.retry_count for row in rows) / len(rows), 2)
+        return {
+            "retry_turns": retry_turns,
+            "avg_tts_retry_count": avg_retry_count,
+            "fallback_count": fallback_count,
+            "fallback_rate": round(fallback_count / len(rows) * 100, 2),
+        }
 
 
 class ResourceRepo:
@@ -1044,7 +1274,7 @@ class ResourceChunkRepo:
 
     @staticmethod
     def search(agent_id: str, query: str, limit: int = 5) -> list[ResourceChunkModel]:
-        """Simple keyword search using LIKE across chunks for the given agent."""
+        """Lexical search with SQL candidate filtering and Python reranking."""
         with get_session() as session:
             # Get resource IDs for this agent
             resource_ids_stmt = select(ResourceModel.id).where(
@@ -1053,24 +1283,65 @@ class ResourceChunkRepo:
             )
             resource_ids = list(session.exec(resource_ids_stmt).all())
             if not resource_ids:
+                logger.debug("resource search skipped for agent_id=%s: no ready resources", agent_id)
                 return []
 
-            # Search chunks with LIKE for each query word
-            stmt = select(ResourceChunkModel).where(
-                ResourceChunkModel.resource_id.in_(resource_ids)
-            )
-            # Match any word from the query
-            words = [w.strip() for w in query.split() if len(w.strip()) > 2]
-            if words:
-                from sqlalchemy import or_
-                conditions = [
-                    ResourceChunkModel.content.contains(word)
-                    for word in words
-                ]
-                stmt = stmt.where(or_(*conditions))
+            query_terms = _resource_query_terms(query)
+            if not query_terms:
+                logger.debug(
+                    "resource search skipped for agent_id=%s: no meaningful query terms",
+                    agent_id,
+                )
+                return []
 
-            stmt = stmt.limit(limit)
-            return list(session.exec(stmt).all())
+            from sqlalchemy import or_
+
+            conditions = [
+                func.lower(ResourceChunkModel.content).like(f"%{term}%")
+                for term in query_terms
+            ]
+            normalized_query = " ".join(query_terms)
+            if len(query_terms) > 1:
+                conditions.append(
+                    func.lower(ResourceChunkModel.content).like(f"%{normalized_query}%")
+                )
+
+            candidate_limit = max(limit * 20, 100)
+            stmt = (
+                select(ResourceChunkModel)
+                .where(
+                    ResourceChunkModel.resource_id.in_(resource_ids),
+                    or_(*conditions),
+                )
+                .order_by(ResourceChunkModel.resource_id, ResourceChunkModel.chunk_index)
+                .limit(candidate_limit)
+            )
+
+            candidates = list(session.exec(stmt).all())
+            if not candidates:
+                logger.debug(
+                    "resource search returned no candidates for agent_id=%s terms=%d",
+                    agent_id,
+                    len(query_terms),
+                )
+                return []
+
+            ranked = sorted(
+                (
+                    (_score_resource_chunk(chunk.content, query_terms, normalized_query), chunk)
+                    for chunk in candidates
+                ),
+                key=lambda item: (-item[0], item[1].resource_id, item[1].chunk_index),
+            )
+            results = [chunk for score, chunk in ranked if score > 0][:limit]
+            logger.debug(
+                "resource search agent_id=%s terms=%d candidates=%d returned=%d",
+                agent_id,
+                len(query_terms),
+                len(candidates),
+                len(results),
+            )
+            return results
 
 
 class TopicMasteryRepo:
@@ -1139,7 +1410,77 @@ class TopicMasteryRepo:
 
         return {"topics": topics, "chapters": chapters}
 
+    @staticmethod
+    def get_tutoring_context(
+        user_id: str,
+        agent_id: str,
+        max_topics: int = 5,
+        max_chapters: int = 5,
+    ) -> dict:
+        """Return a compact, deterministic tutoring context for prompts."""
+        summary = TopicMasteryRepo.get_summary(user_id, agent_id)
+        topics = summary.get("topics", [])
+        chapters = summary.get("chapters", [])
+
+        if not topics and not chapters:
+            return {"topics": [], "chapters": [], "prompt": ""}
+
+        signal_order = {
+            "struggled": 0,
+            "unclear": 1,
+            "understood": 2,
+        }
+
+        ordered_topics = sorted(
+            topics,
+            key=lambda item: (
+                signal_order.get(item.get("signal_type"), 99),
+                -int(item.get("session_count") or 0),
+                (item.get("topic") or "").lower(),
+            ),
+        )[:max_topics]
+
+        ordered_chapters = sorted(
+            chapters,
+            key=lambda item: (
+                -(item.get("struggled") or 0),
+                -(item.get("unclear") or 0),
+                -(item.get("understood") or 0),
+                (item.get("name") or "").lower(),
+            ),
+        )[:max_chapters]
+
+        topic_lines = [
+            (
+                f"{item.get('topic')} "
+                f"[{item.get('signal_type', 'unknown')}, "
+                f"sessions={item.get('session_count', 0)}, "
+                f"chapter={item.get('chapter') or 'Uncategorized'}]"
+            )
+            for item in ordered_topics
+        ]
+        chapter_lines = [
+            (
+                f"{item.get('name')} "
+                f"[U={item.get('understood', 0)}, "
+                f"S={item.get('struggled', 0)}, "
+                f"C={item.get('unclear', 0)}]"
+            )
+            for item in ordered_chapters
+        ]
+
+        prompt_parts: list[str] = []
+        if topic_lines:
+            prompt_parts.append("Recent topics: " + "; ".join(topic_lines))
+        if chapter_lines:
+            prompt_parts.append("Chapter balance: " + "; ".join(chapter_lines))
+
+        return {
+            "topics": ordered_topics,
+            "chapters": ordered_chapters,
+            "prompt": "\n".join(prompt_parts),
+        }
+
 
 # Initialize DB on import
 init_db()
-

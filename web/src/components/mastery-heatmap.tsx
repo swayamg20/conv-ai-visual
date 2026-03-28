@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { fetchMastery } from "@/lib/api";
 import type { MasteryData, TopicMastery, ChapterMastery } from "@/lib/types";
@@ -41,19 +41,49 @@ function TopicNode({
   index: number;
 }) {
   const [showTooltip, setShowTooltip] = useState(false);
+  const [tooltipPlacement, setTooltipPlacement] = useState<"center" | "left" | "right">("center");
   const colors = SIGNAL_COLORS[topic.signal_type];
+  const nodeRef = useRef<HTMLDivElement>(null);
+
+  const updateTooltipPlacement = useCallback(() => {
+    const rect = nodeRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const tooltipWidth = 224;
+    const gutter = 24;
+    const centeredLeft = rect.left + rect.width / 2 - tooltipWidth / 2;
+    const centeredRight = rect.left + rect.width / 2 + tooltipWidth / 2;
+
+    if (centeredRight > window.innerWidth - gutter) {
+      setTooltipPlacement("right");
+      return;
+    }
+
+    if (centeredLeft < gutter) {
+      setTooltipPlacement("left");
+      return;
+    }
+
+    setTooltipPlacement("center");
+  }, []);
+
+  const handleTooltipOpen = useCallback(() => {
+    updateTooltipPlacement();
+    setShowTooltip(true);
+  }, [updateTooltipPlacement]);
 
   return (
     <motion.div
+      ref={nodeRef}
       initial={{ opacity: 0, scale: 0.8 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ delay: index * 0.04, duration: 0.3 }}
-      className="relative"
-      onMouseEnter={() => setShowTooltip(true)}
+      className={`relative ${showTooltip ? "z-20" : "z-0"}`}
+      onMouseEnter={handleTooltipOpen}
       onMouseLeave={() => setShowTooltip(false)}
     >
       <motion.div
-        className="px-3 py-2 rounded-xl text-sm font-medium cursor-default transition-all duration-200 border"
+        className="max-w-full cursor-default rounded-2xl border px-3.5 py-2.5 text-sm font-medium transition-all duration-200"
         style={{
           backgroundColor: colors.bgFaint,
           borderColor: colors.border,
@@ -71,7 +101,7 @@ function TopicNode({
         }
         whileHover={{ scale: 1.05 }}
       >
-        <span className="font-handwriting text-base" style={{ color: colors.bg }}>
+        <span className="block max-w-full break-words text-sm font-medium leading-snug sm:text-[15px]" style={{ color: colors.bg }}>
           {topic.topic}
         </span>
       </motion.div>
@@ -84,7 +114,20 @@ function TopicNode({
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 4, scale: 0.95 }}
             transition={{ duration: 0.15 }}
-            className="absolute z-50 bottom-full left-1/2 -translate-x-1/2 mb-2 w-56 glass-card rounded-xl p-3 pointer-events-none"
+            className={`pointer-events-none absolute bottom-full z-50 mb-3 w-56 max-w-[min(15rem,calc(100vw-3rem))] rounded-xl border p-3 shadow-2xl ${
+              tooltipPlacement === "center"
+                ? "left-1/2 -translate-x-1/2"
+                : tooltipPlacement === "left"
+                ? "left-0"
+                : "right-0"
+            }`}
+            style={{
+              backgroundColor: "hsl(var(--slate) / 0.97)",
+              borderColor: "hsl(var(--chalk-faint) / 0.24)",
+              boxShadow: "0 20px 48px rgba(0, 0, 0, 0.42)",
+              backdropFilter: "blur(18px)",
+              WebkitBackdropFilter: "blur(18px)",
+            }}
           >
             <p className="text-sm font-semibold text-foreground mb-1">{topic.topic}</p>
             <p className="text-xs text-chalk-soft">
@@ -100,7 +143,16 @@ function TopicNode({
               </span>
             </div>
             {/* Triangle pointer */}
-            <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-[6px] border-l-transparent border-r-[6px] border-r-transparent border-t-[6px] border-t-chalk-faint/20" />
+            <div
+              className={`absolute top-full h-0 w-0 border-l-[7px] border-l-transparent border-r-[7px] border-r-transparent border-t-[7px] ${
+                tooltipPlacement === "center"
+                  ? "left-1/2 -translate-x-1/2"
+                  : tooltipPlacement === "left"
+                  ? "left-8"
+                  : "right-8"
+              }`}
+              style={{ borderTopColor: "hsl(var(--slate) / 0.97)" }}
+            />
           </motion.div>
         )}
       </AnimatePresence>
@@ -127,11 +179,11 @@ function ChapterGroup({
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ delay: chapterIndex * 0.1, duration: 0.4 }}
-      className="glass-card rounded-2xl p-5"
+      className="rounded-[24px] p-4 glass-card sm:p-5"
     >
       {/* Chapter header */}
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-base font-semibold font-handwriting tracking-wide text-foreground">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold tracking-tight text-foreground">
           {chapter.name}
         </h3>
         <span className="text-xs text-chalk-soft font-mono">
@@ -171,7 +223,7 @@ function ChapterGroup({
       </div>
 
       {/* Topic nodes */}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap gap-2.5">
         {topics.map((topic, i) => (
           <TopicNode key={topic.topic} topic={topic} index={i} />
         ))}
@@ -303,7 +355,7 @@ export function MasteryHeatmap({ agentId }: MasteryHeatmapProps) {
   return (
     <div className="space-y-4">
       {/* Legend */}
-      <div className="flex items-center gap-4 mb-2 px-1">
+      <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-2 px-1">
         {(["understood", "struggled", "unclear"] as const).map((type) => (
           <div key={type} className="flex items-center gap-1.5">
             <div

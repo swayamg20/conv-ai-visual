@@ -14,7 +14,7 @@ import { SessionHistoryPanel } from "@/components/session-history-panel";
 
 export default function DashboardPage() {
   const router = useRouter();
-  const { user, logout } = useAuth();
+  const { user, logout, isLoading: authLoading } = useAuth();
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +24,7 @@ export default function DashboardPage() {
 
   const loadAgents = useCallback(async () => {
     try {
+      setLoading(true);
       setError(null);
       const data = await fetchAgents();
       setAgents(data);
@@ -36,8 +37,19 @@ export default function DashboardPage() {
   }, []);
 
   useEffect(() => {
-    loadAgents();
-  }, [loadAgents]);
+    if (authLoading) {
+      return;
+    }
+
+    if (!user) {
+      setAgents([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+
+    void loadAgents();
+  }, [authLoading, loadAgents, user]);
 
   const handleDeleteConfirm = async (agentId: string) => {
     setConfirmDeleteId(null);

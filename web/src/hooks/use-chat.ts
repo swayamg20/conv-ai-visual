@@ -22,13 +22,14 @@ type SSEEvent =
 interface UseChatOptions {
   apiUrl?: string;
   canvasMode?: boolean;
+  agentId?: string;
   sessionId?: string | null;
   onCanvasUpdate?: (operations: CanvasOperation[]) => void;
   onSDLScene?: (sdl: SDLScene) => void;
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
+  const { apiUrl = "http://localhost:8000", canvasMode = false, agentId, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -56,11 +57,15 @@ export function useChat(options: UseChatOptions = {}) {
     try {
       const response = await fetch(`${apiUrl}/chat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(await getAuthHeaders()),
+        },
         body: JSON.stringify({
           message: text,
           session_id: sessionIdRef.current,
           canvas_mode: canvasMode,
+          agent_id: agentId,
         }),
       });
 
@@ -133,7 +138,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [apiUrl, canvasMode, externalSessionId, onCanvasUpdate, onSDLScene]);
+  }, [agentId, apiUrl, canvasMode, externalSessionId, onCanvasUpdate, onSDLScene]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {

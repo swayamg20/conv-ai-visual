@@ -3,9 +3,12 @@ __pycache__/
 *.pyc
 .DS_Store
 *.db
+*.db-shm
+*.db-wal
 /funcs/models.py
 /web/node_modules
 /web/.next
+file.json
 
 # Environment variables
 .env

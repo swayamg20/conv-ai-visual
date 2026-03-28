@@ -98,7 +98,7 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="fixed inset-0 z-50 flex items-center justify-center p-6"
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-3 sm:items-center sm:p-6"
       onClick={onClose}
     >
       {/* Backdrop */}
@@ -111,17 +111,17 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
         onClick={(e) => e.stopPropagation()}
-        className="relative glass-card rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden"
+        className="relative my-4 flex max-h-[min(88vh,48rem)] w-full max-w-xl flex-col overflow-hidden rounded-[28px] glass-card sm:my-0"
       >
         {/* Header */}
-        <div className="p-6 border-b border-chalk-faint/20 shrink-0">
+        <div className="shrink-0 border-b border-chalk-faint/20 p-5 sm:p-6">
           <div className="flex items-start justify-between gap-4">
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               <span className="text-3xl">{agent.icon || "🤖"}</span>
-              <div>
-                <h2 className="text-lg font-semibold">{agent.name}</h2>
+              <div className="min-w-0">
+                <h2 className="truncate text-lg font-semibold">{agent.name}</h2>
                 {agent.description && (
-                  <p className="text-sm text-chalk-soft line-clamp-1 mt-0.5">
+                  <p className="mt-0.5 line-clamp-2 text-sm text-chalk-soft">
                     {agent.description}
                   </p>
                 )}
@@ -136,7 +136,7 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
             </button>
           </div>
 
-          <div className="mt-4">
+          <div className="mt-5">
             <FloatingButton
               variant="primary"
               size="sm"
@@ -149,26 +149,26 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
           </div>
 
           {/* Tabs */}
-          <div className="flex gap-1 mt-4 p-1 rounded-xl bg-chalk-faint/10">
+          <div className="mt-5 flex gap-1 rounded-xl bg-chalk-faint/10 p-1">
             {tabs.map((tab) => (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id)}
-                className={`flex-1 inline-flex items-center justify-center gap-1.5 h-8 rounded-lg text-xs font-medium transition-all duration-200 ${
+                className={`inline-flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-3 text-xs font-medium transition-all duration-200 ${
                   activeTab === tab.id
                     ? "bg-amber/15 text-amber border border-amber/20"
                     : "text-chalk-soft hover:text-foreground"
                 }`}
               >
                 {tab.icon}
-                {tab.label}
+                <span className="truncate">{tab.label}</span>
               </button>
             ))}
           </div>
         </div>
 
         {/* Tab Content */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto px-4 pb-4 pt-3 sm:px-5 sm:pb-5">
           <AnimatePresence mode="wait">
             {activeTab === "sessions" && (
               <motion.div
@@ -177,7 +177,7 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: 10 }}
                 transition={{ duration: 0.2 }}
-                className="p-4"
+                className="min-h-full"
               >
                 {loading && <SessionsSkeleton />}
 
@@ -255,7 +255,7 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -10 }}
                 transition={{ duration: 0.2 }}
-                className="p-4"
+                className="min-h-full"
               >
                 <MasteryHeatmap agentId={agent.id} />
               </motion.div>

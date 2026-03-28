@@ -20,7 +20,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatInterface } from "@/components/chat-interface";
 import { BackgroundDoodles, WaveformToSketch } from "@/components/murmur-doodles";
 import { fetchAgent, createSession, endSession, API_BASE } from "@/lib/api";
-import type { Agent } from "@/lib/types";
+import type { Agent, Session, SessionEndResponse } from "@/lib/types";
 
 export default function AgentSessionPage() {
   const params = useParams();
@@ -34,6 +34,9 @@ export default function AgentSessionPage() {
   const [agentError, setAgentError] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(existingSessionId);
   const sessionIdRef = useRef<string | null>(existingSessionId);
+  const sessionInitPromiseRef = useRef<Promise<Session> | null>(null);
+  const [sessionEndResult, setSessionEndResult] = useState<SessionEndResponse | null>(null);
+  const [isEndingSession, setIsEndingSession] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -48,15 +51,22 @@ export default function AgentSessionPage() {
   useEffect(() => {
     if (existingSessionId) return; // Already have a session to resume
     let cancelled = false;
-    createSession(agentId)
+    const sessionPromise = createSession(agentId);
+    sessionInitPromiseRef.current = sessionPromise;
+    sessionPromise
       .then((session) => {
-        if (!cancelled) {
+        if (!cancelled && !sessionIdRef.current) {
           setSessionId(session.id);
           sessionIdRef.current = session.id;
         }
       })
       .catch(() => {
         // Non-blocking — session tracking is optional
+      })
+      .finally(() => {
+        if (sessionInitPromiseRef.current === sessionPromise) {
+          sessionInitPromiseRef.current = null;
+        }
       });
     return () => { cancelled = true; };
   }, [agentId, existingSessionId]);
@@ -77,7 +87,7 @@ export default function AgentSessionPage() {
       window.removeEventListener("beforeunload", handleBeforeUnload);
       // Fire end-session on component unmount (navigation away)
       if (sessionIdRef.current) {
-        endSession(sessionIdRef.current);
+        void endSession(sessionIdRef.current).catch(() => {});
       }
     };
   }, []);
@@ -174,6 +184,7 @@ export default function AgentSessionPage() {
     clearChat,
   } = useChat({
     canvasMode: true,
+    agentId,
     sessionId,
     onCanvasUpdate: handleCanvasUpdate,
     onSDLScene: handleSDLScene,
@@ -213,6 +224,39 @@ export default function AgentSessionPage() {
     handleLog(`Pipeline: ${parts.join(" | ")}`);
   }, [handleLog]);
 
+  const handleVoiceSessionReady = useCallback((nextSessionId: string) => {
+    if (!nextSessionId) {
+      return;
+    }
+    sessionIdRef.current = nextSessionId;
+    setSessionId((current) => (current === nextSessionId ? current : nextSessionId));
+  }, []);
+
+  const ensureSessionId = useCallback(async (): Promise<string | null> => {
+    if (sessionIdRef.current) {
+      return sessionIdRef.current;
+    }
+
+    let sessionPromise = sessionInitPromiseRef.current;
+    if (!sessionPromise) {
+      sessionPromise = createSession(agentId);
+      sessionInitPromiseRef.current = sessionPromise;
+    }
+
+    try {
+      const session = await sessionPromise;
+      sessionIdRef.current = session.id;
+      setSessionId((current) => (current === session.id ? current : session.id));
+      return session.id;
+    } catch {
+      return null;
+    } finally {
+      if (sessionInitPromiseRef.current === sessionPromise) {
+        sessionInitPromiseRef.current = null;
+      }
+    }
+  }, [agentId]);
+
   const {
     status,
     pipelineState,
@@ -224,6 +268,9 @@ export default function AgentSessionPage() {
     toggleMicMute,
     toggleTTS,
   } = useWebRTC({
+    agentId,
+    sessionId: sessionIdRef.current ?? undefined,
+    onSessionReady: handleVoiceSessionReady,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
@@ -238,10 +285,34 @@ export default function AgentSessionPage() {
     onStateChange: handleStateChange,
   });
 
-  const handleConnect = useCallback(() => {
+  const handleConnect = useCallback(async () => {
     initAudio();
-    connect();
-  }, [initAudio, connect]);
+    const ensuredSessionId = await ensureSessionId();
+    connect({ agentId, sessionId: ensuredSessionId ?? undefined });
+  }, [agentId, connect, ensureSessionId, initAudio]);
+
+  const handleEndSession = useCallback(async () => {
+    if (isEndingSession) return;
+    setIsEndingSession(true);
+    try {
+      if (sessionIdRef.current) {
+        const result = await endSession(sessionIdRef.current);
+        setSessionEndResult(result);
+        sessionIdRef.current = null;
+        setSessionId(null);
+      }
+    } catch {
+      setSessionEndResult({
+        id: sessionIdRef.current ?? "",
+        summary: null,
+        mastery_count: 0,
+        status: "ended",
+      });
+    } finally {
+      disconnect();
+      setIsEndingSession(false);
+    }
+  }, [disconnect, isEndingSession]);
 
   const isConnected = status === "connected";
   const isConnecting = status === "connecting";
@@ -348,8 +419,8 @@ export default function AgentSessionPage() {
                   state={voiceState}
                   size="lg"
                   audioLevel={0.3}
-                  onClick={isConnected ? disconnect : handleConnect}
-                  disabled={isConnecting}
+                  onClick={isConnected ? handleEndSession : handleConnect}
+                  disabled={isConnecting || isEndingSession}
                 />
               </motion.div>
 
@@ -496,6 +567,44 @@ export default function AgentSessionPage() {
           logs={logs}
           pipelineState={pipelineState}
         />
+      )}
+
+      {sessionEndResult && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 z-40 flex items-center justify-center bg-background/70 px-6 backdrop-blur-sm"
+        >
+          <motion.div
+            initial={{ y: 18, scale: 0.98 }}
+            animate={{ y: 0, scale: 1 }}
+            transition={{ type: "spring", stiffness: 220, damping: 24 }}
+            className="w-full max-w-xl"
+          >
+            <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="space-y-5 border border-chalk-faint/40">
+              <div className="space-y-2">
+                <p className="text-xs uppercase tracking-[0.24em] text-muted-foreground">Session complete</p>
+                <h2 className="text-2xl font-semibold tracking-tight">Summary for {agent.name}</h2>
+              </div>
+              <div className="rounded-2xl bg-graphite/40 p-5 text-sm leading-relaxed text-foreground/90">
+                {sessionEndResult.summary || "No summary was generated for this session."}
+              </div>
+              {sessionEndResult.summary && sessionEndResult.mastery_count > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {sessionEndResult.mastery_count} learning signal{sessionEndResult.mastery_count === 1 ? "" : "s"} saved for future tutoring.
+                </p>
+              )}
+              <div className="flex justify-end">
+                <button
+                  onClick={() => router.push("/dashboard")}
+                  className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
+                >
+                  Back to dashboard
+                </button>
+              </div>
+            </GlassmorphicCard>
+          </motion.div>
+        </motion.div>
       )}
     </div>
   );

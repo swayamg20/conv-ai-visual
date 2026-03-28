@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { useAuth } from "@/contexts/auth-context";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { signIn, signUp, signInWithGoogle } from "@/hooks/use-auth";
 
 export default function LoginPage() {
   const [mode, setMode] = useState<"signin" | "signup">("signin");
@@ -13,7 +13,6 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { signIn, signUp, signInWithGoogle } = useAuth();
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -27,7 +26,7 @@ export default function LoginPage() {
       } else {
         await signUp(email, password);
       }
-      router.push("/");
+      router.push("/dashboard");
     } catch (err: any) {
       const code = err?.code || "";
       if (code === "auth/user-not-found" || code === "auth/wrong-password" || code === "auth/invalid-credential") {
@@ -50,7 +49,7 @@ export default function LoginPage() {
     setError("");
     try {
       await signInWithGoogle();
-      router.push("/");
+      router.push("/dashboard");
     } catch (err: any) {
       if (err?.code !== "auth/popup-closed-by-user") {
         setError(err?.message || "Google sign-in failed.");
@@ -105,6 +104,7 @@ export default function LoginPage() {
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={mode === "signup" ? "At least 6 characters" : ""}
                   required
+                  minLength={6}
                   autoComplete={mode === "signin" ? "current-password" : "new-password"}
                 />
               </div>

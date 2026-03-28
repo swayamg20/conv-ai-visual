@@ -6,6 +6,22 @@ and maps capability strings to tool names.
 """
 
 
+def _is_physics_subject(subject: str) -> bool:
+    """Return True when the subject string clearly points to physics tutoring."""
+    normalized = subject.lower()
+    physics_keywords = (
+        "physics",
+        "mechanics",
+        "kinematics",
+        "dynamics",
+        "motion",
+        "forces",
+        "jee",
+        "cbse",
+    )
+    return any(keyword in normalized for keyword in physics_keywords)
+
+
 def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
     """
     Compile a structured persona dict + capabilities into a full system prompt.
@@ -56,6 +72,19 @@ def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
         lines.append("You have access to a visual whiteboard canvas. Use the teach_with_visuals tool for explanations.")
         lines.append("Every visual explanation must use the teach_with_visuals tool with step-by-step narration.")
         lines.append("Prefer visual components (diagrams, charts, equations) over long text narration.")
+        lines.append("When solving a problem, show the setup first, then the reasoning, then the final result.")
+        lines.append("Keep each visual step focused: one idea per step, with short voice narration.")
+        lines.append("Use labels, arrows, highlights, and equations to make the student's next step obvious.")
+
+        if _is_physics_subject(subject):
+            lines.append("For physics, be concrete and diagram-first.")
+            lines.append("Use free-body diagrams for force problems before writing equations.")
+            lines.append("For inclined planes, draw the slope, angle, weight, normal, and resolved force components before solving.")
+            lines.append("For projectile motion, draw axes, launch angle, initial velocity components, and key points of the trajectory.")
+            lines.append("For graph questions, explicitly name the axes, units, slope, intercept, area, and what each means physically.")
+            lines.append("For function or motion plots, use coordinate_plane or function_plot instead of describing the graph in words.")
+            lines.append("Solve physics problems in this order: identify givens, draw the diagram, choose equations, substitute carefully, then check units and direction.")
+            lines.append("Do not jump straight to formulas when a diagram would reduce confusion.")
 
     if "web_search" in capabilities:
         lines.append("")
@@ -105,6 +134,31 @@ def append_resource_context(system_prompt: str, resource_names: list[str]) -> st
         f"You have access to the following resources: {names_list}.",
         "When relevant, use the search_resources tool to look up information from these resources.",
         "Cite the resource name when referencing information from them.",
+    ]
+    return system_prompt + "\n".join(lines)
+
+
+def append_mastery_context(system_prompt: str, mastery_context: str) -> str:
+    """
+    Append caller-prepared mastery context to an agent system prompt.
+
+    Args:
+        system_prompt: Existing compiled system prompt.
+        mastery_context: Prebuilt text block describing known strengths, struggles,
+            or prior-session tutoring signals.
+
+    Returns:
+        Updated system prompt with tutoring-specific mastery guidance.
+    """
+    if not mastery_context or not mastery_context.strip():
+        return system_prompt
+
+    lines = [
+        "",
+        "MASTERY CONTEXT:",
+        mastery_context.strip(),
+        "Use this to adjust depth, pace, and examples.",
+        "Reinforce weak areas gently, and do not waste time re-teaching topics the student already handles well unless needed.",
     ]
     return system_prompt + "\n".join(lines)
 

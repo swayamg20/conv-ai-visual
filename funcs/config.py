@@ -11,6 +11,13 @@ env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(dotenv_path=env_path)
 
 
+def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
+    """Parse a comma-separated env var into a cleaned string list."""
+    if not value:
+        return list(default)
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class Config:
     """Application configuration."""
     # Provider selection — Groq default for fast inference (~80ms TTFT)
@@ -23,7 +30,7 @@ class Config:
     # Higher values = wait longer for user to continue speaking (better for natural pauses)
     # Lower values = faster finalization (but may cut off mid-sentence)
     # Recommended: 1500-2000ms for natural conversation with pauses
-    # Default: 1800ms (1.8 seconds) - patient enough for natural speech
+    # Default: 700ms (0.7 seconds) - tuned here for faster turn finalization
     DEEPGRAM_ENDPOINTING: int = int(os.getenv("DEEPGRAM_ENDPOINTING", "700"))
     # Utterance end: milliseconds of gap after last word before sending UtteranceEnd event
     # This works with endpointing to detect complete sentences vs just silence
@@ -52,7 +59,11 @@ class Config:
     MEMORY_SEMANTIC_TIMEOUT_SECS: float = float(os.getenv("MEMORY_SEMANTIC_TIMEOUT_SECS", "1.0"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
-    LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "5"))
+    LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
+    ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
+        os.getenv("ALLOWED_CORS_ORIGINS"),
+        ("http://localhost:3000",),
+    )
     LLM_ASYNC_CONTEXT: bool = os.getenv("LLM_ASYNC_CONTEXT", "true").lower() == "true"
     LLM_TOOL_SCHEMA_CACHE: bool = os.getenv("LLM_TOOL_SCHEMA_CACHE", "true").lower() == "true"
     LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "true").lower() == "true"
@@ -162,6 +173,9 @@ EXAMPLE — "Explain the Pythagorean theorem":
     TTS_SIMILARITY_BOOST: float = float(os.getenv("TTS_SIMILARITY_BOOST", "0.75"))
     TTS_STYLE: float = float(os.getenv("TTS_STYLE", "0.0"))
     TTS_USE_SPEAKER_BOOST: bool = os.getenv("TTS_USE_SPEAKER_BOOST", "true").lower() == "true"
+    TTS_MAX_RETRIES: int = int(os.getenv("TTS_MAX_RETRIES", "2"))
+    TTS_RETRY_BASE_DELAY_SECS: float = float(os.getenv("TTS_RETRY_BASE_DELAY_SECS", "0.35"))
+    TTS_FALLBACK_TO_KOKORO: bool = os.getenv("TTS_FALLBACK_TO_KOKORO", "true").lower() == "true"
     # Firebase Auth
     FIREBASE_SERVICE_ACCOUNT_PATH: Optional[str] = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
     FIREBASE_PROJECT_ID: Optional[str] = os.getenv("FIREBASE_PROJECT_ID")
@@ -192,6 +206,9 @@ EXAMPLE — "Explain the Pythagorean theorem":
         # Validate TTS configuration
         if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
             raise ValueError("ELEVENLABS_API_KEY environment variable is required when TTS_PROVIDER=elevenlabs")
+
+        if not cls.ALLOWED_CORS_ORIGINS:
+            raise ValueError("ALLOWED_CORS_ORIGINS must contain at least one origin")
 
         return True
 

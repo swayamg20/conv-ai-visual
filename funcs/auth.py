@@ -31,12 +31,15 @@ def _ensure_firebase() -> firebase_admin.App | None:
             cred = credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
             _firebase_app = firebase_admin.initialize_app(cred)
         elif config.FIREBASE_PROJECT_ID:
-            # Application Default Credentials (Cloud Run, etc.)
+            # Explicitly pin the Firebase project for local/dev token verification.
             _firebase_app = firebase_admin.initialize_app(options={"projectId": config.FIREBASE_PROJECT_ID})
         else:
-            # Try default credentials (useful in GCP environments)
+            logger.warning("Firebase project is not configured; set FIREBASE_PROJECT_ID for local auth verification")
             _firebase_app = firebase_admin.initialize_app()
-        logger.info("Firebase Admin SDK initialised successfully")
+        logger.info(
+            "Firebase Admin SDK initialised successfully (project_id=%s)",
+            config.FIREBASE_PROJECT_ID or "<default>",
+        )
     except Exception as exc:
         logger.warning("Firebase Admin SDK init failed — auth will be unavailable: %s", exc)
         _firebase_app = None
@@ -49,14 +52,15 @@ def _ensure_firebase() -> firebase_admin.App | None:
 
 def verify_firebase_token(token: str) -> dict | None:
     """Verify a Firebase ID token.  Returns decoded claims dict or None."""
-    if _ensure_firebase() is None:
+    app = _ensure_firebase()
+    if app is None:
         logger.warning("Firebase not initialised — cannot verify token")
         return None
     try:
-        decoded = firebase_auth.verify_id_token(token)
+        decoded = firebase_auth.verify_id_token(token, app=app)
         return decoded
     except Exception as exc:
-        logger.debug("Firebase token verification failed: %s", exc)
+        logger.warning("Firebase token verification failed: %s", exc)
         return None
 
 
@@ -93,7 +97,8 @@ def get_current_user(request: Request) -> dict | None:
 def get_current_user_id(request: Request) -> str:
     """
     Backwards-compatible helper.
-    Returns the authenticated user's ID, falling back to header/query/default.
+    Returns the authenticated user's ID, or a legacy header/query fallback.
+    Returns an empty string if no identity is available.
     """
     user = get_current_user(request)
     if user:
@@ -102,11 +107,14 @@ def get_current_user_id(request: Request) -> str:
     # Legacy fallbacks
     user_id = request.headers.get("X-User-ID")
     if user_id:
+        logger.debug("Using legacy X-User-ID fallback for %s", request.url.path)
         return user_id
     user_id = request.query_params.get("user_id")
     if user_id:
+        logger.debug("Using legacy query user_id fallback for %s", request.url.path)
         return user_id
-    return "default_user"
+    logger.debug("No authenticated user identity available for %s", request.url.path)
+    return ""
 
 
 def require_auth(request: Request) -> str:

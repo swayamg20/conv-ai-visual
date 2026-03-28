@@ -46,6 +46,10 @@ interface VoiceLogEntry {
   tokens_out: number | null;
   tts_chunks_sent: number | null;
   tts_interrupted: boolean;
+  tts_provider_used: string | null;
+  tts_retry_count: number;
+  tts_fallback_used: boolean;
+  tts_fallback_provider: string | null;
   smart_turn_used: boolean;
   smart_turn_result: string | null;
   error: string | null;
@@ -67,6 +71,10 @@ interface Stats {
   error_rate: number;
   interrupted_count: number;
   interrupt_rate: number;
+  retry_turns?: number;
+  avg_tts_retry_count?: number;
+  fallback_count?: number;
+  fallback_rate?: number;
 }
 
 const API_URL = "http://localhost:8000";
@@ -432,6 +440,14 @@ export default function Dashboard() {
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-ember/20 text-ember">
                         Error
                       </span>
+                    ) : log.tts_fallback_used ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-amber/20 text-amber">
+                        Fallback
+                      </span>
+                    ) : log.tts_retry_count > 0 ? (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-lavender/20 text-lavender">
+                        Retried
+                      </span>
                     ) : log.tts_interrupted ? (
                       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] bg-amber/20 text-amber">
                         Cut
@@ -508,6 +524,12 @@ export default function Dashboard() {
                               </span>
                             </div>
                           )}
+                          {log.tts_provider_used && (
+                            <div>
+                              <span className="text-muted-foreground">TTS provider:</span>{" "}
+                              <span className="font-mono">{log.tts_provider_used}</span>
+                            </div>
+                          )}
                           {log.tts_chunks_sent != null && (
                             <div>
                               <span className="text-muted-foreground">TTS chunks:</span>{" "}
@@ -515,6 +537,20 @@ export default function Dashboard() {
                               {log.tts_interrupted && (
                                 <span className="text-amber ml-2">(interrupted)</span>
                               )}
+                            </div>
+                          )}
+                          {log.tts_retry_count > 0 && (
+                            <div>
+                              <span className="text-muted-foreground">TTS retries:</span>{" "}
+                              <span className="font-mono text-lavender">{log.tts_retry_count}</span>
+                            </div>
+                          )}
+                          {log.tts_fallback_used && (
+                            <div>
+                              <span className="text-muted-foreground">TTS fallback:</span>{" "}
+                              <span className="font-mono text-amber">
+                                {log.tts_fallback_provider ?? "used"}
+                              </span>
                             </div>
                           )}
                           {log.smart_turn_used && (

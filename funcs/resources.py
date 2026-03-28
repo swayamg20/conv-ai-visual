@@ -173,5 +173,12 @@ async def ingest_url(url: str, agent_id: str, user_id: str) -> ResourceModel:
 
 
 def search_chunks(agent_id: str, query: str, limit: int = 5) -> list[ResourceChunkModel]:
-    """Search resource chunks for the given agent using keyword matching."""
-    return ResourceChunkRepo.search(agent_id, query, limit=limit)
+    """Search resource chunks for the given agent using hybrid lexical ranking."""
+    chunks = ResourceChunkRepo.search(agent_id, query, limit=limit)
+    logger.debug(
+        "search_chunks agent_id=%s query_len=%d returned=%d",
+        agent_id,
+        len(query),
+        len(chunks),
+    )
+    return chunks

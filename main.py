@@ -19,21 +19,28 @@ from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from funcs.agents import compile_agent_prompt, get_agent_tools, append_resource_context
-from funcs.auth import get_current_user_id, get_current_user, require_auth
+from funcs.agents import (
+    append_mastery_context,
+    append_resource_context,
+    compile_agent_prompt,
+    get_agent_tools,
+)
+from funcs.auth import get_current_user, require_auth
 from funcs.config import config
 from funcs.llm_clients import create_llm_client
 from funcs.llm_pipeline import LLMPipeline
 from funcs.models import (
     UserRepo, AgentRepo, SessionRepo, ConversationMessageRepo, ResourceRepo,
-    TopicMasteryRepo, TopicMasteryModel, LLMCallLogRepo, VoicePipelineLogRepo,
+    TopicMasteryRepo, TopicMasteryModel, LLMCallLogRepo, TTSResilienceLogRepo,
+    VoicePipelineLogRepo,
 )
 from collections.abc import Sequence
+from funcs.kokoro_tts import KokoroTTSPipeline
 from funcs.model_router import route_model
 from funcs.resources import ingest_pdf, ingest_url, search_chunks
 from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
-from funcs.tts_pipeline import TTSPipeline
+from funcs.tts_pipeline import TTSPipeline, is_retryable_tts_error
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +65,6 @@ try:
         logger.warning("Failed to register web_search tool: %s", e)
     
     if config.TTS_PROVIDER == "kokoro":
-        from funcs.kokoro_tts import KokoroTTSPipeline
         tts_pipeline = KokoroTTSPipeline(model_path=config.KOKORO_MODEL_PATH)
         logger.info("Kokoro TTS pipeline initialized (local ONNX)")
     else:
@@ -72,21 +78,12 @@ try:
             use_speaker_boost=config.TTS_USE_SPEAKER_BOOST
         )
         logger.info("ElevenLabs TTS pipeline initialized")
+    tts_fallback_pipeline: KokoroTTSPipeline | None = None
 
     # Smart Turn analyzer (singleton, shared across sessions)
     smart_turn_analyzer: SmartTurnAnalyzer | None = None
     if config.SMART_TURN_ENABLED:
-        try:
-            smart_turn_analyzer = SmartTurnAnalyzer.get_instance(
-                model_path=config.SMART_TURN_MODEL_PATH,
-                threshold=config.SMART_TURN_THRESHOLD,
-                stop_secs=config.SMART_TURN_STOP_SECS,
-            )
-            logger.info("Smart Turn analyzer initialized (threshold=%.2f, stop_secs=%.1f)",
-                         config.SMART_TURN_THRESHOLD, config.SMART_TURN_STOP_SECS)
-        except Exception as e:
-            logger.warning("Smart Turn init failed, falling back to Deepgram endpointing: %s", e)
-            smart_turn_analyzer = None
+        logger.info("Smart Turn enabled; analyzer will initialize on first voice session")
     else:
         logger.info("Smart Turn disabled, using Deepgram endpointing only")
     
@@ -94,11 +91,27 @@ except Exception as e:
     logger.error("Failed to initialize pipelines: %s", e)
     llm_pipeline = None
     tts_pipeline = None
+    tts_fallback_pipeline = None
     smart_turn_analyzer = None
+
+def _get_cors_origins() -> list[str]:
+    """Return explicit CORS origins from config or env, with a safe localhost default."""
+    configured = getattr(config, "ALLOWED_CORS_ORIGINS", None)
+    if configured:
+        if isinstance(configured, str):
+            raw_origins = configured.split(",")
+        else:
+            raw_origins = list(configured)
+    else:
+        raw_origins = os.getenv("ALLOWED_CORS_ORIGINS", "http://localhost:3000").split(",")
+
+    origins = [origin.strip() for origin in raw_origins if origin and origin.strip()]
+    return origins or ["http://localhost:3000"]
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,6 +120,9 @@ app.add_middleware(
 class Offer(BaseModel):
     sdp: str
     type: str
+    canvas_mode: bool = False
+    session_id: str | None = None
+    agent_id: str | None = None
 
 class ChatMessage(BaseModel):
     message: str
@@ -140,20 +156,378 @@ class UpdateAgentRequest(BaseModel):
 class AddResourceURLRequest(BaseModel):
     url: str
 
+def _get_voice_user_id(pc_id: str) -> str:
+    """Return the authenticated user ID for a voice peer connection."""
+    user_id = peer_user_ids.get(pc_id)
+    if not user_id:
+        raise RuntimeError(f"Missing authenticated voice user for peer {pc_id}")
+    return user_id
+
+
+def _get_tts_provider_name(pipeline: Any) -> str | None:
+    if pipeline is None:
+        return None
+    if isinstance(pipeline, KokoroTTSPipeline):
+        return "kokoro"
+    if isinstance(pipeline, TTSPipeline):
+        return "elevenlabs"
+    return pipeline.__class__.__name__.lower()
+
+
+def _get_kokoro_fallback_pipeline() -> KokoroTTSPipeline | None:
+    """Lazily initialize a Kokoro fallback pipeline when enabled."""
+    global tts_fallback_pipeline
+    if not config.TTS_FALLBACK_TO_KOKORO:
+        return None
+    if isinstance(tts_pipeline, KokoroTTSPipeline):
+        return tts_pipeline
+    if tts_fallback_pipeline is None:
+        try:
+            tts_fallback_pipeline = KokoroTTSPipeline(model_path=config.KOKORO_MODEL_PATH)
+            logger.info("Kokoro fallback TTS pipeline initialized")
+        except Exception as e:
+            logger.warning("Failed to initialize Kokoro fallback pipeline: %s", e)
+            tts_fallback_pipeline = None
+    return tts_fallback_pipeline
+
+
+def _get_smart_turn_analyzer() -> SmartTurnAnalyzer | None:
+    """Lazily initialize Smart Turn so importing `main` stays lightweight."""
+    global smart_turn_analyzer
+    if not config.SMART_TURN_ENABLED:
+        return None
+    if smart_turn_analyzer is not None:
+        return smart_turn_analyzer
+    try:
+        smart_turn_analyzer = SmartTurnAnalyzer.get_instance(
+            model_path=config.SMART_TURN_MODEL_PATH,
+            threshold=config.SMART_TURN_THRESHOLD,
+            stop_secs=config.SMART_TURN_STOP_SECS,
+        )
+        logger.info(
+            "Smart Turn analyzer initialized lazily (threshold=%.2f, stop_secs=%.1f)",
+            config.SMART_TURN_THRESHOLD,
+            config.SMART_TURN_STOP_SECS,
+        )
+    except Exception as e:
+        logger.warning("Smart Turn init failed, falling back to Deepgram endpointing: %s", e)
+        smart_turn_analyzer = None
+    return smart_turn_analyzer
+
 chat_sessions: dict[str, LLMPipeline] = {}
 peer_canvas_modes: dict[str, bool] = {}
 pcs: set[Any] = set()
 datachannels: dict[str, Any] = {}
 voice_sessions: dict[str, LLMPipeline] = {}
 peer_user_ids: dict[str, str] = {}
+peer_agent_ids: dict[str, str] = {}
+peer_session_ids: dict[str, str] = {}
 tts_interrupt_flags: dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
 _pending_sdl: dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
 smart_turn_sessions: dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
 turn_processing_tasks: dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
+chat_session_activity: dict[str, float] = {}
+voice_session_activity: dict[str, float] = {}
+chat_session_finalizing: set[str] = set()
+voice_session_finalizing: set[str] = set()
+_session_sweeper_task: asyncio.Task | None = None
 
 # Per-peer turn timing data. Populated by consume_audio_track, consumed by _run_llm_tts.
 # Keys: speech_start_ts, stt_final_ts, turn_confirmed_ts, smart_turn_result, vad_detect_ts
 turn_timing: dict[str, dict[str, Any]] = {}
+
+SESSION_IDLE_EVICTION_SECS = 2 * 60 * 60
+SESSION_SWEEP_INTERVAL_SECS = 5 * 60
+SESSION_SUMMARY_MIN_MESSAGES = 4
+
+
+def _touch_chat_session(session_id: str) -> None:
+    chat_session_activity[session_id] = time.monotonic()
+
+
+def _touch_voice_session(pc_id: str) -> None:
+    voice_session_activity[pc_id] = time.monotonic()
+
+
+def _pipeline_message_count(pipeline: LLMPipeline | None) -> int:
+    memory = getattr(pipeline, "memory", None)
+    context = getattr(memory, "context", None)
+    messages = getattr(context, "messages", None)
+    if isinstance(messages, list):
+        return len(messages)
+    return 0
+
+
+def _build_agent_runtime_config(user_id: str, agent: Any) -> tuple[str, bool, list[Any]]:
+    """Build the prompt and runtime flags for an agent-backed session."""
+    capabilities = agent.get_capabilities()
+    has_canvas = "canvas" in capabilities
+
+    agent_prompt = agent.system_prompt
+    agent_resources = ResourceRepo.list_by_agent(agent.id)
+    ready_resources = [r for r in agent_resources if r.status == "ready"]
+    if ready_resources:
+        agent_prompt = append_resource_context(
+            agent_prompt,
+            [r.name for r in ready_resources],
+        )
+
+    mastery_context = TopicMasteryRepo.get_tutoring_context(user_id, agent.id)
+    agent_prompt = append_mastery_context(
+        agent_prompt,
+        mastery_context.get("prompt", ""),
+    )
+    if mastery_context.get("prompt"):
+        logger.info(
+            "Injected mastery context for user=%s agent=%s topics=%d chapters=%d",
+            user_id,
+            agent.id,
+            len(mastery_context.get("topics", [])),
+            len(mastery_context.get("chapters", [])),
+        )
+
+    return agent_prompt, has_canvas, ready_resources
+
+
+def _register_agent_resource_tool(pipeline: LLMPipeline, agent_id: str, ready_resources: Sequence[Any]) -> None:
+    """Expose uploaded-resource search to an agent-backed pipeline when resources are ready."""
+    if not ready_resources:
+        return
+
+    def _search_resources_handler(query: str, limit: int = 5) -> str:
+        chunks = search_chunks(agent_id, query, limit=limit)
+        if not chunks:
+            return "No relevant content found in the resources."
+        results = []
+        for c in chunks:
+            page_info = f" (page {c.page_number})" if c.page_number else ""
+            results.append(f"[Chunk {c.chunk_index}{page_info}]\n{c.content}")
+        return "\n\n---\n\n".join(results)
+
+    pipeline.register_tool(
+        name="search_resources",
+        description="Search the agent's uploaded resources (PDFs, URLs) for relevant content. Use this when the student asks about topics covered in their materials.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query to find relevant content"},
+                "limit": {"type": "integer", "description": "Max results to return", "default": 5},
+            },
+            "required": ["query"],
+        },
+        func=_search_resources_handler,
+    )
+
+
+def _log_background_task(task: asyncio.Task, label: str) -> None:
+    """Surface exceptions from fire-and-forget cleanup work."""
+    def _done(t: asyncio.Task) -> None:
+        try:
+            exc = t.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning("%s task inspection failed: %s", label, e)
+            return
+
+        if exc:
+            logger.warning("%s failed: %s", label, exc)
+
+    task.add_done_callback(_done)
+
+
+async def _persist_pipeline_summary(
+    pipeline: LLMPipeline,
+    session_id: str,
+    *,
+    min_messages: int,
+    persist_db_summary: bool,
+) -> str | None:
+    """Generate, save, and close a pipeline summary if the session was long enough."""
+    persisted_session_id = getattr(pipeline, "session_id", session_id)
+    if _pipeline_message_count(pipeline) < min_messages:
+        try:
+            pipeline.end_session(None)
+        except Exception as e:
+            logger.warning("[%s] Failed to clear pipeline without summary: %s", session_id, e)
+        return None
+
+    summary: str | None = None
+    try:
+        summary = await pipeline.generate_session_summary()
+        summary = summary.strip() if summary else None
+    except Exception as e:
+        logger.warning("[%s] Failed to generate session summary: %s", session_id, e)
+
+    try:
+        pipeline.end_session(summary)
+    except Exception as e:
+        logger.warning("[%s] Failed to close pipeline after summary: %s", session_id, e)
+
+    if summary and persist_db_summary:
+        try:
+            SessionRepo.update_summary(persisted_session_id, summary)
+        except Exception as e:
+            logger.warning(
+                "[%s] Failed to persist session summary to DB for session=%s: %s",
+                session_id,
+                persisted_session_id,
+                e,
+            )
+
+    return summary
+
+
+async def _finalize_chat_session(
+    session_id: str,
+    *,
+    min_messages: int = 0,
+    persist_db_summary: bool = True,
+    background: bool = False,
+) -> str | None:
+    """Remove a chat session and optionally persist a summary."""
+    if session_id in chat_session_finalizing:
+        return None
+
+    chat_session_finalizing.add(session_id)
+    try:
+        pipeline = chat_sessions.pop(session_id, None)
+        chat_session_activity.pop(session_id, None)
+        if not pipeline:
+            return None
+
+        if background:
+            task = asyncio.create_task(
+                _persist_pipeline_summary(
+                    pipeline,
+                    session_id,
+                    min_messages=min_messages,
+                    persist_db_summary=persist_db_summary,
+                )
+            )
+            _log_background_task(task, f"chat session finalizer [{session_id}]")
+            return None
+
+        return await _persist_pipeline_summary(
+            pipeline,
+            session_id,
+            min_messages=min_messages,
+            persist_db_summary=persist_db_summary,
+        )
+    finally:
+        chat_session_finalizing.discard(session_id)
+
+
+async def _finalize_voice_session(
+    pc_id: str,
+    *,
+    min_messages: int = SESSION_SUMMARY_MIN_MESSAGES,
+    background: bool = True,
+    pc: RTCPeerConnection | None = None,
+) -> str | None:
+    """Remove a voice peer session, cancel work, and optionally persist a summary."""
+    if pc_id in voice_session_finalizing:
+        return None
+
+    voice_session_finalizing.add(pc_id)
+    try:
+        await _cancel_active_turn(pc_id)
+
+        pipeline = voice_sessions.pop(pc_id, None)
+        voice_session_activity.pop(pc_id, None)
+        datachannels.pop(pc_id, None)
+        peer_user_ids.pop(pc_id, None)
+        peer_agent_ids.pop(pc_id, None)
+        peer_session_ids.pop(pc_id, None)
+        peer_canvas_modes.pop(pc_id, None)
+        tts_interrupt_flags.pop(pc_id, None)
+        _pending_sdl.pop(pc_id, None)
+        turn_timing.pop(pc_id, None)
+
+        task = turn_processing_tasks.pop(pc_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        st = smart_turn_sessions.pop(pc_id, None)
+        if st:
+            st.cleanup()
+
+        if pc is not None:
+            if pc.connectionState not in ("closed", "failed"):
+                try:
+                    await pc.close()
+                except Exception as e:
+                    logger.warning("[%s] Failed to close peer connection: %s", pc_id, e)
+            pcs.discard(pc)
+
+        if not pipeline:
+            return None
+
+        persist_voice_summary = bool(
+            getattr(pipeline, "agent_id", None)
+            and getattr(pipeline, "session_id", pc_id) != pc_id
+        )
+
+        if background:
+            task = asyncio.create_task(
+                _persist_pipeline_summary(
+                    pipeline,
+                    pc_id,
+                    min_messages=min_messages,
+                    persist_db_summary=persist_voice_summary,
+                )
+            )
+            _log_background_task(task, f"voice session finalizer [{pc_id}]")
+            return None
+
+        return await _persist_pipeline_summary(
+            pipeline,
+            pc_id,
+            min_messages=min_messages,
+            persist_db_summary=persist_voice_summary,
+        )
+    finally:
+        voice_session_finalizing.discard(pc_id)
+
+
+async def _evict_idle_sessions() -> None:
+    """Remove inactive in-memory sessions so they do not accumulate forever."""
+    now = time.monotonic()
+
+    for session_id, last_seen in list(chat_session_activity.items()):
+        if session_id in chat_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
+            logger.info("[%s] Evicting idle chat session", session_id)
+            await _finalize_chat_session(
+                session_id,
+                min_messages=SESSION_SUMMARY_MIN_MESSAGES,
+                persist_db_summary=True,
+                background=True,
+            )
+
+    for pc_id, last_seen in list(voice_session_activity.items()):
+        if pc_id in voice_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
+            logger.info("[%s] Evicting idle voice session", pc_id)
+            await _finalize_voice_session(
+                pc_id,
+                min_messages=SESSION_SUMMARY_MIN_MESSAGES,
+                background=True,
+            )
+
+
+async def _session_sweeper_loop() -> None:
+    """Periodic task that reaps idle in-memory sessions."""
+    try:
+        while True:
+            await asyncio.sleep(SESSION_SWEEP_INTERVAL_SECS)
+            await _evict_idle_sessions()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("Session sweeper failed: %s", e)
 
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
@@ -235,21 +609,69 @@ async def deepgram_stream_ws_send_and_recv(
 async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
     """Get or create the LLMPipeline for a voice peer connection."""
     if pc_id not in voice_sessions:
-        user_id = peer_user_ids.get(pc_id, "default_user")
-        canvas_mode = True
-        voice_pipeline = LLMPipeline(
-            provider=config.LLM_PROVIDER,
-            api_key=None,
-            model=None,
-            system_prompt=config.LLM_SYSTEM_PROMPT,
-            max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
-            user_id=user_id,
-            session_id=pc_id,
-            enable_memory=True,
-            canvas_mode=canvas_mode,
-            canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT,
-        )
+        user_id = _get_voice_user_id(pc_id)
+        agent_id = peer_agent_ids.get(pc_id)
+        persistent_session_id = peer_session_ids.get(pc_id)
+        session_key = persistent_session_id or pc_id
+        agent = None
+
+        if agent_id:
+            agent = AgentRepo.get_by_id(agent_id)
+            if not agent:
+                raise RuntimeError(f"Agent not found for voice session: {agent_id}")
+            if agent.user_id != user_id:
+                raise RuntimeError(f"Forbidden voice  agent access for user={user_id} agent={agent_id}")
+
+        if agent:
+            agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(user_id, agent)
+            voice_pipeline = LLMPipeline(
+                provider=config.LLM_PROVIDER,
+                api_key=None,
+                model=None,
+                system_prompt=agent_prompt,
+                max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                user_id=user_id,
+                session_id=session_key,
+                agent_id=agent.id,
+                enable_memory=True,
+                canvas_mode=has_canvas,
+                canvas_system_prompt=agent_prompt if has_canvas else None,
+            )
+        else:
+            ready_resources = []
+            voice_pipeline = LLMPipeline(
+                provider=config.LLM_PROVIDER,
+                api_key=None,
+                model=None,
+                system_prompt=config.LLM_SYSTEM_PROMPT,
+                max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
+                user_id=user_id,
+                session_id=session_key,
+                agent_id=agent_id,
+                enable_memory=True,
+                canvas_mode=True,
+                canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT,
+            )
+
+        if voice_pipeline.memory and agent_id:
+            voice_pipeline.memory.agent_id = agent_id
+
+        if persistent_session_id and voice_pipeline.memory:
+            existing_session = SessionRepo.get_by_id(persistent_session_id)
+            if existing_session and existing_session.message_count > 0:
+                voice_pipeline.memory.load_session_messages(persistent_session_id)
+                logger.info(
+                    "[%s] Resumed persistent voice session %s for user=%s agent=%s with %d persisted messages",
+                    pc_id,
+                    persistent_session_id,
+                    user_id,
+                    agent_id or "none",
+                    existing_session.message_count,
+                )
+
         voice_pipeline.load_tools_from_db()
+        if agent and ready_resources:
+            _register_agent_resource_tool(voice_pipeline, agent.id, ready_resources)
 
         async def canvas_broadcast(operations):
             ch = datachannels.get(pc_id)
@@ -269,7 +691,16 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
 
         voice_pipeline.set_animation_callback(animation_broadcast)
         voice_sessions[pc_id] = voice_pipeline
-        logger.info("[%s] Session created (%d tools)", pc_id, len(voice_pipeline.get_tools_schema()))
+        _touch_voice_session(pc_id)
+        logger.info(
+            "[%s] Voice session created (persistent_session=%s, agent=%s, tools=%d)",
+            pc_id,
+            session_key,
+            agent_id or "none",
+            len(voice_pipeline.get_tools_schema()),
+        )
+    else:
+        _touch_voice_session(pc_id)
     return voice_sessions[pc_id]
 
 
@@ -291,6 +722,7 @@ async def _process_user_turn(pc_id: str, user_text: str):
     Schedule LLM → TTS pipeline for a confirmed user turn.
     Cancels any previous in-flight turn for this peer first.
     """
+    _touch_voice_session(pc_id)
     # Stamp turn-confirmed time
     timing = turn_timing.setdefault(pc_id, {})
     timing["turn_confirmed_ts"] = time.perf_counter()
@@ -435,6 +867,10 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     t_tts_end = None
     tts_chunks_sent = 0
     tts_interrupted = False
+    tts_retry_count = 0
+    tts_fallback_used = False
+    tts_fallback_provider = None
+    tts_providers_used: list[str] = []
     llm_response = ""
     error_msg = None
 
@@ -443,9 +879,97 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
     async def _tts_sender():
         """Consume sentences from the queue and stream TTS audio to client."""
-        nonlocal tts_chunks_sent, tts_interrupted, t_tts_first_chunk, t_tts_end, t_tts_start
+        nonlocal tts_chunks_sent
+        nonlocal tts_fallback_provider
+        nonlocal tts_fallback_used
+        nonlocal tts_interrupted
+        nonlocal tts_retry_count
+        nonlocal t_tts_first_chunk
+        nonlocal t_tts_end
+        nonlocal t_tts_start
+        nonlocal error_msg
 
         tts_started_sent = False
+
+        async def _emit_audio_chunk(audio_chunk: bytes) -> None:
+            nonlocal tts_chunks_sent, t_tts_first_chunk, tts_interrupted
+            if not tts_interrupt_flags.get(pc_id, False):
+                tts_interrupted = True
+                raise asyncio.CancelledError("TTS interrupted")
+
+            if ch and ch.readyState == "open":
+                if tts_chunks_sent == 0:
+                    t_tts_first_chunk = time.perf_counter()
+                    logger.info("[%s] First TTS chunk (%d bytes)", pc_id, len(audio_chunk))
+                ch.send(json.dumps({
+                    "type": "tts_chunk",
+                    "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                }))
+                tts_chunks_sent += 1
+
+        async def _stream_with_pipeline(sentence: str, pipeline_obj: Any) -> None:
+            async for audio_chunk in pipeline_obj.text_to_speech_stream(sentence):
+                await _emit_audio_chunk(audio_chunk)
+
+        async def _stream_sentence_with_resilience(sentence: str) -> dict[str, Any]:
+            metadata = {
+                "provider_used": None,
+                "retry_count": 0,
+                "fallback_used": False,
+                "fallback_provider": None,
+                "final_error": None,
+            }
+            primary_pipeline = tts_pipeline
+            primary_provider = _get_tts_provider_name(primary_pipeline)
+
+            if primary_pipeline is not None:
+                max_attempts = 1
+                if primary_provider == "elevenlabs":
+                    max_attempts += max(0, config.TTS_MAX_RETRIES)
+
+                for attempt in range(max_attempts):
+                    try:
+                        await _stream_with_pipeline(sentence, primary_pipeline)
+                        metadata["provider_used"] = primary_provider
+                        return metadata
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        metadata["final_error"] = f"{type(exc).__name__}: {exc}"
+                        should_retry = (
+                            primary_provider == "elevenlabs"
+                            and attempt < max_attempts - 1
+                            and is_retryable_tts_error(exc)
+                        )
+                        if not should_retry:
+                            break
+
+                        metadata["retry_count"] += 1
+                        delay_secs = config.TTS_RETRY_BASE_DELAY_SECS * (2 ** attempt)
+                        logger.warning(
+                            "[%s] ElevenLabs TTS failed on attempt %d/%d, retrying in %.2fs: %s",
+                            pc_id,
+                            attempt + 1,
+                            max_attempts,
+                            delay_secs,
+                            exc,
+                        )
+                        await asyncio.sleep(delay_secs)
+
+            fallback_pipeline = _get_kokoro_fallback_pipeline()
+            if fallback_pipeline is not None and fallback_pipeline is not primary_pipeline:
+                try:
+                    await _stream_with_pipeline(sentence, fallback_pipeline)
+                    metadata["provider_used"] = "kokoro"
+                    metadata["fallback_used"] = True
+                    metadata["fallback_provider"] = "kokoro"
+                    return metadata
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    metadata["final_error"] = f"{type(exc).__name__}: {exc}"
+
+            raise RuntimeError(metadata["final_error"] or "TTS failed without a fallback path")
 
         while True:
             sentence = await sentence_queue.get()
@@ -455,7 +979,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
             if not sentence.strip():
                 continue
 
-            if not tts_pipeline:
+            if not tts_pipeline and not _get_kokoro_fallback_pipeline():
                 continue
 
             if not tts_started_sent:
@@ -466,25 +990,23 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 tts_started_sent = True
 
             try:
-                async for audio_chunk in tts_pipeline.text_to_speech_stream(sentence):
-                    if not tts_interrupt_flags.get(pc_id, False):
-                        tts_interrupted = True
-                        logger.warning("[%s] TTS interrupted after %d chunks", pc_id, tts_chunks_sent)
-                        if ch and ch.readyState == "open":
-                            ch.send(json.dumps({"type": "tts_interrupted", "chunks_sent": tts_chunks_sent}))
-                        return  # exit sender entirely
-
-                    if ch and ch.readyState == "open":
-                        if tts_chunks_sent == 0:
-                            t_tts_first_chunk = time.perf_counter()
-                            logger.info("[%s] First TTS chunk (%d bytes)", pc_id, len(audio_chunk))
-                        ch.send(json.dumps({
-                            "type": "tts_chunk",
-                            "audio": base64.b64encode(audio_chunk).decode("utf-8"),
-                        }))
-                        tts_chunks_sent += 1
+                sentence_meta = await _stream_sentence_with_resilience(sentence)
+                tts_retry_count += int(sentence_meta.get("retry_count") or 0)
+                if sentence_meta.get("fallback_used"):
+                    tts_fallback_used = True
+                    tts_fallback_provider = sentence_meta.get("fallback_provider") or "kokoro"
+                provider_used = sentence_meta.get("provider_used")
+                if provider_used and provider_used not in tts_providers_used:
+                    tts_providers_used.append(provider_used)
+            except asyncio.CancelledError:
+                tts_interrupted = True
+                logger.warning("[%s] TTS interrupted after %d chunks", pc_id, tts_chunks_sent)
+                if ch and ch.readyState == "open":
+                    ch.send(json.dumps({"type": "tts_interrupted", "chunks_sent": tts_chunks_sent}))
+                return
             except Exception as tts_err:
                 logger.exception("[%s] TTS error on sentence: %s", pc_id, tts_err)
+                error_msg = error_msg or str(tts_err)
 
         # All sentences processed
         t_tts_end = time.perf_counter()
@@ -593,6 +1115,10 @@ async def _run_llm_tts(pc_id: str, user_text: str):
             "latency_total_ms": latency_total_ms,
             "tts_chunks_sent": tts_chunks_sent,
             "tts_interrupted": tts_interrupted,
+            "tts_provider_used": ",".join(tts_providers_used) if tts_providers_used else None,
+            "tts_retry_count": tts_retry_count,
+            "tts_fallback_used": tts_fallback_used,
+            "tts_fallback_provider": tts_fallback_provider,
             "smart_turn_result": smart_turn_result,
         }
 
@@ -606,18 +1132,19 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
         # Log to console
         logger.info(
-            "[%s] METRICS: stt=%s turn=%s llm=%s tool=%s tts=%s tts_ttfb=%s total=%s interrupted=%s",
+            "[%s] METRICS: stt=%s turn=%s llm=%s tool=%s tts=%s tts_ttfb=%s total=%s interrupted=%s provider=%s retries=%s fallback=%s",
             pc_id,
             latency_stt_ms, turn_detection_ms, latency_llm_ms, latency_tool_ms,
             latency_tts_ms, latency_tts_first_chunk_ms, latency_total_ms, tts_interrupted,
+            metrics_payload["tts_provider_used"], tts_retry_count, tts_fallback_used,
         )
 
         # ── Save to DB ──
         try:
             from funcs.models import VoicePipelineLogRepo
-            user_id = peer_user_ids.get(pc_id, "default_user")
-            VoicePipelineLogRepo.save(
-                session_id=pc_id,
+            user_id = _get_voice_user_id(pc_id)
+            log_record = VoicePipelineLogRepo.save(
+                session_id=getattr(pipeline, "session_id", pc_id),
                 user_id=user_id,
                 mode="voice",
                 user_message=user_text,
@@ -642,6 +1169,14 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 smart_turn_used=smart_turn_result is not None,
                 smart_turn_result=smart_turn_result,
                 error=error_msg,
+            )
+            TTSResilienceLogRepo.save(
+                voice_log_id=log_record.id,
+                provider_used=metrics_payload["tts_provider_used"],
+                retry_count=tts_retry_count,
+                fallback_used=tts_fallback_used,
+                fallback_provider=tts_fallback_provider,
+                final_error=error_msg,
             )
         except Exception as log_err:
             logger.warning("[%s] Failed to save voice pipeline log: %s", pc_id, log_err)
@@ -672,8 +1207,9 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     _watchdog_task: asyncio.Task | None = None
     _WATCHDOG_TIMEOUT = 3.0  # seconds after last is_final before forcing turn
 
-    if smart_turn_analyzer:
-        st_session = SmartTurnSession(smart_turn_analyzer)
+    analyzer = _get_smart_turn_analyzer()
+    if analyzer:
+        st_session = SmartTurnSession(analyzer)
         smart_turn_sessions[pc_id] = st_session
 
         # Wire up fallback callback: when silence exceeds stop_secs, force-complete
@@ -910,29 +1446,48 @@ async def chat(chat_msg: ChatMessage, request: Request):
     Each session gets its own LLMPipeline with 4-layer memory.
     Supports cross-session persistence when agent_id is provided.
     """
-    # user_id from middleware (auth) or request body
-    user_id = chat_msg.user_id or get_current_user_id(request)
+    user_id = require_auth(request)
+    if chat_msg.user_id and chat_msg.user_id != user_id:
+        logger.warning(
+            "Ignoring client-supplied chat user_id %s in favor of authenticated user %s",
+            chat_msg.user_id,
+            user_id,
+        )
 
     # Queues for events during this request
     canvas_events = []
     animation_events = []
 
-    # Resolve agent if provided
+    session_id = chat_msg.session_id
+    existing_session = None
     agent = None
     agent_id = chat_msg.agent_id
+
+    if session_id:
+        existing_session = SessionRepo.get_by_id(session_id)
+        if existing_session:
+            if existing_session.user_id != user_id:
+                return JSONResponse({"error": "Forbidden"}, status_code=403)
+            if agent_id and agent_id != existing_session.agent_id:
+                return JSONResponse({"error": "Session does not belong to the supplied agent"}, status_code=400)
+            agent_id = existing_session.agent_id
+
+    # Resolve agent after canonicalizing it from the session row when present
     if agent_id:
         agent = AgentRepo.get_by_id(agent_id)
         if not agent:
             return JSONResponse({"error": "Agent not found"}, status_code=404)
+        if agent.user_id != user_id:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     # Resolve or create a persistent session when we have an agent
-    session_id = chat_msg.session_id
     is_new_session = False
     if not session_id:
         if agent_id and user_id:
             # Create a persistent DB session
             db_session = SessionRepo.create(user_id=user_id, agent_id=agent_id)
             session_id = db_session.id
+            existing_session = db_session
             is_new_session = True
         else:
             session_id = str(uuid.uuid4())
@@ -942,18 +1497,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
         try:
             # Use agent system prompt and capabilities when available
             if agent:
-                capabilities = agent.get_capabilities()
-                has_canvas = "canvas" in capabilities
-
-                # Enrich system prompt with resource names if agent has resources
-                agent_prompt = agent.system_prompt
-                agent_resources = ResourceRepo.list_by_agent(agent.id)
-                ready_resources = [r for r in agent_resources if r.status == "ready"]
-                if ready_resources:
-                    agent_prompt = append_resource_context(
-                        agent_prompt,
-                        [r.name for r in ready_resources],
-                    )
+                agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(user_id, agent)
 
                 pipeline = LLMPipeline(
                     provider=config.LLM_PROVIDER,
@@ -963,6 +1507,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
                     max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
                     user_id=user_id,
                     session_id=session_id,
+                    agent_id=agent_id,
                     enable_memory=True,
                     canvas_mode=has_canvas,
                     canvas_system_prompt=agent_prompt if has_canvas else None,
@@ -984,45 +1529,49 @@ async def chat(chat_msg: ChatMessage, request: Request):
             # Set agent_id on the memory manager for cross-session context
             if pipeline.memory and agent_id:
                 pipeline.memory.agent_id = agent_id
+                logger.info(
+                    "Chat session %s bound to user=%s agent=%s for memory/cross-session context",
+                    session_id,
+                    user_id,
+                    agent_id,
+                )
+            elif agent_id:
+                logger.warning(
+                    "Chat session %s created for agent=%s but memory manager was unavailable",
+                    session_id,
+                    agent_id,
+                )
 
             # If resuming an existing session, load persisted messages
             if not is_new_session and pipeline.memory:
-                existing = SessionRepo.get_by_id(session_id)
+                existing = existing_session or SessionRepo.get_by_id(session_id)
                 if existing and existing.message_count > 0:
                     pipeline.memory.load_session_messages(session_id)
-                    logger.info("Resumed session %s with %d persisted messages", session_id, existing.message_count)
+                    logger.info(
+                        "Resumed session %s for user=%s agent=%s with %d persisted messages",
+                        session_id,
+                        user_id,
+                        agent_id or "none",
+                        existing.message_count,
+                    )
 
             pipeline.load_tools_from_db()
 
             # Register search_resources tool if this agent has resources
-            if agent and agent_resources and ready_resources:
-                _agent_id_for_search = agent.id
-                def _search_resources_handler(query: str, limit: int = 5) -> str:
-                    chunks = search_chunks(_agent_id_for_search, query, limit=limit)
-                    if not chunks:
-                        return "No relevant content found in the resources."
-                    results = []
-                    for c in chunks:
-                        page_info = f" (page {c.page_number})" if c.page_number else ""
-                        results.append(f"[Chunk {c.chunk_index}{page_info}]\n{c.content}")
-                    return "\n\n---\n\n".join(results)
-
-                pipeline.register_tool(
-                    name="search_resources",
-                    description="Search the agent's uploaded resources (PDFs, URLs) for relevant content. Use this when the student asks about topics covered in their materials.",
-                    parameters={
-                        "type": "object",
-                        "properties": {
-                            "query": {"type": "string", "description": "Search query to find relevant content"},
-                            "limit": {"type": "integer", "description": "Max results to return", "default": 5},
-                        },
-                        "required": ["query"],
-                    },
-                    func=_search_resources_handler,
-                )
+            if agent and ready_resources:
+                _register_agent_resource_tool(pipeline, agent.id, ready_resources)
 
             chat_sessions[session_id] = pipeline
-            logger.info("Created chat session %s with %d tools (canvas_mode=%s, agent=%s)", session_id, len(pipeline.get_tools_schema()), pipeline.canvas_mode, agent_id)
+            _touch_chat_session(session_id)
+            logger.info(
+                "Created chat session %s for user=%s with %d tools (canvas_mode=%s, agent=%s, persistent=%s)",
+                session_id,
+                user_id,
+                len(pipeline.get_tools_schema()),
+                pipeline.canvas_mode,
+                agent_id or "none",
+                bool(agent_id),
+            )
         except Exception as e:
             logger.exception("Failed to create chat session: %s", e)
             return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
@@ -1036,6 +1585,10 @@ async def chat(chat_msg: ChatMessage, request: Request):
             pass
     
     pipeline = chat_sessions[session_id]
+    _touch_chat_session(session_id)
+
+    if pipeline.memory:
+        pipeline.memory.agent_id = agent_id
     
     # Update canvas mode if specified in this request
     if chat_msg.canvas_mode is not None:
@@ -1148,15 +1701,15 @@ async def chat(chat_msg: ChatMessage, request: Request):
 @app.delete("/chat/{session_id}")
 async def clear_chat(session_id: str):
     """Clear chat session and optionally save summary to episodic memory."""
-    pipeline = chat_sessions.pop(session_id, None)
-    if pipeline:
-        try:
-            # Generate and save session summary before clearing
-            summary = await pipeline.generate_session_summary()
-            if summary:
-                pipeline.end_session(summary)
-        except Exception as e:
-            logger.warning("Failed to save session summary: %s", e)
+    try:
+        await _finalize_chat_session(
+            session_id,
+            min_messages=0,
+            persist_db_summary=True,
+            background=False,
+        )
+    except Exception as e:
+        logger.warning("Failed to clear chat session %s: %s", session_id, e)
     return JSONResponse({"status": "cleared"})
 
 
@@ -1545,9 +2098,10 @@ async def end_session(session_id: str, request: Request):
                 {
                     "role": "system",
                     "content": (
-                        "Summarize this tutoring session in 2-3 sentences. "
-                        "Focus on what topics were covered, what the student understood, "
-                        "and what they struggled with."
+                        "Summarize this tutoring session in 3-4 concise sentences for a future tutor. "
+                        "Include: the main topics covered, what the student understood well, "
+                        "where they struggled or showed misconceptions, and the best next thing "
+                        "to revisit in a follow-up session. Avoid generic praise."
                     ),
                 },
                 {"role": "user", "content": convo_text},
@@ -1571,12 +2125,15 @@ async def end_session(session_id: str, request: Request):
                 {
                     "role": "system",
                     "content": (
-                        "From this tutoring conversation, identify concepts/topics discussed. "
-                        "For each, classify the student's understanding. "
+                        "From this tutoring conversation, extract the durable tutoring signals. "
+                        "Identify the important concepts/topics actually discussed and classify the student's understanding. "
                         'Return a JSON array: [{"topic": "...", "chapter": "...", '
                         '"signal_type": "understood|struggled|unclear", "details": "..."}]. '
                         "Only include topics that were actually discussed. "
-                        "Be specific about topic names. Return ONLY valid JSON, no markdown."
+                        "Be specific about topic names, prefer chapter names when obvious, "
+                        "and use `details` for a short evidence-based note about what the student got right, "
+                        "got wrong, or still needs help with. If uncertain, use `unclear`. "
+                        "Return ONLY valid JSON, no markdown."
                     ),
                 },
                 {"role": "user", "content": convo_text},
@@ -1607,7 +2164,8 @@ async def end_session(session_id: str, request: Request):
 
     # Also clean up in-memory pipeline if it exists
     pipeline = chat_sessions.pop(session_id, None)
-    if pipeline and summary:
+    chat_session_activity.pop(session_id, None)
+    if pipeline:
         try:
             pipeline.end_session(summary)
         except Exception:
@@ -1663,6 +2221,9 @@ async def get_logs_stats():
 async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = None):
     """Get recent voice pipeline logs with full stage latencies."""
     logs = VoicePipelineLogRepo.get_recent(limit=min(limit, 200), offset=offset, mode=mode)
+    resilience = TTSResilienceLogRepo.get_by_voice_log_ids(
+        [log.id for log in logs if log.id is not None]
+    )
     return JSONResponse({
         "logs": [
             {
@@ -1689,6 +2250,10 @@ async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = No
                 "tokens_out": log.tokens_out,
                 "tts_chunks_sent": log.tts_chunks_sent,
                 "tts_interrupted": log.tts_interrupted,
+                "tts_provider_used": resilience.get(log.id).provider_used if log.id in resilience else None,
+                "tts_retry_count": resilience.get(log.id).retry_count if log.id in resilience else 0,
+                "tts_fallback_used": resilience.get(log.id).fallback_used if log.id in resilience else False,
+                "tts_fallback_provider": resilience.get(log.id).fallback_provider if log.id in resilience else None,
                 "smart_turn_used": log.smart_turn_used,
                 "smart_turn_result": log.smart_turn_result,
                 "error": log.error,
@@ -1709,16 +2274,53 @@ async def get_voice_logs_stats(mode: str | None = None):
 
 
 @app.post("/offer")
-async def offer(request: Request):
-    data: dict = await request.json()
-    offer = RTCSessionDescription(sdp=data["sdp"], type=data["type"])
+async def offer(body: Offer, request: Request):
+    offer = RTCSessionDescription(sdp=body.sdp, type=body.type)
+    user_id = require_auth(request)
+    persistent_session_id = body.session_id
+    agent_id = body.agent_id
+    existing_session = None
+
+    if persistent_session_id:
+        existing_session = SessionRepo.get_by_id(persistent_session_id)
+        if not existing_session:
+            return JSONResponse({"error": "Session not found"}, status_code=404)
+        if existing_session.user_id != user_id:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+        if agent_id and agent_id != existing_session.agent_id:
+            return JSONResponse({"error": "Session does not belong to the supplied agent"}, status_code=400)
+        agent_id = existing_session.agent_id
+
+    if agent_id:
+        agent = AgentRepo.get_by_id(agent_id)
+        if not agent:
+            return JSONResponse({"error": "Agent not found"}, status_code=404)
+        if agent.user_id != user_id:
+            return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    if not persistent_session_id and agent_id:
+        db_session = SessionRepo.create(user_id=user_id, agent_id=agent_id)
+        persistent_session_id = db_session.id
+        existing_session = db_session
+
     pc = RTCPeerConnection()
     pc_id = f"pc-{id(pc)}"
-    user_id = data.get("user_id") or get_current_user_id(request)
     peer_user_ids[pc_id] = user_id
-    canvas_mode = data.get("canvas_mode", False)
+    if agent_id:
+        peer_agent_ids[pc_id] = agent_id
+    if persistent_session_id:
+        peer_session_ids[pc_id] = persistent_session_id
+    _touch_voice_session(pc_id)
+    canvas_mode = body.canvas_mode
     peer_canvas_modes[pc_id] = canvas_mode
-    logger.info("[%s] User ID: %s, Canvas Mode: %s", pc_id, user_id, canvas_mode)
+    logger.info(
+        "[%s] User ID: %s, Canvas Mode: %s, Agent: %s, Session: %s",
+        pc_id,
+        user_id,
+        canvas_mode,
+        agent_id or "none",
+        persistent_session_id or "none",
+    )
 
     @pc.on("datachannel")
     def on_datachannel(channel):
@@ -1741,17 +2343,7 @@ async def offer(request: Request):
         @channel.on("close")
         async def on_close():
             logger.info("[%s] DataChannel closed", pc_id)
-            datachannels.pop(pc_id, None)
-            voice_sessions.pop(pc_id, None)
-            peer_user_ids.pop(pc_id, None)
-            peer_canvas_modes.pop(pc_id, None)
-            tts_interrupt_flags.pop(pc_id, None)
-            t = turn_processing_tasks.pop(pc_id, None)
-            if t and not t.done():
-                t.cancel()
-            st = smart_turn_sessions.pop(pc_id, None)
-            if st:
-                st.cleanup()
+            await _finalize_voice_session(pc_id, background=True, pc=pc)
 
 
     pcs.add(pc)
@@ -1763,19 +2355,7 @@ async def offer(request: Request):
     async def on_connectionstatechange():
         logger.info("[%s] Connection: %s", pc_id, pc.connectionState)
         if pc.connectionState in ("failed", "closed"):
-            await pc.close()
-            pcs.discard(pc)
-            datachannels.pop(pc_id, None)
-            voice_sessions.pop(pc_id, None)
-            peer_user_ids.pop(pc_id, None)
-            peer_canvas_modes.pop(pc_id, None)
-            tts_interrupt_flags.pop(pc_id, None)
-            t = turn_processing_tasks.pop(pc_id, None)
-            if t and not t.done():
-                t.cancel()
-            st = smart_turn_sessions.pop(pc_id, None)
-            if st:
-                st.cleanup()
+            await _finalize_voice_session(pc_id, background=True, pc=pc)
             logger.info("[%s] Closed", pc_id)
 
     @pc.on("track")
@@ -1798,13 +2378,52 @@ async def offer(request: Request):
     await pc.setLocalDescription(answer)
 
     logger.info("[%s] Answer created", pc_id)
-    return JSONResponse({"sdp": pc.localDescription.sdp, "type": pc.localDescription.type})
+    return JSONResponse(
+        {
+            "sdp": pc.localDescription.sdp,
+            "type": pc.localDescription.type,
+            "session_id": persistent_session_id,
+            "agent_id": agent_id,
+        }
+    )
+
+@app.on_event("startup")
+async def on_startup():
+    global _session_sweeper_task
+    if _session_sweeper_task is None or _session_sweeper_task.done():
+        _session_sweeper_task = asyncio.create_task(_session_sweeper_loop())
+        logger.info("Session sweeper started")
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    global _session_sweeper_task
+    if _session_sweeper_task is not None:
+        _session_sweeper_task.cancel()
+        try:
+            await _session_sweeper_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning("Session sweeper shutdown error: %s", e)
+        _session_sweeper_task = None
+
     coros = [pc.close() for pc in pcs]
     await asyncio.gather(*coros, return_exceptions=True)
     pcs.clear()
+    chat_sessions.clear()
+    voice_sessions.clear()
+    datachannels.clear()
+    peer_user_ids.clear()
+    peer_canvas_modes.clear()
+    tts_interrupt_flags.clear()
+    _pending_sdl.clear()
+    smart_turn_sessions.clear()
+    turn_processing_tasks.clear()
+    turn_timing.clear()
+    chat_session_activity.clear()
+    voice_session_activity.clear()
+    chat_session_finalizing.clear()
+    voice_session_finalizing.clear()
     logger.info("Server shutdown, pcs closed")
 
 if __name__ == "__main__":

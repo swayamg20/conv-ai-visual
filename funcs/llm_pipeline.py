@@ -44,6 +44,7 @@ class LLMPipeline:
         max_context_messages: int = 20,
         user_id: str = "default_user",
         session_id: str | None = None,
+        agent_id: str | None = None,
         enable_memory: bool = True,
         canvas_mode: bool = False,
         canvas_system_prompt: str | None = None
@@ -59,6 +60,7 @@ class LLMPipeline:
             max_context_messages: Max messages in context window
             user_id: User ID for memory isolation
             session_id: Session ID for episodic tracking
+            agent_id: Agent ID for cross-session memory scoping
             enable_memory: Whether to enable memory layers
             canvas_mode: Whether canvas visual mode is enabled (uses canvas for all responses)
             canvas_system_prompt: Custom canvas mode prompt (uses default if not provided)
@@ -75,6 +77,7 @@ class LLMPipeline:
         )
 
         self.user_id = user_id
+        self.agent_id = agent_id
         self.enable_memory = enable_memory
         
         # Canvas mode settings
@@ -90,7 +93,7 @@ class LLMPipeline:
         self.memory: MemoryManager | None = None
         if enable_memory:
             try:
-                self.memory = MemoryManager(user_id=user_id, session_id=session_id)
+                self.memory = MemoryManager(user_id=user_id, session_id=session_id, agent_id=agent_id)
                 self.memory.context.max_messages = max_context_messages
                 logger.info("4-layer memory initialized")
             except Exception as e:
