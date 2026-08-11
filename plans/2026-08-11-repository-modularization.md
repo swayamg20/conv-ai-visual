@@ -50,7 +50,7 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] Split the 1,520-line SVG renderer into typed scene normalization, render primitives, and timeline execution modules.
 - [x] 2026-08-11 15:39 IST: Removed the unused Excalidraw and legacy canvas renderers, Excalidraw types/global CSS/dependency, and duplicate Next.js configuration; the active SDL-to-SVG renderer remains the single canvas implementation.
 - [x] Update README/setup/architecture documentation to describe only the resulting active system.
-- [ ] Complete the security, build, test, and end-to-end acceptance audit and record the outcome here.
+- [x] 2026-08-11 18:59 IST: Completed the security, build, test, packaging, runtime, and clean-checkout acceptance audit. A fresh `git archive` passed locked backend/frontend installs, Ruff, forty-six backend tests, twelve frontend tests, strict typecheck, production build, zero-finding npm audit, and a fresh wheel inspection with no legacy `funcs` package. A real Uvicorn process reached application startup/shutdown cleanly; `/openapi.json` returned `200`, while unauthenticated `/api/logs` and `DELETE /chat/not-owned` returned `401`. GitHub Actions run `31496084054` passed both hosted jobs for the final hardening checkpoint.
 
 ## Surprises & Discoveries
 
@@ -154,7 +154,13 @@ The browser VAD wrapper exposed `minSpeechFrames` and `redemptionFrames`, but ne
 
 ## Outcomes & Retrospective
 
-Work is in progress. The baseline audit is complete and the refactor has not yet met acceptance. This section will record shipped module boundaries, deleted legacy paths, validation results, remaining risks, and any deviations from the plan after implementation.
+The refactor met its acceptance boundary. Root `main.py` is a thirteen-line compatibility entrypoint. The backend has one installable `murmur` package with focused API, agents, chat, runtime, persistence, LLM, memory, voice, tools, resources, and canvas domains; the transitional `funcs` package is absent from source and from a wheel built in clean staging. Session state is represented by typed chat and voice records owned by the FastAPI application, and canvas state is owned by the pipeline that consumes it. The frontend has one SVG/Rough.js canvas implementation split behind a typed feature boundary, plus enforced lint, typecheck, unit-test, and build gates.
+
+Security behavior is now structural and regression-tested: Firebase identity is the only request identity source; owned agents, sessions, and resources are resolved before mutation or peer allocation; and observability queries are authenticated and user-scoped. Runtime teardown is idempotent, overlapping chat turns are serialized, failed WebRTC negotiation unwinds allocations, and nested Smart Turn and TTS tasks are cancelled and gathered. The existing two-session fake-provider scenario proves durable context continuity without paid network calls.
+
+Acceptance was rerun from an archive of commit `21ba635`, not from the warmed development tree. `uv sync --locked --extra dev` and `npm ci` completed from lockfiles; Ruff checked ninety-five Python files; pytest reported `46 passed`; Vitest reported five files and twelve tests passed; ESLint and strict TypeScript passed; the Next.js production build generated every app route; `npm audit --audit-level=high` reported zero vulnerabilities; and `uv build --wheel` produced a canonical wheel with no `funcs/` entries. A provisioned Uvicorn process completed startup and shutdown, served OpenAPI with `200`, and returned `401` for both protected acceptance probes. GitHub Actions run `31496084054` independently passed the same backend and frontend jobs. Ignored source-tree build remnants were preserved outside the repository under `/private/tmp/conv-ai-visual-generated.E9Sl0C` rather than deleted.
+
+The remaining risks are explicit instead of hidden. SQLite repository calls are synchronous and suitable for local development or a small pilot, but should move off the event loop or to an async database before high concurrency. Schema creation is guarded and append-only migration work remains necessary before distributed production rollout. Inline tools are trusted operator extensions: their callers have a timeout, but already-running Python threads are not force-terminated, so hostile-code isolation would require a separate process or container. Automated acceptance deliberately fakes paid providers; a credentialed staging voice call remains a deployment check rather than a repository test. The only test-suite warning is Starlette's third-party transition notice from `TestClient` toward `httpx2`.
 
 ## Context and Orientation
 
