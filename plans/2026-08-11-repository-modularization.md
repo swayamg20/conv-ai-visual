@@ -44,6 +44,8 @@ The first Python 3.12 environment sync exposed a second stale binary pin: `aiort
 
 Removing Excalidraw cut the production frontend audit from eight findings to two; both remaining findings originated in the unpatched Next.js 14 runtime. Upgrading to Next.js 16.3, React 19.2, the flat ESLint configuration, and current Vitest removed all reported npm vulnerabilities. The stricter React lint rules also exposed render-time ref access and uncancelled data-loading effects, which were corrected rather than suppressed. Turbopack now builds the browser VAD/ONNX bundle without the former Webpack dynamic-require warnings.
 
+The first hosted workflow dispatch failed validation before creating any jobs because the unquoted SQLite in-memory URL ended with a colon, which YAML interpreted as mapping syntax. Both colon-bearing environment values are now quoted, and workflow YAML is parsed locally before publication; hosted success remains required evidence for the gate.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
