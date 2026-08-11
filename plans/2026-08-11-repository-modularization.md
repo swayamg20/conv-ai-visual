@@ -46,6 +46,8 @@ Removing Excalidraw cut the production frontend audit from eight findings to two
 
 The first hosted workflow dispatch failed validation before creating any jobs because the unquoted SQLite in-memory URL ended with a colon, which YAML interpreted as mapping syntax. Both colon-bearing environment values are now quoted, and workflow YAML is parsed locally before publication; hosted success remains required evidence for the gate.
 
+The corrected workflow then proved the complete frontend job on GitHub's Node 22 runner, but the backend job could not resolve a floating `astral-sh/setup-uv@v9` alias. The release exists only as the exact `v9.0.0` tag, so CI pins that published tag and will be re-run before the quality-gate milestone is considered hosted-green.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
