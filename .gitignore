@@ -8,6 +8,8 @@ __pycache__/
 .coverage
 htmlcov/
 *.egg-info/
+/build/
+/dist/
 
 # Frontend
 /web/node_modules/

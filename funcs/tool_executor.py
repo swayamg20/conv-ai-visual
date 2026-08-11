@@ -13,11 +13,12 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from murmur.persistence.models import ToolModel
+from murmur.persistence.repositories.tools import ToolRepo
 from RestrictedPython import compile_restricted, safe_builtins
 from RestrictedPython.Eval import default_guarded_getitem, default_guarded_getiter
 from RestrictedPython.Guards import guarded_iter_unpack_sequence, safer_getattr
 
-from funcs.models import ToolModel, ToolRepo
 from funcs.tools import ToolCall, ToolResult
 
 logger = logging.getLogger("tool-executor")

@@ -50,7 +50,8 @@ experiments = [
 ]
 
 [tool.setuptools]
-packages = ["funcs"]
+packages = ["funcs", "murmur", "murmur.persistence", "murmur.persistence.repositories"]
+package-dir = { murmur = "backend/murmur" }
 py-modules = ["main"]
 
 [tool.pytest.ini_options]
@@ -74,7 +75,7 @@ ignore = ["B008"]
 
 [tool.coverage.run]
 branch = true
-source = ["funcs"]
+source = ["funcs", "murmur"]
 
 [tool.coverage.report]
 show_missing = true

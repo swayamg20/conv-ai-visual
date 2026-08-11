@@ -9,9 +9,9 @@ import firebase_admin
 from fastapi import HTTPException, Request
 from firebase_admin import auth as firebase_auth
 from firebase_admin import credentials
+from murmur.persistence.repositories.identities import UserRepo
 
 from .config import config
-from .models import UserRepo
 
 logger = logging.getLogger(__name__)
 

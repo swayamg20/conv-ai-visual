@@ -1,14 +1,14 @@
 import json
 import unittest
-from datetime import datetime
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from murmur.persistence import get_session
+from murmur.persistence.clock import utc_now
+from murmur.persistence.repositories.sessions import ConversationMessageRepo, SessionRepo
 from sqlalchemy import text
 
 import main
-from funcs.database import get_session
-from funcs.models import ConversationMessageRepo, SessionRepo
 
 TEST_USER = {
     "id": "continuity-test-user",
@@ -81,7 +81,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
                     "email": TEST_USER["email"],
                     "password_hash": "test-password-hash",
                     "name": TEST_USER["name"],
-                    "created_at": datetime.utcnow().isoformat(sep=" "),
+                    "created_at": utc_now().isoformat(sep=" "),
                     "is_active": 1,
                 },
             )

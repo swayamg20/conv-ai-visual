@@ -12,7 +12,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from funcs.models import ToolModel, ToolRepo
+from murmur.persistence.models import ToolModel
+from murmur.persistence.repositories.tools import ToolRepo
 
 logger = logging.getLogger("tools")
 

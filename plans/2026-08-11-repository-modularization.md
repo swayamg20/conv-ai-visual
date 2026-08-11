@@ -17,7 +17,8 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 15:42 IST: Verified GitHub Actions run `31481099746`: both hosted jobs passed clean lockfile installs and every configured backend/frontend quality gate.
 - [x] 2026-08-11 15:26 IST: Moved the existing SQLite/vector-store data and generated audio into gitignored `var/` storage, removed generated artifacts from version control, and separated experiments and manual provider scripts from the tested application surface.
 - [x] 2026-08-11 15:49 IST: Protected chat clear/canvas controls and observability routes, enforced session/agent ownership, scoped log rows and statistics in repository queries, moved `/obs` behind the authenticated app layout, and added five API security regression tests.
-- [ ] Extract database engine/session setup, SQLModel declarations, and repositories from `funcs/models.py`; make the database path configurable and test-isolatable.
+- [x] 2026-08-11 15:53 IST: Verified GitHub Actions run `31481754730`: the ownership/security checkpoint passed both hosted backend and frontend jobs.
+- [x] 2026-08-11 16:00 IST: Removed `funcs/models.py` and `funcs/database.py`; introduced the installable `murmur.persistence` package, isolated 14 table declarations from six focused repository domains, moved schema/tool setup to application startup, and rebuilt the schema fresh in memory for every automated test. Ten backend tests, the built wheel, an automated comparison of all 14 tables and 139 columns, and all 55 existing public repository method signatures pass unchanged; the shared UTC clock reduced backend test warnings from 134 to four without changing the legacy naive-SQLite format.
 - [ ] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
@@ -49,6 +50,10 @@ The first hosted workflow dispatch failed validation before creating any jobs be
 
 The corrected workflow then proved the complete frontend job on GitHub's Node 22 runner, but the backend job could not resolve a floating `astral-sh/setup-uv@v9` alias. The release exists only as the exact `v9.0.0` tag, so CI pins that published tag and will be re-run before the quality-gate milestone is considered hosted-green.
 
+The persistence split could be verified more strongly than a smoke test. Loading the pre-refactor declarations from Git and comparing their SQLAlchemy metadata with the new package proved identical table, column, nullability, primary-key, unique, index, foreign-key, and default-presence contracts across 14 tables and 139 columns. The explicit setuptools package map also produces a wheel containing root `main.py`, the transitional `funcs` package, and the new `murmur` package.
+
+The first explicit startup smoke test exposed an ordering dependency hidden by import-time schema creation: root `main.py` constructed an unused default `LLMPipeline` before application startup, and that constructor attempted to read profile memory before the new startup hook created tables. No runtime path referenced that singleton; chat and voice create user/session-specific pipelines. Removing the dead singleton restored a clean database-first startup without reintroducing import-time schema mutation.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -67,6 +72,8 @@ The corrected workflow then proved the complete frontend job on GitHub's Node 22
 
 2026-08-11, Codex: The user authorized ongoing GitHub pushes. Each coherent checkpoint will be committed and pushed to `origin/main` only after its relevant checks pass; partial dependency or refactor breakage will not be published as a checkpoint.
 
+2026-08-11, Codex: Importing persistence declarations must be side-effect free. Table creation and built-in tool registration now happen at application startup, while an autouse test fixture rebuilds a shared in-memory SQLite schema before every test. This keeps production startup explicit and prevents tests from touching developer runtime data.
+
 ## Outcomes & Retrospective
 
 Work is in progress. The baseline audit is complete and the refactor has not yet met acceptance. This section will record shipped module boundaries, deleted legacy paths, validation results, remaining risks, and any deviations from the plan after implementation.
@@ -75,7 +82,7 @@ Work is in progress. The baseline audit is complete and the refactor has not yet
 
 The current backend starts at root `main.py`. Importing it creates the FastAPI application, initializes the default LLM and TTS pipelines, registers a database-backed web-search tool, declares request schemas, owns roughly fifteen process-global state collections, implements WebRTC audio consumption, performs voice turn orchestration, and declares every HTTP route. This concentration makes route imports expensive, complicates tests, and couples transport behavior to persistence and provider SDKs.
 
-The current `funcs/models.py` defines the SQLite engine, all SQLModel tables, every repository class, lexical resource scoring, and import-time schema creation. `funcs/memory.py` and `funcs/llm_pipeline.py` use those repositories directly. `funcs/auth.py` verifies Firebase ID tokens and provisions users. The refactor must preserve that identity contract: the bearer token is authoritative, client-supplied user IDs are never trusted, and every owned resource is checked against the authenticated user.
+Before the second milestone, `funcs/models.py` defined the SQLite engine, all SQLModel tables, every repository class, lexical resource scoring, and import-time schema creation. Those concerns now live in `backend/murmur/persistence/`, while `funcs/memory.py`, `funcs/resources.py`, `funcs/tools.py`, and `funcs/auth.py` import only their focused repository domains. The identity contract remains unchanged: the bearer token is authoritative, client-supplied user IDs are never trusted, and every owned resource is checked against the authenticated user.
 
 The current LLM layer is split between `funcs/llm_clients.py`, which implements provider SDK behavior, and `funcs/llm_pipeline.py`, which assembles memory, tools, canvas state, execution policy, streaming, and metrics. Both files are approximately one thousand lines. Provider-specific serialization belongs in provider modules; provider-independent tool policy and conversation orchestration belong in smaller services.
 

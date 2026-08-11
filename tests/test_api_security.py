@@ -4,15 +4,14 @@ from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
-
-import main
-from funcs.models import (
-    AgentRepo,
+from murmur.persistence.repositories.identities import AgentRepo, UserRepo
+from murmur.persistence.repositories.observability import (
     LLMCallLogRepo,
-    SessionRepo,
-    UserRepo,
     VoicePipelineLogRepo,
 )
+from murmur.persistence.repositories.sessions import SessionRepo
+
+import main
 
 
 class ApiSecurityTest(unittest.TestCase):

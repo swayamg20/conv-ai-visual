@@ -4,8 +4,9 @@ Web search integration via Tavily.
 
 import logging
 
+from murmur.persistence.repositories.tools import ToolRepo
+
 from funcs.config import config
-from funcs.models import ToolRepo
 
 logger = logging.getLogger("search")
 

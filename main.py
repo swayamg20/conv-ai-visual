@@ -19,6 +19,20 @@ from aiortc.mediastreams import AudioFrame
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from murmur.persistence import get_data_dir, init_db
+from murmur.persistence.models import TopicMasteryModel
+from murmur.persistence.repositories.identities import AgentRepo
+from murmur.persistence.repositories.observability import (
+    LLMCallLogRepo,
+    TTSResilienceLogRepo,
+    VoicePipelineLogRepo,
+)
+from murmur.persistence.repositories.resources import ResourceRepo
+from murmur.persistence.repositories.sessions import (
+    ConversationMessageRepo,
+    SessionRepo,
+    TopicMasteryRepo,
+)
 from pydantic import BaseModel
 
 from funcs.agents import (
@@ -28,22 +42,10 @@ from funcs.agents import (
 )
 from funcs.auth import get_current_user, require_auth
 from funcs.config import config
-from funcs.database import get_data_dir
 from funcs.kokoro_tts import KokoroTTSPipeline
 from funcs.llm_clients import create_llm_client
 from funcs.llm_pipeline import LLMPipeline
 from funcs.model_router import route_model
-from funcs.models import (
-    AgentRepo,
-    ConversationMessageRepo,
-    LLMCallLogRepo,
-    ResourceRepo,
-    SessionRepo,
-    TopicMasteryModel,
-    TopicMasteryRepo,
-    TTSResilienceLogRepo,
-    VoicePipelineLogRepo,
-)
 from funcs.resources import ingest_pdf, ingest_url, search_chunks
 from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
@@ -57,21 +59,6 @@ logger = logging.getLogger("webrtc-deepgram")
 
 try:
     config.validate()
-
-    llm_pipeline = LLMPipeline(
-        provider=config.LLM_PROVIDER,
-        api_key=None,  # Factory will get from config based on provider
-        model=None,  # Factory will get from config based on provider
-        system_prompt=config.LLM_SYSTEM_PROMPT,
-        max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
-    )
-    logger.info("LLM pipeline initialized successfully")
-
-    # Register web_search tool in DB so it's available for agents with web_search capability
-    try:
-        register_web_search_tool()
-    except Exception as e:
-        logger.warning("Failed to register web_search tool: %s", e)
 
     if config.TTS_PROVIDER == "kokoro":
         tts_pipeline = KokoroTTSPipeline(model_path=config.KOKORO_MODEL_PATH)
@@ -98,7 +85,6 @@ try:
 
 except Exception as e:
     logger.error("Failed to initialize pipelines: %s", e)
-    llm_pipeline = None
     tts_pipeline = None
     tts_fallback_pipeline = None
     smart_turn_analyzer = None
@@ -1229,8 +1215,6 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
         # ── Save to DB ──
         try:
-            from funcs.models import VoicePipelineLogRepo
-
             user_id = _get_voice_user_id(pc_id)
             log_record = VoicePipelineLogRepo.save(
                 session_id=getattr(pipeline, "session_id", pc_id),
@@ -2581,6 +2565,12 @@ async def offer(body: Offer, request: Request):
 @app.on_event("startup")
 async def on_startup():
     global _session_sweeper_task
+    init_db()
+    try:
+        register_web_search_tool()
+    except Exception as exc:
+        logger.warning("Failed to register web_search tool: %s", exc)
+
     if _session_sweeper_task is None or _session_sweeper_task.done():
         _session_sweeper_task = asyncio.create_task(_session_sweeper_loop())
         logger.info("Session sweeper started")
