@@ -1,9 +1,9 @@
 import logging
 import time
+
 import numpy as np
 import torch
 from silero_vad import load_silero_vad
-
 
 logger = logging.getLogger("webrtc-deepgram.vad")
 
@@ -51,7 +51,7 @@ class SileroVADGate:
         - latency_ms: Time taken for VAD inference in milliseconds.
         """
         t_start = time.perf_counter()
-        
+
         audio = self._bytes_to_mono_float(pcm_bytes)
         if audio.size == 0:
             return False, 0.0
@@ -84,7 +84,7 @@ class SileroVADGate:
         # Model returns speech probability for this window.
         prob = float(self.model(chunk, sr).item())
         decision = prob >= self.threshold
-        
+
         t_end = time.perf_counter()
         latency_ms = (t_end - t_start) * 1000
 
@@ -97,5 +97,3 @@ class SileroVADGate:
                 logger.debug("noise/silence prob=%.3f latency=%.2fms", prob, latency_ms)
 
         return decision, latency_ms
-
-

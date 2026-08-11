@@ -1,7 +1,10 @@
-import numpy as np
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, AudioFrame
-import base64
 import asyncio
+import base64
+
+import numpy as np
+from aiortc import AudioFrame, MediaStreamTrack
+
+
 def audio_frame_to_base64(frame: AudioFrame) -> str:
     """
     Convert aiortc.AudioFrame -> base64 of raw 16-bit PCM interleaved bytes.
@@ -20,6 +23,7 @@ def audio_frame_to_base64(frame: AudioFrame) -> str:
     b64 = base64.b64encode(pcm_bytes).decode("ascii")
     return b64
 
+
 async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     """
     Read frames from incoming audio track. Convert each frame into base64
@@ -33,9 +37,11 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             b64 = audio_frame_to_base64(frame)
 
             # Example: print short metadata and first 80 chars of base64
-            print(f"[{pc_id}] frame ts={frame.time} samples={frame.samples} rate={frame.sample_rate} b64(len)={len(b64)}")
+            print(
+                f"[{pc_id}] frame ts={frame.time} samples={frame.samples} rate={frame.sample_rate} b64(len)={len(b64)}"
+            )
             # CAUTION: printing whole base64 may be huge — here just a small prefix
-            print(b64[:80] + "..." )
+            print(b64[:80] + "...")
 
             # TODO: replace the print above with one of:
             # - push b64 into an asyncio.Queue to be processed by a writer task
@@ -48,5 +54,3 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         raise
     except Exception as e:
         print(f"[{pc_id}] consumer stopped: {e}")
-
-        

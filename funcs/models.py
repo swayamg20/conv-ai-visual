@@ -1,46 +1,19 @@
 """
 SQLModel database models.
 """
-import logging
-import os
+
 import json
+import logging
 import re
 from collections import Counter
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
-from sqlmodel import SQLModel, Field, create_engine, Session, select
-from sqlalchemy import Column, JSON, event, func
 
-# Database path - use absolute path to avoid readonly issues
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "memory.db"))
-DATABASE_URL = f"sqlite:///{DB_PATH}"
+from sqlalchemy import func
+from sqlmodel import Field, Session, SQLModel, select
 
-# Create engine (sync for simplicity - can switch to async later)
-# SQLite benefits from an explicit timeout and WAL-backed connections for
-# small concurrent workloads.
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    connect_args={
-        "check_same_thread": False,
-        "timeout": 30,
-    },
-)
-
-
-@event.listens_for(engine, "connect")
-def _configure_sqlite_connection(dbapi_connection, connection_record) -> None:
-    """Apply SQLite pragmas for safer concurrent access."""
-    cursor = dbapi_connection.cursor()
-    try:
-        cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute("PRAGMA synchronous=NORMAL")
-        cursor.execute("PRAGMA foreign_keys=ON")
-        cursor.execute("PRAGMA busy_timeout=5000")
-    finally:
-        cursor.close()
-
+from funcs.database import get_session, init_db
 
 logger = logging.getLogger(__name__)
 _RESOURCE_TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -92,10 +65,12 @@ def _load_json(value: str | None, default: Any = None) -> Any:
 
 # ============== Models ==============
 
+
 class EpisodicMemoryModel(SQLModel, table=True):
     """Layer 2: Conversation summaries."""
+
     __tablename__ = "episodic_memory"
-    
+
     id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
     session_id: str | None = None
@@ -103,7 +78,7 @@ class EpisodicMemoryModel(SQLModel, table=True):
     turn_count: int | None = None
     meta_json: str | None = Field(default=None, sa_column_kwargs={"name": "metadata"})
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     def get_meta(self) -> dict:
         """Get metadata dict."""
         return _load_json(self.meta_json, {})
@@ -115,8 +90,9 @@ class EpisodicMemoryModel(SQLModel, table=True):
 
 class UserProfileModel(SQLModel, table=True):
     """Layer 4: User profile - canonical identity."""
+
     __tablename__ = "user_profile"
-    
+
     user_id: str = Field(primary_key=True)
     name: str | None = None
     timezone: str | None = None
@@ -124,7 +100,7 @@ class UserProfileModel(SQLModel, table=True):
     facts_json: str | None = Field(default="{}", sa_column_kwargs={"name": "facts"})
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     @property
     def preferences(self) -> dict:
         return _load_json(self.preferences_json, {})
@@ -144,8 +120,9 @@ class UserProfileModel(SQLModel, table=True):
 
 class DecisionMemoryModel(SQLModel, table=True):
     """Agentic decision tracking."""
+
     __tablename__ = "decision_memory"
-    
+
     id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True)
     session_id: str | None = None
@@ -158,6 +135,7 @@ class DecisionMemoryModel(SQLModel, table=True):
 
 class UserModel(SQLModel, table=True):
     """Registered user accounts.  id is the Firebase uid."""
+
     __tablename__ = "users"
 
     id: str = Field(primary_key=True)
@@ -172,6 +150,7 @@ class UserModel(SQLModel, table=True):
 
 class AgentModel(SQLModel, table=True):
     """User-created AI agents with compiled system prompts."""
+
     __tablename__ = "agents"
 
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
@@ -195,6 +174,7 @@ class AgentModel(SQLModel, table=True):
 
 class SessionModel(SQLModel, table=True):
     """Persistent chat sessions for cross-session memory."""
+
     __tablename__ = "sessions"
 
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
@@ -209,6 +189,7 @@ class SessionModel(SQLModel, table=True):
 
 class ConversationMessageModel(SQLModel, table=True):
     """Persisted conversation messages for session replay and cross-session context."""
+
     __tablename__ = "conversation_messages"
 
     id: int | None = Field(default=None, primary_key=True)
@@ -223,6 +204,7 @@ class ConversationMessageModel(SQLModel, table=True):
 
 class LLMCallLogModel(SQLModel, table=True):
     """End-to-end logging for LLM API calls."""
+
     __tablename__ = "llm_call_log"
 
     id: int | None = Field(default=None, primary_key=True)
@@ -251,6 +233,7 @@ class VoicePipelineLogModel(SQLModel, table=True):
 
     Captures every stage: speech detection → STT → turn detection → LLM → tool calls → TTS → playback.
     """
+
     __tablename__ = "voice_pipeline_log"
 
     id: int | None = Field(default=None, primary_key=True)
@@ -264,16 +247,16 @@ class VoicePipelineLogModel(SQLModel, table=True):
     llm_model: str | None = None
 
     # Stage latencies (milliseconds)
-    latency_vad_ms: float | None = None           # VAD speech detection time
-    latency_stt_ms: float | None = None            # Time from audio start to final transcript
-    latency_turn_detection_ms: float | None = None # Smart Turn analysis time
-    latency_stt_to_llm_ms: float | None = None     # Gap between STT final and LLM call start
-    latency_llm_ms: float | None = None             # LLM inference (incl tool call rounds)
-    latency_llm_first_token_ms: float | None = None # Time to first LLM token (TTFT)
-    latency_tool_ms: float | None = None            # Total tool execution time
-    latency_tts_ms: float | None = None             # TTS generation time (all chunks)
-    latency_tts_first_chunk_ms: float | None = None # Time to first TTS audio chunk (TTFB)
-    latency_total_ms: float | None = None           # End-to-end: speech start → last TTS chunk
+    latency_vad_ms: float | None = None  # VAD speech detection time
+    latency_stt_ms: float | None = None  # Time from audio start to final transcript
+    latency_turn_detection_ms: float | None = None  # Smart Turn analysis time
+    latency_stt_to_llm_ms: float | None = None  # Gap between STT final and LLM call start
+    latency_llm_ms: float | None = None  # LLM inference (incl tool call rounds)
+    latency_llm_first_token_ms: float | None = None  # Time to first LLM token (TTFT)
+    latency_tool_ms: float | None = None  # Total tool execution time
+    latency_tts_ms: float | None = None  # TTS generation time (all chunks)
+    latency_tts_first_chunk_ms: float | None = None  # Time to first TTS audio chunk (TTFB)
+    latency_total_ms: float | None = None  # End-to-end: speech start → last TTS chunk
 
     # Pipeline metadata
     tool_calls_json: str | None = None
@@ -293,6 +276,7 @@ class VoicePipelineLogModel(SQLModel, table=True):
 
 class TTSResilienceLogModel(SQLModel, table=True):
     """Sidecar metadata for retries and fallback without altering existing voice log rows."""
+
     __tablename__ = "tts_resilience_log"
 
     id: int | None = Field(default=None, primary_key=True)
@@ -307,14 +291,15 @@ class TTSResilienceLogModel(SQLModel, table=True):
 
 class ResourceModel(SQLModel, table=True):
     """Uploaded resources (PDFs, URLs, text) attached to an agent."""
+
     __tablename__ = "resources"
 
     id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True)
     agent_id: str = Field(index=True, foreign_key="agents.id")
     user_id: str = Field(index=True, foreign_key="users.id")
-    name: str                # Original filename or URL
-    resource_type: str       # "pdf", "url", "text"
-    content_text: str = ""   # Extracted full text
+    name: str  # Original filename or URL
+    resource_type: str  # "pdf", "url", "text"
+    content_text: str = ""  # Extracted full text
     chunk_count: int = 0
     size_bytes: int | None = None
     status: str = "processing"  # "processing", "ready", "failed"
@@ -323,34 +308,37 @@ class ResourceModel(SQLModel, table=True):
 
 class ResourceChunkModel(SQLModel, table=True):
     """Chunked text from a resource for retrieval."""
+
     __tablename__ = "resource_chunks"
 
     id: int | None = Field(default=None, primary_key=True)
     resource_id: str = Field(index=True, foreign_key="resources.id")
     chunk_index: int
-    content: str             # ~500 token chunk (~2000 chars)
+    content: str  # ~500 token chunk (~2000 chars)
     page_number: int | None = None
 
 
 class TopicMasteryModel(SQLModel, table=True):
     """Per-session topic mastery signals for the struggle heatmap."""
+
     __tablename__ = "topic_mastery"
 
     id: int | None = Field(default=None, primary_key=True)
     user_id: str = Field(index=True, foreign_key="users.id")
     agent_id: str = Field(index=True, foreign_key="agents.id")
     session_id: str = Field(index=True, foreign_key="sessions.id")
-    topic: str               # "Newton's Second Law"
+    topic: str  # "Newton's Second Law"
     chapter: str | None = None  # "Laws of Motion"
-    signal_type: str         # "understood", "struggled", "unclear"
+    signal_type: str  # "understood", "struggled", "unclear"
     details: str | None = None  # Brief note on what happened
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class ToolModel(SQLModel, table=True):
     """Tool definitions for function calling."""
+
     __tablename__ = "tools"
-    
+
     name: str = Field(primary_key=True)
     description: str
     parameters_json: str = Field(sa_column_kwargs={"name": "parameters"})
@@ -360,7 +348,7 @@ class ToolModel(SQLModel, table=True):
     enabled: bool = True
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
-    
+
     @property
     def parameters(self) -> dict:
         return _load_json(self.parameters_json, {})
@@ -376,29 +364,13 @@ class ToolModel(SQLModel, table=True):
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters
-            }
+                "parameters": self.parameters,
+            },
         }
 
     def to_anthropic_schema(self) -> dict:
         """Anthropic tool format."""
-        return {
-            "name": self.name,
-            "description": self.description,
-            "input_schema": self.parameters
-        }
-
-
-# ============== Database Operations ==============
-
-def init_db():
-    """Create all tables."""
-    SQLModel.metadata.create_all(engine)
-
-
-def get_session() -> Session:
-    """Get a database session."""
-    return Session(engine)
+        return {"name": self.name, "description": self.description, "input_schema": self.parameters}
 
 
 def _resource_query_terms(query: str) -> list[str]:
@@ -451,25 +423,31 @@ def _score_resource_chunk(content: str, query_terms: list[str], normalized_query
 
 # ============== Repository Classes ==============
 
+
 class EpisodicMemoryRepo:
     """Repository for episodic memory operations."""
-    
+
     @staticmethod
-    def save(user_id: str, summary: str, session_id: str | None = None,
-             turn_count: int = 0, metadata: dict | None = None) -> EpisodicMemoryModel:
+    def save(
+        user_id: str,
+        summary: str,
+        session_id: str | None = None,
+        turn_count: int = 0,
+        metadata: dict | None = None,
+    ) -> EpisodicMemoryModel:
         with get_session() as session:
             record = EpisodicMemoryModel(
                 user_id=user_id,
                 session_id=session_id,
                 summary=summary,
                 turn_count=turn_count,
-                meta_json=json.dumps(metadata) if metadata else None
+                meta_json=json.dumps(metadata) if metadata else None,
             )
             session.add(record)
             session.commit()
             session.refresh(record)
             return record
-    
+
     @staticmethod
     def get_recent(user_id: str, limit: int = 5) -> list[EpisodicMemoryModel]:
         with get_session() as session:
@@ -484,7 +462,7 @@ class EpisodicMemoryRepo:
 
 class UserProfileRepo:
     """Repository for user profile operations."""
-    
+
     @staticmethod
     def get_or_create(user_id: str) -> UserProfileModel:
         with get_session() as session:
@@ -495,19 +473,19 @@ class UserProfileRepo:
                 session.commit()
                 session.refresh(profile)
             return profile
-    
+
     @staticmethod
     def get(user_id: str) -> UserProfileModel | None:
         with get_session() as session:
             return session.get(UserProfileModel, user_id)
-    
+
     @staticmethod
     def update(user_id: str, **kwargs) -> UserProfileModel | None:
         with get_session() as session:
             profile = session.get(UserProfileModel, user_id)
             if not profile:
                 return None
-            
+
             for key, value in kwargs.items():
                 if key == "preferences":
                     profile.preferences_json = json.dumps(value)
@@ -515,7 +493,7 @@ class UserProfileRepo:
                     profile.facts_json = json.dumps(value)
                 elif hasattr(profile, key):
                     setattr(profile, key, value)
-            
+
             profile.updated_at = datetime.utcnow()
             session.add(profile)
             session.commit()
@@ -525,11 +503,16 @@ class UserProfileRepo:
 
 class DecisionMemoryRepo:
     """Repository for decision memory operations."""
-    
+
     @staticmethod
-    def log(user_id: str, action: str, session_id: str | None = None,
-            tool_used: str | None = None, success: bool = True,
-            context: str | None = None) -> DecisionMemoryModel:
+    def log(
+        user_id: str,
+        action: str,
+        session_id: str | None = None,
+        tool_used: str | None = None,
+        success: bool = True,
+        context: str | None = None,
+    ) -> DecisionMemoryModel:
         with get_session() as session:
             record = DecisionMemoryModel(
                 user_id=user_id,
@@ -537,25 +520,25 @@ class DecisionMemoryRepo:
                 action=action,
                 tool_used=tool_used,
                 success=success,
-                context=context
+                context=context,
             )
             session.add(record)
             session.commit()
             session.refresh(record)
             return record
-    
+
     @staticmethod
     def get_recent_failures(user_id: str, limit: int = 5) -> list[DecisionMemoryModel]:
         with get_session() as session:
             stmt = (
                 select(DecisionMemoryModel)
                 .where(DecisionMemoryModel.user_id == user_id)
-                .where(DecisionMemoryModel.success == False)
+                .where(DecisionMemoryModel.success.is_(False))
                 .order_by(DecisionMemoryModel.created_at.desc())
                 .limit(limit)
             )
             return list(session.exec(stmt).all())
-    
+
     @staticmethod
     def has_recent_failure(user_id: str, action: str, within_minutes: int = 5) -> bool:
         with get_session() as session:
@@ -564,7 +547,7 @@ class DecisionMemoryRepo:
                 select(DecisionMemoryModel)
                 .where(DecisionMemoryModel.user_id == user_id)
                 .where(DecisionMemoryModel.action == action)
-                .where(DecisionMemoryModel.success == False)
+                .where(DecisionMemoryModel.success.is_(False))
                 .order_by(DecisionMemoryModel.created_at.desc())
                 .limit(1)
             )
@@ -578,6 +561,7 @@ class DecisionMemoryRepo:
 
 class ToolRepo:
     """Repository for tool operations."""
+
     _openai_schema_cache: list[dict] | None = None
     _openai_schema_cache_key: tuple[int, datetime | None] | None = None
 
@@ -592,16 +576,20 @@ class ToolRepo:
             stmt = select(
                 func.count(ToolModel.name),
                 func.max(ToolModel.updated_at),
-            ).where(ToolModel.enabled == True)
+            ).where(ToolModel.enabled.is_(True))
             count, latest_updated_at = session.exec(stmt).one()
             return int(count or 0), latest_updated_at
-    
+
     @staticmethod
-    def upsert(name: str, description: str, parameters: dict,
-               handler_module: str | None = None,
-               handler_function: str | None = None,
-               code: str | None = None,
-               enabled: bool = True) -> ToolModel:
+    def upsert(
+        name: str,
+        description: str,
+        parameters: dict,
+        handler_module: str | None = None,
+        handler_function: str | None = None,
+        code: str | None = None,
+        enabled: bool = True,
+    ) -> ToolModel:
         with get_session() as session:
             tool = session.get(ToolModel, name)
             if tool:
@@ -620,33 +608,33 @@ class ToolRepo:
                     handler_module=handler_module,
                     handler_function=handler_function,
                     code=code,
-                    enabled=enabled
+                    enabled=enabled,
                 )
             session.add(tool)
             session.commit()
             session.refresh(tool)
             ToolRepo._invalidate_schema_cache()
             return tool
-    
+
     @staticmethod
     def get(name: str) -> ToolModel | None:
         with get_session() as session:
             return session.get(ToolModel, name)
-    
+
     @staticmethod
     def get_enabled(name: str) -> ToolModel | None:
         with get_session() as session:
             tool = session.get(ToolModel, name)
             return tool if tool and tool.enabled else None
-    
+
     @staticmethod
     def list_all(enabled_only: bool = True) -> list[ToolModel]:
         with get_session() as session:
             stmt = select(ToolModel).order_by(ToolModel.name)
             if enabled_only:
-                stmt = stmt.where(ToolModel.enabled == True)
+                stmt = stmt.where(ToolModel.enabled.is_(True))
             return list(session.exec(stmt).all())
-    
+
     @staticmethod
     def delete(name: str) -> bool:
         with get_session() as session:
@@ -657,7 +645,7 @@ class ToolRepo:
                 ToolRepo._invalidate_schema_cache()
                 return True
             return False
-    
+
     @staticmethod
     def set_enabled(name: str, enabled: bool) -> bool:
         with get_session() as session:
@@ -670,7 +658,7 @@ class ToolRepo:
                 ToolRepo._invalidate_schema_cache()
                 return True
             return False
-    
+
     @staticmethod
     def to_openai_format() -> list[dict]:
         """
@@ -689,7 +677,7 @@ class ToolRepo:
         ToolRepo._openai_schema_cache = formatted
         ToolRepo._openai_schema_cache_key = cache_key
         return formatted
-    
+
     @staticmethod
     def to_anthropic_format() -> list[dict]:
         """Get all enabled tools in Anthropic format."""
@@ -818,7 +806,7 @@ class AgentRepo:
             stmt = (
                 select(AgentModel)
                 .where(AgentModel.user_id == user_id)
-                .where(AgentModel.is_default == True)
+                .where(AgentModel.is_default.is_(True))
             )
             for agent in session.exec(stmt).all():
                 agent.is_default = False
@@ -946,9 +934,8 @@ class ConversationMessageRepo:
     @staticmethod
     def count_by_session(session_id: str) -> int:
         with get_session() as session:
-            stmt = (
-                select(func.count(ConversationMessageModel.id))
-                .where(ConversationMessageModel.session_id == session_id)
+            stmt = select(func.count(ConversationMessageModel.id)).where(
+                ConversationMessageModel.session_id == session_id
             )
             return session.exec(stmt).one() or 0
 
@@ -971,7 +958,7 @@ class LLMCallLogRepo:
         latency_stream_ms: float | None = None,
         tokens_in: int | None = None,
         tokens_out: int | None = None,
-        error: str | None = None
+        error: str | None = None,
     ) -> LLMCallLogModel:
         with get_session() as session:
             record = LLMCallLogModel(
@@ -988,7 +975,7 @@ class LLMCallLogRepo:
                 latency_stream_ms=latency_stream_ms,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
-                error=error
+                error=error,
             )
             session.add(record)
             session.commit()
@@ -1010,28 +997,22 @@ class LLMCallLogRepo:
     def get_stats() -> dict:
         """Get aggregated stats."""
         with get_session() as db:
-            total = db.exec(
-                select(func.count(LLMCallLogModel.id))
-            ).one()
-            avg_total = db.exec(
-                select(func.avg(LLMCallLogModel.latency_total_ms))
-            ).one()
-            avg_llm = db.exec(
-                select(func.avg(LLMCallLogModel.latency_llm_ms))
-            ).one()
-            avg_tool = db.exec(
-                select(func.avg(LLMCallLogModel.latency_tool_ms))
-            ).one()
+            total = db.exec(select(func.count(LLMCallLogModel.id))).one()
+            avg_total = db.exec(select(func.avg(LLMCallLogModel.latency_total_ms))).one()
+            avg_llm = db.exec(select(func.avg(LLMCallLogModel.latency_llm_ms))).one()
+            avg_tool = db.exec(select(func.avg(LLMCallLogModel.latency_tool_ms))).one()
             error_count = db.exec(
                 select(func.count(LLMCallLogModel.id)).where(LLMCallLogModel.error.isnot(None))
             ).one()
 
             def _percentile(col, p: float) -> float | None:
-                values = [v for v in db.exec(select(col).where(col.isnot(None))).all() if v is not None]
+                values = [
+                    v for v in db.exec(select(col).where(col.isnot(None))).all() if v is not None
+                ]
                 if not values:
                     return None
                 values.sort()
-                rank = int(round((p / 100.0) * (len(values) - 1)))
+                rank = round((p / 100.0) * (len(values) - 1))
                 rank = min(max(rank, 0), len(values) - 1)
                 return round(values[rank], 2)
 
@@ -1046,7 +1027,7 @@ class LLMCallLogRepo:
                 "p50_stream_latency_ms": _percentile(LLMCallLogModel.latency_stream_ms, 50),
                 "p95_stream_latency_ms": _percentile(LLMCallLogModel.latency_stream_ms, 95),
                 "error_count": error_count or 0,
-                "error_rate": round((error_count or 0) / total * 100, 2) if total else 0
+                "error_rate": round((error_count or 0) / total * 100, 2) if total else 0,
             }
 
 
@@ -1063,7 +1044,9 @@ class VoicePipelineLogRepo:
             return record
 
     @staticmethod
-    def get_recent(limit: int = 50, offset: int = 0, mode: str | None = None) -> list[VoicePipelineLogModel]:
+    def get_recent(
+        limit: int = 50, offset: int = 0, mode: str | None = None
+    ) -> list[VoicePipelineLogModel]:
         with get_session() as session:
             stmt = (
                 select(VoicePipelineLogModel)
@@ -1099,7 +1082,7 @@ class VoicePipelineLogRepo:
                 if not values:
                     return None
                 values.sort()
-                rank = int(round((p / 100.0) * (len(values) - 1)))
+                rank = round((p / 100.0) * (len(values) - 1))
                 rank = min(max(rank, 0), len(values) - 1)
                 return round(values[rank], 2)
 
@@ -1111,7 +1094,7 @@ class VoicePipelineLogRepo:
             error_count = db.exec(error_q).one() or 0
 
             interrupted_q = select(func.count(VoicePipelineLogModel.id)).where(
-                VoicePipelineLogModel.tts_interrupted == True
+                VoicePipelineLogModel.tts_interrupted.is_(True)
             )
             if mode:
                 interrupted_q = interrupted_q.where(VoicePipelineLogModel.mode == mode)
@@ -1127,8 +1110,12 @@ class VoicePipelineLogRepo:
                 "avg_turn_detection_ms": _avg(VoicePipelineLogModel.latency_turn_detection_ms),
                 "avg_llm_ms": _avg(VoicePipelineLogModel.latency_llm_ms),
                 "avg_llm_ttft_ms": _avg(VoicePipelineLogModel.latency_llm_first_token_ms),
-                "p50_llm_ttft_ms": _percentile(VoicePipelineLogModel.latency_llm_first_token_ms, 50),
-                "p95_llm_ttft_ms": _percentile(VoicePipelineLogModel.latency_llm_first_token_ms, 95),
+                "p50_llm_ttft_ms": _percentile(
+                    VoicePipelineLogModel.latency_llm_first_token_ms, 50
+                ),
+                "p95_llm_ttft_ms": _percentile(
+                    VoicePipelineLogModel.latency_llm_first_token_ms, 95
+                ),
                 "avg_tool_ms": _avg(VoicePipelineLogModel.latency_tool_ms),
                 "avg_tts_ms": _avg(VoicePipelineLogModel.latency_tts_ms),
                 "avg_tts_ttfb_ms": _avg(VoicePipelineLogModel.latency_tts_first_chunk_ms),
@@ -1283,7 +1270,9 @@ class ResourceChunkRepo:
             )
             resource_ids = list(session.exec(resource_ids_stmt).all())
             if not resource_ids:
-                logger.debug("resource search skipped for agent_id=%s: no ready resources", agent_id)
+                logger.debug(
+                    "resource search skipped for agent_id=%s: no ready resources", agent_id
+                )
                 return []
 
             query_terms = _resource_query_terms(query)
@@ -1297,8 +1286,7 @@ class ResourceChunkRepo:
             from sqlalchemy import or_
 
             conditions = [
-                func.lower(ResourceChunkModel.content).like(f"%{term}%")
-                for term in query_terms
+                func.lower(ResourceChunkModel.content).like(f"%{term}%") for term in query_terms
             ]
             normalized_query = " ".join(query_terms)
             if len(query_terms) > 1:
@@ -1389,10 +1377,12 @@ class TopicMasteryRepo:
 
         topics = []
         for topic, info in topic_latest.items():
-            topics.append({
-                **info,
-                "session_count": len(topic_sessions[topic]),
-            })
+            topics.append(
+                {
+                    **info,
+                    "session_count": len(topic_sessions[topic]),
+                }
+            )
 
         # Aggregate by chapter
         chapter_stats: dict[str, dict[str, int]] = {}
@@ -1403,10 +1393,7 @@ class TopicMasteryRepo:
             if sig in stats:
                 stats[sig] += 1
 
-        chapters = [
-            {"name": name, **counts}
-            for name, counts in chapter_stats.items()
-        ]
+        chapters = [{"name": name, **counts} for name, counts in chapter_stats.items()]
 
         return {"topics": topics, "chapters": chapters}
 

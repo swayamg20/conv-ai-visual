@@ -1,9 +1,11 @@
 """
 Configuration module for voice AI application.
 """
+
 import os
 from pathlib import Path
 from typing import Optional
+
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -20,6 +22,7 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
 
 class Config:
     """Application configuration."""
+
     # Provider selection — Groq default for fast inference (~80ms TTFT)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
 
@@ -58,7 +61,9 @@ class Config:
     MEM0_API_KEY: Optional[str] = os.getenv("MEM0_API_KEY")
     MEMORY_SEMANTIC_TIMEOUT_SECS: float = float(os.getenv("MEMORY_SEMANTIC_TIMEOUT_SECS", "1.0"))
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    LLM_MAX_TOKENS: Optional[int] = int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
+    LLM_MAX_TOKENS: Optional[int] = (
+        int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
+    )
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
     ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
         os.getenv("ALLOWED_CORS_ORIGINS"),
@@ -66,13 +71,15 @@ class Config:
     )
     LLM_ASYNC_CONTEXT: bool = os.getenv("LLM_ASYNC_CONTEXT", "true").lower() == "true"
     LLM_TOOL_SCHEMA_CACHE: bool = os.getenv("LLM_TOOL_SCHEMA_CACHE", "true").lower() == "true"
-    LLM_STREAM_TOOL_ORCHESTRATION: bool = os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "true").lower() == "true"
+    LLM_STREAM_TOOL_ORCHESTRATION: bool = (
+        os.getenv("LLM_STREAM_TOOL_ORCHESTRATION", "true").lower() == "true"
+    )
     LLM_PARALLEL_TOOLS: bool = os.getenv("LLM_PARALLEL_TOOLS", "true").lower() == "true"
     LLM_SYSTEM_PROMPT: str = os.getenv(
         "LLM_SYSTEM_PROMPT",
-        "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction."
+        "You are a helpful voice assistant. Provide concise, natural responses suitable for voice interaction.",
     )
-    
+
     LLM_CANVAS_SYSTEM_PROMPT: str = os.getenv(
         "LLM_CANVAS_SYSTEM_PROMPT",
         """You are a senior systems architect who teaches through visual diagrams. You explain system designs using the teach_with_visuals tool.
@@ -102,7 +109,7 @@ EXAMPLE — "Design a URL shortener":
     { "say": "We check Redis first for fast lookups, falling back to the database.", "highlight": ["cache", "db"] }
   ]
 }
-"""
+""",
     )
 
     # Math Tutor System Prompt (SDL v2 — semantic components, no coordinates)
@@ -153,7 +160,7 @@ EXAMPLE — "Explain the Pythagorean theorem":
     { "say": "And a and b are the other two sides.", "highlight": ["a", "b"] }
   ]
 }
-"""
+""",
     )
 
     # Smart Turn detection config
@@ -182,7 +189,7 @@ EXAMPLE — "Explain the Pythagorean theorem":
 
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
-    
+
     @classmethod
     def validate(cls) -> bool:
         """Validate required configuration based on provider."""
@@ -191,13 +198,17 @@ EXAMPLE — "Explain the Pythagorean theorem":
         # Validate LLM provider configuration
         if provider == "openai":
             if not cls.OPENAI_API_KEY:
-                raise ValueError("OPENAI_API_KEY environment variable is required for provider=openai")
+                raise ValueError(
+                    "OPENAI_API_KEY environment variable is required for provider=openai"
+                )
         elif provider == "groq":
             if not cls.GROQ_API_KEY:
                 raise ValueError("GROQ_API_KEY environment variable is required for provider=groq")
         elif provider == "gemini":
             if not cls.GEMINI_API_KEY:
-                raise ValueError("GEMINI_API_KEY environment variable is required for provider=gemini")
+                raise ValueError(
+                    "GEMINI_API_KEY environment variable is required for provider=gemini"
+                )
         else:
             raise ValueError(
                 f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
@@ -205,7 +216,9 @@ EXAMPLE — "Explain the Pythagorean theorem":
 
         # Validate TTS configuration
         if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
-            raise ValueError("ELEVENLABS_API_KEY environment variable is required when TTS_PROVIDER=elevenlabs")
+            raise ValueError(
+                "ELEVENLABS_API_KEY environment variable is required when TTS_PROVIDER=elevenlabs"
+            )
 
         if not cls.ALLOWED_CORS_ORIGINS:
             raise ValueError("ALLOWED_CORS_ORIGINS must contain at least one origin")

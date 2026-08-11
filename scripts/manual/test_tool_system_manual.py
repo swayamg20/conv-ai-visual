@@ -6,20 +6,18 @@ To use:
 2. Create handler functions in your own module
 3. Run tests
 """
+
 import asyncio
 import os
 import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from funcs import (
-    LLMPipeline, 
-    ToolExecutor, 
-    SandboxConfig, 
+    LLMPipeline,
+    ToolExecutor,
     ToolRepo,
-    default_executor,
-    default_store,
 )
-from funcs.tools import ToolCall
 
 
 async def test_executor():
@@ -27,21 +25,23 @@ async def test_executor():
     print("=" * 50)
     print("Testing ToolExecutor")
     print("=" * 50)
-    
+
     executor = ToolExecutor()
-    
+
     # List available tools
     tools = ToolRepo.list_all()
     print(f"\nAvailable tools: {len(tools)}")
     for t in tools:
         print(f"  - {t.name}: {t.description[:50]}...")
-    
+
     if not tools:
         print("\nNo tools registered. Register tools first:")
         print("  from funcs import ToolRepo")
-        print("  ToolRepo.upsert(name='...', description='...', parameters={...}, handler_module='...', handler_function='...')")
+        print(
+            "  ToolRepo.upsert(name='...', description='...', parameters={...}, handler_module='...', handler_function='...')"
+        )
         return
-    
+
     # Try executing first tool
     first_tool = tools[0]
     print(f"\nTrying to execute: {first_tool.name}")
@@ -55,17 +55,17 @@ async def test_pipeline():
     print("\n" + "=" * 50)
     print("Testing LLMPipeline with tools")
     print("=" * 50)
-    
+
     pipeline = LLMPipeline()
     pipeline.load_tools_from_db()
-    
+
     schemas = pipeline.get_tools_schema()
     print(f"\nLoaded {len(schemas)} tool schemas")
-    
+
     if not schemas:
         print("No tools available. Skipping pipeline test.")
         return
-    
+
     print("\nTesting chat_with_tools...")
     # This will make an actual LLM call
     # response = await pipeline.chat_with_tools("Hello, what can you help me with?")
@@ -78,7 +78,7 @@ def show_tool_registration_example():
     print("\n" + "=" * 50)
     print("How to register a tool")
     print("=" * 50)
-    
+
     print("""
 # 1. Create a handler module (e.g., myapp/tools/weather.py):
 
@@ -117,4 +117,3 @@ if __name__ == "__main__":
     show_tool_registration_example()
     asyncio.run(test_executor())
     asyncio.run(test_pipeline())
-

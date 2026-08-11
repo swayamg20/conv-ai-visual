@@ -5,6 +5,7 @@ Default: fast model (Groq). Escalates to capable model (OpenAI) for complex reas
 """
 
 import re
+
 from funcs.config import config
 
 # Patterns that suggest complex reasoning needed

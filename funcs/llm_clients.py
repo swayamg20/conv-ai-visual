@@ -4,6 +4,7 @@ LLM client abstraction layer for multiple providers.
 This module provides a unified interface for interacting with different LLM providers
 (OpenAI, Gemini, etc.) through the LLMClient abstract base class.
 """
+
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -25,7 +26,7 @@ class LLMClient(ABC):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> str:
         """
         Non-streaming completion.
@@ -47,7 +48,7 @@ class LLMClient(ABC):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[str, None]:
         """
         Streaming completion.
@@ -70,7 +71,7 @@ class LLMClient(ABC):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> Any:
         """
         Non-streaming completion with tool support.
@@ -94,7 +95,7 @@ class LLMClient(ABC):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """
         Streaming completion with tool support.
@@ -113,8 +114,7 @@ class LLMClient(ABC):
 
     @abstractmethod
     async def iter_stream_tool_events(
-        self,
-        stream: AsyncGenerator[Any, None]
+        self, stream: AsyncGenerator[Any, None]
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         Normalize provider stream chunks into tool-aware events.
@@ -180,13 +180,7 @@ class LLMClient(ABC):
 class OpenAIClient(LLMClient):
     """LLM client for OpenAI API (and compatible APIs like Groq, Together, etc.)."""
 
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        base_url: str | None = None,
-        **default_params
-    ):
+    def __init__(self, api_key: str, model: str, base_url: str | None = None, **default_params):
         """
         Initialize OpenAI client.
 
@@ -209,14 +203,16 @@ class OpenAIClient(LLMClient):
             provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
         except (IndexError, AttributeError):
             provider_label = base_url or "openai"
-        logger.info(f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}")
+        logger.info(
+            f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}"
+        )
 
     async def complete(
         self,
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> str:
         """Non-streaming completion."""
         try:
@@ -225,7 +221,7 @@ class OpenAIClient(LLMClient):
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                **{**self.default_params, **kwargs}
+                **{**self.default_params, **kwargs},
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -237,7 +233,7 @@ class OpenAIClient(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
         try:
@@ -247,7 +243,7 @@ class OpenAIClient(LLMClient):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
-                **{**self.default_params, **kwargs}
+                **{**self.default_params, **kwargs},
             )
 
             async for chunk in stream:
@@ -263,7 +259,7 @@ class OpenAIClient(LLMClient):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> Any:
         """Non-streaming completion with tools."""
         try:
@@ -273,7 +269,7 @@ class OpenAIClient(LLMClient):
                 temperature=temperature,
                 max_tokens=max_tokens,
                 tools=tools if tools else None,
-                **{**self.default_params, **kwargs}
+                **{**self.default_params, **kwargs},
             )
             return response
         except Exception as e:
@@ -286,7 +282,7 @@ class OpenAIClient(LLMClient):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
         try:
@@ -297,7 +293,7 @@ class OpenAIClient(LLMClient):
                 max_tokens=max_tokens,
                 tools=tools if tools else None,
                 stream=True,
-                **{**self.default_params, **kwargs}
+                **{**self.default_params, **kwargs},
             )
 
             async for chunk in stream:
@@ -307,8 +303,7 @@ class OpenAIClient(LLMClient):
             raise
 
     async def iter_stream_tool_events(
-        self,
-        stream: AsyncGenerator[Any, None]
+        self, stream: AsyncGenerator[Any, None]
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Normalize OpenAI-compatible streamed chunks into events."""
         tool_acc: dict[int, dict[str, str]] = {}
@@ -397,7 +392,11 @@ class OpenAIClient(LLMClient):
             try:
                 arguments = json.loads(tc.function.arguments) if tc.function.arguments else {}
             except (json.JSONDecodeError, TypeError):
-                logger.warning("Malformed tool call arguments for %s: %s", tc.function.name, tc.function.arguments)
+                logger.warning(
+                    "Malformed tool call arguments for %s: %s",
+                    tc.function.name,
+                    tc.function.arguments,
+                )
                 arguments = {}
             tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
         return tool_calls
@@ -415,22 +414,13 @@ class OpenAIClient(LLMClient):
 
     def format_tool_result(self, result: Any) -> dict:
         """Format tool result for OpenAI."""
-        return {
-            "role": "tool",
-            "tool_call_id": result.tool_call_id,
-            "content": result.content
-        }
+        return {"role": "tool", "tool_call_id": result.tool_call_id, "content": result.content}
 
 
 class GeminiClient(LLMClient):
     """LLM client for Google Gemini API."""
 
-    def __init__(
-        self,
-        api_key: str,
-        model: str,
-        **default_params
-    ):
+    def __init__(self, api_key: str, model: str, **default_params):
         """
         Initialize Gemini client.
 
@@ -441,12 +431,13 @@ class GeminiClient(LLMClient):
         """
         try:
             import google.generativeai as genai
+
             self.genai = genai
-        except ImportError:
+        except ImportError as exc:
             raise ImportError(
                 "google-generativeai package is required for Gemini support. "
                 "Install it with: pip install google-generativeai"
-            )
+            ) from exc
 
         self.genai.configure(api_key=api_key)
         self.model_name = model
@@ -475,7 +466,10 @@ class GeminiClient(LLMClient):
             elif role == "assistant":
                 # Tool call responses have content=None — reconstruct as text summary
                 if content is None and "tool_calls" in msg:
-                    tool_names = [tc.get("function", {}).get("name", "tool") for tc in msg.get("tool_calls", [])]
+                    tool_names = [
+                        tc.get("function", {}).get("name", "tool")
+                        for tc in msg.get("tool_calls", [])
+                    ]
                     summary = f"[Called tools: {', '.join(tool_names)}]"
                     history.append({"role": "model", "parts": [summary]})
                 elif content:
@@ -484,10 +478,7 @@ class GeminiClient(LLMClient):
             elif role == "tool":
                 # Gemini handles tool results differently
                 # Append as user message with tool result context
-                history.append({
-                    "role": "user",
-                    "parts": [f"Tool result: {content or ''}"]
-                })
+                history.append({"role": "user", "parts": [f"Tool result: {content or ''}"]})
 
         return system_prompt, history
 
@@ -496,18 +487,14 @@ class GeminiClient(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> str:
         """Non-streaming completion."""
         try:
             system_prompt, history = self._convert_messages(messages)
 
             # Gemini uses generation_config for parameters
-            generation_config = {
-                "temperature": temperature,
-                **self.default_params,
-                **kwargs
-            }
+            generation_config = {"temperature": temperature, **self.default_params, **kwargs}
             if max_tokens:
                 generation_config["max_output_tokens"] = max_tokens
 
@@ -526,7 +513,9 @@ class GeminiClient(LLMClient):
 
             # Send the last message
             last_message = history[-1]["parts"][0] if history else ""
-            response = await chat.send_message_async(last_message, generation_config=generation_config)
+            response = await chat.send_message_async(
+                last_message, generation_config=generation_config
+            )
 
             return response.text
         except Exception as e:
@@ -538,17 +527,13 @@ class GeminiClient(LLMClient):
         messages: list[dict],
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
         try:
             system_prompt, history = self._convert_messages(messages)
 
-            generation_config = {
-                "temperature": temperature,
-                **self.default_params,
-                **kwargs
-            }
+            generation_config = {"temperature": temperature, **self.default_params, **kwargs}
             if max_tokens:
                 generation_config["max_output_tokens"] = max_tokens
 
@@ -562,9 +547,7 @@ class GeminiClient(LLMClient):
             last_message = history[-1]["parts"][0] if history else ""
 
             response = await chat.send_message_async(
-                last_message,
-                generation_config=generation_config,
-                stream=True
+                last_message, generation_config=generation_config, stream=True
             )
 
             async for chunk in response:
@@ -580,17 +563,13 @@ class GeminiClient(LLMClient):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> Any:
         """Non-streaming completion with tools."""
         try:
             system_prompt, history = self._convert_messages(messages)
 
-            generation_config = {
-                "temperature": temperature,
-                **self.default_params,
-                **kwargs
-            }
+            generation_config = {"temperature": temperature, **self.default_params, **kwargs}
             if max_tokens:
                 generation_config["max_output_tokens"] = max_tokens
 
@@ -607,24 +586,27 @@ class GeminiClient(LLMClient):
 
             # Create model with tools if provided
             if gemini_tools:
-                model_with_tools = self.genai.GenerativeModel(
-                    self.model_name,
-                    tools=gemini_tools
-                )
+                model_with_tools = self.genai.GenerativeModel(self.model_name, tools=gemini_tools)
                 chat = model_with_tools.start_chat(history=history[:-1] if len(history) > 1 else [])
             else:
                 chat = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
 
             last_message = history[-1]["parts"][0] if history else ""
             try:
-                response = await chat.send_message_async(last_message, generation_config=generation_config)
+                response = await chat.send_message_async(
+                    last_message, generation_config=generation_config
+                )
             except Exception as send_err:
                 # Handle MALFORMED_FUNCTION_CALL — Gemini generated bad tool call JSON
                 # Retry without tools so it returns a plain text response
                 if "MALFORMED_FUNCTION_CALL" in str(send_err):
                     logger.warning("Gemini MALFORMED_FUNCTION_CALL — retrying without tools")
-                    chat_no_tools = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
-                    response = await chat_no_tools.send_message_async(last_message, generation_config=generation_config)
+                    chat_no_tools = self.model.start_chat(
+                        history=history[:-1] if len(history) > 1 else []
+                    )
+                    response = await chat_no_tools.send_message_async(
+                        last_message, generation_config=generation_config
+                    )
                 else:
                     raise
 
@@ -639,17 +621,13 @@ class GeminiClient(LLMClient):
         tools: list[dict] | None,
         temperature: float = 0.7,
         max_tokens: int | None = None,
-        **kwargs
+        **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
         try:
             system_prompt, history = self._convert_messages(messages)
 
-            generation_config = {
-                "temperature": temperature,
-                **self.default_params,
-                **kwargs
-            }
+            generation_config = {"temperature": temperature, **self.default_params, **kwargs}
             if max_tokens:
                 generation_config["max_output_tokens"] = max_tokens
 
@@ -664,19 +642,14 @@ class GeminiClient(LLMClient):
                 raise ValueError("No messages to process")
 
             if gemini_tools:
-                model_with_tools = self.genai.GenerativeModel(
-                    self.model_name,
-                    tools=gemini_tools
-                )
+                model_with_tools = self.genai.GenerativeModel(self.model_name, tools=gemini_tools)
                 chat = model_with_tools.start_chat(history=history[:-1] if len(history) > 1 else [])
             else:
                 chat = self.model.start_chat(history=history[:-1] if len(history) > 1 else [])
 
             last_message = history[-1]["parts"][0] if history else ""
             response = await chat.send_message_async(
-                last_message,
-                generation_config=generation_config,
-                stream=True
+                last_message, generation_config=generation_config, stream=True
             )
 
             async for chunk in response:
@@ -686,8 +659,7 @@ class GeminiClient(LLMClient):
             raise
 
     async def iter_stream_tool_events(
-        self,
-        stream: AsyncGenerator[Any, None]
+        self, stream: AsyncGenerator[Any, None]
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Normalize Gemini streamed chunks into tool-aware events."""
         pending_tool_calls: dict[str, ToolCall] = {}
@@ -772,11 +744,13 @@ class GeminiClient(LLMClient):
                 gemini_schema = self._convert_json_schema_to_gemini(params)
 
                 # Gemini's high-level API accepts dicts with specific structure
-                gemini_tools.append({
-                    "name": func["name"],
-                    "description": func.get("description", ""),
-                    "parameters": gemini_schema
-                })
+                gemini_tools.append(
+                    {
+                        "name": func["name"],
+                        "description": func.get("description", ""),
+                        "parameters": gemini_schema,
+                    }
+                )
 
         return gemini_tools
 
@@ -837,7 +811,7 @@ class GeminiClient(LLMClient):
 
         for candidate in response.candidates:
             for part in candidate.content.parts:
-                if hasattr(part, 'function_call') and part.function_call:
+                if hasattr(part, "function_call") and part.function_call:
                     return True
         return False
 
@@ -849,20 +823,22 @@ class GeminiClient(LLMClient):
 
         for candidate in response.candidates:
             for part in candidate.content.parts:
-                if hasattr(part, 'function_call') and part.function_call:
+                if hasattr(part, "function_call") and part.function_call:
                     fc = part.function_call
 
                     # Convert protobuf args to regular dict
                     args_dict = {}
-                    if hasattr(fc, 'args') and fc.args:
+                    if hasattr(fc, "args") and fc.args:
                         args_dict = self._convert_protobuf_to_dict(fc.args)
 
                     # Convert Gemini's function call to ToolCall
-                    tool_calls.append(ToolCall(
-                        id=f"call_{hash(fc.name)}_{len(tool_calls)}",  # Generate ID
-                        name=fc.name,
-                        arguments=args_dict
-                    ))
+                    tool_calls.append(
+                        ToolCall(
+                            id=f"call_{hash(fc.name)}_{len(tool_calls)}",  # Generate ID
+                            name=fc.name,
+                            arguments=args_dict,
+                        )
+                    )
 
         return tool_calls
 
@@ -878,6 +854,7 @@ class GeminiClient(LLMClient):
 
     def _convert_protobuf_to_dict(self, protobuf_struct) -> dict:
         """Convert protobuf Struct to regular Python dict with native types."""
+
         def _to_native(val):
             """Recursively convert protobuf/proto-plus values to native Python."""
             if isinstance(val, dict):
@@ -886,18 +863,19 @@ class GeminiClient(LLMClient):
                 return [_to_native(v) for v in val]
             # Handle proto-plus RepeatedComposite / MapComposite
             type_name = type(val).__name__
-            if 'RepeatedComposite' in type_name or 'Repeated' in type_name:
+            if "RepeatedComposite" in type_name or "Repeated" in type_name:
                 return [_to_native(v) for v in val]
-            if 'MapComposite' in type_name:
+            if "MapComposite" in type_name:
                 return {k: _to_native(v) for k, v in val.items()}
-            if hasattr(val, 'items'):
+            if hasattr(val, "items"):
                 return {k: _to_native(v) for k, v in val.items()}
-            if hasattr(val, '__iter__') and not isinstance(val, (str, bytes)):
+            if hasattr(val, "__iter__") and not isinstance(val, (str, bytes)):
                 return [_to_native(v) for v in val]
             return val
 
         try:
             from google.protobuf.json_format import MessageToDict
+
             result = MessageToDict(protobuf_struct, preserving_proto_field_name=True)
             return _to_native(result)
         except Exception:
@@ -919,49 +897,38 @@ class GeminiClient(LLMClient):
             tool_calls_data = []
             for candidate in response.candidates:
                 for part in candidate.content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
+                    if hasattr(part, "function_call") and part.function_call:
                         fc = part.function_call
 
                         # Convert protobuf args to regular dict
                         args_dict = {}
-                        if hasattr(fc, 'args') and fc.args:
+                        if hasattr(fc, "args") and fc.args:
                             args_dict = self._convert_protobuf_to_dict(fc.args)
 
-                        tool_calls_data.append({
-                            "id": f"call_{hash(fc.name)}",
-                            "type": "function",
-                            "function": {
-                                "name": fc.name,
-                                "arguments": json.dumps(args_dict)
+                        tool_calls_data.append(
+                            {
+                                "id": f"call_{hash(fc.name)}",
+                                "type": "function",
+                                "function": {"name": fc.name, "arguments": json.dumps(args_dict)},
                             }
-                        })
+                        )
 
-            return {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": tool_calls_data
-            }
+            return {"role": "assistant", "content": None, "tool_calls": tool_calls_data}
         else:
             return {
                 "role": "assistant",
-                "content": response.text if hasattr(response, 'text') else ""
+                "content": response.text if hasattr(response, "text") else "",
             }
 
     def format_tool_result(self, result: Any) -> dict:
         """Format tool result for Gemini."""
         # Gemini doesn't use the same tool result format as OpenAI
         # We'll format it as a user message with tool result context
-        return {
-            "role": "user",
-            "content": f"Tool '{result.tool_call_id}' result: {result.content}"
-        }
+        return {"role": "user", "content": f"Tool '{result.tool_call_id}' result: {result.content}"}
 
 
 def create_llm_client(
-    provider: str,
-    api_key: str | None = None,
-    model: str | None = None,
-    **kwargs
+    provider: str, api_key: str | None = None, model: str | None = None, **kwargs
 ) -> LLMClient:
     """
     Factory function to create LLM client based on provider.
@@ -982,25 +949,20 @@ def create_llm_client(
 
     if provider == "openai":
         return OpenAIClient(
-            api_key=api_key or config.OPENAI_API_KEY,
-            model=model or config.OPENAI_MODEL,
-            **kwargs
+            api_key=api_key or config.OPENAI_API_KEY, model=model or config.OPENAI_MODEL, **kwargs
         )
     elif provider == "groq":
         return OpenAIClient(
             api_key=api_key or config.GROQ_API_KEY,
             model=model or config.GROQ_MODEL,
             base_url="https://api.groq.com/openai/v1",
-            **kwargs
+            **kwargs,
         )
     elif provider == "gemini":
         return GeminiClient(
-            api_key=api_key or config.GEMINI_API_KEY,
-            model=model or config.GEMINI_MODEL,
-            **kwargs
+            api_key=api_key or config.GEMINI_API_KEY, model=model or config.GEMINI_MODEL, **kwargs
         )
     else:
         raise ValueError(
-            f"Unsupported LLM provider: {provider}. "
-            f"Supported providers: openai, groq, gemini"
+            f"Unsupported LLM provider: {provider}. Supported providers: openai, groq, gemini"
         )

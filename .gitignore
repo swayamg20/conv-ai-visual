@@ -1,13 +1,30 @@
-/venv
+# Python
+/.venv/
+/venv/
 __pycache__/
-*.pyc
-.DS_Store
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Frontend
+/web/node_modules/
+/web/.next/
+*.tsbuildinfo
+
+# Local runtime state
+/var/
+/data/
 *.db
 *.db-shm
 *.db-wal
-/funcs/models.py
-/web/node_modules
-/web/.next
+*.sqlite
+*.pcm
+
+# OS and editor files
+.DS_Store
 file.json
 
 # Environment variables

@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "murmur-backend"
+version = "0.1.0"
+description = "Voice-first conversational AI with a synchronized visual canvas"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "aiortc>=1.13,<2",
+  "beautifulsoup4>=4.12,<5",
+  "elevenlabs>=1.33,<2",
+  "fastapi>=0.121,<1",
+  "firebase-admin>=6,<8",
+  "google-generativeai>=0.8,<0.9",
+  "httpx>=0.27.2,<1",
+  "mem0ai>=0.1,<1",
+  "numpy>=1.26.4,<2.3",
+  "onnxruntime>=1.20.1,<2",
+  "openai>=1.54,<3",
+  "pydantic>=2.12,<3",
+  "pymupdf>=1.24,<2",
+  "python-dotenv>=1.2,<2",
+  "python-multipart>=0.0.20,<1",
+  "RestrictedPython>=7,<9",
+  "sqlmodel>=0.0.22,<0.1",
+  "tavily-python>=0.3,<1",
+  "uvicorn[standard]>=0.38,<1",
+  "websockets>=15,<16",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3,<9",
+  "pytest-asyncio>=0.25,<1",
+  "pytest-cov>=6,<7",
+  "ruff>=0.12,<1",
+]
+local-tts = ["kokoro-onnx>=0.4,<1"]
+legacy-vad = ["silero-vad>=6.2,<7", "torch>=2.8,<3"]
+experiments = [
+  "accelerate>=1.10,<2",
+  "bitsandbytes>=0.42,<1",
+  "snac>=1.2,<2",
+  "soundfile>=0.13,<1",
+  "transformers>=4.57,<5",
+  "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@81fc1791e1a198b4028559504ebf6da6061a4b26",
+]
+
+[tool.setuptools]
+packages = ["funcs"]
+py-modules = ["main"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+  "integration: exercises multiple application layers with local fakes",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+extend-exclude = ["experiments", ".claude", "docs", "**/*.md"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B", "ASYNC", "RUF"]
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/manual/*.py" = ["T201"]
+
+[tool.coverage.run]
+branch = true
+source = ["funcs"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

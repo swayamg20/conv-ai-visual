@@ -1,18 +1,19 @@
 """
 Resource ingestion — PDF and URL extraction, chunking, and search.
 """
-import os
-import logging
 
-import pymupdf  # pymupdf (import as pymupdf, not fitz, to avoid conflicts)
+import logging
+import os
+
 import httpx
+import pymupdf  # pymupdf (import as pymupdf, not fitz, to avoid conflicts)
 from bs4 import BeautifulSoup
 
 from .models import (
-    ResourceModel,
     ResourceChunkModel,
-    ResourceRepo,
     ResourceChunkRepo,
+    ResourceModel,
+    ResourceRepo,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,12 +93,14 @@ def ingest_pdf(file_path: str, agent_id: str, user_id: str) -> ResourceModel:
         for page_num, page_text in page_texts:
             page_chunks = _chunk_text(page_text)
             for chunk_content in page_chunks:
-                chunk_models.append(ResourceChunkModel(
-                    resource_id=resource.id,
-                    chunk_index=chunk_index,
-                    content=chunk_content,
-                    page_number=page_num,
-                ))
+                chunk_models.append(
+                    ResourceChunkModel(
+                        resource_id=resource.id,
+                        chunk_index=chunk_index,
+                        content=chunk_content,
+                        page_number=page_num,
+                    )
+                )
                 chunk_index += 1
 
         ResourceChunkRepo.create_batch(chunk_models)

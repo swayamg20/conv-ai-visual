@@ -1,18 +1,17 @@
-import json
 import asyncio
 import logging
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 from mem0 import MemoryClient
+
 from funcs.config import config
 from funcs.models import (
-    EpisodicMemoryRepo,
-    UserProfileRepo,
-    DecisionMemoryRepo,
-    ToolRepo,
-    SessionRepo,
     ConversationMessageRepo,
-    init_db,
+    DecisionMemoryRepo,
+    EpisodicMemoryRepo,
+    SessionRepo,
+    UserProfileRepo,
 )
 
 logger = logging.getLogger("memory")
@@ -54,7 +53,11 @@ def _estimate_text_tokens(text: str) -> int:
 
 def _estimate_message_tokens(message: Dict[str, str]) -> int:
     """Estimate chat-format tokens for a single role/content message."""
-    return 4 + _estimate_text_tokens(message.get("role", "")) + _estimate_text_tokens(message.get("content", ""))
+    return (
+        4
+        + _estimate_text_tokens(message.get("role", ""))
+        + _estimate_text_tokens(message.get("content", ""))
+    )
 
 
 def _estimate_messages_tokens(messages: List[Dict[str, str]]) -> int:
@@ -82,7 +85,9 @@ def _assemble_budgeted_system_prompt(
     The base prompt is always preserved. Memory sections are added in priority
     order until the prompt budget is exhausted.
     """
-    available_sections = [section_name for section_name, section_text in prompt_sections if section_text]
+    available_sections = [
+        section_name for section_name, section_text in prompt_sections if section_text
+    ]
     base_tokens = _estimate_text_tokens(base_system_prompt)
     messages_tokens = _estimate_messages_tokens(current_messages)
     query_tokens = _estimate_message_tokens({"role": "user", "content": current_query})
@@ -128,24 +133,24 @@ class ConversationContext:
     Layer 1: Short-Term Conversation Context.
     Sliding window of recent messages, kept in memory.
     """
-    
+
     def __init__(self, max_messages: int = 20, max_tokens: int = 4000):
         self.max_messages = max_messages
         self.max_tokens = max_tokens
         self.messages: List[Dict[str, str]] = []
         self.system_prompt: str = ""
-    
+
     def set_system_prompt(self, prompt: str):
         self.system_prompt = prompt
-    
+
     def add(self, role: str, content: str):
         self.messages.append({"role": role, "content": content})
         self._trim()
-    
+
     def _trim(self):
         """Keep the newest messages while respecting both count and token budgets."""
         if len(self.messages) > self.max_messages:
-            self.messages = self.messages[-self.max_messages:]
+            self.messages = self.messages[-self.max_messages :]
 
         total_tokens = _estimate_text_tokens(self.system_prompt) + 3
         total_tokens += sum(_estimate_message_tokens(message) for message in self.messages)
@@ -153,14 +158,14 @@ class ConversationContext:
         while self.messages and total_tokens > self.max_tokens:
             removed = self.messages.pop(0)
             total_tokens -= _estimate_message_tokens(removed)
-    
+
     def get_messages(self) -> List[Dict[str, str]]:
         """Get full context with system prompt."""
-        return [{"role": "system", "content": self.system_prompt}] + self.messages
-    
+        return [{"role": "system", "content": self.system_prompt}, *self.messages]
+
     def clear(self):
         self.messages = []
-    
+
     def get_recent_text(self, n: int = 5) -> str:
         """Get recent messages as text for summarization."""
         recent = self.messages[-n:] if len(self.messages) > n else self.messages
@@ -172,16 +177,16 @@ class EpisodicMemory:
     Layer 2: Episodic Memory.
     Stores summarized conversation sessions.
     """
-    
+
     def __init__(self, user_id: str):
         self.user_id = user_id
-    
+
     def save_summary(
-        self, 
-        summary: str, 
+        self,
+        summary: str,
         session_id: Optional[str] = None,
         turn_count: int = 0,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
     ):
         """Save a conversation summary."""
         EpisodicMemoryRepo.save(
@@ -189,10 +194,10 @@ class EpisodicMemory:
             summary=summary,
             session_id=session_id,
             turn_count=turn_count,
-            metadata=metadata
+            metadata=metadata,
         )
         logger.info(f"Saved episodic memory for user {self.user_id}")
-    
+
     def get_recent(self, limit: int = 5) -> List[Dict]:
         """Get recent conversation summaries."""
         records = EpisodicMemoryRepo.get_recent(self.user_id, limit)
@@ -202,17 +207,17 @@ class EpisodicMemory:
                 "session_id": r.session_id,
                 "turn_count": r.turn_count,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
-                "metadata": r.get_meta()
+                "metadata": r.get_meta(),
             }
             for r in records
         ]
-    
+
     def get_context_string(self, limit: int = 3) -> str:
         """Get formatted episodic context for prompt injection."""
         episodes = self.get_recent(limit)
         if not episodes:
             return ""
-        
+
         lines = ["Previous conversations:"]
         for ep in episodes:
             date = ep.get("created_at", "")[:10] if ep.get("created_at") else ""
@@ -225,24 +230,24 @@ class SemanticMemory:
     Layer 3: Semantic Memory via Mem0 Cloud.
     Vector-based retrieval of facts, preferences, entities.
     """
-    
+
     def __init__(self, user_id: str, api_key: Optional[str] = None):
         self.user_id = user_id
         self.api_key = api_key or config.MEM0_API_KEY
         self.client: Optional[MemoryClient] = None
-        
+
         if self.api_key:
             try:
                 self.client = MemoryClient(api_key=self.api_key)
                 logger.info(f"Semantic memory initialized for user {user_id}")
             except Exception as e:
                 logger.warning(f"Failed to init Mem0 client: {e}")
-    
+
     def add(self, messages: List[Dict[str, str]], metadata: Optional[Dict] = None) -> Dict:
         """Add memories from conversation. Mem0 extracts facts automatically."""
         if not self.client:
             return {"error": "Mem0 not configured"}
-        
+
         try:
             result = self.client.add(messages, user_id=self.user_id, metadata=metadata)
             logger.info(f"Added to semantic memory: {result}")
@@ -250,30 +255,26 @@ class SemanticMemory:
         except Exception as e:
             logger.error(f"Semantic memory add error: {e}")
             return {"error": str(e)}
-    
+
     def search(self, query: str, limit: int = 5) -> List[Dict]:
         """Search for relevant memories."""
         if not self.client:
             return []
-        
+
         try:
-            results = self.client.search(
-                query, 
-                filters={"user_id": self.user_id},
-                limit=limit
-            )
+            results = self.client.search(query, filters={"user_id": self.user_id}, limit=limit)
             if isinstance(results, list):
                 return results
             return results.get("results", [])
         except Exception as e:
             logger.error(f"Semantic memory search error: {e}")
             return []
-    
+
     def get_all(self) -> List[Dict]:
         """Get all memories for user."""
         if not self.client:
             return []
-        
+
         try:
             results = self.client.get_all(user_id=self.user_id)
             if isinstance(results, list):
@@ -282,7 +283,7 @@ class SemanticMemory:
         except Exception as e:
             logger.error(f"Semantic memory get_all error: {e}")
             return []
-    
+
     def get_context_string(self, query: str, limit: int = 5) -> str:
         """Get formatted semantic context for prompt injection."""
         logger.info(f"Searching semantic memory for user={self.user_id}, query={query[:50]}...")
@@ -290,7 +291,7 @@ class SemanticMemory:
         logger.info(f"Found {len(memories)} memories")
         if not memories:
             return ""
-        
+
         lines = ["Known facts about the user:"]
         for mem in memories:
             text = mem.get("memory", mem.get("text", str(mem)))
@@ -302,7 +303,9 @@ class SemanticMemory:
         if not self.client:
             return ""
 
-        logger.info(f"Searching semantic memory async for user={self.user_id}, query={query[:50]}...")
+        logger.info(
+            f"Searching semantic memory async for user={self.user_id}, query={query[:50]}..."
+        )
         try:
             if hasattr(self.client, "search_async"):
                 results = await self.client.search_async(
@@ -332,15 +335,15 @@ class UserProfile:
     Layer 4: User Profile - Canonical Identity.
     Ground truth facts, explicitly set, not inferred.
     """
-    
+
     def __init__(self, user_id: str):
         self.user_id = user_id
         self._ensure_exists()
-    
+
     def _ensure_exists(self):
         """Create profile if doesn't exist."""
         UserProfileRepo.get_or_create(self.user_id)
-    
+
     def get(self) -> Dict:
         """Get full user profile."""
         profile = UserProfileRepo.get(self.user_id)
@@ -355,7 +358,7 @@ class UserProfile:
             "created_at": profile.created_at.isoformat() if profile.created_at else None,
             "updated_at": profile.updated_at.isoformat() if profile.updated_at else None,
         }
-    
+
     def update(self, **kwargs):
         """Update profile fields."""
         allowed = ["name", "timezone", "preferences", "facts"]
@@ -363,41 +366,41 @@ class UserProfile:
         if updates:
             UserProfileRepo.update(self.user_id, **updates)
             logger.info(f"Updated profile for {self.user_id}: {list(updates.keys())}")
-    
+
     def add_fact(self, key: str, value: Any):
         """Add a single fact to profile."""
         profile = self.get()
         facts = profile.get("facts", {})
         facts[key] = value
         self.update(facts=facts)
-    
+
     def add_preference(self, key: str, value: Any):
         """Add a single preference."""
         profile = self.get()
         prefs = profile.get("preferences", {})
         prefs[key] = value
         self.update(preferences=prefs)
-    
+
     def get_context_string(self) -> str:
         """Get formatted profile for prompt injection."""
         profile = self.get()
         if not profile:
             return ""
-        
+
         lines = []
         if profile.get("name"):
             lines.append(f"User's name: {profile['name']}")
         if profile.get("timezone"):
             lines.append(f"Timezone: {profile['timezone']}")
-        
+
         prefs = profile.get("preferences", {})
         if prefs:
             lines.append("Preferences: " + ", ".join([f"{k}={v}" for k, v in prefs.items()]))
-        
+
         facts = profile.get("facts", {})
         if facts:
             lines.append("Facts: " + ", ".join([f"{k}={v}" for k, v in facts.items()]))
-        
+
         return "\n".join(lines) if lines else ""
 
 
@@ -406,17 +409,17 @@ class DecisionMemory:
     Bonus: Decision Memory for Agentic Loops.
     Tracks tool usage, failures, prevents infinite loops.
     """
-    
+
     def __init__(self, user_id: str, session_id: Optional[str] = None):
         self.user_id = user_id
         self.session_id = session_id
-    
+
     def log_decision(
-        self, 
-        action: str, 
+        self,
+        action: str,
         tool_used: Optional[str] = None,
         success: bool = True,
-        context: Optional[str] = None
+        context: Optional[str] = None,
     ):
         """Log a decision/action taken."""
         DecisionMemoryRepo.log(
@@ -425,9 +428,9 @@ class DecisionMemory:
             action=action,
             tool_used=tool_used,
             success=success,
-            context=context
+            context=context,
         )
-    
+
     def get_recent_failures(self, limit: int = 5) -> List[Dict]:
         """Get recent failed actions to avoid repeating."""
         records = DecisionMemoryRepo.get_recent_failures(self.user_id, limit)
@@ -436,11 +439,11 @@ class DecisionMemory:
                 "action": r.action,
                 "tool_used": r.tool_used,
                 "context": r.context,
-                "created_at": r.created_at.isoformat() if r.created_at else None
+                "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in records
         ]
-    
+
     def has_recent_failure(self, action: str, within_minutes: int = 5) -> bool:
         """Check if action failed recently."""
         return DecisionMemoryRepo.has_recent_failure(self.user_id, action, within_minutes)
@@ -469,8 +472,10 @@ class MemoryManager:
         self.profile = UserProfile(user_id)
         self.decisions = DecisionMemory(user_id, self.session_id)
 
-        logger.info(f"MemoryManager initialized for user={user_id}, session={self.session_id}, agent={agent_id}")
-    
+        logger.info(
+            f"MemoryManager initialized for user={user_id}, session={self.session_id}, agent={agent_id}"
+        )
+
     def load_session_messages(self, session_id: str, limit: int = 20) -> None:
         """Load persisted messages from a previous session into the conversation context."""
         try:
@@ -482,7 +487,9 @@ class MemoryManager:
         except Exception as e:
             logger.warning(f"Failed to load session messages: {e}")
 
-    def persist_message(self, role: str, content: str, tool_calls_json: Optional[str] = None) -> None:
+    def persist_message(
+        self, role: str, content: str, tool_calls_json: Optional[str] = None
+    ) -> None:
         """Persist a single message to the database."""
         if not self.agent_id:
             logger.warning(
@@ -613,7 +620,9 @@ class MemoryManager:
                 final_total_tokens,
             )
 
-    def build_context_sync(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
+    def build_context_sync(
+        self, current_query: str, base_system_prompt: str
+    ) -> List[Dict[str, str]]:
         """Build context sequentially (legacy path)."""
         profile_ctx = self.profile.get_context_string()
         semantic_ctx = self.semantic.get_context_string(current_query, limit=5)
@@ -644,7 +653,9 @@ class MemoryManager:
         )
         return self.context.get_messages()
 
-    async def build_context(self, current_query: str, base_system_prompt: str) -> List[Dict[str, str]]:
+    async def build_context(
+        self, current_query: str, base_system_prompt: str
+    ) -> List[Dict[str, str]]:
         """
         Build full context for LLM call.
         Combines all memory layers into system prompt + conversation history.
@@ -711,17 +722,14 @@ class MemoryManager:
 
         # Return Layer 1: Conversation context
         return self.context.get_messages()
-    
+
     def add_turn(self, role: str, content: str):
         """Add a message to conversation context and persist to DB."""
         self.context.add(role, content)
         self.persist_message(role, content)
-    
+
     def process_for_memory(
-        self,
-        user_message: str,
-        assistant_response: str,
-        save_semantic: bool = True
+        self, user_message: str, assistant_response: str, save_semantic: bool = True
     ):
         """
         Post-turn memory processing.
@@ -737,24 +745,24 @@ class MemoryManager:
 
         # Save to semantic memory (Mem0 extracts facts)
         if save_semantic and self.semantic.client:
-            self.semantic.add([
-                {"role": "user", "content": user_message},
-                {"role": "assistant", "content": assistant_response}
-            ])
-    
+            self.semantic.add(
+                [
+                    {"role": "user", "content": user_message},
+                    {"role": "assistant", "content": assistant_response},
+                ]
+            )
+
     def end_session(self, summary: Optional[str] = None):
         """
         End conversation session.
         Saves episodic summary if provided.
         """
         turn_count = len(self.context.messages) // 2
-        
+
         if summary:
             self.episodic.save_summary(
-                summary=summary,
-                session_id=self.session_id,
-                turn_count=turn_count
+                summary=summary, session_id=self.session_id, turn_count=turn_count
             )
-        
+
         self.context.clear()
         logger.info(f"Session {self.session_id} ended, {turn_count} turns")

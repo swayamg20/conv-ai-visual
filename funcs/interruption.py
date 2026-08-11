@@ -3,9 +3,9 @@ Interruption handling for real-time voice conversations.
 """
 
 import asyncio
-import logging
 import base64
 import json
+import logging
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -56,12 +56,7 @@ class InterruptionManager:
         """Cleanup interruption state."""
         self._states.pop(peer_id, None)
 
-    async def stream_tts_with_interruption(
-        self,
-        peer_id: str,
-        tts_generator,
-        datachannel
-    ):
+    async def stream_tts_with_interruption(self, peer_id: str, tts_generator, datachannel):
         """Stream TTS with interruption support."""
         state = self.get_state(peer_id)
         if not state:
@@ -79,14 +74,18 @@ class InterruptionManager:
                     break
 
                 if datachannel and datachannel.readyState == "open":
-                    audio_b64 = base64.b64encode(audio_chunk).decode('utf-8')
-                    datachannel.send(json.dumps({
-                        "type": "tts_audio_chunk",
-                        "audio": audio_b64,
-                        "format": "pcm_16000",
-                        "sample_rate": 16000,
-                        "chunk_index": chunk_count
-                    }))
+                    audio_b64 = base64.b64encode(audio_chunk).decode("utf-8")
+                    datachannel.send(
+                        json.dumps(
+                            {
+                                "type": "tts_audio_chunk",
+                                "audio": audio_b64,
+                                "format": "pcm_16000",
+                                "sample_rate": 16000,
+                                "chunk_index": chunk_count,
+                            }
+                        )
+                    )
                     chunk_count += 1
 
             # Send completion or cancellation message

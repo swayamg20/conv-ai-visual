@@ -25,12 +25,13 @@ class KokoroTTSPipeline:
             return
         try:
             import kokoro_onnx
-            self._model = kokoro_onnx.Kokoro(self._model_path) if self._model_path else kokoro_onnx.Kokoro()
-            logger.info("Kokoro TTS model loaded")
-        except ImportError:
-            raise ImportError(
-                "kokoro-onnx not installed. Run: pip install kokoro-onnx"
+
+            self._model = (
+                kokoro_onnx.Kokoro(self._model_path) if self._model_path else kokoro_onnx.Kokoro()
             )
+            logger.info("Kokoro TTS model loaded")
+        except ImportError as exc:
+            raise ImportError("kokoro-onnx not installed. Run: pip install kokoro-onnx") from exc
 
     async def text_to_speech_stream(self, text: str) -> AsyncIterator[bytes]:
         """

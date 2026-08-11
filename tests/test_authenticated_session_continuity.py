@@ -7,8 +7,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 import main
-from funcs.models import ConversationMessageRepo, SessionRepo, get_session
-
+from funcs.database import get_session
+from funcs.models import ConversationMessageRepo, SessionRepo
 
 TEST_USER = {
     "id": "continuity-test-user",
@@ -90,11 +90,19 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         self._patchers = [
             patch.object(main, "get_current_user", side_effect=lambda request: TEST_USER),
             patch.object(main, "require_auth", side_effect=lambda request: TEST_USER["id"]),
-            patch("funcs.llm_pipeline.create_llm_client", side_effect=lambda *args, **kwargs: _FakeLLMClient()),
-            patch.object(main, "create_llm_client", side_effect=lambda *args, **kwargs: _FakeLLMClient()),
+            patch(
+                "funcs.llm_pipeline.create_llm_client",
+                side_effect=lambda *args, **kwargs: _FakeLLMClient(),
+            ),
+            patch.object(
+                main, "create_llm_client", side_effect=lambda *args, **kwargs: _FakeLLMClient()
+            ),
             patch("funcs.memory.config.MEM0_API_KEY", ""),
             patch("funcs.llm_pipeline.config.LLM_ASYNC_CONTEXT", False),
-            patch("funcs.llm_pipeline.LLMPipeline.chat_with_tools_stream", new=_fake_chat_with_tools_stream),
+            patch(
+                "funcs.llm_pipeline.LLMPipeline.chat_with_tools_stream",
+                new=_fake_chat_with_tools_stream,
+            ),
         ]
         for patcher in self._patchers:
             patcher.start()
@@ -205,6 +213,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         resumed_text = "".join(resumed_chunks)
         self.assertIn("free-body diagrams", resumed_text)
         self.assertIn("incline", resumed_text)
+
 
 if __name__ == "__main__":
     unittest.main()

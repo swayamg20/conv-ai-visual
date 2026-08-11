@@ -2,11 +2,13 @@
 Authentication and user identity middleware.
 Uses Firebase Admin SDK for token verification.
 """
+
 import logging
 
 import firebase_admin
-from firebase_admin import auth as firebase_auth, credentials
 from fastapi import HTTPException, Request
+from firebase_admin import auth as firebase_auth
+from firebase_admin import credentials
 
 from .config import config
 from .models import UserRepo
@@ -32,9 +34,13 @@ def _ensure_firebase() -> firebase_admin.App | None:
             _firebase_app = firebase_admin.initialize_app(cred)
         elif config.FIREBASE_PROJECT_ID:
             # Explicitly pin the Firebase project for local/dev token verification.
-            _firebase_app = firebase_admin.initialize_app(options={"projectId": config.FIREBASE_PROJECT_ID})
+            _firebase_app = firebase_admin.initialize_app(
+                options={"projectId": config.FIREBASE_PROJECT_ID}
+            )
         else:
-            logger.warning("Firebase project is not configured; set FIREBASE_PROJECT_ID for local auth verification")
+            logger.warning(
+                "Firebase project is not configured; set FIREBASE_PROJECT_ID for local auth verification"
+            )
             _firebase_app = firebase_admin.initialize_app()
         logger.info(
             "Firebase Admin SDK initialised successfully (project_id=%s)",
@@ -49,6 +55,7 @@ def _ensure_firebase() -> firebase_admin.App | None:
 # ---------------------------------------------------------------------------
 # Token helpers
 # ---------------------------------------------------------------------------
+
 
 def verify_firebase_token(token: str) -> dict | None:
     """Verify a Firebase ID token.  Returns decoded claims dict or None."""
@@ -67,6 +74,7 @@ def verify_firebase_token(token: str) -> dict | None:
 # ---------------------------------------------------------------------------
 # FastAPI dependencies
 # ---------------------------------------------------------------------------
+
 
 def get_current_user(request: Request) -> dict | None:
     """

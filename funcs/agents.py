@@ -50,7 +50,9 @@ def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
     # Goals
     if goals:
         lines.append(f"The student's goals: {goals}.")
-        lines.append("Tailor every explanation toward these goals. Reference them when motivating concepts.")
+        lines.append(
+            "Tailor every explanation toward these goals. Reference them when motivating concepts."
+        )
 
     # Learning style
     style_instructions = {
@@ -58,56 +60,90 @@ def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
         "examples-first": "Always start with a concrete example before introducing theory or definitions.",
         "step-by-step": "Break every explanation into numbered steps. Never skip steps, even if they seem obvious.",
     }
-    style_line = style_instructions.get(learning_style, f"Adapt your teaching to a {learning_style} learning style.")
+    style_line = style_instructions.get(
+        learning_style, f"Adapt your teaching to a {learning_style} learning style."
+    )
     lines.append(f"Learning style preference: {style_line}")
 
     # Language
     if language and language.lower() != "english":
-        lines.append(f"Communicate in {language}. Use technical terms in English but explain in the preferred language.")
+        lines.append(
+            f"Communicate in {language}. Use technical terms in English but explain in the preferred language."
+        )
 
     # Capability-specific instructions
     if "canvas" in capabilities:
         lines.append("")
         lines.append("CANVAS INSTRUCTIONS:")
-        lines.append("You have access to a visual whiteboard canvas. Use the teach_with_visuals tool for explanations.")
-        lines.append("Every visual explanation must use the teach_with_visuals tool with step-by-step narration.")
-        lines.append("Prefer visual components (diagrams, charts, equations) over long text narration.")
-        lines.append("When solving a problem, show the setup first, then the reasoning, then the final result.")
-        lines.append("Keep each visual step focused: one idea per step, with short voice narration.")
-        lines.append("Use labels, arrows, highlights, and equations to make the student's next step obvious.")
+        lines.append(
+            "You have access to a visual whiteboard canvas. Use the teach_with_visuals tool for explanations."
+        )
+        lines.append(
+            "Every visual explanation must use the teach_with_visuals tool with step-by-step narration."
+        )
+        lines.append(
+            "Prefer visual components (diagrams, charts, equations) over long text narration."
+        )
+        lines.append(
+            "When solving a problem, show the setup first, then the reasoning, then the final result."
+        )
+        lines.append(
+            "Keep each visual step focused: one idea per step, with short voice narration."
+        )
+        lines.append(
+            "Use labels, arrows, highlights, and equations to make the student's next step obvious."
+        )
 
         if _is_physics_subject(subject):
             lines.append("For physics, be concrete and diagram-first.")
             lines.append("Use free-body diagrams for force problems before writing equations.")
-            lines.append("For inclined planes, draw the slope, angle, weight, normal, and resolved force components before solving.")
-            lines.append("For projectile motion, draw axes, launch angle, initial velocity components, and key points of the trajectory.")
-            lines.append("For graph questions, explicitly name the axes, units, slope, intercept, area, and what each means physically.")
-            lines.append("For function or motion plots, use coordinate_plane or function_plot instead of describing the graph in words.")
-            lines.append("Solve physics problems in this order: identify givens, draw the diagram, choose equations, substitute carefully, then check units and direction.")
+            lines.append(
+                "For inclined planes, draw the slope, angle, weight, normal, and resolved force components before solving."
+            )
+            lines.append(
+                "For projectile motion, draw axes, launch angle, initial velocity components, and key points of the trajectory."
+            )
+            lines.append(
+                "For graph questions, explicitly name the axes, units, slope, intercept, area, and what each means physically."
+            )
+            lines.append(
+                "For function or motion plots, use coordinate_plane or function_plot instead of describing the graph in words."
+            )
+            lines.append(
+                "Solve physics problems in this order: identify givens, draw the diagram, choose equations, substitute carefully, then check units and direction."
+            )
             lines.append("Do not jump straight to formulas when a diagram would reduce confusion.")
 
     if "web_search" in capabilities:
         lines.append("")
         lines.append("WEB SEARCH INSTRUCTIONS:")
-        lines.append("You can search the web for current information. Use this for recent data, news, or facts you're unsure about.")
+        lines.append(
+            "You can search the web for current information. Use this for recent data, news, or facts you're unsure about."
+        )
 
     if "sandbox" in capabilities:
         lines.append("")
         lines.append("CODE SANDBOX INSTRUCTIONS:")
-        lines.append("You can execute code in a sandboxed environment. Use this to demonstrate algorithms, run experiments, or verify solutions.")
+        lines.append(
+            "You can execute code in a sandboxed environment. Use this to demonstrate algorithms, run experiments, or verify solutions."
+        )
 
     # Memory instructions
     lines.append("")
     lines.append("MEMORY:")
     lines.append("Reference what the student has covered in previous sessions when relevant.")
     lines.append("Build on prior knowledge rather than repeating basics unless asked.")
-    lines.append("Track which topics the student finds difficult and revisit them with different approaches.")
+    lines.append(
+        "Track which topics the student finds difficult and revisit them with different approaches."
+    )
 
     # General behavior
     lines.append("")
     lines.append("BEHAVIOR:")
     lines.append("Be encouraging but honest. If the student makes an error, correct it clearly.")
-    lines.append("Keep responses concise for voice interaction. Elaborate only when the student asks.")
+    lines.append(
+        "Keep responses concise for voice interaction. Elaborate only when the student asks."
+    )
     lines.append("Ask clarifying questions when the student's request is ambiguous.")
 
     return "\n".join(lines)

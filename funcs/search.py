@@ -1,7 +1,9 @@
 """
 Web search integration via Tavily.
 """
+
 import logging
+
 from funcs.config import config
 from funcs.models import ToolRepo
 
@@ -21,9 +23,7 @@ async def web_search(query: str, max_results: int = 5) -> str:
 
         formatted = []
         for r in results.get("results", []):
-            formatted.append(
-                f"**{r['title']}**\n{r['content']}\nSource: {r['url']}\n"
-            )
+            formatted.append(f"**{r['title']}**\n{r['content']}\nSource: {r['url']}\n")
 
         return "\n---\n".join(formatted) if formatted else "No results found."
     except Exception as e:

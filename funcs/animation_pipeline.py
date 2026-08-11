@@ -17,11 +17,7 @@ def teach_with_visuals(steps: List[Dict], session_id: str = "default") -> Dict:
     SDL tool handler. Returns the SDL steps directly — the frontend's
     scene-kit compiler handles layout and rendering.
     """
-    speech_cues = [
-        s.get("say", "").strip()
-        for s in steps
-        if s.get("say", "").strip()
-    ]
+    speech_cues = [s.get("say", "").strip() for s in steps if s.get("say", "").strip()]
 
     return {
         "success": True,
@@ -65,7 +61,7 @@ Position hints (optional): "center", "top", "bottom", { below: "id" }, { rightOf
                         "properties": {
                             "say": {
                                 "type": "string",
-                                "description": "Spoken narration for this step"
+                                "description": "Spoken narration for this step",
                             },
                             "show": {
                                 "type": "object",
@@ -74,32 +70,41 @@ Position hints (optional): "center", "top", "bottom", { below: "id" }, { rightOf
                                     "component": {
                                         "type": "string",
                                         "enum": [
-                                            "right_triangle", "equation",
-                                            "coordinate_plane", "function_plot",
+                                            "right_triangle",
+                                            "equation",
+                                            "coordinate_plane",
+                                            "function_plot",
                                             "number_line",
-                                            "bar_chart", "flowchart", "tree",
-                                            "venn_diagram", "circle_diagram", "label"
-                                        ]
+                                            "bar_chart",
+                                            "flowchart",
+                                            "tree",
+                                            "venn_diagram",
+                                            "circle_diagram",
+                                            "label",
+                                        ],
                                     },
                                     "props": {"type": "object"},
-                                    "position": {"description": "Position hint: 'center', 'top', 'bottom', {below: 'id'}, {rightOf: 'id'}"},
-                                    "id": {"type": "string", "description": "ID for referencing this component later"}
+                                    "position": {
+                                        "description": "Position hint: 'center', 'top', 'bottom', {below: 'id'}, {rightOf: 'id'}"
+                                    },
+                                    "id": {
+                                        "type": "string",
+                                        "description": "ID for referencing this component later",
+                                    },
                                 },
-                                "required": ["component", "props"]
+                                "required": ["component", "props"],
                             },
-                            "highlight": {
-                                "description": "Element ID(s) to highlight"
-                            },
+                            "highlight": {"description": "Element ID(s) to highlight"},
                             "clear": {
                                 "type": "boolean",
-                                "description": "Clear canvas before this step"
-                            }
+                                "description": "Clear canvas before this step",
+                            },
                         },
-                        "required": ["say"]
-                    }
+                        "required": ["say"],
+                    },
                 }
             },
-            "required": ["steps"]
-        }
-    }
+            "required": ["steps"],
+        },
+    },
 }

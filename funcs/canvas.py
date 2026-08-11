@@ -7,18 +7,20 @@ Frontend Integration:
 - Canvas operations are converted to Excalidraw elements on the client
 - Supports rect, circle, ellipse, line, arrow, text, path operations
 """
+
 import json
 import logging
 import uuid
-from typing import Dict, List, Any, Optional
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("canvas")
 
 
 class CanvasAction(str, Enum):
     """Supported canvas operations."""
+
     RECT = "rect"
     CIRCLE = "circle"
     ELLIPSE = "ellipse"
@@ -40,6 +42,7 @@ class CanvasAction(str, Enum):
 @dataclass
 class CanvasElement:
     """A single element on the canvas."""
+
     id: str
     action: str
     x: float = 0
@@ -58,10 +61,10 @@ class CanvasElement:
     initial_state: Dict[str, Any] = field(default_factory=dict)  # For animation resets
     animation_state: str = "idle"  # idle, animating, paused
     timeline_id: Optional[str] = None  # Associated timeline
-    
+
     def to_dict(self) -> Dict:
         return asdict(self)
-    
+
     def get_bounds(self) -> Dict[str, float]:
         """Get bounding box for position awareness."""
         if self.action in [CanvasAction.LINE, CanvasAction.ARROW, CanvasAction.PATH]:
@@ -87,9 +90,9 @@ class CanvasElement:
                             "min_x": min(xs),
                             "min_y": min(ys),
                             "max_x": max(xs),
-                            "max_y": max(ys)
+                            "max_y": max(ys),
                         }
-                except (TypeError, IndexError, ValueError, KeyError) as e:
+                except (TypeError, IndexError, ValueError, KeyError):
                     # If points are malformed, fall back to x,y,width,height
                     pass
 
@@ -97,13 +100,14 @@ class CanvasElement:
             "min_x": self.x,
             "min_y": self.y,
             "max_x": self.x + self.width,
-            "max_y": self.y + self.height
+            "max_y": self.y + self.height,
         }
 
 
-@dataclass 
+@dataclass
 class CanvasOperation:
     """Single operation to be rendered on canvas."""
+
     action: str
     id: Optional[str] = None
     x: float = 0
@@ -119,7 +123,7 @@ class CanvasOperation:
     points: List[List[float]] = field(default_factory=list)
     label: str = ""
     target_id: str = ""  # for delete/update/highlight
-    
+
     def to_dict(self) -> Dict:
         d = asdict(self)
         # Generate ID if not provided (except for control actions)
@@ -133,39 +137,39 @@ class CanvasState:
     Manages canvas state for a session.
     Tracks all elements for AI position awareness.
     """
-    
+
     def __init__(self, width: float = 800, height: float = 600):
         self.width = width
         self.height = height
         self.elements: Dict[str, CanvasElement] = {}
         self._history: List[Dict] = []  # for undo
-    
+
     def apply_operations(self, operations: List[Dict]) -> List[Dict]:
         """
         Apply a batch of operations and return normalized ops for client.
         """
         results = []
-        
+
         for op in operations:
             action = op.get("action", "")
-            
+
             if action == "clear":
                 self._history.append({"elements": self.elements.copy()})
                 self.elements.clear()
                 results.append({"action": "clear"})
-                
+
             elif action == "delete":
                 target = op.get("target_id") or op.get("id")
                 if target and target in self.elements:
                     self._history.append({"deleted": self.elements[target].to_dict()})
                     del self.elements[target]
                     results.append({"action": "delete", "id": target})
-                    
+
             elif action == "highlight":
                 target = op.get("target_id") or op.get("id")
                 if target and target in self.elements:
                     results.append({"action": "highlight", "id": target})
-                    
+
             elif action == "update":
                 target = op.get("target_id") or op.get("id")
                 if target and target in self.elements:
@@ -175,11 +179,11 @@ class CanvasState:
                         if k not in ["action", "target_id"] and hasattr(elem, k):
                             setattr(elem, k, v)
                     results.append({"action": "update", **elem.to_dict()})
-                    
+
             else:
                 # Drawing operation - create element
                 elem_id = op.get("id") or f"el_{uuid.uuid4().hex[:8]}"
-                
+
                 elem = CanvasElement(
                     id=elem_id,
                     action=action,
@@ -194,14 +198,14 @@ class CanvasState:
                     font_size=op.get("font_size", 16),
                     font_family=op.get("font_family", "Arial"),
                     points=op.get("points", []),
-                    label=op.get("label", "")
+                    label=op.get("label", ""),
                 )
-                
+
                 self.elements[elem_id] = elem
                 results.append({"action": action, **elem.to_dict()})
-        
+
         return results
-    
+
     def get_context_summary(self) -> str:
         """
         Generate a text summary of canvas state for LLM context.
@@ -209,19 +213,19 @@ class CanvasState:
         """
         if not self.elements:
             return "Canvas is empty."
-        
+
         lines = [f"Canvas ({self.width}x{self.height}) contains {len(self.elements)} elements:"]
-        
+
         for elem in self.elements.values():
             bounds = elem.get_bounds()
             pos = f"at ({bounds['min_x']:.0f}, {bounds['min_y']:.0f})"
-            
+
             if elem.action == CanvasAction.TEXT:
                 desc = f"- Text '{elem.text}' {pos}"
             elif elem.action == CanvasAction.RECT:
                 desc = f"- Rectangle {pos}, {elem.width:.0f}x{elem.height:.0f}"
             elif elem.action == CanvasAction.CIRCLE:
-                desc = f"- Circle {pos}, radius {elem.width/2:.0f}"
+                desc = f"- Circle {pos}, radius {elem.width / 2:.0f}"
             elif elem.action == CanvasAction.ARROW:
                 if elem.points and len(elem.points) >= 2:
                     start, end = elem.points[0], elem.points[-1]
@@ -232,22 +236,24 @@ class CanvasState:
                 desc = f"- Line {pos}"
             else:
                 desc = f"- {elem.action} {pos}"
-            
+
             if elem.label:
                 desc += f" (label: {elem.label})"
-            
+
             lines.append(desc)
-        
+
         return "\n".join(lines)
-    
+
     def to_json(self) -> str:
         """Serialize full state for persistence/transfer."""
-        return json.dumps({
-            "width": self.width,
-            "height": self.height,
-            "elements": [e.to_dict() for e in self.elements.values()]
-        })
-    
+        return json.dumps(
+            {
+                "width": self.width,
+                "height": self.height,
+                "elements": [e.to_dict() for e in self.elements.values()],
+            }
+        )
+
     @classmethod
     def from_json(cls, data: str) -> "CanvasState":
         """Deserialize from JSON."""
@@ -277,11 +283,12 @@ def clear_canvas_session(session_id: str):
 
 # ============= Canvas Tool Handler =============
 
+
 def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
     """
     Tool handler for canvas updates.
     Called by LLM via tool system.
-    
+
     Args:
         operations: List of drawing operations
             Each operation: {
@@ -296,18 +303,18 @@ def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
                 "target_id": str  # for delete/update/highlight
             }
         session_id: Session identifier
-        
+
     Returns:
         Dict with applied operations and canvas summary
     """
     state = get_canvas_state(session_id)
     applied = state.apply_operations(operations)
-    
+
     return {
         "success": True,
         "applied_count": len(applied),
         "operations": applied,
-        "canvas_summary": state.get_context_summary()
+        "canvas_summary": state.get_context_summary(),
     }
 
 
@@ -342,33 +349,65 @@ Rendered style: Hand-drawn sketch look via Excalidraw.
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["rect", "circle", "ellipse", "line", "arrow", "text", "path", "clear", "delete", "highlight"],
-                                "description": "Type of drawing operation"
+                                "enum": [
+                                    "rect",
+                                    "circle",
+                                    "ellipse",
+                                    "line",
+                                    "arrow",
+                                    "text",
+                                    "path",
+                                    "clear",
+                                    "delete",
+                                    "highlight",
+                                ],
+                                "description": "Type of drawing operation",
                             },
-                            "x": {"type": "number", "description": "X position (left edge for shapes, anchor for text)"},
-                            "y": {"type": "number", "description": "Y position (top edge for shapes)"},
-                            "width": {"type": "number", "description": "Width of shape (or diameter for circle)"},
+                            "x": {
+                                "type": "number",
+                                "description": "X position (left edge for shapes, anchor for text)",
+                            },
+                            "y": {
+                                "type": "number",
+                                "description": "Y position (top edge for shapes)",
+                            },
+                            "width": {
+                                "type": "number",
+                                "description": "Width of shape (or diameter for circle)",
+                            },
                             "height": {"type": "number", "description": "Height of shape"},
-                            "text": {"type": "string", "description": "Text content (for text action)"},
+                            "text": {
+                                "type": "string",
+                                "description": "Text content (for text action)",
+                            },
                             "color": {"type": "string", "description": "Stroke/text color (hex)"},
-                            "fill": {"type": "string", "description": "Fill color (hex, empty for no fill)"},
+                            "fill": {
+                                "type": "string",
+                                "description": "Fill color (hex, empty for no fill)",
+                            },
                             "stroke_width": {"type": "number", "description": "Line thickness"},
                             "font_size": {"type": "number", "description": "Font size for text"},
                             "points": {
                                 "type": "array",
                                 "items": {"type": "array", "items": {"type": "number"}},
-                                "description": "Array of [x,y] points for line/arrow/path"
+                                "description": "Array of [x,y] points for line/arrow/path",
                             },
-                            "label": {"type": "string", "description": "Semantic label for referencing this element later"},
-                            "target_id": {"type": "string", "description": "ID of element to delete/update/highlight"}
+                            "label": {
+                                "type": "string",
+                                "description": "Semantic label for referencing this element later",
+                            },
+                            "target_id": {
+                                "type": "string",
+                                "description": "ID of element to delete/update/highlight",
+                            },
                         },
-                        "required": ["action"]
-                    }
+                        "required": ["action"],
+                    },
                 }
             },
-            "required": ["operations"]
-        }
-    }
+            "required": ["operations"],
+        },
+    },
 }
 
 
@@ -378,7 +417,7 @@ CANVAS_TOOL_DEFINITION = {
     "description": CANVAS_TOOL_SCHEMA["function"]["description"],
     "parameters": CANVAS_TOOL_SCHEMA["function"]["parameters"],
     "handler_module": "funcs.canvas",
-    "handler_function": "canvas_update"
+    "handler_function": "canvas_update",
 }
 
 
@@ -390,4 +429,3 @@ try:
 except ImportError:
     logger.warning("Animation tools not available - animation_pipeline module not found")
     ANIMATION_TOOLS = []
-

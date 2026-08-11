@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
-from typing import Callable, Coroutine, Dict, Optional, Tuple
+from typing import Callable, Coroutine, Optional, Tuple
 
 import numpy as np
 import onnxruntime as ort
@@ -28,9 +28,7 @@ HF_REPO_ID = "pipecat-ai/smart-turn-v3"
 HF_MODEL_FILE = "smart-turn-v3.2-cpu.onnx"
 
 
-def _truncate_or_pad(
-    audio: np.ndarray, n_seconds: int = 8, sample_rate: int = 16000
-) -> np.ndarray:
+def _truncate_or_pad(audio: np.ndarray, n_seconds: int = 8, sample_rate: int = 16000) -> np.ndarray:
     """Truncate to last n_seconds or zero-pad at the beginning (audio at end)."""
     max_samples = n_seconds * sample_rate
     if len(audio) > max_samples:
@@ -355,9 +353,7 @@ class SmartTurnSession:
         else:
             # Turn incomplete → start fallback timer, wait for more speech
             self._pending = True
-            self._fallback_task = asyncio.create_task(
-                self._fallback_timeout()
-            )
+            self._fallback_task = asyncio.create_task(self._fallback_timeout())
             return False, ""
 
     async def _fallback_timeout(self):

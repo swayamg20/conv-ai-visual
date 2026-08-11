@@ -2,8 +2,10 @@
 """
 Register the canvas_update tool in the database.
 """
-import sys
+
 import os
+import sys
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from funcs import ToolRepo
@@ -20,31 +22,57 @@ CANVAS_PARAMETERS = {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["rect", "circle", "ellipse", "line", "arrow", "text", "path", "clear", "delete", "highlight"],
-                        "description": "Type of drawing operation"
+                        "enum": [
+                            "rect",
+                            "circle",
+                            "ellipse",
+                            "line",
+                            "arrow",
+                            "text",
+                            "path",
+                            "clear",
+                            "delete",
+                            "highlight",
+                        ],
+                        "description": "Type of drawing operation",
                     },
-                    "x": {"type": "number", "description": "X position (left edge for shapes, anchor for text)"},
+                    "x": {
+                        "type": "number",
+                        "description": "X position (left edge for shapes, anchor for text)",
+                    },
                     "y": {"type": "number", "description": "Y position (top edge for shapes)"},
-                    "width": {"type": "number", "description": "Width of shape (or diameter for circle)"},
+                    "width": {
+                        "type": "number",
+                        "description": "Width of shape (or diameter for circle)",
+                    },
                     "height": {"type": "number", "description": "Height of shape"},
                     "text": {"type": "string", "description": "Text content (for text action)"},
                     "color": {"type": "string", "description": "Stroke/text color (hex)"},
-                    "fill": {"type": "string", "description": "Fill color (hex, empty for no fill)"},
+                    "fill": {
+                        "type": "string",
+                        "description": "Fill color (hex, empty for no fill)",
+                    },
                     "stroke_width": {"type": "number", "description": "Line thickness"},
                     "font_size": {"type": "number", "description": "Font size for text"},
                     "points": {
                         "type": "array",
                         "items": {"type": "array", "items": {"type": "number"}},
-                        "description": "Array of [x,y] points for line/arrow/path"
+                        "description": "Array of [x,y] points for line/arrow/path",
                     },
-                    "label": {"type": "string", "description": "Semantic label for referencing this element later"},
-                    "target_id": {"type": "string", "description": "ID of element to delete/update/highlight"}
+                    "label": {
+                        "type": "string",
+                        "description": "Semantic label for referencing this element later",
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "ID of element to delete/update/highlight",
+                    },
                 },
-                "required": ["action"]
-            }
+                "required": ["action"],
+            },
         }
     },
-    "required": ["operations"]
+    "required": ["operations"],
 }
 
 CANVAS_DESCRIPTION = """Draw on the shared canvas to illustrate concepts visually while explaining.
@@ -64,7 +92,7 @@ ToolRepo.upsert(
     parameters=CANVAS_PARAMETERS,
     handler_module="funcs.canvas",
     handler_function="canvas_update",
-    enabled=True
+    enabled=True,
 )
 
 print("✓ Registered: canvas_update")
@@ -74,4 +102,3 @@ print("\nAll tools in database:")
 for tool in ToolRepo.list_all():
     status = "✓" if tool.enabled else "✗"
     print(f"  [{status}] {tool.name}")
-

@@ -1,5 +1,4 @@
 import asyncio
-asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 import base64
 import json
 import logging
@@ -7,40 +6,50 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from typing import Any
 from uuid import uuid4 as _uuid4
+
 import numpy as np
 import uvicorn
 import websockets
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 from aiortc.mediastreams import AudioFrame
-from fastapi import FastAPI, Request, UploadFile, File, Form
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
 from funcs.agents import (
     append_mastery_context,
     append_resource_context,
     compile_agent_prompt,
-    get_agent_tools,
 )
 from funcs.auth import get_current_user, require_auth
 from funcs.config import config
+from funcs.database import get_data_dir
+from funcs.kokoro_tts import KokoroTTSPipeline
 from funcs.llm_clients import create_llm_client
 from funcs.llm_pipeline import LLMPipeline
+from funcs.model_router import route_model
 from funcs.models import (
-    UserRepo, AgentRepo, SessionRepo, ConversationMessageRepo, ResourceRepo,
-    TopicMasteryRepo, TopicMasteryModel, LLMCallLogRepo, TTSResilienceLogRepo,
+    AgentRepo,
+    ConversationMessageRepo,
+    LLMCallLogRepo,
+    ResourceRepo,
+    SessionRepo,
+    TopicMasteryModel,
+    TopicMasteryRepo,
+    TTSResilienceLogRepo,
     VoicePipelineLogRepo,
 )
-from collections.abc import Sequence
-from funcs.kokoro_tts import KokoroTTSPipeline
-from funcs.model_router import route_model
 from funcs.resources import ingest_pdf, ingest_url, search_chunks
 from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
 from funcs.tts_pipeline import TTSPipeline, is_retryable_tts_error
+
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
 
 app = FastAPI()
 logging.basicConfig(level=logging.INFO)
@@ -48,13 +57,13 @@ logger = logging.getLogger("webrtc-deepgram")
 
 try:
     config.validate()
-        
+
     llm_pipeline = LLMPipeline(
         provider=config.LLM_PROVIDER,
         api_key=None,  # Factory will get from config based on provider
-        model=None,    # Factory will get from config based on provider
+        model=None,  # Factory will get from config based on provider
         system_prompt=config.LLM_SYSTEM_PROMPT,
-        max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES
+        max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
     )
     logger.info("LLM pipeline initialized successfully")
 
@@ -63,7 +72,7 @@ try:
         register_web_search_tool()
     except Exception as e:
         logger.warning("Failed to register web_search tool: %s", e)
-    
+
     if config.TTS_PROVIDER == "kokoro":
         tts_pipeline = KokoroTTSPipeline(model_path=config.KOKORO_MODEL_PATH)
         logger.info("Kokoro TTS pipeline initialized (local ONNX)")
@@ -75,7 +84,7 @@ try:
             stability=config.TTS_STABILITY,
             similarity_boost=config.TTS_SIMILARITY_BOOST,
             style=config.TTS_STYLE,
-            use_speaker_boost=config.TTS_USE_SPEAKER_BOOST
+            use_speaker_boost=config.TTS_USE_SPEAKER_BOOST,
         )
         logger.info("ElevenLabs TTS pipeline initialized")
     tts_fallback_pipeline: KokoroTTSPipeline | None = None
@@ -86,13 +95,14 @@ try:
         logger.info("Smart Turn enabled; analyzer will initialize on first voice session")
     else:
         logger.info("Smart Turn disabled, using Deepgram endpointing only")
-    
+
 except Exception as e:
     logger.error("Failed to initialize pipelines: %s", e)
     llm_pipeline = None
     tts_pipeline = None
     tts_fallback_pipeline = None
     smart_turn_analyzer = None
+
 
 def _get_cors_origins() -> list[str]:
     """Return explicit CORS origins from config or env, with a safe localhost default."""
@@ -117,12 +127,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 class Offer(BaseModel):
     sdp: str
     type: str
     canvas_mode: bool = False
     session_id: str | None = None
     agent_id: str | None = None
+
 
 class ChatMessage(BaseModel):
     message: str
@@ -131,12 +143,15 @@ class ChatMessage(BaseModel):
     canvas_mode: bool | None = None
     agent_id: str | None = None
 
+
 class CanvasModeRequest(BaseModel):
     enabled: bool
     custom_prompt: str | None = None
 
+
 class CreateSessionRequest(BaseModel):
     agent_id: str
+
 
 class CreateAgentRequest(BaseModel):
     name: str
@@ -144,6 +159,7 @@ class CreateAgentRequest(BaseModel):
     persona: dict[str, Any] | None = None
     capabilities: list[str] = ["canvas"]
     icon: str | None = None
+
 
 class UpdateAgentRequest(BaseModel):
     name: str | None = None
@@ -153,8 +169,10 @@ class UpdateAgentRequest(BaseModel):
     icon: str | None = None
     is_default: bool | None = None
 
+
 class AddResourceURLRequest(BaseModel):
     url: str
+
 
 def _get_voice_user_id(pc_id: str) -> str:
     """Return the authenticated user ID for a voice peer connection."""
@@ -214,6 +232,7 @@ def _get_smart_turn_analyzer() -> SmartTurnAnalyzer | None:
         smart_turn_analyzer = None
     return smart_turn_analyzer
 
+
 chat_sessions: dict[str, LLMPipeline] = {}
 peer_canvas_modes: dict[str, bool] = {}
 pcs: set[Any] = set()
@@ -225,7 +244,10 @@ peer_session_ids: dict[str, str] = {}
 tts_interrupt_flags: dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
 _pending_sdl: dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
 smart_turn_sessions: dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
-turn_processing_tasks: dict[str, asyncio.Task] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
+turn_processing_tasks: dict[
+    str, asyncio.Task
+] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
+background_tasks: set[asyncio.Task] = set()
 chat_session_activity: dict[str, float] = {}
 voice_session_activity: dict[str, float] = {}
 chat_session_finalizing: set[str] = set()
@@ -289,7 +311,9 @@ def _build_agent_runtime_config(user_id: str, agent: Any) -> tuple[str, bool, li
     return agent_prompt, has_canvas, ready_resources
 
 
-def _register_agent_resource_tool(pipeline: LLMPipeline, agent_id: str, ready_resources: Sequence[Any]) -> None:
+def _register_agent_resource_tool(
+    pipeline: LLMPipeline, agent_id: str, ready_resources: Sequence[Any]
+) -> None:
     """Expose uploaded-resource search to an agent-backed pipeline when resources are ready."""
     if not ready_resources:
         return
@@ -321,7 +345,10 @@ def _register_agent_resource_tool(pipeline: LLMPipeline, agent_id: str, ready_re
 
 def _log_background_task(task: asyncio.Task, label: str) -> None:
     """Surface exceptions from fire-and-forget cleanup work."""
+    background_tasks.add(task)
+
     def _done(t: asyncio.Task) -> None:
+        background_tasks.discard(t)
         try:
             exc = t.exception()
         except asyncio.CancelledError:
@@ -468,8 +495,7 @@ async def _finalize_voice_session(
             return None
 
         persist_voice_summary = bool(
-            getattr(pipeline, "agent_id", None)
-            and getattr(pipeline, "session_id", pc_id) != pc_id
+            getattr(pipeline, "agent_id", None) and getattr(pipeline, "session_id", pc_id) != pc_id
         )
 
         if background:
@@ -529,6 +555,7 @@ async def _session_sweeper_loop() -> None:
     except Exception as e:
         logger.exception("Session sweeper failed: %s", e)
 
+
 def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
     """
     Convert aiortc.AudioFrame to interleaved 16-bit PCM bytes.
@@ -540,7 +567,6 @@ def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
         arr = arr.reshape(-1, 1)
     samples = getattr(frame, "samples", None)
     if samples is not None:
-
         if arr.shape[0] != samples and arr.shape[1] == samples:
             arr = arr.T
     if np.issubdtype(arr.dtype, np.floating):
@@ -549,6 +575,7 @@ def audioframe_to_pcm16_bytes(frame: AudioFrame) -> bytes:
         arr = arr.astype("int16")
 
     return arr.tobytes()
+
 
 async def deepgram_stream_ws_send_and_recv(
     websocket_url: str,
@@ -606,6 +633,7 @@ async def deepgram_stream_ws_send_and_recv(
     except Exception as e:
         logger.exception("Failed to connect or stream to Deepgram: %s", e)
 
+
 async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
     """Get or create the LLMPipeline for a voice peer connection."""
     if pc_id not in voice_sessions:
@@ -620,7 +648,9 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
             if not agent:
                 raise RuntimeError(f"Agent not found for voice session: {agent_id}")
             if agent.user_id != user_id:
-                raise RuntimeError(f"Forbidden voice  agent access for user={user_id} agent={agent_id}")
+                raise RuntimeError(
+                    f"Forbidden voice  agent access for user={user_id} agent={agent_id}"
+                )
 
         if agent:
             agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(user_id, agent)
@@ -676,10 +706,14 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
         async def canvas_broadcast(operations):
             ch = datachannels.get(pc_id)
             if ch and ch.readyState == "open":
-                ch.send(json.dumps({
-                    "type": "canvas_update",
-                    "operations": operations,
-                }))
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "canvas_update",
+                            "operations": operations,
+                        }
+                    )
+                )
 
         voice_pipeline.set_canvas_callback(canvas_broadcast)
 
@@ -735,7 +769,7 @@ def _split_sentence(buf: str):
     """Split buffer at the first sentence boundary, returning (sentence, remainder).
     Returns (None, buf) if no boundary found yet."""
     # Match sentence-ending punctuation followed by a space, newline, or end-of-string
-    m = re.search(r'[.!?](?:\s|$)', buf)
+    m = re.search(r"[.!?](?:\s|$)", buf)
     if m:
         idx = m.end()
         return buf[:idx].strip(), buf[idx:]
@@ -754,12 +788,16 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
     seq_id = f"seq_{uuid.uuid4().hex[:8]}"
 
     if ch and ch.readyState == "open":
-        ch.send(json.dumps({
-            "type": "sdl_start",
-            "sequence_id": seq_id,
-            "total_steps": len(steps),
-            "sdl": sdl,
-        }))
+        ch.send(
+            json.dumps(
+                {
+                    "type": "sdl_start",
+                    "sequence_id": seq_id,
+                    "total_steps": len(steps),
+                    "sdl": sdl,
+                }
+            )
+        )
 
     tts_interrupt_flags[pc_id] = True
 
@@ -778,52 +816,76 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
 
                 # Send sdl_step on first chunk so frontend starts animation with audio
                 if total_audio_bytes == 0 and ch and ch.readyState == "open":
-                    ch.send(json.dumps({
-                        "type": "sdl_step",
-                        "sequence_id": seq_id,
-                        "step_index": step_idx,
-                    }))
+                    ch.send(
+                        json.dumps(
+                            {
+                                "type": "sdl_step",
+                                "sequence_id": seq_id,
+                                "step_index": step_idx,
+                            }
+                        )
+                    )
 
                 total_audio_bytes += len(audio_chunk)
                 if ch and ch.readyState == "open":
-                    ch.send(json.dumps({
-                        "type": "tts_chunk",
-                        "audio": base64.b64encode(audio_chunk).decode("utf-8"),
-                        "sequence_id": seq_id,
-                        "step_index": step_idx,
-                    }))
+                    ch.send(
+                        json.dumps(
+                            {
+                                "type": "tts_chunk",
+                                "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                                "sequence_id": seq_id,
+                                "step_index": step_idx,
+                            }
+                        )
+                    )
 
             # Audio duration from PCM byte count: 16-bit (2 bytes) @ 16kHz
             audio_duration_ms = round(total_audio_bytes / 32) if total_audio_bytes > 0 else 0
             if ch and ch.readyState == "open":
-                ch.send(json.dumps({
-                    "type": "tts_step_complete",
-                    "sequence_id": seq_id,
-                    "step_index": step_idx,
-                    "audio_duration_ms": audio_duration_ms,
-                }))
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "tts_step_complete",
+                            "sequence_id": seq_id,
+                            "step_index": step_idx,
+                            "audio_duration_ms": audio_duration_ms,
+                        }
+                    )
+                )
         else:
             # No speech for this step — send sdl_step and complete immediately
             if ch and ch.readyState == "open":
-                ch.send(json.dumps({
-                    "type": "sdl_step",
-                    "sequence_id": seq_id,
-                    "step_index": step_idx,
-                }))
-                ch.send(json.dumps({
-                    "type": "tts_step_complete",
-                    "sequence_id": seq_id,
-                    "step_index": step_idx,
-                    "audio_duration_ms": 0,
-                }))
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "sdl_step",
+                            "sequence_id": seq_id,
+                            "step_index": step_idx,
+                        }
+                    )
+                )
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "tts_step_complete",
+                            "sequence_id": seq_id,
+                            "step_index": step_idx,
+                            "audio_duration_ms": 0,
+                        }
+                    )
+                )
 
     # Sequence complete
     tts_interrupt_flags[pc_id] = False
     if ch and ch.readyState == "open":
-        ch.send(json.dumps({
-            "type": "sdl_complete",
-            "sequence_id": seq_id,
-        }))
+        ch.send(
+            json.dumps(
+                {
+                    "type": "sdl_complete",
+                    "sequence_id": seq_id,
+                }
+            )
+        )
 
 
 async def _run_llm_tts(pc_id: str, user_text: str):
@@ -859,7 +921,6 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     smart_turn_result = timing.get("smart_turn_result")
     t_turn_detection = timing.get("turn_detection_ms")
 
-    t_pipeline_start = time.perf_counter()
     t_llm_start = None
     t_llm_end = None
     t_tts_start = None
@@ -901,10 +962,14 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 if tts_chunks_sent == 0:
                     t_tts_first_chunk = time.perf_counter()
                     logger.info("[%s] First TTS chunk (%d bytes)", pc_id, len(audio_chunk))
-                ch.send(json.dumps({
-                    "type": "tts_chunk",
-                    "audio": base64.b64encode(audio_chunk).decode("utf-8"),
-                }))
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "tts_chunk",
+                            "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                        }
+                    )
+                )
                 tts_chunks_sent += 1
 
         async def _stream_with_pipeline(sentence: str, pipeline_obj: Any) -> None:
@@ -945,7 +1010,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                             break
 
                         metadata["retry_count"] += 1
-                        delay_secs = config.TTS_RETRY_BASE_DELAY_SECS * (2 ** attempt)
+                        delay_secs = config.TTS_RETRY_BASE_DELAY_SECS * (2**attempt)
                         logger.warning(
                             "[%s] ElevenLabs TTS failed on attempt %d/%d, retrying in %.2fs: %s",
                             pc_id,
@@ -1059,7 +1124,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         # If SDL was captured during tool execution, run step-pipelined sync
         pending_sdl = _pending_sdl.pop(pc_id, None)
         if pending_sdl and pending_sdl.get("steps"):
-            logger.info("[%s] Starting SDL step pipeline (%d steps)", pc_id, len(pending_sdl["steps"]))
+            logger.info(
+                "[%s] Starting SDL step pipeline (%d steps)", pc_id, len(pending_sdl["steps"])
+            )
             await _run_sdl_step_pipeline(pc_id, pending_sdl)
 
     except asyncio.CancelledError:
@@ -1091,7 +1158,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         llm_metrics = pipeline.get_last_call_metrics() or {}
 
         latency_vad_ms = None
-        latency_stt_ms = _ms(t_speech_start, t_stt_final) if t_speech_start and t_stt_final else None
+        latency_stt_ms = (
+            _ms(t_speech_start, t_stt_final) if t_speech_start and t_stt_final else None
+        )
         latency_stt_to_llm_ms = _ms(t_turn_confirmed, t_llm_start)
         latency_llm_ms = llm_metrics.get("latency_llm_ms") or _ms(t_llm_start, t_llm_end)
         latency_llm_first_token_ms = llm_metrics.get("latency_llm_first_token_ms")
@@ -1134,14 +1203,23 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         logger.info(
             "[%s] METRICS: stt=%s turn=%s llm=%s tool=%s tts=%s tts_ttfb=%s total=%s interrupted=%s provider=%s retries=%s fallback=%s",
             pc_id,
-            latency_stt_ms, turn_detection_ms, latency_llm_ms, latency_tool_ms,
-            latency_tts_ms, latency_tts_first_chunk_ms, latency_total_ms, tts_interrupted,
-            metrics_payload["tts_provider_used"], tts_retry_count, tts_fallback_used,
+            latency_stt_ms,
+            turn_detection_ms,
+            latency_llm_ms,
+            latency_tool_ms,
+            latency_tts_ms,
+            latency_tts_first_chunk_ms,
+            latency_total_ms,
+            tts_interrupted,
+            metrics_payload["tts_provider_used"],
+            tts_retry_count,
+            tts_fallback_used,
         )
 
         # ── Save to DB ──
         try:
             from funcs.models import VoicePipelineLogRepo
+
             user_id = _get_voice_user_id(pc_id)
             log_record = VoicePipelineLogRepo.save(
                 session_id=getattr(pipeline, "session_id", pc_id),
@@ -1161,7 +1239,9 @@ async def _run_llm_tts(pc_id: str, user_text: str):
                 latency_tts_ms=latency_tts_ms,
                 latency_tts_first_chunk_ms=latency_tts_first_chunk_ms,
                 latency_total_ms=latency_total_ms,
-                tool_calls_json=json.dumps(llm_metrics.get("tool_calls", [])) if llm_metrics.get("tool_calls") else None,
+                tool_calls_json=json.dumps(llm_metrics.get("tool_calls", []))
+                if llm_metrics.get("tool_calls")
+                else None,
                 tokens_in=llm_metrics.get("tokens_in"),
                 tokens_out=llm_metrics.get("tokens_out"),
                 tts_chunks_sent=tts_chunks_sent,
@@ -1221,7 +1301,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         st_session.set_turn_complete_callback(on_fallback_complete)
         logger.info("[%s] Smart Turn session created", pc_id)
 
-    async def on_deepgram_event(data: Dict):
+    async def on_deepgram_event(data: dict[str, Any]):
         """Handle Deepgram transcript events with full timing instrumentation.
 
         Key distinction:
@@ -1246,7 +1326,10 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             if transcript.strip() and (is_final or speech_final):
                 logger.debug(
                     "[%s] DG event: is_final=%s speech_final=%s text='%s'",
-                    pc_id, is_final, speech_final, transcript[:40],
+                    pc_id,
+                    is_final,
+                    speech_final,
+                    transcript[:40],
                 )
 
             ch = datachannels.get(pc_id)
@@ -1262,7 +1345,8 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                 if transcript.strip() and tts_was_active:
                     logger.warning(
                         "[%s] INTERRUPT - User speaking during TTS: '%s'",
-                        pc_id, transcript[:30],
+                        pc_id,
+                        transcript[:30],
                     )
                     tts_interrupt_flags[pc_id] = False
                     if st_session:
@@ -1270,12 +1354,16 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         logger.info("[%s] Smart Turn reset for new turn after interrupt", pc_id)
 
                 # Forward all transcripts to client
-                ch.send(json.dumps({
-                    "type": "transcript",
-                    "text": transcript,
-                    "is_final": is_final,
-                    "speech_final": speech_final,
-                }))
+                ch.send(
+                    json.dumps(
+                        {
+                            "type": "transcript",
+                            "text": transcript,
+                            "is_final": is_final,
+                            "speech_final": speech_final,
+                        }
+                    )
+                )
 
             if st_session:
                 # ── Smart Turn path ──────────────────────────────
@@ -1297,7 +1385,8 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                             if text:
                                 logger.warning(
                                     "[%s] Watchdog: speech_final never fired, forcing turn (text='%s')",
-                                    pc_id, text[:60],
+                                    pc_id,
+                                    text[:60],
                                 )
                                 timing = turn_timing.setdefault(pc_id, {})
                                 timing["smart_turn_result"] = "watchdog"
@@ -1314,8 +1403,11 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         _watchdog_task.cancel()
                         _watchdog_task = None
 
-                    logger.info("[%s] Speech final → Smart Turn (text='%s')",
-                                pc_id, st_session.accumulated_transcript[:60])
+                    logger.info(
+                        "[%s] Speech final → Smart Turn (text='%s')",
+                        pc_id,
+                        st_session.accumulated_transcript[:60],
+                    )
 
                     t_smart_start = time.perf_counter()
                     is_complete, accumulated_text = await st_session.on_speech_final("")
@@ -1325,11 +1417,15 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     timing["smart_turn_result"] = "complete" if is_complete else "incomplete"
 
                     if ch and ch.readyState == "open":
-                        ch.send(json.dumps({
-                            "type": "smart_turn",
-                            "is_complete": is_complete,
-                            "latency_ms": timing["turn_detection_ms"],
-                        }))
+                        ch.send(
+                            json.dumps(
+                                {
+                                    "type": "smart_turn",
+                                    "is_complete": is_complete,
+                                    "latency_ms": timing["turn_detection_ms"],
+                                }
+                            )
+                        )
 
                     if is_complete and accumulated_text:
                         await _process_user_turn(pc_id, accumulated_text)
@@ -1439,6 +1535,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
 
         logger.info("[%s] Consumer finished", pc_id)
 
+
 @app.post("/chat")
 async def chat(chat_msg: ChatMessage, request: Request):
     """
@@ -1469,7 +1566,9 @@ async def chat(chat_msg: ChatMessage, request: Request):
             if existing_session.user_id != user_id:
                 return JSONResponse({"error": "Forbidden"}, status_code=403)
             if agent_id and agent_id != existing_session.agent_id:
-                return JSONResponse({"error": "Session does not belong to the supplied agent"}, status_code=400)
+                return JSONResponse(
+                    {"error": "Session does not belong to the supplied agent"}, status_code=400
+                )
             agent_id = existing_session.agent_id
 
     # Resolve agent after canonicalizing it from the session row when present
@@ -1497,7 +1596,9 @@ async def chat(chat_msg: ChatMessage, request: Request):
         try:
             # Use agent system prompt and capabilities when available
             if agent:
-                agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(user_id, agent)
+                agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(
+                    user_id, agent
+                )
 
                 pipeline = LLMPipeline(
                     provider=config.LLM_PROVIDER,
@@ -1583,37 +1684,39 @@ async def chat(chat_msg: ChatMessage, request: Request):
             SessionRepo.update_title(session_id, title)
         except Exception:
             pass
-    
+
     pipeline = chat_sessions[session_id]
     _touch_chat_session(session_id)
 
     if pipeline.memory:
         pipeline.memory.agent_id = agent_id
-    
+
     # Update canvas mode if specified in this request
     if chat_msg.canvas_mode is not None:
         pipeline.set_canvas_mode(chat_msg.canvas_mode)
-    
+
     # Set canvas callback to queue events
     def canvas_callback(operations):
         canvas_events.append(operations)
+
     pipeline.set_canvas_callback(canvas_callback)
 
     # Set animation callback to queue events
     def animation_callback(data):
         animation_events.append(data)
+
     pipeline.set_animation_callback(animation_callback)
-    
+
     async def generate():
         try:
             # Send session_id first
             yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-            
+
             # Stream response with tools support
             async for chunk in pipeline.chat_with_tools_stream(
                 chat_msg.message,
                 temperature=config.LLM_TEMPERATURE,
-                max_tokens=config.LLM_MAX_TOKENS
+                max_tokens=config.LLM_MAX_TOKENS,
             ):
                 # Check if we have pending canvas events to send
                 while canvas_events:
@@ -1646,7 +1749,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
                         user_id=user_id,
                         user_message=chat_msg.message,
                         llm_provider=pipeline.provider,
-                        llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                        llm_model=getattr(pipeline.client, "model", pipeline.provider),
                         tool_calls_json=json.dumps(metrics.get("tool_calls", [])),
                         response_text=(metrics.get("response_text") or "")[:2000],
                         latency_total_ms=metrics.get("latency_total_ms"),
@@ -1665,7 +1768,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
                         user_message=chat_msg.message,
                         response_text=(metrics.get("response_text") or "")[:2000],
                         llm_provider=pipeline.provider,
-                        llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                        llm_model=getattr(pipeline.client, "model", pipeline.provider),
                         latency_llm_ms=metrics.get("latency_llm_ms"),
                         latency_llm_first_token_ms=metrics.get("latency_llm_first_token_ms"),
                         latency_tool_ms=metrics.get("latency_tool_ms"),
@@ -1688,13 +1791,13 @@ async def chat(chat_msg: ChatMessage, request: Request):
                     user_id=user_id,
                     user_message=chat_msg.message,
                     llm_provider=pipeline.provider,
-                    llm_model=getattr(pipeline.client, 'model', pipeline.provider),
+                    llm_model=getattr(pipeline.client, "model", pipeline.provider),
                     error=str(e),
                 )
             except Exception:
                 pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-    
+
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
@@ -1713,20 +1816,21 @@ async def clear_chat(session_id: str):
     return JSONResponse({"status": "cleared"})
 
 
-
 @app.post("/chat/{session_id}/canvas-mode")
 async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
     """Toggle canvas mode for an existing chat session."""
     pipeline = chat_sessions.get(session_id)
     if not pipeline:
         return JSONResponse({"error": "Session not found"}, status_code=404)
-    
+
     pipeline.set_canvas_mode(req.enabled, req.custom_prompt)
-    return JSONResponse({
-        "session_id": session_id,
-        "canvas_mode": pipeline.canvas_mode,
-        "tools_count": len(pipeline.get_tools_schema())
-    })
+    return JSONResponse(
+        {
+            "session_id": session_id,
+            "canvas_mode": pipeline.canvas_mode,
+            "tools_count": len(pipeline.get_tools_schema()),
+        }
+    )
 
 
 @app.get("/api/auth/me")
@@ -1735,13 +1839,15 @@ async def auth_me(request: Request):
     user = get_current_user(request)
     if user is None:
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
-    return JSONResponse({
-        "user": {
-            "id": user["id"],
-            "email": user["email"],
-            "name": user["name"],
+    return JSONResponse(
+        {
+            "user": {
+                "id": user["id"],
+                "email": user["email"],
+                "name": user["name"],
+            }
         }
-    })
+    )
 
 
 # ============== Agent CRUD Endpoints ==============
@@ -1839,7 +1945,9 @@ async def update_agent(agent_id: str, body: UpdateAgentRequest, request: Request
     needs_recompile = body.persona is not None or body.capabilities is not None
     if needs_recompile:
         persona = body.persona if body.persona is not None else agent.get_persona()
-        capabilities = body.capabilities if body.capabilities is not None else agent.get_capabilities()
+        capabilities = (
+            body.capabilities if body.capabilities is not None else agent.get_capabilities()
+        )
         updates["system_prompt"] = compile_agent_prompt(persona, capabilities)
         if body.persona is not None:
             updates["persona_json"] = json.dumps(persona)
@@ -1908,17 +2016,14 @@ async def add_resource(
     if file and file.filename:
         # File upload path
         resource_id = str(_uuid4())
-        upload_dir = os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "data", "uploads", user["id"]
-        )
-        os.makedirs(upload_dir, exist_ok=True)
-        file_path = os.path.join(upload_dir, f"{resource_id}.pdf")
+        upload_dir = get_data_dir() / "uploads" / user["id"]
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        file_path = upload_dir / f"{resource_id}.pdf"
 
         content = await file.read()
-        with open(file_path, "wb") as f:
-            f.write(content)
+        await asyncio.to_thread(file_path.write_bytes, content)
 
-        resource = ingest_pdf(file_path, agent_id=agent_id, user_id=user["id"])
+        resource = ingest_pdf(str(file_path), agent_id=agent_id, user_id=user["id"])
         return JSONResponse(_resource_to_dict(resource))
 
     elif url:
@@ -1990,6 +2095,7 @@ async def get_mastery(agent_id: str, request: Request):
 
 # ============== Session Endpoints ==============
 
+
 @app.post("/api/sessions")
 async def create_session(body: CreateSessionRequest, request: Request):
     """Create a new persistent session for an agent."""
@@ -2002,15 +2108,17 @@ async def create_session(body: CreateSessionRequest, request: Request):
         return JSONResponse({"error": "Agent not found"}, status_code=404)
 
     session = SessionRepo.create(user_id=user["id"], agent_id=body.agent_id)
-    return JSONResponse({
-        "id": session.id,
-        "user_id": session.user_id,
-        "agent_id": session.agent_id,
-        "title": session.title,
-        "summary": session.summary,
-        "message_count": session.message_count,
-        "created_at": session.created_at.isoformat(),
-    })
+    return JSONResponse(
+        {
+            "id": session.id,
+            "user_id": session.user_id,
+            "agent_id": session.agent_id,
+            "title": session.title,
+            "summary": session.summary,
+            "message_count": session.message_count,
+            "created_at": session.created_at.isoformat(),
+        }
+    )
 
 
 @app.get("/api/sessions")
@@ -2021,18 +2129,20 @@ async def list_sessions(request: Request, agent_id: str | None = None):
         return JSONResponse({"error": "Not authenticated"}, status_code=401)
 
     sessions = SessionRepo.list_by_user(user["id"], agent_id=agent_id)
-    return JSONResponse([
-        {
-            "id": s.id,
-            "agent_id": s.agent_id,
-            "title": s.title,
-            "summary": s.summary,
-            "message_count": s.message_count,
-            "created_at": s.created_at.isoformat(),
-            "updated_at": s.updated_at.isoformat(),
-        }
-        for s in sessions
-    ])
+    return JSONResponse(
+        [
+            {
+                "id": s.id,
+                "agent_id": s.agent_id,
+                "title": s.title,
+                "summary": s.summary,
+                "message_count": s.message_count,
+                "created_at": s.created_at.isoformat(),
+                "updated_at": s.updated_at.isoformat(),
+            }
+            for s in sessions
+        ]
+    )
 
 
 @app.get("/api/sessions/{session_id}")
@@ -2049,24 +2159,26 @@ async def get_session_detail(session_id: str, request: Request):
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     messages = ConversationMessageRepo.get_recent(session_id, limit=50)
-    return JSONResponse({
-        "id": session.id,
-        "agent_id": session.agent_id,
-        "title": session.title,
-        "summary": session.summary,
-        "message_count": session.message_count,
-        "created_at": session.created_at.isoformat(),
-        "updated_at": session.updated_at.isoformat(),
-        "messages": [
-            {
-                "id": m.id,
-                "role": m.role,
-                "content": m.content,
-                "created_at": m.created_at.isoformat(),
-            }
-            for m in messages
-        ],
-    })
+    return JSONResponse(
+        {
+            "id": session.id,
+            "agent_id": session.agent_id,
+            "title": session.title,
+            "summary": session.summary,
+            "message_count": session.message_count,
+            "created_at": session.created_at.isoformat(),
+            "updated_at": session.updated_at.isoformat(),
+            "messages": [
+                {
+                    "id": m.id,
+                    "role": m.role,
+                    "content": m.content,
+                    "created_at": m.created_at.isoformat(),
+                }
+                for m in messages
+            ],
+        }
+    )
 
 
 @app.post("/api/sessions/{session_id}/end")
@@ -2148,15 +2260,17 @@ async def end_session(session_id: str, request: Request):
         if isinstance(parsed, list):
             for item in parsed:
                 if isinstance(item, dict) and "topic" in item and "signal_type" in item:
-                    mastery_entries.append(TopicMasteryModel(
-                        user_id=user["id"],
-                        agent_id=session.agent_id,
-                        session_id=session_id,
-                        topic=item["topic"],
-                        chapter=item.get("chapter"),
-                        signal_type=item["signal_type"],
-                        details=item.get("details"),
-                    ))
+                    mastery_entries.append(
+                        TopicMasteryModel(
+                            user_id=user["id"],
+                            agent_id=session.agent_id,
+                            session_id=session_id,
+                            topic=item["topic"],
+                            chapter=item.get("chapter"),
+                            signal_type=item["signal_type"],
+                            details=item.get("details"),
+                        )
+                    )
         if mastery_entries:
             TopicMasteryRepo.save_batch(mastery_entries)
     except Exception as e:
@@ -2171,43 +2285,47 @@ async def end_session(session_id: str, request: Request):
         except Exception:
             pass
 
-    return JSONResponse({
-        "id": session_id,
-        "summary": summary,
-        "mastery_count": len(mastery_entries),
-        "status": "ended",
-    })
+    return JSONResponse(
+        {
+            "id": session_id,
+            "summary": summary,
+            "mastery_count": len(mastery_entries),
+            "status": "ended",
+        }
+    )
 
 
 @app.get("/api/logs")
 async def get_logs(limit: int = 50, offset: int = 0):
     """Get recent LLM call logs with pagination."""
     logs = LLMCallLogRepo.get_recent(limit=min(limit, 200), offset=offset)
-    return JSONResponse({
-        "logs": [
-            {
-                "id": log.id,
-                "session_id": log.session_id,
-                "user_id": log.user_id,
-                "user_message": log.user_message,
-                "llm_provider": log.llm_provider,
-                "llm_model": log.llm_model,
-                "tool_calls": log.get_tool_calls(),
-                "response_text": log.response_text,
-                "latency_total_ms": log.latency_total_ms,
-                "latency_llm_ms": log.latency_llm_ms,
-                "latency_tool_ms": log.latency_tool_ms,
-                "latency_stream_ms": log.latency_stream_ms,
-                "tokens_in": log.tokens_in,
-                "tokens_out": log.tokens_out,
-                "error": log.error,
-                "created_at": log.created_at.isoformat() if log.created_at else None,
-            }
-            for log in logs
-        ],
-        "limit": limit,
-        "offset": offset,
-    })
+    return JSONResponse(
+        {
+            "logs": [
+                {
+                    "id": log.id,
+                    "session_id": log.session_id,
+                    "user_id": log.user_id,
+                    "user_message": log.user_message,
+                    "llm_provider": log.llm_provider,
+                    "llm_model": log.llm_model,
+                    "tool_calls": log.get_tool_calls(),
+                    "response_text": log.response_text,
+                    "latency_total_ms": log.latency_total_ms,
+                    "latency_llm_ms": log.latency_llm_ms,
+                    "latency_tool_ms": log.latency_tool_ms,
+                    "latency_stream_ms": log.latency_stream_ms,
+                    "tokens_in": log.tokens_in,
+                    "tokens_out": log.tokens_out,
+                    "error": log.error,
+                    "created_at": log.created_at.isoformat() if log.created_at else None,
+                }
+                for log in logs
+            ],
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 @app.get("/api/logs/stats")
@@ -2224,46 +2342,56 @@ async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = No
     resilience = TTSResilienceLogRepo.get_by_voice_log_ids(
         [log.id for log in logs if log.id is not None]
     )
-    return JSONResponse({
-        "logs": [
-            {
-                "id": log.id,
-                "session_id": log.session_id,
-                "user_id": log.user_id,
-                "mode": log.mode,
-                "user_message": log.user_message,
-                "response_text": log.response_text,
-                "llm_provider": log.llm_provider,
-                "llm_model": log.llm_model,
-                "latency_vad_ms": log.latency_vad_ms,
-                "latency_stt_ms": log.latency_stt_ms,
-                "latency_turn_detection_ms": log.latency_turn_detection_ms,
-                "latency_stt_to_llm_ms": log.latency_stt_to_llm_ms,
-                "latency_llm_ms": log.latency_llm_ms,
-                "latency_llm_first_token_ms": log.latency_llm_first_token_ms,
-                "latency_tool_ms": log.latency_tool_ms,
-                "latency_tts_ms": log.latency_tts_ms,
-                "latency_tts_first_chunk_ms": log.latency_tts_first_chunk_ms,
-                "latency_total_ms": log.latency_total_ms,
-                "tool_calls": log.get_tool_calls(),
-                "tokens_in": log.tokens_in,
-                "tokens_out": log.tokens_out,
-                "tts_chunks_sent": log.tts_chunks_sent,
-                "tts_interrupted": log.tts_interrupted,
-                "tts_provider_used": resilience.get(log.id).provider_used if log.id in resilience else None,
-                "tts_retry_count": resilience.get(log.id).retry_count if log.id in resilience else 0,
-                "tts_fallback_used": resilience.get(log.id).fallback_used if log.id in resilience else False,
-                "tts_fallback_provider": resilience.get(log.id).fallback_provider if log.id in resilience else None,
-                "smart_turn_used": log.smart_turn_used,
-                "smart_turn_result": log.smart_turn_result,
-                "error": log.error,
-                "created_at": log.created_at.isoformat() if log.created_at else None,
-            }
-            for log in logs
-        ],
-        "limit": limit,
-        "offset": offset,
-    })
+    return JSONResponse(
+        {
+            "logs": [
+                {
+                    "id": log.id,
+                    "session_id": log.session_id,
+                    "user_id": log.user_id,
+                    "mode": log.mode,
+                    "user_message": log.user_message,
+                    "response_text": log.response_text,
+                    "llm_provider": log.llm_provider,
+                    "llm_model": log.llm_model,
+                    "latency_vad_ms": log.latency_vad_ms,
+                    "latency_stt_ms": log.latency_stt_ms,
+                    "latency_turn_detection_ms": log.latency_turn_detection_ms,
+                    "latency_stt_to_llm_ms": log.latency_stt_to_llm_ms,
+                    "latency_llm_ms": log.latency_llm_ms,
+                    "latency_llm_first_token_ms": log.latency_llm_first_token_ms,
+                    "latency_tool_ms": log.latency_tool_ms,
+                    "latency_tts_ms": log.latency_tts_ms,
+                    "latency_tts_first_chunk_ms": log.latency_tts_first_chunk_ms,
+                    "latency_total_ms": log.latency_total_ms,
+                    "tool_calls": log.get_tool_calls(),
+                    "tokens_in": log.tokens_in,
+                    "tokens_out": log.tokens_out,
+                    "tts_chunks_sent": log.tts_chunks_sent,
+                    "tts_interrupted": log.tts_interrupted,
+                    "tts_provider_used": resilience.get(log.id).provider_used
+                    if log.id in resilience
+                    else None,
+                    "tts_retry_count": resilience.get(log.id).retry_count
+                    if log.id in resilience
+                    else 0,
+                    "tts_fallback_used": resilience.get(log.id).fallback_used
+                    if log.id in resilience
+                    else False,
+                    "tts_fallback_provider": resilience.get(log.id).fallback_provider
+                    if log.id in resilience
+                    else None,
+                    "smart_turn_used": log.smart_turn_used,
+                    "smart_turn_result": log.smart_turn_result,
+                    "error": log.error,
+                    "created_at": log.created_at.isoformat() if log.created_at else None,
+                }
+                for log in logs
+            ],
+            "limit": limit,
+            "offset": offset,
+        }
+    )
 
 
 @app.get("/api/voice-logs/stats")
@@ -2288,7 +2416,9 @@ async def offer(body: Offer, request: Request):
         if existing_session.user_id != user_id:
             return JSONResponse({"error": "Forbidden"}, status_code=403)
         if agent_id and agent_id != existing_session.agent_id:
-            return JSONResponse({"error": "Session does not belong to the supplied agent"}, status_code=400)
+            return JSONResponse(
+                {"error": "Session does not belong to the supplied agent"}, status_code=400
+            )
         agent_id = existing_session.agent_id
 
     if agent_id:
@@ -2337,14 +2467,13 @@ async def offer(body: Offer, request: Request):
                     st = smart_turn_sessions.get(pc_id)
                     if st:
                         st._reset_turn()
-            except:
-                pass
+            except (json.JSONDecodeError, TypeError) as exc:
+                logger.debug("[%s] Ignoring malformed data-channel message: %s", pc_id, exc)
 
         @channel.on("close")
         async def on_close():
             logger.info("[%s] DataChannel closed", pc_id)
             await _finalize_voice_session(pc_id, background=True, pc=pc)
-
 
     pcs.add(pc)
     logger.info("[%s] created for incoming offer", pc_id)
@@ -2360,7 +2489,9 @@ async def offer(body: Offer, request: Request):
 
     @pc.on("track")
     def on_track(track):
-        logger.info("[%s] Track received: kind=%s id=%s", pc_id, track.kind, getattr(track, "id", "?"))
+        logger.info(
+            "[%s] Track received: kind=%s id=%s", pc_id, track.kind, getattr(track, "id", "?")
+        )
         if track.kind == "audio":
             task = asyncio.create_task(consume_audio_track(track, pc_id))
 
@@ -2371,7 +2502,8 @@ async def offer(body: Offer, request: Request):
 
         else:
             pc.addTrack(track)
-            asyncio.ensure_future(media_blackhole.start())
+            blackhole_task = asyncio.create_task(media_blackhole.start())
+            _log_background_task(blackhole_task, f"media blackhole [{pc_id}]")
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
@@ -2387,12 +2519,14 @@ async def offer(body: Offer, request: Request):
         }
     )
 
+
 @app.on_event("startup")
 async def on_startup():
     global _session_sweeper_task
     if _session_sweeper_task is None or _session_sweeper_task.done():
         _session_sweeper_task = asyncio.create_task(_session_sweeper_loop())
         logger.info("Session sweeper started")
+
 
 @app.on_event("shutdown")
 async def on_shutdown():
@@ -2426,6 +2560,6 @@ async def on_shutdown():
     voice_session_finalizing.clear()
     logger.info("Server shutdown, pcs closed")
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     uvicorn.run("main:app", host=config.HOST, port=config.PORT, reload=True)
