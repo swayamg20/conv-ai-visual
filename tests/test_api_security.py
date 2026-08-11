@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
+from aiortc import RTCSessionDescription
 from fastapi.testclient import TestClient
 from murmur.api.dependencies import get_authenticated_user
 from murmur.api.errors import ApiError
@@ -15,6 +16,38 @@ from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 
 import main
+
+
+class _FakePeerConnection:
+    def __init__(self) -> None:
+        self.handlers = {}
+        self.connectionState = "new"
+        self.localDescription = None
+        self.remote_description = None
+        self.closed = False
+
+    def on(self, event_name):
+        def register(handler):
+            self.handlers[event_name] = handler
+            return handler
+
+        return register
+
+    async def setRemoteDescription(self, description) -> None:
+        self.remote_description = description
+
+    async def createAnswer(self):
+        return RTCSessionDescription(sdp="answer-sdp", type="answer")
+
+    async def setLocalDescription(self, description) -> None:
+        self.localDescription = description
+
+    async def close(self) -> None:
+        self.connectionState = "closed"
+        self.closed = True
+
+    def addTrack(self, _track) -> None:
+        pass
 
 
 class ApiSecurityTest(unittest.TestCase):
@@ -107,6 +140,7 @@ class ApiSecurityTest(unittest.TestCase):
                 f"/chat/{self.owner_session.id}/canvas-mode",
                 {"enabled": True},
             ),
+            ("post", "/offer", {"sdp": "offer-sdp", "type": "offer"}),
         ]
 
         for method, path, body in requests:
@@ -224,6 +258,58 @@ class ApiSecurityTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_voice_ownership_is_checked_before_peer_allocation(self) -> None:
+        self.current_user = self.owner
+        peer_factory = Mock(side_effect=AssertionError("peer should not be allocated"))
+
+        with patch.object(main.app.state.voice_service, "peer_connection_factory", peer_factory):
+            response = self.client.post(
+                "/offer",
+                json={
+                    "sdp": "offer-sdp",
+                    "type": "offer",
+                    "session_id": self.other_session.id,
+                    "agent_id": self.other_agent.id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 403)
+        peer_factory.assert_not_called()
+
+    def test_owned_voice_offer_allocates_peer_after_authentication(self) -> None:
+        self.current_user = self.owner
+        peer = _FakePeerConnection()
+
+        with patch.object(
+            main.app.state.voice_service,
+            "peer_connection_factory",
+            return_value=peer,
+        ) as peer_factory:
+            response = self.client.post(
+                "/offer",
+                json={
+                    "sdp": "offer-sdp",
+                    "type": "offer",
+                    "session_id": self.owner_session.id,
+                    "agent_id": self.owner_agent.id,
+                    "canvas_mode": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "sdp": "answer-sdp",
+                "type": "answer",
+                "session_id": self.owner_session.id,
+                "agent_id": self.owner_agent.id,
+            },
+        )
+        peer_factory.assert_called_once_with()
+        self.assertEqual(peer.remote_description.sdp, "offer-sdp")
+        self.assertIn(peer, main.runtime.peer_connections)
 
     def test_resource_delete_binds_id_to_owned_agent(self) -> None:
         self.current_user = self.owner

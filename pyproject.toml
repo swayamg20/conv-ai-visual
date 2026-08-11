@@ -61,6 +61,7 @@ packages = [
   "murmur.persistence",
   "murmur.persistence.repositories",
   "murmur.runtime",
+  "murmur.voice",
 ]
 package-dir = { murmur = "backend/murmur" }
 py-modules = ["main"]

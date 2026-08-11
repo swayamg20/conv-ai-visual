@@ -25,7 +25,9 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 16:26 IST: Moved identity, agent, resource, mastery, session-lifecycle, and observability endpoints—13 of 17 product paths and 18 of 22 operations—into five focused routers with reusable authenticated-user and owned-agent dependencies. Added an exact OpenAPI route-contract test and bound resource deletion to the owned path agent after the extraction exposed that missing check; fourteen backend tests pass.
 - [x] 2026-08-11 16:28 IST: Verified GitHub Actions run `31484301698`: the focused-router checkpoint passed both hosted jobs.
 - [x] 2026-08-11 16:31 IST: Extracted all three chat endpoints into a thin SSE router and a transport-neutral `ChatService`; centralized agent prompt/resource/mastery assembly; replaced three parallel chat-state collections with an owned `ChatRuntimeSession` record and per-session turn lock; and added cross-user active-session, serialized-turn, and idempotent-finalization tests. Seventeen backend tests pass and `main.py` is down to 1,425 lines, with only voice signaling left as an entrypoint route.
-- [ ] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
+- [x] 2026-08-11 16:34 IST: Verified GitHub Actions run `31484924514`: the isolated-chat-service checkpoint passed both hosted jobs.
+- [x] 2026-08-11 16:38 IST: Moved the final `/offer` endpoint into an authenticated voice router, introduced an application-owned `VoiceService` and shared session supervisor, delayed provider setup until FastAPI lifespan startup, and reduced root `main.py` from 2,600 baseline lines to a 13-line compatibility entrypoint. Nineteen backend tests pass, including proof that authentication and ownership are decided before peer allocation and a locally faked successful offer/answer exchange.
+- [x] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
 - [ ] Split LLM provider clients and pipeline policies into focused modules while preserving the existing provider/tool contracts.
@@ -62,6 +64,8 @@ The first explicit startup smoke test exposed an ordering dependency hidden by i
 
 Moving chat orchestration behind a service exposed a second ownership gap: `/chat` checked persistent session rows but trusted an already-active transient pipeline without comparing its owner to the authenticated user. The typed runtime record now carries the authoritative user and agent IDs, and a regression test proves another user cannot submit a turn to that active session. The same record also carries its activity timestamp, finalization flag, and turn lock, eliminating state-map drift and concurrent mutation of one pipeline's callbacks.
 
+The old module allocated and registered a peer before WebRTC negotiation, but did not unwind that state if `setRemoteDescription`, answer creation, or `setLocalDescription` failed. The voice service now resolves authenticated session/agent ownership before calling the injectable peer factory and finalizes the peer and all registry entries if negotiation raises. This also made the signaling trust boundary testable without a browser or paid provider.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -87,6 +91,8 @@ Moving chat orchestration behind a service exposed a second ownership gap: `/cha
 2026-08-11, Codex: Router dependencies raise a small application `ApiError` handled centrally as the existing `{"error": ...}` JSON shape. This makes authentication and owned-agent checks reusable without changing client-visible failure bodies. Chat and WebRTC routes remain in `main.py` until their orchestration moves behind services; duplicating that runtime logic merely to claim a router split is not acceptable.
 
 2026-08-11, Codex: Chat is an application service, not an HTTP handler. `ChatService` owns trusted session/agent resolution, pipeline setup, streaming events, observability, summaries, and eviction; the router maps its transport-neutral events to SSE. Each active chat is one typed record with a per-session lock, so callbacks and memory cannot be mutated by overlapping turns. Expected service failures use transport-independent domain exceptions that the API layer maps to the established JSON error contract.
+
+2026-08-11, Codex: Root `main.py` is now only the documented `uvicorn main:app` compatibility surface. Application construction owns the runtime registry, chat service, voice service, and session supervisor. Voice provider initialization runs in lifespan startup instead of import time; signaling owns only request mapping, while `VoiceService` owns authenticated peer negotiation and runtime behavior. The voice implementation still requires internal decomposition and a typed peer record before its milestone is complete.
 
 ## Outcomes & Retrospective
 

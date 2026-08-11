@@ -10,6 +10,7 @@ from murmur.chat import ChatService
 from murmur.persistence.models import AgentModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.runtime import RuntimeRegistry
+from murmur.voice import VoiceService
 
 
 class CurrentUser(TypedDict):
@@ -59,3 +60,10 @@ def get_chat_service(request: Request) -> ChatService:
 
 
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
+
+
+def get_voice_service(request: Request) -> VoiceService:
+    return cast(VoiceService, request.app.state.voice_service)
+
+
+VoiceServiceDependency = Annotated[VoiceService, Depends(get_voice_service)]
