@@ -54,6 +54,7 @@ packages = [
   "funcs",
   "murmur",
   "murmur.api",
+  "murmur.api.routers",
   "murmur.persistence",
   "murmur.persistence.repositories",
   "murmur.runtime",

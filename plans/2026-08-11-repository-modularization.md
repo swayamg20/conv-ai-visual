@@ -21,6 +21,8 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 16:00 IST: Removed `funcs/models.py` and `funcs/database.py`; introduced the installable `murmur.persistence` package, isolated 14 table declarations from six focused repository domains, moved schema/tool setup to application startup, and rebuilt the schema fresh in memory for every automated test. Ten backend tests, the built wheel, an automated comparison of all 14 tables and 139 columns, and all 55 existing public repository method signatures pass unchanged; the shared UTC clock reduced backend test warnings from 134 to four without changing the legacy naive-SQLite format.
 - [x] 2026-08-11 16:04 IST: Verified GitHub Actions run `31482942723`: the persistence checkpoint passed the hosted backend job in 25 seconds and frontend job in 52 seconds.
 - [x] 2026-08-11 16:12 IST: Added a FastAPI application factory with lifespan-based database/tool startup, moved all process-local chat/voice collections under an `app.state`-owned typed `RuntimeRegistry`, and replaced partial shutdown with tested idempotent cancellation, analyzer cleanup, peer closure, and state clearing. Twelve backend tests pass with only one third-party TestClient warning.
+- [x] 2026-08-11 16:16 IST: Verified GitHub Actions run `31483646347`: the application-lifecycle checkpoint passed both hosted jobs.
+- [x] 2026-08-11 16:26 IST: Moved identity, agent, resource, mastery, session-lifecycle, and observability endpoints—13 of 17 product paths and 18 of 22 operations—into five focused routers with reusable authenticated-user and owned-agent dependencies. Added an exact OpenAPI route-contract test and bound resource deletion to the owned path agent after the extraction exposed that missing check; fourteen backend tests pass.
 - [ ] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
@@ -77,6 +79,8 @@ The first explicit startup smoke test exposed an ordering dependency hidden by i
 2026-08-11, Codex: Importing persistence declarations must be side-effect free. Table creation and built-in tool registration now happen at application startup, while an autouse test fixture rebuilds a shared in-memory SQLite schema before every test. This keeps production startup explicit and prevents tests from touching developer runtime data.
 
 2026-08-11, Codex: Process-local session state has one owner. `RuntimeRegistry` is attached to `app.state`, and route/runtime code accesses its typed fields rather than declaring parallel module-level dictionaries. The application lifespan owns startup and idempotent teardown; subsequent router and voice-service extraction will receive this registry through the application boundary.
+
+2026-08-11, Codex: Router dependencies raise a small application `ApiError` handled centrally as the existing `{"error": ...}` JSON shape. This makes authentication and owned-agent checks reusable without changing client-visible failure bodies. Chat and WebRTC routes remain in `main.py` until their orchestration moves behind services; duplicating that runtime logic merely to claim a router split is not acceptable.
 
 ## Outcomes & Retrospective
 

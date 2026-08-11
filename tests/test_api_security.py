@@ -4,11 +4,14 @@ from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from murmur.api.dependencies import get_authenticated_user
+from murmur.api.errors import ApiError
 from murmur.persistence.repositories.identities import AgentRepo, UserRepo
 from murmur.persistence.repositories.observability import (
     LLMCallLogRepo,
     VoicePipelineLogRepo,
 )
+from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 
 import main
@@ -81,17 +84,24 @@ class ApiSecurityTest(unittest.TestCase):
             side_effect=lambda _request: self.current_user,
         )
         self.auth_patcher.start()
+        main.app.dependency_overrides[get_authenticated_user] = self._authenticated_user
         self.client = TestClient(main.app)
 
     def tearDown(self) -> None:
         self.client.close()
         self.auth_patcher.stop()
+        main.app.dependency_overrides.pop(get_authenticated_user, None)
         main.runtime.chat_sessions.clear()
         main.runtime.chat_session_activity.clear()
 
     @staticmethod
     def _user_repo_args(user: dict) -> dict:
         return {"uid": user["id"], "email": user["email"], "name": user["name"]}
+
+    def _authenticated_user(self) -> dict:
+        if self.current_user is None:
+            raise ApiError(401, "Not authenticated")
+        return self.current_user
 
     def test_sensitive_routes_require_authentication(self) -> None:
         requests = [
@@ -195,6 +205,23 @@ class ApiSecurityTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 403)
+
+    def test_resource_delete_binds_id_to_owned_agent(self) -> None:
+        self.current_user = self.owner
+        foreign_resource = ResourceRepo.create(
+            agent_id=self.other_agent.id,
+            user_id=self.other_user["id"],
+            name="private-notes.txt",
+            resource_type="text",
+            status="ready",
+        )
+
+        response = self.client.delete(
+            f"/api/agents/{self.owner_agent.id}/resources/{foreign_resource.id}"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIsNotNone(ResourceRepo.get_by_id(foreign_resource.id))
 
 
 if __name__ == "__main__":

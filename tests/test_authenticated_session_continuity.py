@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from murmur.api.dependencies import get_authenticated_user
 from murmur.persistence import get_session
 from murmur.persistence.clock import utc_now
 from murmur.persistence.repositories.sessions import ConversationMessageRepo, SessionRepo
@@ -94,8 +95,9 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
                 "funcs.llm_pipeline.create_llm_client",
                 side_effect=lambda *args, **kwargs: _FakeLLMClient(),
             ),
-            patch.object(
-                main, "create_llm_client", side_effect=lambda *args, **kwargs: _FakeLLMClient()
+            patch(
+                "murmur.api.routers.sessions.create_llm_client",
+                side_effect=lambda *args, **kwargs: _FakeLLMClient(),
             ),
             patch("funcs.memory.config.MEM0_API_KEY", ""),
             patch("funcs.llm_pipeline.config.LLM_ASYNC_CONTEXT", False),
@@ -107,6 +109,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         for patcher in self._patchers:
             patcher.start()
 
+        main.app.dependency_overrides[get_authenticated_user] = lambda: TEST_USER
         self.client = TestClient(main.app)
         self.headers = {"Authorization": "Bearer continuity-test-token"}
 
@@ -114,6 +117,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         self.client.close()
         for patcher in reversed(self._patchers):
             patcher.stop()
+        main.app.dependency_overrides.pop(get_authenticated_user, None)
 
         main.runtime.chat_sessions.clear()
         main.runtime.chat_session_activity.clear()
