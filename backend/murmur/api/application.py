@@ -10,15 +10,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from funcs.config import config
-from funcs.search import register_web_search_tool
 from murmur.api.errors import ApiError, api_error_handler, domain_error_handler
 from murmur.api.routers import api_router
+from murmur.canvas.state import register_canvas_tool
 from murmur.chat import ChatService
 from murmur.core import MurmurError
+from murmur.core.config import config
 from murmur.persistence import init_db
 from murmur.runtime import RuntimeRegistry
 from murmur.runtime.supervisor import SessionSupervisor
+from murmur.tools.search import register_web_search_tool
 from murmur.voice import VoiceService
 
 logger = logging.getLogger(__name__)
@@ -53,8 +54,9 @@ def create_application(
         voice_service.start()
         try:
             register_web_search_tool()
+            register_canvas_tool()
         except Exception as exc:
-            logger.warning("Failed to register web_search tool: %s", exc)
+            logger.warning("Failed to register built-in tools: %s", exc)
 
         if runtime.sweeper_task is None or runtime.sweeper_task.done():
             runtime.sweeper_task = asyncio.create_task(supervisor.run())

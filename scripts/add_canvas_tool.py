@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from funcs import ToolRepo
+from murmur.persistence.repositories.tools import ToolRepo
 
 # Canvas tool schema
 CANVAS_PARAMETERS = {
@@ -90,7 +90,7 @@ ToolRepo.upsert(
     name="canvas_update",
     description=CANVAS_DESCRIPTION,
     parameters=CANVAS_PARAMETERS,
-    handler_module="funcs.canvas",
+    handler_module="murmur.canvas.state",
     handler_function="canvas_update",
     enabled=True,
 )

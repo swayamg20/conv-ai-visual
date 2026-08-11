@@ -7,7 +7,7 @@ import asyncio
 import os
 from pathlib import Path
 
-from funcs.tts_pipeline import TTSPipeline
+from murmur.voice.elevenlabs import TTSPipeline
 
 
 async def test_tts_pipeline():

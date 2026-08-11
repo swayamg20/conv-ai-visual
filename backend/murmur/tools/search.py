@@ -4,9 +4,8 @@ Web search integration via Tavily.
 
 import logging
 
+from murmur.core.config import config
 from murmur.persistence.repositories.tools import ToolRepo
-
-from funcs.config import config
 
 logger = logging.getLogger("search")
 
@@ -50,7 +49,7 @@ def register_web_search_tool() -> None:
             },
             "required": ["query"],
         },
-        handler_module="funcs.search",
+        handler_module="murmur.tools.search",
         handler_function="web_search",
         enabled=True,
     )

@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from mem0 import MemoryClient
+
+from murmur.core.config import config
 from murmur.persistence.repositories.memory import (
     DecisionMemoryRepo,
     EpisodicMemoryRepo,
@@ -13,8 +15,6 @@ from murmur.persistence.repositories.sessions import (
     ConversationMessageRepo,
     SessionRepo,
 )
-
-from funcs.config import config
 
 logger = logging.getLogger("memory")
 _token_encoder = None

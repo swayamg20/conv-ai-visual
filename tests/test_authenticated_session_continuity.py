@@ -96,7 +96,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
                 "murmur.api.routers.sessions.create_llm_client",
                 side_effect=lambda *args, **kwargs: _FakeLLMClient(),
             ),
-            patch("funcs.memory.config.MEM0_API_KEY", ""),
+            patch("murmur.memory.manager.config.MEM0_API_KEY", ""),
             patch("murmur.llm.pipeline.config.LLM_ASYNC_CONTEXT", False),
             patch(
                 "murmur.llm.pipeline.LLMPipeline.chat_with_tools_stream",

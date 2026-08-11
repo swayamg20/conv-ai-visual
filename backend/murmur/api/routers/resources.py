@@ -7,13 +7,13 @@ from uuid import uuid4
 from fastapi import APIRouter, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from funcs.resources import ingest_pdf, ingest_url
 from murmur.api.dependencies import OwnedAgentDependency
 from murmur.api.errors import ApiError
 from murmur.persistence import get_data_dir
 from murmur.persistence.models import ResourceModel
 from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import TopicMasteryRepo
+from murmur.resources.service import ingest_pdf, ingest_url
 
 router = APIRouter(tags=["resources"])
 

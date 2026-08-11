@@ -8,6 +8,7 @@ import os
 import httpx
 import pymupdf  # pymupdf (import as pymupdf, not fitz, to avoid conflicts)
 from bs4 import BeautifulSoup
+
 from murmur.persistence.models import ResourceChunkModel, ResourceModel
 from murmur.persistence.repositories.resources import ResourceChunkRepo, ResourceRepo
 

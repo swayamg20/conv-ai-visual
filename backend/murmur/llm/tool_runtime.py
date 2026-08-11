@@ -6,10 +6,10 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from funcs.animation_pipeline import teach_with_visuals
-from funcs.canvas import canvas_update
-from funcs.config import config
-from funcs.tools import ToolCall, ToolResult
+from murmur.canvas.animation import teach_with_visuals
+from murmur.canvas.state import canvas_update
+from murmur.core.config import config
+from murmur.tools.contracts import ToolCall, ToolResult
 
 logger = logging.getLogger("llm-pipeline")
 

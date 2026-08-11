@@ -9,7 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from funcs import ToolRepo
+from murmur.persistence.repositories.tools import ToolRepo
 
 # Add get_current_time tool
 ToolRepo.upsert(

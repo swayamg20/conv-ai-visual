@@ -11,8 +11,8 @@ import time
 import uuid
 from typing import Any, Protocol
 
-from funcs.config import config
-from funcs.model_router import route_model
+from murmur.core.config import config
+from murmur.llm.routing import route_model
 from murmur.persistence.repositories.observability import (
     TTSResilienceLogRepo,
     VoicePipelineLogRepo,

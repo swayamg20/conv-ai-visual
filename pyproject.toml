@@ -51,17 +51,20 @@ experiments = [
 
 [tool.setuptools]
 packages = [
-  "funcs",
   "murmur",
   "murmur.agents",
   "murmur.api",
   "murmur.api.routers",
+  "murmur.canvas",
   "murmur.chat",
   "murmur.core",
   "murmur.llm",
+  "murmur.memory",
   "murmur.persistence",
   "murmur.persistence.repositories",
+  "murmur.resources",
   "murmur.runtime",
+  "murmur.tools",
   "murmur.voice",
 ]
 package-dir = { murmur = "backend/murmur" }
@@ -88,7 +91,7 @@ ignore = ["B008"]
 
 [tool.coverage.run]
 branch = true
-source = ["funcs", "murmur"]
+source = ["murmur"]
 
 [tool.coverage.report]
 show_missing = true

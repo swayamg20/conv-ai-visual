@@ -4,7 +4,7 @@ Test script for 4-layer memory architecture.
 
 import asyncio
 
-from funcs import LLMPipeline
+from murmur.llm import LLMPipeline
 
 
 async def test_memory():

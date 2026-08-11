@@ -8,9 +8,9 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from funcs.config import config
-from funcs.kokoro_tts import KokoroTTSPipeline
-from funcs.tts_pipeline import TTSPipeline, is_retryable_tts_error
+from murmur.core.config import config
+from murmur.voice.elevenlabs import TTSPipeline, is_retryable_tts_error
+from murmur.voice.kokoro import KokoroTTSPipeline
 
 logger = logging.getLogger(__name__)
 AudioEmitter = Callable[[bytes], Awaitable[None]]

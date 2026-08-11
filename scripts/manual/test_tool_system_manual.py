@@ -13,11 +13,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from funcs import (
-    LLMPipeline,
-    ToolExecutor,
-    ToolRepo,
-)
+from murmur.llm import LLMPipeline
+from murmur.persistence.repositories.tools import ToolRepo
+from murmur.tools.executor import ToolExecutor
 
 
 async def test_executor():
@@ -36,7 +34,7 @@ async def test_executor():
 
     if not tools:
         print("\nNo tools registered. Register tools first:")
-        print("  from funcs import ToolRepo")
+        print("  from murmur.persistence.repositories.tools import ToolRepo")
         print(
             "  ToolRepo.upsert(name='...', description='...', parameters={...}, handler_module='...', handler_function='...')"
         )
@@ -88,7 +86,7 @@ async def get_weather(location: str, unit: str = "celsius") -> str:
 
 # 2. Register the tool in DB:
 
-from funcs import ToolRepo
+from murmur.persistence.repositories.tools import ToolRepo
 
 ToolRepo.upsert(
     name="get_weather",

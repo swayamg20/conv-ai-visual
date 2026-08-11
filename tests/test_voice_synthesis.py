@@ -1,9 +1,8 @@
 """Provider-free retry and fallback contracts for speech synthesis."""
 
 import pytest
+from murmur.core.config import config
 from murmur.voice.synthesis import SpeechSynthesizer
-
-from funcs.config import config
 
 
 class _FakePipeline:

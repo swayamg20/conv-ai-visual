@@ -4,8 +4,7 @@ from typing import ClassVar
 
 import pytest
 from murmur.llm.tool_runtime import ToolConversationMixin
-
-from funcs.tools import ToolCall, ToolResult
+from murmur.tools.contracts import ToolCall, ToolResult
 
 
 class RecordingExecutor:

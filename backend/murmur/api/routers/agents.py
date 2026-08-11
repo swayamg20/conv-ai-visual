@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from funcs.agents import compile_agent_prompt
+from murmur.agents.prompting import compile_agent_prompt
 from murmur.api.dependencies import CurrentUserDependency, OwnedAgentDependency
 from murmur.api.errors import ApiError
 from murmur.api.schemas import CreateAgentRequest, UpdateAgentRequest

@@ -2,8 +2,7 @@
 
 import uvicorn
 from murmur.api import create_application
-
-from funcs.config import config
+from murmur.core.config import config
 
 app = create_application()
 runtime = app.state.runtime

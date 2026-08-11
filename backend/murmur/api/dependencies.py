@@ -4,7 +4,7 @@ from typing import Annotated, TypedDict, cast
 
 from fastapi import Depends, Request
 
-from funcs.auth import get_current_user
+from murmur.api.authentication import get_current_user
 from murmur.api.errors import ApiError
 from murmur.chat import ChatService
 from murmur.persistence.models import AgentModel

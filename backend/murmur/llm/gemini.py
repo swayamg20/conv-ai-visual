@@ -5,8 +5,8 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from funcs.tools import ToolCall
 from murmur.llm.base import LLMClient
+from murmur.tools.contracts import ToolCall
 
 logger = logging.getLogger(__name__)
 

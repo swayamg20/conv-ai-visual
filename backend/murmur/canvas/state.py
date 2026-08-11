@@ -2,10 +2,8 @@
 Real-time canvas state management for AI-driven drawing.
 Tracks canvas elements with positions for AI context awareness.
 
-Frontend Integration:
-- Uses Excalidraw for rendering (hand-drawn sketch aesthetic)
-- Canvas operations are converted to Excalidraw elements on the client
-- Supports rect, circle, ellipse, line, arrow, text, path operations
+Frontend integration uses the typed SVG canvas feature and supports rect,
+circle, ellipse, line, arrow, text, path, and teaching-sequence operations.
 """
 
 import json
@@ -14,6 +12,9 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
+
+from murmur.canvas.animation import TEACH_WITH_VISUALS_SCHEMA
+from murmur.persistence.repositories.tools import ToolRepo
 
 logger = logging.getLogger("canvas")
 
@@ -416,16 +417,15 @@ CANVAS_TOOL_DEFINITION = {
     "name": "canvas_update",
     "description": CANVAS_TOOL_SCHEMA["function"]["description"],
     "parameters": CANVAS_TOOL_SCHEMA["function"]["parameters"],
-    "handler_module": "funcs.canvas",
+    "handler_module": "murmur.canvas.state",
     "handler_function": "canvas_update",
 }
 
 
-# ============= Animation Tool Schemas =============
-try:
-    from funcs.animation_pipeline import TEACH_WITH_VISUALS_SCHEMA
+def register_canvas_tool() -> None:
+    """Upsert the built-in canvas tool and repair legacy handler paths."""
+    ToolRepo.upsert(**CANVAS_TOOL_DEFINITION, enabled=True)
+    logger.info("Registered canvas_update tool in DB")
 
-    ANIMATION_TOOLS = [TEACH_WITH_VISUALS_SCHEMA]
-except ImportError:
-    logger.warning("Animation tools not available - animation_pipeline module not found")
-    ANIMATION_TOOLS = []
+
+ANIMATION_TOOLS = [TEACH_WITH_VISUALS_SCHEMA]

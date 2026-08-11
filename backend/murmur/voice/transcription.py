@@ -12,10 +12,10 @@ from typing import Any
 from aiortc import MediaStreamTrack
 from aiortc.mediastreams import AudioFrame
 
-from funcs.config import config
-from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
+from murmur.core.config import config
 from murmur.runtime import RuntimeRegistry, VoiceRuntimeSession
 from murmur.voice.audio import audioframe_to_pcm16_bytes, stream_deepgram
+from murmur.voice.smart_turn import SmartTurnAnalyzer, SmartTurnSession
 
 logger = logging.getLogger(__name__)
 

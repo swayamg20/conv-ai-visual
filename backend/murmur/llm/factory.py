@@ -1,6 +1,6 @@
 """Configuration-backed LLM provider factory."""
 
-from funcs.config import config
+from murmur.core.config import config
 from murmur.llm.base import LLMClient
 from murmur.llm.gemini import GeminiClient
 from murmur.llm.openai import OpenAIClient

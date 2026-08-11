@@ -7,11 +7,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from funcs.agents import append_mastery_context, append_resource_context
-from funcs.resources import search_chunks
+from murmur.agents.prompting import append_mastery_context, append_resource_context
 from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import TopicMasteryRepo
+from murmur.resources.service import search_chunks
 
 logger = logging.getLogger(__name__)
 

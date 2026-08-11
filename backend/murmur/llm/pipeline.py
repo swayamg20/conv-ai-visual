@@ -3,14 +3,14 @@ import logging
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, ClassVar
 
-from funcs.canvas import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, get_canvas_state
-from funcs.config import config
-from funcs.memory import MemoryManager
-from funcs.tool_executor import ToolExecutor, default_executor
-from funcs.tools import ModelAdapter, OpenAIAdapter, ToolRegistry, ToolStore
+from murmur.canvas.state import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, get_canvas_state
+from murmur.core.config import config
 from murmur.llm.base import LLMClient
 from murmur.llm.factory import create_llm_client
 from murmur.llm.tool_runtime import ToolConversationMixin
+from murmur.memory import MemoryManager
+from murmur.tools.contracts import ModelAdapter, OpenAIAdapter, ToolRegistry, ToolStore
+from murmur.tools.executor import ToolExecutor, default_executor
 
 # Number of recent messages used when generating a session summary
 _SUMMARY_RECENT_MESSAGES = 10

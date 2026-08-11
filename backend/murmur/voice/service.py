@@ -11,15 +11,15 @@ from collections.abc import Callable
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 
-from funcs.config import config
-from funcs.smart_turn import SmartTurnAnalyzer
 from murmur.core import InvalidRequestError, PermissionDeniedError, ResourceNotFoundError
+from murmur.core.config import config
 from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.runtime import RuntimeRegistry
 from murmur.voice.models import VoiceOfferAnswer, VoiceOfferRequest
 from murmur.voice.pipeline import VoicePipelineFactory
+from murmur.voice.smart_turn import SmartTurnAnalyzer
 from murmur.voice.synthesis import SpeechSynthesizer
 from murmur.voice.transcription import VoiceTranscriber
 from murmur.voice.turns import cancel_turn, schedule_turn
