@@ -21,6 +21,8 @@ import {
 import Link from "next/link";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { API_BASE } from "@/lib/api";
+import { getAuthHeaders } from "@/lib/firebase";
 
 interface VoiceLogEntry {
   id: number;
@@ -76,8 +78,6 @@ interface Stats {
   fallback_count?: number;
   fallback_rate?: number;
 }
-
-const API_URL = "http://localhost:8000";
 
 function StatCard({
   title,
@@ -180,10 +180,16 @@ export default function Dashboard() {
   const fetchData = useCallback(async () => {
     try {
       const modeParam = modeFilter ? `&mode=${modeFilter}` : "";
+      const headers = await getAuthHeaders();
       const [logsRes, statsRes] = await Promise.all([
-        fetch(`${API_URL}/api/voice-logs?limit=50${modeParam}`),
-        fetch(`${API_URL}/api/voice-logs/stats${modeFilter ? `?mode=${modeFilter}` : ""}`),
+        fetch(`${API_BASE}/api/voice-logs?limit=50${modeParam}`, { headers }),
+        fetch(`${API_BASE}/api/voice-logs/stats${modeFilter ? `?mode=${modeFilter}` : ""}`, {
+          headers,
+        }),
       ]);
+      if (!logsRes.ok || !statsRes.ok) {
+        throw new Error("Failed to load observability data");
+      }
       const logsData = await logsRes.json();
       const statsData = await statsRes.json();
       setLogs(logsData.logs);

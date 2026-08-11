@@ -145,7 +145,10 @@ export function useChat(options: UseChatOptions = {}) {
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {
       try {
-        await fetch(`${apiUrl}/chat/${sessionIdRef.current}`, { method: "DELETE" });
+        await fetch(`${apiUrl}/chat/${sessionIdRef.current}`, {
+          method: "DELETE",
+          headers: await getAuthHeaders(),
+        });
       } catch {
         // Ignore
       }

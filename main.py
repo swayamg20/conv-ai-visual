@@ -16,7 +16,7 @@ import websockets
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 from aiortc.mediastreams import AudioFrame
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
@@ -269,6 +269,17 @@ def _touch_chat_session(session_id: str) -> None:
 
 def _touch_voice_session(pc_id: str) -> None:
     voice_session_activity[pc_id] = time.monotonic()
+
+
+def _get_chat_session_owner(session_id: str) -> str | None:
+    """Resolve a persistent or active chat session to its trusted owner."""
+    persistent_session = SessionRepo.get_by_id(session_id)
+    if persistent_session:
+        return persistent_session.user_id
+
+    pipeline = chat_sessions.get(session_id)
+    owner_id = getattr(pipeline, "user_id", None) if pipeline else None
+    return owner_id if isinstance(owner_id, str) and owner_id else None
 
 
 def _pipeline_message_count(pipeline: LLMPipeline | None) -> int:
@@ -1802,8 +1813,18 @@ async def chat(chat_msg: ChatMessage, request: Request):
 
 
 @app.delete("/chat/{session_id}")
-async def clear_chat(session_id: str):
+async def clear_chat(session_id: str, request: Request):
     """Clear chat session and optionally save summary to episodic memory."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    owner_id = _get_chat_session_owner(session_id)
+    if owner_id is None:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if owner_id != user["id"]:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
     try:
         await _finalize_chat_session(
             session_id,
@@ -1817,8 +1838,18 @@ async def clear_chat(session_id: str):
 
 
 @app.post("/chat/{session_id}/canvas-mode")
-async def set_canvas_mode(session_id: str, req: CanvasModeRequest):
+async def set_canvas_mode(session_id: str, req: CanvasModeRequest, request: Request):
     """Toggle canvas mode for an existing chat session."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    owner_id = _get_chat_session_owner(session_id)
+    if owner_id is None:
+        return JSONResponse({"error": "Session not found"}, status_code=404)
+    if owner_id != user["id"]:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
     pipeline = chat_sessions.get(session_id)
     if not pipeline:
         return JSONResponse({"error": "Session not found"}, status_code=404)
@@ -2106,6 +2137,8 @@ async def create_session(body: CreateSessionRequest, request: Request):
     agent = AgentRepo.get_by_id(body.agent_id)
     if not agent:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
+    if agent.user_id != user["id"]:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
 
     session = SessionRepo.create(user_id=user["id"], agent_id=body.agent_id)
     return JSONResponse(
@@ -2296,9 +2329,17 @@ async def end_session(session_id: str, request: Request):
 
 
 @app.get("/api/logs")
-async def get_logs(limit: int = 50, offset: int = 0):
-    """Get recent LLM call logs with pagination."""
-    logs = LLMCallLogRepo.get_recent(limit=min(limit, 200), offset=offset)
+async def get_logs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    """Get the current user's recent LLM call logs with pagination."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    logs = LLMCallLogRepo.get_recent(user["id"], limit=limit, offset=offset)
     return JSONResponse(
         {
             "logs": [
@@ -2329,16 +2370,29 @@ async def get_logs(limit: int = 50, offset: int = 0):
 
 
 @app.get("/api/logs/stats")
-async def get_logs_stats():
-    """Get aggregated LLM call stats."""
-    stats = LLMCallLogRepo.get_stats()
+async def get_logs_stats(request: Request):
+    """Get aggregate LLM call stats for the current user."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    stats = LLMCallLogRepo.get_stats(user["id"])
     return JSONResponse(stats)
 
 
 @app.get("/api/voice-logs")
-async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = None):
-    """Get recent voice pipeline logs with full stage latencies."""
-    logs = VoicePipelineLogRepo.get_recent(limit=min(limit, 200), offset=offset, mode=mode)
+async def get_voice_logs(
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    mode: str | None = None,
+):
+    """Get the current user's voice pipeline logs with full stage latencies."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    logs = VoicePipelineLogRepo.get_recent(user["id"], limit=limit, offset=offset, mode=mode)
     resilience = TTSResilienceLogRepo.get_by_voice_log_ids(
         [log.id for log in logs if log.id is not None]
     )
@@ -2395,9 +2449,13 @@ async def get_voice_logs(limit: int = 50, offset: int = 0, mode: str | None = No
 
 
 @app.get("/api/voice-logs/stats")
-async def get_voice_logs_stats(mode: str | None = None):
-    """Get aggregated voice pipeline stats with per-stage averages."""
-    stats = VoicePipelineLogRepo.get_stats(mode=mode)
+async def get_voice_logs_stats(request: Request, mode: str | None = None):
+    """Get the current user's aggregate voice pipeline stats."""
+    user = get_current_user(request)
+    if user is None:
+        return JSONResponse({"error": "Not authenticated"}, status_code=401)
+
+    stats = VoicePipelineLogRepo.get_stats(user["id"], mode=mode)
     return JSONResponse(stats)
 
 

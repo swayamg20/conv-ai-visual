@@ -14,8 +14,9 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 15:17 IST: Re-read `.agent/PLANS.md` and created this living ExecPlan before beginning the cross-cutting refactor.
 - [x] 2026-08-11 15:31 IST: Replaced the hand-maintained Python freeze with a bounded `pyproject.toml`, reproducible `uv.lock`, exported compatibility requirements, a Python 3.12 environment, and enforced Ruff lint/format gates; the authenticated session-continuity test passes against an isolated in-memory database.
 - [x] 2026-08-11 15:39 IST: Added deterministic backend and frontend install/lint/format/typecheck/test/build gates and a two-job GitHub Actions workflow; both dependency graphs install from their lockfiles and all local gates pass.
+- [x] 2026-08-11 15:42 IST: Verified GitHub Actions run `31481099746`: both hosted jobs passed clean lockfile installs and every configured backend/frontend quality gate.
 - [x] 2026-08-11 15:26 IST: Moved the existing SQLite/vector-store data and generated audio into gitignored `var/` storage, removed generated artifacts from version control, and separated experiments and manual provider scripts from the tested application surface.
-- [ ] Protect and user-scope chat-control and observability routes before moving them into routers.
+- [x] 2026-08-11 15:49 IST: Protected chat clear/canvas controls and observability routes, enforced session/agent ownership, scoped log rows and statistics in repository queries, moved `/obs` behind the authenticated app layout, and added five API security regression tests.
 - [ ] Extract database engine/session setup, SQLModel declarations, and repositories from `funcs/models.py`; make the database path configurable and test-isolatable.
 - [ ] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
@@ -61,6 +62,8 @@ The corrected workflow then proved the complete frontend job on GitHub's Node 22
 2026-08-11, Codex: There will be one production canvas implementation. The active SDL-to-SVG path stays; the unused Excalidraw component, legacy canvas renderer, global Excalidraw stylesheet, and dependency will be removed after reference checks.
 
 2026-08-11, Codex: Keep the frontend on a currently patched framework line. Next.js 14 could not satisfy the production audit, so the repository now targets Next.js 16.3, React 19.2, Node 22, ESLint 9 flat config, and Vitest 4. This migration is accepted only because clean install, zero-warning lint, strict typecheck, unit tests, and the production Turbopack build all pass.
+
+2026-08-11, Codex: Observability is user-owned product data, not a public operator feed. LLM and voice log list/stat queries require Firebase authentication and include `user_id` in the repository predicate; chat-control and session-creation routes resolve ownership from trusted database or server-side pipeline state before mutation.
 
 2026-08-11, Codex: The user authorized ongoing GitHub pushes. Each coherent checkpoint will be committed and pushed to `origin/main` only after its relevant checks pass; partial dependency or refactor breakage will not be published as a checkpoint.
 

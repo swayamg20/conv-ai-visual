@@ -983,10 +983,11 @@ class LLMCallLogRepo:
             return record
 
     @staticmethod
-    def get_recent(limit: int = 50, offset: int = 0) -> list[LLMCallLogModel]:
+    def get_recent(user_id: str, limit: int = 50, offset: int = 0) -> list[LLMCallLogModel]:
         with get_session() as session:
             stmt = (
                 select(LLMCallLogModel)
+                .where(LLMCallLogModel.user_id == user_id)
                 .order_by(LLMCallLogModel.created_at.desc())
                 .offset(offset)
                 .limit(limit)
@@ -994,20 +995,31 @@ class LLMCallLogRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def get_stats() -> dict:
-        """Get aggregated stats."""
+    def get_stats(user_id: str) -> dict:
+        """Get aggregate LLM stats scoped to one user."""
         with get_session() as db:
-            total = db.exec(select(func.count(LLMCallLogModel.id))).one()
-            avg_total = db.exec(select(func.avg(LLMCallLogModel.latency_total_ms))).one()
-            avg_llm = db.exec(select(func.avg(LLMCallLogModel.latency_llm_ms))).one()
-            avg_tool = db.exec(select(func.avg(LLMCallLogModel.latency_tool_ms))).one()
+            user_scope = LLMCallLogModel.user_id == user_id
+            total = db.exec(select(func.count(LLMCallLogModel.id)).where(user_scope)).one()
+            avg_total = db.exec(
+                select(func.avg(LLMCallLogModel.latency_total_ms)).where(user_scope)
+            ).one()
+            avg_llm = db.exec(
+                select(func.avg(LLMCallLogModel.latency_llm_ms)).where(user_scope)
+            ).one()
+            avg_tool = db.exec(
+                select(func.avg(LLMCallLogModel.latency_tool_ms)).where(user_scope)
+            ).one()
             error_count = db.exec(
-                select(func.count(LLMCallLogModel.id)).where(LLMCallLogModel.error.isnot(None))
+                select(func.count(LLMCallLogModel.id))
+                .where(user_scope)
+                .where(LLMCallLogModel.error.isnot(None))
             ).one()
 
             def _percentile(col, p: float) -> float | None:
                 values = [
-                    v for v in db.exec(select(col).where(col.isnot(None))).all() if v is not None
+                    v
+                    for v in db.exec(select(col).where(user_scope).where(col.isnot(None))).all()
+                    if v is not None
                 ]
                 if not values:
                     return None
@@ -1045,11 +1057,12 @@ class VoicePipelineLogRepo:
 
     @staticmethod
     def get_recent(
-        limit: int = 50, offset: int = 0, mode: str | None = None
+        user_id: str, limit: int = 50, offset: int = 0, mode: str | None = None
     ) -> list[VoicePipelineLogModel]:
         with get_session() as session:
             stmt = (
                 select(VoicePipelineLogModel)
+                .where(VoicePipelineLogModel.user_id == user_id)
                 .order_by(VoicePipelineLogModel.created_at.desc())
                 .offset(offset)
                 .limit(limit)
@@ -1059,25 +1072,30 @@ class VoicePipelineLogRepo:
             return list(session.exec(stmt).all())
 
     @staticmethod
-    def get_stats(mode: str | None = None) -> dict:
-        """Get aggregated pipeline stats."""
+    def get_stats(user_id: str, mode: str | None = None) -> dict:
+        """Get aggregate voice-pipeline stats scoped to one user."""
         with get_session() as db:
+            user_scope = VoicePipelineLogModel.user_id == user_id
+
+            def _scope(stmt):
+                stmt = stmt.where(user_scope)
+                if mode:
+                    stmt = stmt.where(VoicePipelineLogModel.mode == mode)
+                return stmt
+
             base = select(func.count(VoicePipelineLogModel.id))
             if mode:
                 base = base.where(VoicePipelineLogModel.mode == mode)
+            base = base.where(user_scope)
 
             total = db.exec(base).one() or 0
 
             def _avg(col):
-                q = select(func.avg(col))
-                if mode:
-                    q = q.where(VoicePipelineLogModel.mode == mode)
+                q = _scope(select(func.avg(col)))
                 return round(db.exec(q).one() or 0, 2)
 
             def _percentile(col, p: float) -> float | None:
-                q = select(col).where(col.isnot(None))
-                if mode:
-                    q = q.where(VoicePipelineLogModel.mode == mode)
+                q = _scope(select(col).where(col.isnot(None)))
                 values = [v for v in db.exec(q).all() if v is not None]
                 if not values:
                     return None
@@ -1086,21 +1104,23 @@ class VoicePipelineLogRepo:
                 rank = min(max(rank, 0), len(values) - 1)
                 return round(values[rank], 2)
 
-            error_q = select(func.count(VoicePipelineLogModel.id)).where(
-                VoicePipelineLogModel.error.isnot(None)
+            error_q = _scope(
+                select(func.count(VoicePipelineLogModel.id)).where(
+                    VoicePipelineLogModel.error.isnot(None)
+                )
             )
-            if mode:
-                error_q = error_q.where(VoicePipelineLogModel.mode == mode)
             error_count = db.exec(error_q).one() or 0
 
-            interrupted_q = select(func.count(VoicePipelineLogModel.id)).where(
-                VoicePipelineLogModel.tts_interrupted.is_(True)
+            interrupted_q = _scope(
+                select(func.count(VoicePipelineLogModel.id)).where(
+                    VoicePipelineLogModel.tts_interrupted.is_(True)
+                )
             )
-            if mode:
-                interrupted_q = interrupted_q.where(VoicePipelineLogModel.mode == mode)
             interrupted_count = db.exec(interrupted_q).one() or 0
 
-            resilience = TTSResilienceLogRepo.get_stats_for_voice_logs(db, mode=mode)
+            resilience = TTSResilienceLogRepo.get_stats_for_voice_logs(
+                db, user_id=user_id, mode=mode
+            )
 
             return {
                 "total_turns": total,
@@ -1154,8 +1174,12 @@ class TTSResilienceLogRepo:
             return {row.voice_log_id: row for row in rows}
 
     @staticmethod
-    def get_stats_for_voice_logs(db: Session, mode: str | None = None) -> dict[str, float]:
-        log_ids_stmt = select(VoicePipelineLogModel.id)
+    def get_stats_for_voice_logs(
+        db: Session, user_id: str, mode: str | None = None
+    ) -> dict[str, float]:
+        log_ids_stmt = select(VoicePipelineLogModel.id).where(
+            VoicePipelineLogModel.user_id == user_id
+        )
         if mode:
             log_ids_stmt = log_ids_stmt.where(VoicePipelineLogModel.mode == mode)
         voice_log_ids = list(db.exec(log_ids_stmt).all())
