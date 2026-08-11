@@ -13,8 +13,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from funcs.config import config
 from funcs.search import register_web_search_tool
-from murmur.api.errors import ApiError, api_error_handler
+from murmur.api.errors import ApiError, api_error_handler, domain_error_handler
 from murmur.api.routers import api_router
+from murmur.chat import ChatService
+from murmur.core import MurmurError
 from murmur.persistence import init_db
 from murmur.runtime import RuntimeRegistry
 
@@ -36,6 +38,7 @@ def create_application(
     *,
     runtime: RuntimeRegistry,
     session_sweeper: Callable[[], Awaitable[None]],
+    chat_service: ChatService | None = None,
 ) -> FastAPI:
     """Build the HTTP application around an explicit runtime owner."""
 
@@ -59,7 +62,9 @@ def create_application(
 
     app = FastAPI(lifespan=lifespan)
     app.state.runtime = runtime
+    app.state.chat_service = chat_service or ChatService(runtime)
     app.add_exception_handler(ApiError, api_error_handler)
+    app.add_exception_handler(MurmurError, domain_error_handler)
     app.include_router(api_router)
     app.add_middleware(
         CORSMiddleware,

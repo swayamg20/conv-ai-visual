@@ -18,12 +18,22 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
+class ChatRuntimeSession:
+    """All process-local state for one text-chat pipeline."""
+
+    pipeline: LLMPipeline
+    user_id: str
+    agent_id: str | None = None
+    last_activity: float = field(default_factory=time.monotonic)
+    finalizing: bool = False
+    turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+@dataclass(slots=True)
 class RuntimeRegistry:
     """Own all process-local session state and provide idempotent teardown."""
 
-    chat_sessions: dict[str, LLMPipeline] = field(default_factory=dict)
-    chat_session_activity: dict[str, float] = field(default_factory=dict)
-    chat_session_finalizing: set[str] = field(default_factory=set)
+    chat_sessions: dict[str, ChatRuntimeSession] = field(default_factory=dict)
 
     voice_sessions: dict[str, LLMPipeline] = field(default_factory=dict)
     voice_session_activity: dict[str, float] = field(default_factory=dict)
@@ -44,7 +54,31 @@ class RuntimeRegistry:
     sweeper_task: asyncio.Task[Any] | None = None
 
     def touch_chat(self, session_id: str) -> None:
-        self.chat_session_activity[session_id] = time.monotonic()
+        session = self.chat_sessions.get(session_id)
+        if session:
+            session.last_activity = time.monotonic()
+
+    def register_chat(
+        self,
+        session_id: str,
+        pipeline: LLMPipeline,
+        *,
+        user_id: str,
+        agent_id: str | None,
+    ) -> ChatRuntimeSession:
+        session = ChatRuntimeSession(
+            pipeline=pipeline,
+            user_id=user_id,
+            agent_id=agent_id,
+        )
+        self.chat_sessions[session_id] = session
+        return session
+
+    def get_chat(self, session_id: str | None) -> ChatRuntimeSession | None:
+        return self.chat_sessions.get(session_id) if session_id else None
+
+    def pop_chat(self, session_id: str) -> ChatRuntimeSession | None:
+        return self.chat_sessions.pop(session_id, None)
 
     def touch_voice(self, peer_id: str) -> None:
         self.voice_session_activity[peer_id] = time.monotonic()
@@ -52,8 +86,6 @@ class RuntimeRegistry:
     def clear(self) -> None:
         """Clear references after work has been cancelled and peers have been closed."""
         self.chat_sessions.clear()
-        self.chat_session_activity.clear()
-        self.chat_session_finalizing.clear()
         self.voice_sessions.clear()
         self.voice_session_activity.clear()
         self.voice_session_finalizing.clear()

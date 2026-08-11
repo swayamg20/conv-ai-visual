@@ -10,8 +10,8 @@ from fastapi.responses import JSONResponse
 
 from funcs.llm_clients import create_llm_client
 from murmur.api.dependencies import (
+    ChatServiceDependency,
     CurrentUserDependency,
-    RuntimeDependency,
     require_owned_agent,
 )
 from murmur.api.errors import ApiError
@@ -93,7 +93,7 @@ async def get_session_detail(
 async def end_session(
     session_id: str,
     user: CurrentUserDependency,
-    runtime: RuntimeDependency,
+    chat_service: ChatServiceDependency,
 ) -> JSONResponse:
     """Summarize a completed session and persist tutoring mastery signals."""
     session = SessionRepo.get_by_id(session_id)
@@ -177,13 +177,7 @@ async def end_session(
     except Exception as exc:
         logger.warning("Failed to extract topic mastery: %s", exc)
 
-    pipeline = runtime.chat_sessions.pop(session_id, None)
-    runtime.chat_session_activity.pop(session_id, None)
-    if pipeline:
-        try:
-            pipeline.end_session(summary)
-        except Exception:
-            logger.debug("In-memory session cleanup failed for %s", session_id, exc_info=True)
+    await chat_service.close_with_summary(session_id, summary)
 
     return JSONResponse(
         {

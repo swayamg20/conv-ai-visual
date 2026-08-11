@@ -68,7 +68,6 @@ async def _fake_chat_with_tools_stream(self, user_message, temperature=None, max
 class AuthenticatedSessionContinuityTest(unittest.TestCase):
     def setUp(self) -> None:
         main.runtime.chat_sessions.clear()
-        main.runtime.chat_session_activity.clear()
         with get_session() as session:
             session.exec(
                 text(
@@ -89,8 +88,6 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
             session.commit()
 
         self._patchers = [
-            patch.object(main, "get_current_user", side_effect=lambda request: TEST_USER),
-            patch.object(main, "require_auth", side_effect=lambda request: TEST_USER["id"]),
             patch(
                 "funcs.llm_pipeline.create_llm_client",
                 side_effect=lambda *args, **kwargs: _FakeLLMClient(),
@@ -120,7 +117,6 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         main.app.dependency_overrides.pop(get_authenticated_user, None)
 
         main.runtime.chat_sessions.clear()
-        main.runtime.chat_session_activity.clear()
 
     def test_agent_session_summary_is_reused_in_next_session(self) -> None:
         agent_response = self.client.post(

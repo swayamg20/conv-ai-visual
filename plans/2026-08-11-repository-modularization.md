@@ -23,6 +23,8 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 16:12 IST: Added a FastAPI application factory with lifespan-based database/tool startup, moved all process-local chat/voice collections under an `app.state`-owned typed `RuntimeRegistry`, and replaced partial shutdown with tested idempotent cancellation, analyzer cleanup, peer closure, and state clearing. Twelve backend tests pass with only one third-party TestClient warning.
 - [x] 2026-08-11 16:16 IST: Verified GitHub Actions run `31483646347`: the application-lifecycle checkpoint passed both hosted jobs.
 - [x] 2026-08-11 16:26 IST: Moved identity, agent, resource, mastery, session-lifecycle, and observability endpoints—13 of 17 product paths and 18 of 22 operations—into five focused routers with reusable authenticated-user and owned-agent dependencies. Added an exact OpenAPI route-contract test and bound resource deletion to the owned path agent after the extraction exposed that missing check; fourteen backend tests pass.
+- [x] 2026-08-11 16:28 IST: Verified GitHub Actions run `31484301698`: the focused-router checkpoint passed both hosted jobs.
+- [x] 2026-08-11 16:31 IST: Extracted all three chat endpoints into a thin SSE router and a transport-neutral `ChatService`; centralized agent prompt/resource/mastery assembly; replaced three parallel chat-state collections with an owned `ChatRuntimeSession` record and per-session turn lock; and added cross-user active-session, serialized-turn, and idempotent-finalization tests. Seventeen backend tests pass and `main.py` is down to 1,425 lines, with only voice signaling left as an entrypoint route.
 - [ ] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
@@ -58,6 +60,8 @@ The persistence split could be verified more strongly than a smoke test. Loading
 
 The first explicit startup smoke test exposed an ordering dependency hidden by import-time schema creation: root `main.py` constructed an unused default `LLMPipeline` before application startup, and that constructor attempted to read profile memory before the new startup hook created tables. No runtime path referenced that singleton; chat and voice create user/session-specific pipelines. Removing the dead singleton restored a clean database-first startup without reintroducing import-time schema mutation.
 
+Moving chat orchestration behind a service exposed a second ownership gap: `/chat` checked persistent session rows but trusted an already-active transient pipeline without comparing its owner to the authenticated user. The typed runtime record now carries the authoritative user and agent IDs, and a regression test proves another user cannot submit a turn to that active session. The same record also carries its activity timestamp, finalization flag, and turn lock, eliminating state-map drift and concurrent mutation of one pipeline's callbacks.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -81,6 +85,8 @@ The first explicit startup smoke test exposed an ordering dependency hidden by i
 2026-08-11, Codex: Process-local session state has one owner. `RuntimeRegistry` is attached to `app.state`, and route/runtime code accesses its typed fields rather than declaring parallel module-level dictionaries. The application lifespan owns startup and idempotent teardown; subsequent router and voice-service extraction will receive this registry through the application boundary.
 
 2026-08-11, Codex: Router dependencies raise a small application `ApiError` handled centrally as the existing `{"error": ...}` JSON shape. This makes authentication and owned-agent checks reusable without changing client-visible failure bodies. Chat and WebRTC routes remain in `main.py` until their orchestration moves behind services; duplicating that runtime logic merely to claim a router split is not acceptable.
+
+2026-08-11, Codex: Chat is an application service, not an HTTP handler. `ChatService` owns trusted session/agent resolution, pipeline setup, streaming events, observability, summaries, and eviction; the router maps its transport-neutral events to SSE. Each active chat is one typed record with a per-session lock, so callbacks and memory cannot be mutated by overlapping turns. Expected service failures use transport-independent domain exceptions that the API layer maps to the established JSON error contract.
 
 ## Outcomes & Retrospective
 

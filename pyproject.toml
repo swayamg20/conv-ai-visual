@@ -53,8 +53,11 @@ experiments = [
 packages = [
   "funcs",
   "murmur",
+  "murmur.agents",
   "murmur.api",
   "murmur.api.routers",
+  "murmur.chat",
+  "murmur.core",
   "murmur.persistence",
   "murmur.persistence.repositories",
   "murmur.runtime",

@@ -15,32 +15,26 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 from aiortc.mediastreams import AudioFrame
 from fastapi import Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse
+from murmur.agents.runtime import (
+    build_agent_runtime_config,
+    register_agent_resource_tool,
+)
 from murmur.api import create_application
-from murmur.api.schemas import CanvasModeRequest, ChatMessage, Offer
+from murmur.api.schemas import Offer
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.observability import (
-    LLMCallLogRepo,
     TTSResilienceLogRepo,
     VoicePipelineLogRepo,
 )
-from murmur.persistence.repositories.resources import ResourceRepo
-from murmur.persistence.repositories.sessions import (
-    SessionRepo,
-    TopicMasteryRepo,
-)
+from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.runtime import RuntimeRegistry
 
-from funcs.agents import (
-    append_mastery_context,
-    append_resource_context,
-)
-from funcs.auth import get_current_user, require_auth
+from funcs.auth import require_auth
 from funcs.config import config
 from funcs.kokoro_tts import KokoroTTSPipeline
 from funcs.llm_pipeline import LLMPipeline
 from funcs.model_router import route_model
-from funcs.resources import search_chunks
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
 from funcs.tts_pipeline import TTSPipeline, is_retryable_tts_error
 
@@ -148,23 +142,8 @@ SESSION_SWEEP_INTERVAL_SECS = 5 * 60
 SESSION_SUMMARY_MIN_MESSAGES = 4
 
 
-def _touch_chat_session(session_id: str) -> None:
-    runtime.touch_chat(session_id)
-
-
 def _touch_voice_session(pc_id: str) -> None:
     runtime.touch_voice(pc_id)
-
-
-def _get_chat_session_owner(session_id: str) -> str | None:
-    """Resolve a persistent or active chat session to its trusted owner."""
-    persistent_session = SessionRepo.get_by_id(session_id)
-    if persistent_session:
-        return persistent_session.user_id
-
-    pipeline = runtime.chat_sessions.get(session_id)
-    owner_id = getattr(pipeline, "user_id", None) if pipeline else None
-    return owner_id if isinstance(owner_id, str) and owner_id else None
 
 
 def _pipeline_message_count(pipeline: LLMPipeline | None) -> int:
@@ -174,69 +153,6 @@ def _pipeline_message_count(pipeline: LLMPipeline | None) -> int:
     if isinstance(messages, list):
         return len(messages)
     return 0
-
-
-def _build_agent_runtime_config(user_id: str, agent: Any) -> tuple[str, bool, list[Any]]:
-    """Build the prompt and runtime flags for an agent-backed session."""
-    capabilities = agent.get_capabilities()
-    has_canvas = "canvas" in capabilities
-
-    agent_prompt = agent.system_prompt
-    agent_resources = ResourceRepo.list_by_agent(agent.id)
-    ready_resources = [r for r in agent_resources if r.status == "ready"]
-    if ready_resources:
-        agent_prompt = append_resource_context(
-            agent_prompt,
-            [r.name for r in ready_resources],
-        )
-
-    mastery_context = TopicMasteryRepo.get_tutoring_context(user_id, agent.id)
-    agent_prompt = append_mastery_context(
-        agent_prompt,
-        mastery_context.get("prompt", ""),
-    )
-    if mastery_context.get("prompt"):
-        logger.info(
-            "Injected mastery context for user=%s agent=%s topics=%d chapters=%d",
-            user_id,
-            agent.id,
-            len(mastery_context.get("topics", [])),
-            len(mastery_context.get("chapters", [])),
-        )
-
-    return agent_prompt, has_canvas, ready_resources
-
-
-def _register_agent_resource_tool(
-    pipeline: LLMPipeline, agent_id: str, ready_resources: Sequence[Any]
-) -> None:
-    """Expose uploaded-resource search to an agent-backed pipeline when resources are ready."""
-    if not ready_resources:
-        return
-
-    def _search_resources_handler(query: str, limit: int = 5) -> str:
-        chunks = search_chunks(agent_id, query, limit=limit)
-        if not chunks:
-            return "No relevant content found in the resources."
-        results = []
-        for c in chunks:
-            page_info = f" (page {c.page_number})" if c.page_number else ""
-            results.append(f"[Chunk {c.chunk_index}{page_info}]\n{c.content}")
-        return "\n\n---\n\n".join(results)
-
-    pipeline.register_tool(
-        name="search_resources",
-        description="Search the agent's uploaded resources (PDFs, URLs) for relevant content. Use this when the student asks about topics covered in their materials.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query to find relevant content"},
-                "limit": {"type": "integer", "description": "Max results to return", "default": 5},
-            },
-            "required": ["query"],
-        },
-        func=_search_resources_handler,
-    )
 
 
 def _log_background_task(task: asyncio.Task, label: str) -> None:
@@ -299,46 +215,6 @@ async def _persist_pipeline_summary(
             )
 
     return summary
-
-
-async def _finalize_chat_session(
-    session_id: str,
-    *,
-    min_messages: int = 0,
-    persist_db_summary: bool = True,
-    background: bool = False,
-) -> str | None:
-    """Remove a chat session and optionally persist a summary."""
-    if session_id in runtime.chat_session_finalizing:
-        return None
-
-    runtime.chat_session_finalizing.add(session_id)
-    try:
-        pipeline = runtime.chat_sessions.pop(session_id, None)
-        runtime.chat_session_activity.pop(session_id, None)
-        if not pipeline:
-            return None
-
-        if background:
-            task = asyncio.create_task(
-                _persist_pipeline_summary(
-                    pipeline,
-                    session_id,
-                    min_messages=min_messages,
-                    persist_db_summary=persist_db_summary,
-                )
-            )
-            _log_background_task(task, f"chat session finalizer [{session_id}]")
-            return None
-
-        return await _persist_pipeline_summary(
-            pipeline,
-            session_id,
-            min_messages=min_messages,
-            persist_db_summary=persist_db_summary,
-        )
-    finally:
-        runtime.chat_session_finalizing.discard(session_id)
 
 
 async def _finalize_voice_session(
@@ -419,16 +295,11 @@ async def _finalize_voice_session(
 async def _evict_idle_sessions() -> None:
     """Remove inactive in-memory sessions so they do not accumulate forever."""
     now = time.monotonic()
-
-    for session_id, last_seen in list(runtime.chat_session_activity.items()):
-        if session_id in runtime.chat_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
-            logger.info("[%s] Evicting idle chat session", session_id)
-            await _finalize_chat_session(
-                session_id,
-                min_messages=SESSION_SUMMARY_MIN_MESSAGES,
-                persist_db_summary=True,
-                background=True,
-            )
+    await app.state.chat_service.evict_idle(
+        idle_after_seconds=SESSION_IDLE_EVICTION_SECS,
+        min_messages=SESSION_SUMMARY_MIN_MESSAGES,
+        now=now,
+    )
 
     for pc_id, last_seen in list(runtime.voice_session_activity.items()):
         if pc_id in runtime.voice_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
@@ -549,22 +420,23 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
                 )
 
         if agent:
-            agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(user_id, agent)
+            agent_config = build_agent_runtime_config(user_id, agent)
             voice_pipeline = LLMPipeline(
                 provider=config.LLM_PROVIDER,
                 api_key=None,
                 model=None,
-                system_prompt=agent_prompt,
+                system_prompt=agent_config.prompt,
                 max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
                 user_id=user_id,
                 session_id=session_key,
                 agent_id=agent.id,
                 enable_memory=True,
-                canvas_mode=has_canvas,
-                canvas_system_prompt=agent_prompt if has_canvas else None,
+                canvas_mode=agent_config.canvas_enabled,
+                canvas_system_prompt=(agent_config.prompt if agent_config.canvas_enabled else None),
             )
+            ready_resources = agent_config.ready_resources
         else:
-            ready_resources = []
+            ready_resources = ()
             voice_pipeline = LLMPipeline(
                 provider=config.LLM_PROVIDER,
                 api_key=None,
@@ -597,7 +469,7 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
 
         voice_pipeline.load_tools_from_db()
         if agent and ready_resources:
-            _register_agent_resource_tool(voice_pipeline, agent.id, ready_resources)
+            register_agent_resource_tool(voice_pipeline, agent.id, ready_resources)
 
         async def canvas_broadcast(operations):
             ch = runtime.datachannels.get(pc_id)
@@ -1428,323 +1300,6 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
             runtime.smart_turn_sessions.pop(pc_id, None)
 
         logger.info("[%s] Consumer finished", pc_id)
-
-
-@app.post("/chat")
-async def chat(chat_msg: ChatMessage, request: Request):
-    """
-    Chat mode endpoint with SSE streaming.
-    Each session gets its own LLMPipeline with 4-layer memory.
-    Supports cross-session persistence when agent_id is provided.
-    """
-    user_id = require_auth(request)
-    if chat_msg.user_id and chat_msg.user_id != user_id:
-        logger.warning(
-            "Ignoring client-supplied chat user_id %s in favor of authenticated user %s",
-            chat_msg.user_id,
-            user_id,
-        )
-
-    # Queues for events during this request
-    canvas_events = []
-    animation_events = []
-
-    session_id = chat_msg.session_id
-    existing_session = None
-    agent = None
-    agent_id = chat_msg.agent_id
-
-    if session_id:
-        existing_session = SessionRepo.get_by_id(session_id)
-        if existing_session:
-            if existing_session.user_id != user_id:
-                return JSONResponse({"error": "Forbidden"}, status_code=403)
-            if agent_id and agent_id != existing_session.agent_id:
-                return JSONResponse(
-                    {"error": "Session does not belong to the supplied agent"}, status_code=400
-                )
-            agent_id = existing_session.agent_id
-
-    # Resolve agent after canonicalizing it from the session row when present
-    if agent_id:
-        agent = AgentRepo.get_by_id(agent_id)
-        if not agent:
-            return JSONResponse({"error": "Agent not found"}, status_code=404)
-        if agent.user_id != user_id:
-            return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    # Resolve or create a persistent session when we have an agent
-    is_new_session = False
-    if not session_id:
-        if agent_id and user_id:
-            # Create a persistent DB session
-            db_session = SessionRepo.create(user_id=user_id, agent_id=agent_id)
-            session_id = db_session.id
-            existing_session = db_session
-            is_new_session = True
-        else:
-            session_id = str(uuid.uuid4())
-
-    # Get or create session pipeline with memory and tools
-    if session_id not in runtime.chat_sessions:
-        try:
-            # Use agent system prompt and capabilities when available
-            if agent:
-                agent_prompt, has_canvas, ready_resources = _build_agent_runtime_config(
-                    user_id, agent
-                )
-
-                pipeline = LLMPipeline(
-                    provider=config.LLM_PROVIDER,
-                    api_key=None,
-                    model=None,
-                    system_prompt=agent_prompt,
-                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
-                    user_id=user_id,
-                    session_id=session_id,
-                    agent_id=agent_id,
-                    enable_memory=True,
-                    canvas_mode=has_canvas,
-                    canvas_system_prompt=agent_prompt if has_canvas else None,
-                )
-            else:
-                pipeline = LLMPipeline(
-                    provider=config.LLM_PROVIDER,
-                    api_key=None,
-                    model=None,
-                    system_prompt=config.LLM_SYSTEM_PROMPT,
-                    max_context_messages=config.LLM_MAX_CONTEXT_MESSAGES,
-                    user_id=user_id,
-                    session_id=session_id,
-                    enable_memory=True,
-                    canvas_mode=True,
-                    canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT,
-                )
-
-            # Set agent_id on the memory manager for cross-session context
-            if pipeline.memory and agent_id:
-                pipeline.memory.agent_id = agent_id
-                logger.info(
-                    "Chat session %s bound to user=%s agent=%s for memory/cross-session context",
-                    session_id,
-                    user_id,
-                    agent_id,
-                )
-            elif agent_id:
-                logger.warning(
-                    "Chat session %s created for agent=%s but memory manager was unavailable",
-                    session_id,
-                    agent_id,
-                )
-
-            # If resuming an existing session, load persisted messages
-            if not is_new_session and pipeline.memory:
-                existing = existing_session or SessionRepo.get_by_id(session_id)
-                if existing and existing.message_count > 0:
-                    pipeline.memory.load_session_messages(session_id)
-                    logger.info(
-                        "Resumed session %s for user=%s agent=%s with %d persisted messages",
-                        session_id,
-                        user_id,
-                        agent_id or "none",
-                        existing.message_count,
-                    )
-
-            pipeline.load_tools_from_db()
-
-            # Register search_resources tool if this agent has resources
-            if agent and ready_resources:
-                _register_agent_resource_tool(pipeline, agent.id, ready_resources)
-
-            runtime.chat_sessions[session_id] = pipeline
-            _touch_chat_session(session_id)
-            logger.info(
-                "Created chat session %s for user=%s with %d tools (canvas_mode=%s, agent=%s, persistent=%s)",
-                session_id,
-                user_id,
-                len(pipeline.get_tools_schema()),
-                pipeline.canvas_mode,
-                agent_id or "none",
-                bool(agent_id),
-            )
-        except Exception as e:
-            logger.exception("Failed to create chat session: %s", e)
-            return JSONResponse({"error": "Failed to initialize chat"}, status_code=500)
-
-    # Auto-title the session from the first user message
-    if is_new_session and agent_id:
-        title = chat_msg.message[:80].strip()
-        try:
-            SessionRepo.update_title(session_id, title)
-        except Exception:
-            pass
-
-    pipeline = runtime.chat_sessions[session_id]
-    _touch_chat_session(session_id)
-
-    if pipeline.memory:
-        pipeline.memory.agent_id = agent_id
-
-    # Update canvas mode if specified in this request
-    if chat_msg.canvas_mode is not None:
-        pipeline.set_canvas_mode(chat_msg.canvas_mode)
-
-    # Set canvas callback to queue events
-    def canvas_callback(operations):
-        canvas_events.append(operations)
-
-    pipeline.set_canvas_callback(canvas_callback)
-
-    # Set animation callback to queue events
-    def animation_callback(data):
-        animation_events.append(data)
-
-    pipeline.set_animation_callback(animation_callback)
-
-    async def generate():
-        try:
-            # Send session_id first
-            yield f"data: {json.dumps({'type': 'session', 'session_id': session_id})}\n\n"
-
-            # Stream response with tools support
-            async for chunk in pipeline.chat_with_tools_stream(
-                chat_msg.message,
-                temperature=config.LLM_TEMPERATURE,
-                max_tokens=config.LLM_MAX_TOKENS,
-            ):
-                # Check if we have pending canvas events to send
-                while canvas_events:
-                    ops = canvas_events.pop(0)
-                    yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
-
-                # Check if we have pending animation events to send
-                while animation_events:
-                    anim = animation_events.pop(0)
-                    yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
-
-                yield f"data: {json.dumps({'type': 'chunk', 'text': chunk})}\n\n"
-
-            # Send any remaining canvas events
-            while canvas_events:
-                ops = canvas_events.pop(0)
-                yield f"data: {json.dumps({'type': 'canvas_update', 'operations': ops})}\n\n"
-
-            # Send any remaining animation events
-            while animation_events:
-                anim = animation_events.pop(0)
-                yield f"data: {json.dumps({'type': 'animation_event', **anim})}\n\n"
-
-            # Save observability log (legacy + unified)
-            try:
-                metrics = pipeline.get_last_call_metrics()
-                if metrics:
-                    LLMCallLogRepo.save(
-                        session_id=session_id,
-                        user_id=user_id,
-                        user_message=chat_msg.message,
-                        llm_provider=pipeline.provider,
-                        llm_model=getattr(pipeline.client, "model", pipeline.provider),
-                        tool_calls_json=json.dumps(metrics.get("tool_calls", [])),
-                        response_text=(metrics.get("response_text") or "")[:2000],
-                        latency_total_ms=metrics.get("latency_total_ms"),
-                        latency_llm_ms=metrics.get("latency_llm_ms"),
-                        latency_tool_ms=metrics.get("latency_tool_ms"),
-                        latency_stream_ms=metrics.get("latency_stream_ms"),
-                        tokens_in=metrics.get("tokens_in"),
-                        tokens_out=metrics.get("tokens_out"),
-                        error=metrics.get("error"),
-                    )
-                    # Also save to unified pipeline log
-                    VoicePipelineLogRepo.save(
-                        session_id=session_id,
-                        user_id=user_id,
-                        mode="chat",
-                        user_message=chat_msg.message,
-                        response_text=(metrics.get("response_text") or "")[:2000],
-                        llm_provider=pipeline.provider,
-                        llm_model=getattr(pipeline.client, "model", pipeline.provider),
-                        latency_llm_ms=metrics.get("latency_llm_ms"),
-                        latency_llm_first_token_ms=metrics.get("latency_llm_first_token_ms"),
-                        latency_tool_ms=metrics.get("latency_tool_ms"),
-                        latency_total_ms=metrics.get("latency_total_ms"),
-                        tool_calls_json=json.dumps(metrics.get("tool_calls", [])),
-                        tokens_in=metrics.get("tokens_in"),
-                        tokens_out=metrics.get("tokens_out"),
-                        error=metrics.get("error"),
-                    )
-            except Exception as log_err:
-                logger.warning("Failed to save LLM call log: %s", log_err)
-
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
-        except Exception as e:
-            logger.exception("Chat stream error: %s", e)
-            try:
-                LLMCallLogRepo.save(
-                    session_id=session_id,
-                    user_id=user_id,
-                    user_message=chat_msg.message,
-                    llm_provider=pipeline.provider,
-                    llm_model=getattr(pipeline.client, "model", pipeline.provider),
-                    error=str(e),
-                )
-            except Exception:
-                pass
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
-
-
-@app.delete("/chat/{session_id}")
-async def clear_chat(session_id: str, request: Request):
-    """Clear chat session and optionally save summary to episodic memory."""
-    user = get_current_user(request)
-    if user is None:
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
-
-    owner_id = _get_chat_session_owner(session_id)
-    if owner_id is None:
-        return JSONResponse({"error": "Session not found"}, status_code=404)
-    if owner_id != user["id"]:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    try:
-        await _finalize_chat_session(
-            session_id,
-            min_messages=0,
-            persist_db_summary=True,
-            background=False,
-        )
-    except Exception as e:
-        logger.warning("Failed to clear chat session %s: %s", session_id, e)
-    return JSONResponse({"status": "cleared"})
-
-
-@app.post("/chat/{session_id}/canvas-mode")
-async def set_canvas_mode(session_id: str, req: CanvasModeRequest, request: Request):
-    """Toggle canvas mode for an existing chat session."""
-    user = get_current_user(request)
-    if user is None:
-        return JSONResponse({"error": "Not authenticated"}, status_code=401)
-
-    owner_id = _get_chat_session_owner(session_id)
-    if owner_id is None:
-        return JSONResponse({"error": "Session not found"}, status_code=404)
-    if owner_id != user["id"]:
-        return JSONResponse({"error": "Forbidden"}, status_code=403)
-
-    pipeline = runtime.chat_sessions.get(session_id)
-    if not pipeline:
-        return JSONResponse({"error": "Session not found"}, status_code=404)
-
-    pipeline.set_canvas_mode(req.enabled, req.custom_prompt)
-    return JSONResponse(
-        {
-            "session_id": session_id,
-            "canvas_mode": pipeline.canvas_mode,
-            "tools_count": len(pipeline.get_tools_schema()),
-        }
-    )
 
 
 @app.post("/offer")

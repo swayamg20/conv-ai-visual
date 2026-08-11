@@ -47,8 +47,7 @@ async def test_runtime_shutdown_is_complete_and_idempotent() -> None:
     smart_turn = _FakeSmartTurnSession()
     registry.peer_connections.add(peer)
     registry.smart_turn_sessions["peer"] = smart_turn
-    registry.chat_sessions["chat"] = object()
-    registry.chat_session_activity["chat"] = 1.0
+    registry.register_chat("chat", object(), user_id="user", agent_id="agent")
     registry.peer_user_ids["peer"] = "user"
     registry.peer_agent_ids["peer"] = "agent"
     registry.peer_session_ids["peer"] = "session"

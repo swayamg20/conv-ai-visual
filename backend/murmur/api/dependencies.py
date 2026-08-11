@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 
 from funcs.auth import get_current_user
 from murmur.api.errors import ApiError
+from murmur.chat import ChatService
 from murmur.persistence.models import AgentModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.runtime import RuntimeRegistry
@@ -51,3 +52,10 @@ def get_runtime(request: Request) -> RuntimeRegistry:
 
 
 RuntimeDependency = Annotated[RuntimeRegistry, Depends(get_runtime)]
+
+
+def get_chat_service(request: Request) -> ChatService:
+    return cast(ChatService, request.app.state.chat_service)
+
+
+ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]

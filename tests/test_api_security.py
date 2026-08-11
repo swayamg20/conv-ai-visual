@@ -78,21 +78,13 @@ class ApiSecurityTest(unittest.TestCase):
         )
 
         self.current_user: dict | None = None
-        self.auth_patcher = patch.object(
-            main,
-            "get_current_user",
-            side_effect=lambda _request: self.current_user,
-        )
-        self.auth_patcher.start()
         main.app.dependency_overrides[get_authenticated_user] = self._authenticated_user
         self.client = TestClient(main.app)
 
     def tearDown(self) -> None:
         self.client.close()
-        self.auth_patcher.stop()
         main.app.dependency_overrides.pop(get_authenticated_user, None)
         main.runtime.chat_sessions.clear()
-        main.runtime.chat_session_activity.clear()
 
     @staticmethod
     def _user_repo_args(user: dict) -> dict:
@@ -156,7 +148,12 @@ class ApiSecurityTest(unittest.TestCase):
             set_canvas_mode=Mock(),
         )
         transient_session_id = f"transient-{uuid4().hex}"
-        main.runtime.chat_sessions[transient_session_id] = foreign_pipeline
+        main.runtime.register_chat(
+            transient_session_id,
+            foreign_pipeline,
+            user_id=self.other_user["id"],
+            agent_id=None,
+        )
 
         clear_response = self.client.delete(f"/chat/{transient_session_id}")
         canvas_response = self.client.post(
@@ -168,6 +165,23 @@ class ApiSecurityTest(unittest.TestCase):
         self.assertEqual(canvas_response.status_code, 403)
         self.assertIn(transient_session_id, main.runtime.chat_sessions)
         foreign_pipeline.set_canvas_mode.assert_not_called()
+
+    def test_chat_turn_rejects_cross_user_active_session(self) -> None:
+        self.current_user = self.owner
+        transient_session_id = f"transient-{uuid4().hex}"
+        main.runtime.register_chat(
+            transient_session_id,
+            SimpleNamespace(),
+            user_id=self.other_user["id"],
+            agent_id=None,
+        )
+
+        response = self.client.post(
+            "/chat",
+            json={"message": "private turn", "session_id": transient_session_id},
+        )
+
+        self.assertEqual(response.status_code, 403)
 
     def test_owner_can_control_an_active_chat_session(self) -> None:
         self.current_user = self.owner
@@ -181,7 +195,12 @@ class ApiSecurityTest(unittest.TestCase):
             pipeline, "canvas_mode", enabled
         )
         transient_session_id = f"transient-{uuid4().hex}"
-        main.runtime.chat_sessions[transient_session_id] = pipeline
+        main.runtime.register_chat(
+            transient_session_id,
+            pipeline,
+            user_id=self.owner["id"],
+            agent_id=None,
+        )
 
         canvas_response = self.client.post(
             f"/chat/{transient_session_id}/canvas-mode",
@@ -190,7 +209,7 @@ class ApiSecurityTest(unittest.TestCase):
         self.assertEqual(canvas_response.status_code, 200)
         self.assertTrue(canvas_response.json()["canvas_mode"])
 
-        with patch.object(main, "_finalize_chat_session", new=AsyncMock()) as finalize:
+        with patch.object(main.app.state.chat_service, "finalize", new=AsyncMock()) as finalize:
             clear_response = self.client.delete(f"/chat/{transient_session_id}")
 
         self.assertEqual(clear_response.status_code, 200)
