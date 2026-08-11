@@ -89,7 +89,7 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
 
         self._patchers = [
             patch(
-                "funcs.llm_pipeline.create_llm_client",
+                "murmur.llm.pipeline.create_llm_client",
                 side_effect=lambda *args, **kwargs: _FakeLLMClient(),
             ),
             patch(
@@ -97,9 +97,9 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
                 side_effect=lambda *args, **kwargs: _FakeLLMClient(),
             ),
             patch("funcs.memory.config.MEM0_API_KEY", ""),
-            patch("funcs.llm_pipeline.config.LLM_ASYNC_CONTEXT", False),
+            patch("murmur.llm.pipeline.config.LLM_ASYNC_CONTEXT", False),
             patch(
-                "funcs.llm_pipeline.LLMPipeline.chat_with_tools_stream",
+                "murmur.llm.pipeline.LLMPipeline.chat_with_tools_stream",
                 new=_fake_chat_with_tools_stream,
             ),
         ]

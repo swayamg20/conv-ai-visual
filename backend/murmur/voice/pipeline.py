@@ -7,8 +7,8 @@ import logging
 from collections.abc import Callable
 
 from funcs.config import config
-from funcs.llm_pipeline import LLMPipeline
 from murmur.agents.runtime import build_agent_runtime_config, register_agent_resource_tool
+from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.runtime import RuntimeRegistry

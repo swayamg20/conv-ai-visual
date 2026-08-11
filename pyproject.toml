@@ -58,6 +58,7 @@ packages = [
   "murmur.api.routers",
   "murmur.chat",
   "murmur.core",
+  "murmur.llm",
   "murmur.persistence",
   "murmur.persistence.repositories",
   "murmur.runtime",

@@ -6,7 +6,7 @@ Test script for LLM pipeline.
 import asyncio
 import os
 
-from funcs.llm_pipeline import LLMPipeline
+from murmur.llm.pipeline import LLMPipeline
 
 
 async def test_llm_pipeline():

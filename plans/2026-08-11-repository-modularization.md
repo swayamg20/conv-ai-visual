@@ -31,10 +31,12 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 16:42 IST: Replaced eleven parallel voice dictionaries/sets with one typed `VoiceRuntimeSession` record per peer, containing trusted identity, persistence binding, peer/channel, pipeline, TTS/SDL/Smart Turn state, timing, active task, activity, and finalization state. Direct teardown coverage proves active turns are cancelled and Smart Turn, peer, pipeline, and registry state are cleaned exactly once; twenty backend tests pass.
 - [x] 2026-08-11 16:44 IST: Verified GitHub Actions run `31485663894`: the typed voice-runtime checkpoint passed both hosted jobs.
 - [x] 2026-08-11 16:53 IST: Decomposed the 1,463-line voice service into signaling/lifecycle, audio conversion and Deepgram transport, voice-bound LLM pipeline construction, transcription/Smart Turn, TTS resilience, and confirmed-turn orchestration modules. Unified normal and SDL speech behind the same retry/fallback policy, made watchdog and TTS-task cleanup explicit, and added provider-free tests for PCM layout conversion, interruption/transcript confirmation, retries/fallback, sentence-pipelined turns, metrics, and teardown. Twenty-six backend tests pass; the lifecycle service is 409 lines and no voice module exceeds 529 lines.
+- [x] 2026-08-11 16:55 IST: Verified GitHub Actions run `31486431057`: the decomposed voice-pipeline checkpoint passed both hosted jobs.
+- [x] 2026-08-11 17:00 IST: Replaced the two legacy LLM modules with an installable `murmur.llm` package: provider-neutral contract, OpenAI-compatible adapter, Gemini adapter, configuration-backed factory, context/memory pipeline, and isolated multi-round tool-runtime policy. Direct provider normalization/factory tests and deterministic sequential-versus-parallel tool policy tests raise the backend suite to thirty-three passing tests; no LLM module exceeds 584 lines and no active import references the removed `funcs.llm_clients` or `funcs.llm_pipeline` paths.
 - [x] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [x] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [x] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
-- [ ] Split LLM provider clients and pipeline policies into focused modules while preserving the existing provider/tool contracts.
+- [x] Split LLM provider clients and pipeline policies into focused modules while preserving the existing provider/tool contracts.
 - [ ] Split the 1,520-line SVG renderer into typed scene normalization, render primitives, and timeline execution modules.
 - [x] 2026-08-11 15:39 IST: Removed the unused Excalidraw and legacy canvas renderers, Excalidraw types/global CSS/dependency, and duplicate Next.js configuration; the active SDL-to-SVG renderer remains the single canvas implementation.
 - [ ] Update README/setup/architecture documentation to describe only the resulting active system.
@@ -72,6 +74,8 @@ The old module allocated and registered a peer before WebRTC negotiation, but di
 
 Internal voice extraction exposed two task-lifecycle leaks that file movement alone would not solve. A Smart Turn watchdog could outlive its audio consumer, and an LLM failure could leave the nested sentence-TTS task unawaited. Transcription now cancels and gathers its watchdog and Deepgram tasks, while confirmed-turn orchestration cancels and gathers its TTS sender on every exit. SDL speech also previously bypassed the established ElevenLabs retry and Kokoro fallback policy; both speech paths now use one `SpeechSynthesizer` contract.
 
+Splitting LLM providers exposed why a compatibility re-export from `funcs` would be the wrong endpoint: the old module mixed a provider contract, two SDK adapters, provider selection, and stream-event normalization. The new package keeps one canonical import surface and uses a lazy `LLMPipeline` export only to avoid importing the memory/canvas stack when consumers need a provider adapter. The tool runtime remains a mixin because it operates on the pipeline's context, callbacks, memory, and metrics, but its mutating-tool ordering is now independently executable and tested.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -103,6 +107,8 @@ Internal voice extraction exposed two task-lifecycle leaks that file movement al
 2026-08-11, Codex: Runtime identity and lifecycle state must be structurally inseparable. `ChatRuntimeSession` and `VoiceRuntimeSession` are now the only values stored under session/peer IDs; activity, finalization, active tasks, provider state, and trusted ownership no longer live in independently mutable maps. Registry shutdown traverses those records and remains idempotent.
 
 2026-08-11, Codex: Voice boundaries follow the live data flow. `audio.py` owns byte conversion and Deepgram transport; `transcription.py` owns transcript and Smart Turn confirmation; `pipeline.py` binds the trusted peer identity to an LLM pipeline; `turns.py` owns confirmed-turn streaming and metrics; `synthesis.py` owns provider retries/fallback; and `service.py` owns signaling and peer lifecycle. Tests inject each external edge instead of calling paid providers.
+
+2026-08-11, Codex: `murmur.llm` is the sole supported LLM import path. Provider SDK adapters, their abstract contract, and the configuration factory are independently importable; `pipeline.py` owns context and memory assembly, while `tool_runtime.py` owns multi-round tool execution, streaming orchestration, and its timing record. The transitional `funcs` lazy-export table points inward to this canonical package but the deleted module paths are not retained as duplicate shims.
 
 ## Outcomes & Retrospective
 

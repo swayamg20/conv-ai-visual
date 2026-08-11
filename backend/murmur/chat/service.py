@@ -12,7 +12,6 @@ from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from funcs.config import config
-from funcs.llm_pipeline import LLMPipeline
 from murmur.agents.runtime import (
     build_agent_runtime_config,
     register_agent_resource_tool,
@@ -24,6 +23,7 @@ from murmur.core import (
     ResourceNotFoundError,
     ServiceInitializationError,
 )
+from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.observability import LLMCallLogRepo, VoicePipelineLogRepo
 from murmur.persistence.repositories.sessions import SessionRepo

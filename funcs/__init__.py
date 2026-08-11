@@ -8,7 +8,7 @@ optional heavy dependencies such as Torch-backed VAD or Smart Turn models.
 from importlib import import_module
 
 _EXPORTS = {
-    "LLMPipeline": "funcs.llm_pipeline",
+    "LLMPipeline": "murmur.llm.pipeline",
     "TTSPipeline": "funcs.tts_pipeline",
     "SileroVADGate": "funcs.vad_gate",
     "config": "funcs.config",
@@ -16,10 +16,10 @@ _EXPORTS = {
     "get_current_user_id": "funcs.auth",
     "get_current_user": "funcs.auth",
     "require_auth": "funcs.auth",
-    "LLMClient": "funcs.llm_clients",
-    "OpenAIClient": "funcs.llm_clients",
-    "GeminiClient": "funcs.llm_clients",
-    "create_llm_client": "funcs.llm_clients",
+    "LLMClient": "murmur.llm",
+    "OpenAIClient": "murmur.llm",
+    "GeminiClient": "murmur.llm",
+    "create_llm_client": "murmur.llm",
     "init_db": "murmur.persistence",
     "get_session": "murmur.persistence",
     "EpisodicMemoryModel": "murmur.persistence.models",

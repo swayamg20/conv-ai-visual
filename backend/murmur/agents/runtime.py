@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from funcs.agents import append_mastery_context, append_resource_context
-from funcs.llm_pipeline import LLMPipeline
 from funcs.resources import search_chunks
+from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import TopicMasteryRepo
 

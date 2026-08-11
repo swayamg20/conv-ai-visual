@@ -12,9 +12,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 
 from funcs.config import config
-from funcs.llm_pipeline import LLMPipeline
 from funcs.smart_turn import SmartTurnAnalyzer
 from murmur.core import InvalidRequestError, PermissionDeniedError, ResourceNotFoundError
+from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.runtime import RuntimeRegistry

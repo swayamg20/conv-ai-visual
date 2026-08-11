@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from aiortc import RTCDataChannel, RTCPeerConnection
 
-    from funcs.llm_pipeline import LLMPipeline
     from funcs.smart_turn import SmartTurnSession
+    from murmur.llm.pipeline import LLMPipeline
 
 logger = logging.getLogger(__name__)
 

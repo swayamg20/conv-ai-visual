@@ -8,7 +8,6 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from funcs.llm_clients import create_llm_client
 from murmur.api.dependencies import (
     ChatServiceDependency,
     CurrentUserDependency,
@@ -16,6 +15,7 @@ from murmur.api.dependencies import (
 )
 from murmur.api.errors import ApiError
 from murmur.api.schemas import CreateSessionRequest
+from murmur.llm import create_llm_client
 from murmur.persistence.models import ConversationMessageModel, SessionModel, TopicMasteryModel
 from murmur.persistence.repositories.sessions import (
     ConversationMessageRepo,
