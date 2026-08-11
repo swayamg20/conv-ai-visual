@@ -50,7 +50,14 @@ experiments = [
 ]
 
 [tool.setuptools]
-packages = ["funcs", "murmur", "murmur.persistence", "murmur.persistence.repositories"]
+packages = [
+  "funcs",
+  "murmur",
+  "murmur.api",
+  "murmur.persistence",
+  "murmur.persistence.repositories",
+  "murmur.runtime",
+]
 package-dir = { murmur = "backend/murmur" }
 py-modules = ["main"]
 

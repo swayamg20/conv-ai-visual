@@ -86,8 +86,8 @@ class ApiSecurityTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.close()
         self.auth_patcher.stop()
-        main.chat_sessions.clear()
-        main.chat_session_activity.clear()
+        main.runtime.chat_sessions.clear()
+        main.runtime.chat_session_activity.clear()
 
     @staticmethod
     def _user_repo_args(user: dict) -> dict:
@@ -146,7 +146,7 @@ class ApiSecurityTest(unittest.TestCase):
             set_canvas_mode=Mock(),
         )
         transient_session_id = f"transient-{uuid4().hex}"
-        main.chat_sessions[transient_session_id] = foreign_pipeline
+        main.runtime.chat_sessions[transient_session_id] = foreign_pipeline
 
         clear_response = self.client.delete(f"/chat/{transient_session_id}")
         canvas_response = self.client.post(
@@ -156,7 +156,7 @@ class ApiSecurityTest(unittest.TestCase):
 
         self.assertEqual(clear_response.status_code, 403)
         self.assertEqual(canvas_response.status_code, 403)
-        self.assertIn(transient_session_id, main.chat_sessions)
+        self.assertIn(transient_session_id, main.runtime.chat_sessions)
         foreign_pipeline.set_canvas_mode.assert_not_called()
 
     def test_owner_can_control_an_active_chat_session(self) -> None:
@@ -171,7 +171,7 @@ class ApiSecurityTest(unittest.TestCase):
             pipeline, "canvas_mode", enabled
         )
         transient_session_id = f"transient-{uuid4().hex}"
-        main.chat_sessions[transient_session_id] = pipeline
+        main.runtime.chat_sessions[transient_session_id] = pipeline
 
         canvas_response = self.client.post(
             f"/chat/{transient_session_id}/canvas-mode",

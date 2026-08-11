@@ -66,8 +66,8 @@ async def _fake_chat_with_tools_stream(self, user_message, temperature=None, max
 
 class AuthenticatedSessionContinuityTest(unittest.TestCase):
     def setUp(self) -> None:
-        main.chat_sessions.clear()
-        main.chat_session_activity.clear()
+        main.runtime.chat_sessions.clear()
+        main.runtime.chat_session_activity.clear()
         with get_session() as session:
             session.exec(
                 text(
@@ -115,8 +115,8 @@ class AuthenticatedSessionContinuityTest(unittest.TestCase):
         for patcher in reversed(self._patchers):
             patcher.stop()
 
-        main.chat_sessions.clear()
-        main.chat_session_activity.clear()
+        main.runtime.chat_sessions.clear()
+        main.runtime.chat_session_activity.clear()
 
     def test_agent_session_summary_is_reused_in_next_session(self) -> None:
         agent_response = self.client.post(

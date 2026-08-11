@@ -2,7 +2,6 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import re
 import time
 import uuid
@@ -16,10 +15,10 @@ import websockets
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaBlackhole
 from aiortc.mediastreams import AudioFrame
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import File, Form, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
-from murmur.persistence import get_data_dir, init_db
+from murmur.api import create_application
+from murmur.persistence import get_data_dir
 from murmur.persistence.models import TopicMasteryModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.observability import (
@@ -33,6 +32,7 @@ from murmur.persistence.repositories.sessions import (
     SessionRepo,
     TopicMasteryRepo,
 )
+from murmur.runtime import RuntimeRegistry
 from pydantic import BaseModel
 
 from funcs.agents import (
@@ -47,15 +47,15 @@ from funcs.llm_clients import create_llm_client
 from funcs.llm_pipeline import LLMPipeline
 from funcs.model_router import route_model
 from funcs.resources import ingest_pdf, ingest_url, search_chunks
-from funcs.search import register_web_search_tool
 from funcs.smart_turn import SmartTurnAnalyzer, SmartTurnSession
 from funcs.tts_pipeline import TTSPipeline, is_retryable_tts_error
 
-asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
-
-app = FastAPI()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("webrtc-deepgram")
+asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+runtime = RuntimeRegistry()
+app = create_application(runtime=runtime, session_sweeper=lambda: _session_sweeper_loop())
 
 try:
     config.validate()
@@ -88,30 +88,6 @@ except Exception as e:
     tts_pipeline = None
     tts_fallback_pipeline = None
     smart_turn_analyzer = None
-
-
-def _get_cors_origins() -> list[str]:
-    """Return explicit CORS origins from config or env, with a safe localhost default."""
-    configured = getattr(config, "ALLOWED_CORS_ORIGINS", None)
-    if configured:
-        if isinstance(configured, str):
-            raw_origins = configured.split(",")
-        else:
-            raw_origins = list(configured)
-    else:
-        raw_origins = os.getenv("ALLOWED_CORS_ORIGINS", "http://localhost:3000").split(",")
-
-    origins = [origin.strip() for origin in raw_origins if origin and origin.strip()]
-    return origins or ["http://localhost:3000"]
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_get_cors_origins(),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class Offer(BaseModel):
@@ -162,7 +138,7 @@ class AddResourceURLRequest(BaseModel):
 
 def _get_voice_user_id(pc_id: str) -> str:
     """Return the authenticated user ID for a voice peer connection."""
-    user_id = peer_user_ids.get(pc_id)
+    user_id = runtime.peer_user_ids.get(pc_id)
     if not user_id:
         raise RuntimeError(f"Missing authenticated voice user for peer {pc_id}")
     return user_id
@@ -219,42 +195,17 @@ def _get_smart_turn_analyzer() -> SmartTurnAnalyzer | None:
     return smart_turn_analyzer
 
 
-chat_sessions: dict[str, LLMPipeline] = {}
-peer_canvas_modes: dict[str, bool] = {}
-pcs: set[Any] = set()
-datachannels: dict[str, Any] = {}
-voice_sessions: dict[str, LLMPipeline] = {}
-peer_user_ids: dict[str, str] = {}
-peer_agent_ids: dict[str, str] = {}
-peer_session_ids: dict[str, str] = {}
-tts_interrupt_flags: dict[str, bool] = {}  # Simple interrupt flag: True = TTS active, False = stop
-_pending_sdl: dict[str, dict] = {}  # Per-peer captured SDL from teach_with_visuals tool calls
-smart_turn_sessions: dict[str, SmartTurnSession] = {}  # Per-peer Smart Turn state
-turn_processing_tasks: dict[
-    str, asyncio.Task
-] = {}  # Per-peer active LLM+TTS task (cancel on new turn)
-background_tasks: set[asyncio.Task] = set()
-chat_session_activity: dict[str, float] = {}
-voice_session_activity: dict[str, float] = {}
-chat_session_finalizing: set[str] = set()
-voice_session_finalizing: set[str] = set()
-_session_sweeper_task: asyncio.Task | None = None
-
-# Per-peer turn timing data. Populated by consume_audio_track, consumed by _run_llm_tts.
-# Keys: speech_start_ts, stt_final_ts, turn_confirmed_ts, smart_turn_result, vad_detect_ts
-turn_timing: dict[str, dict[str, Any]] = {}
-
 SESSION_IDLE_EVICTION_SECS = 2 * 60 * 60
 SESSION_SWEEP_INTERVAL_SECS = 5 * 60
 SESSION_SUMMARY_MIN_MESSAGES = 4
 
 
 def _touch_chat_session(session_id: str) -> None:
-    chat_session_activity[session_id] = time.monotonic()
+    runtime.touch_chat(session_id)
 
 
 def _touch_voice_session(pc_id: str) -> None:
-    voice_session_activity[pc_id] = time.monotonic()
+    runtime.touch_voice(pc_id)
 
 
 def _get_chat_session_owner(session_id: str) -> str | None:
@@ -263,7 +214,7 @@ def _get_chat_session_owner(session_id: str) -> str | None:
     if persistent_session:
         return persistent_session.user_id
 
-    pipeline = chat_sessions.get(session_id)
+    pipeline = runtime.chat_sessions.get(session_id)
     owner_id = getattr(pipeline, "user_id", None) if pipeline else None
     return owner_id if isinstance(owner_id, str) and owner_id else None
 
@@ -342,10 +293,10 @@ def _register_agent_resource_tool(
 
 def _log_background_task(task: asyncio.Task, label: str) -> None:
     """Surface exceptions from fire-and-forget cleanup work."""
-    background_tasks.add(task)
+    runtime.background_tasks.add(task)
 
     def _done(t: asyncio.Task) -> None:
-        background_tasks.discard(t)
+        runtime.background_tasks.discard(t)
         try:
             exc = t.exception()
         except asyncio.CancelledError:
@@ -410,13 +361,13 @@ async def _finalize_chat_session(
     background: bool = False,
 ) -> str | None:
     """Remove a chat session and optionally persist a summary."""
-    if session_id in chat_session_finalizing:
+    if session_id in runtime.chat_session_finalizing:
         return None
 
-    chat_session_finalizing.add(session_id)
+    runtime.chat_session_finalizing.add(session_id)
     try:
-        pipeline = chat_sessions.pop(session_id, None)
-        chat_session_activity.pop(session_id, None)
+        pipeline = runtime.chat_sessions.pop(session_id, None)
+        runtime.chat_session_activity.pop(session_id, None)
         if not pipeline:
             return None
 
@@ -439,7 +390,7 @@ async def _finalize_chat_session(
             persist_db_summary=persist_db_summary,
         )
     finally:
-        chat_session_finalizing.discard(session_id)
+        runtime.chat_session_finalizing.discard(session_id)
 
 
 async def _finalize_voice_session(
@@ -450,25 +401,25 @@ async def _finalize_voice_session(
     pc: RTCPeerConnection | None = None,
 ) -> str | None:
     """Remove a voice peer session, cancel work, and optionally persist a summary."""
-    if pc_id in voice_session_finalizing:
+    if pc_id in runtime.voice_session_finalizing:
         return None
 
-    voice_session_finalizing.add(pc_id)
+    runtime.voice_session_finalizing.add(pc_id)
     try:
         await _cancel_active_turn(pc_id)
 
-        pipeline = voice_sessions.pop(pc_id, None)
-        voice_session_activity.pop(pc_id, None)
-        datachannels.pop(pc_id, None)
-        peer_user_ids.pop(pc_id, None)
-        peer_agent_ids.pop(pc_id, None)
-        peer_session_ids.pop(pc_id, None)
-        peer_canvas_modes.pop(pc_id, None)
-        tts_interrupt_flags.pop(pc_id, None)
-        _pending_sdl.pop(pc_id, None)
-        turn_timing.pop(pc_id, None)
+        pipeline = runtime.voice_sessions.pop(pc_id, None)
+        runtime.voice_session_activity.pop(pc_id, None)
+        runtime.datachannels.pop(pc_id, None)
+        runtime.peer_user_ids.pop(pc_id, None)
+        runtime.peer_agent_ids.pop(pc_id, None)
+        runtime.peer_session_ids.pop(pc_id, None)
+        runtime.peer_canvas_modes.pop(pc_id, None)
+        runtime.tts_interrupt_flags.pop(pc_id, None)
+        runtime.pending_sdl.pop(pc_id, None)
+        runtime.turn_timing.pop(pc_id, None)
 
-        task = turn_processing_tasks.pop(pc_id, None)
+        task = runtime.turn_processing_tasks.pop(pc_id, None)
         if task and not task.done():
             task.cancel()
             try:
@@ -476,7 +427,7 @@ async def _finalize_voice_session(
             except (asyncio.CancelledError, Exception):
                 pass
 
-        st = smart_turn_sessions.pop(pc_id, None)
+        st = runtime.smart_turn_sessions.pop(pc_id, None)
         if st:
             st.cleanup()
 
@@ -486,7 +437,7 @@ async def _finalize_voice_session(
                     await pc.close()
                 except Exception as e:
                     logger.warning("[%s] Failed to close peer connection: %s", pc_id, e)
-            pcs.discard(pc)
+            runtime.peer_connections.discard(pc)
 
         if not pipeline:
             return None
@@ -514,15 +465,15 @@ async def _finalize_voice_session(
             persist_db_summary=persist_voice_summary,
         )
     finally:
-        voice_session_finalizing.discard(pc_id)
+        runtime.voice_session_finalizing.discard(pc_id)
 
 
 async def _evict_idle_sessions() -> None:
     """Remove inactive in-memory sessions so they do not accumulate forever."""
     now = time.monotonic()
 
-    for session_id, last_seen in list(chat_session_activity.items()):
-        if session_id in chat_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
+    for session_id, last_seen in list(runtime.chat_session_activity.items()):
+        if session_id in runtime.chat_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
             logger.info("[%s] Evicting idle chat session", session_id)
             await _finalize_chat_session(
                 session_id,
@@ -531,8 +482,8 @@ async def _evict_idle_sessions() -> None:
                 background=True,
             )
 
-    for pc_id, last_seen in list(voice_session_activity.items()):
-        if pc_id in voice_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
+    for pc_id, last_seen in list(runtime.voice_session_activity.items()):
+        if pc_id in runtime.voice_sessions and now - last_seen >= SESSION_IDLE_EVICTION_SECS:
             logger.info("[%s] Evicting idle voice session", pc_id)
             await _finalize_voice_session(
                 pc_id,
@@ -633,10 +584,10 @@ async def deepgram_stream_ws_send_and_recv(
 
 async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
     """Get or create the LLMPipeline for a voice peer connection."""
-    if pc_id not in voice_sessions:
+    if pc_id not in runtime.voice_sessions:
         user_id = _get_voice_user_id(pc_id)
-        agent_id = peer_agent_ids.get(pc_id)
-        persistent_session_id = peer_session_ids.get(pc_id)
+        agent_id = runtime.peer_agent_ids.get(pc_id)
+        persistent_session_id = runtime.peer_session_ids.get(pc_id)
         session_key = persistent_session_id or pc_id
         agent = None
 
@@ -701,7 +652,7 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
             _register_agent_resource_tool(voice_pipeline, agent.id, ready_resources)
 
         async def canvas_broadcast(operations):
-            ch = datachannels.get(pc_id)
+            ch = runtime.datachannels.get(pc_id)
             if ch and ch.readyState == "open":
                 ch.send(
                     json.dumps(
@@ -718,10 +669,10 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
             tool_name = data.get("tool", "")
             if tool_name == "teach_with_visuals" and data.get("sdl"):
                 # Capture SDL for step-pipelined sync — _run_llm_tts will handle it
-                _pending_sdl[pc_id] = data["sdl"]
+                runtime.pending_sdl[pc_id] = data["sdl"]
 
         voice_pipeline.set_animation_callback(animation_broadcast)
-        voice_sessions[pc_id] = voice_pipeline
+        runtime.voice_sessions[pc_id] = voice_pipeline
         _touch_voice_session(pc_id)
         logger.info(
             "[%s] Voice session created (persistent_session=%s, agent=%s, tools=%d)",
@@ -732,15 +683,15 @@ async def _ensure_voice_session(pc_id: str) -> LLMPipeline:
         )
     else:
         _touch_voice_session(pc_id)
-    return voice_sessions[pc_id]
+    return runtime.voice_sessions[pc_id]
 
 
 async def _cancel_active_turn(pc_id: str):
     """Cancel any in-flight LLM+TTS processing for this peer."""
-    prev = turn_processing_tasks.pop(pc_id, None)
+    prev = runtime.turn_processing_tasks.pop(pc_id, None)
     if prev and not prev.done():
         logger.info("[%s] Cancelling previous turn processing", pc_id)
-        tts_interrupt_flags[pc_id] = False  # Stop TTS immediately
+        runtime.tts_interrupt_flags[pc_id] = False  # Stop TTS immediately
         prev.cancel()
         try:
             await prev
@@ -755,11 +706,11 @@ async def _process_user_turn(pc_id: str, user_text: str):
     """
     _touch_voice_session(pc_id)
     # Stamp turn-confirmed time
-    timing = turn_timing.setdefault(pc_id, {})
+    timing = runtime.turn_timing.setdefault(pc_id, {})
     timing["turn_confirmed_ts"] = time.perf_counter()
     await _cancel_active_turn(pc_id)
     task = asyncio.create_task(_run_llm_tts(pc_id, user_text))
-    turn_processing_tasks[pc_id] = task
+    runtime.turn_processing_tasks[pc_id] = task
 
 
 def _split_sentence(buf: str):
@@ -780,7 +731,7 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
     For each SDL step, sends the visual commands and TTS audio together,
     creating a 'person drawing while talking' effect.
     """
-    ch = datachannels.get(pc_id)
+    ch = runtime.datachannels.get(pc_id)
     steps = sdl.get("steps", [])
     seq_id = f"seq_{uuid.uuid4().hex[:8]}"
 
@@ -796,10 +747,10 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
             )
         )
 
-    tts_interrupt_flags[pc_id] = True
+    runtime.tts_interrupt_flags[pc_id] = True
 
     for step_idx, step in enumerate(steps):
-        if not tts_interrupt_flags.get(pc_id, False):
+        if not runtime.tts_interrupt_flags.get(pc_id, False):
             break  # interrupted
 
         say_text = step.get("say", "").strip()
@@ -808,7 +759,7 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
         if say_text and tts_pipeline:
             total_audio_bytes = 0
             async for audio_chunk in tts_pipeline.text_to_speech_stream(say_text):
-                if not tts_interrupt_flags.get(pc_id, False):
+                if not runtime.tts_interrupt_flags.get(pc_id, False):
                     break
 
                 # Send sdl_step on first chunk so frontend starts animation with audio
@@ -873,7 +824,7 @@ async def _run_sdl_step_pipeline(pc_id: str, sdl: dict):
                 )
 
     # Sequence complete
-    tts_interrupt_flags[pc_id] = False
+    runtime.tts_interrupt_flags[pc_id] = False
     if ch and ch.readyState == "open":
         ch.send(
             json.dumps(
@@ -900,7 +851,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     If the LLM calls teach_with_visuals (SDL), after text TTS completes,
     the SDL steps are streamed with per-step TTS for voice-visual sync.
     """
-    ch = datachannels.get(pc_id)
+    ch = runtime.datachannels.get(pc_id)
     pipeline = await _ensure_voice_session(pc_id)
 
     # Model routing: fast model by default, escalate for complex queries
@@ -908,10 +859,10 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     pipeline.switch_provider(routed_provider, routed_key, routed_model)
 
     # Clear any stale SDL from previous turns
-    _pending_sdl.pop(pc_id, None)
+    runtime.pending_sdl.pop(pc_id, None)
 
     # Grab timing context from STT/turn detection phase
-    timing = turn_timing.pop(pc_id, {})
+    timing = runtime.turn_timing.pop(pc_id, {})
     t_speech_start = timing.get("speech_start_ts")
     t_stt_final = timing.get("stt_final_ts")
     t_turn_confirmed = timing.get("turn_confirmed_ts", time.perf_counter())
@@ -951,7 +902,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
         async def _emit_audio_chunk(audio_chunk: bytes) -> None:
             nonlocal tts_chunks_sent, t_tts_first_chunk, tts_interrupted
-            if not tts_interrupt_flags.get(pc_id, False):
+            if not runtime.tts_interrupt_flags.get(pc_id, False):
                 tts_interrupted = True
                 raise asyncio.CancelledError("TTS interrupted")
 
@@ -1046,7 +997,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
             if not tts_started_sent:
                 t_tts_start = time.perf_counter()
-                tts_interrupt_flags[pc_id] = True
+                runtime.tts_interrupt_flags[pc_id] = True
                 if ch and ch.readyState == "open":
                     ch.send(json.dumps({"type": "tts_started"}))
                 tts_started_sent = True
@@ -1072,7 +1023,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
 
         # All sentences processed
         t_tts_end = time.perf_counter()
-        tts_interrupt_flags[pc_id] = False
+        runtime.tts_interrupt_flags[pc_id] = False
         if tts_started_sent and not tts_interrupted:
             logger.info("[%s] TTS complete (%d chunks)", pc_id, tts_chunks_sent)
             if ch and ch.readyState == "open":
@@ -1119,7 +1070,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         await tts_task
 
         # If SDL was captured during tool execution, run step-pipelined sync
-        pending_sdl = _pending_sdl.pop(pc_id, None)
+        pending_sdl = runtime.pending_sdl.pop(pc_id, None)
         if pending_sdl and pending_sdl.get("steps"):
             logger.info(
                 "[%s] Starting SDL step pipeline (%d steps)", pc_id, len(pending_sdl["steps"])
@@ -1129,10 +1080,10 @@ async def _run_llm_tts(pc_id: str, user_text: str):
     except asyncio.CancelledError:
         logger.info("[%s] Turn processing cancelled (new turn arrived)", pc_id)
         tts_interrupted = True
-        tts_interrupt_flags[pc_id] = False
+        runtime.tts_interrupt_flags[pc_id] = False
         # Kill TTS sender
         sentence_queue.put_nowait(None)
-        ch = datachannels.get(pc_id)
+        ch = runtime.datachannels.get(pc_id)
         if ch and ch.readyState == "open":
             ch.send(json.dumps({"type": "tts_interrupted", "reason": "new_turn"}))
     except Exception as e:
@@ -1143,8 +1094,8 @@ async def _run_llm_tts(pc_id: str, user_text: str):
             ch.send(json.dumps({"type": "error", "message": error_msg}))
     finally:
         t_end = time.perf_counter()
-        turn_processing_tasks.pop(pc_id, None)
-        tts_interrupt_flags.pop(pc_id, None)
+        runtime.turn_processing_tasks.pop(pc_id, None)
+        runtime.tts_interrupt_flags.pop(pc_id, None)
 
         # ── Compute all latencies ──
         def _ms(start, end):
@@ -1189,7 +1140,7 @@ async def _run_llm_tts(pc_id: str, user_text: str):
         }
 
         # Send metrics to client
-        ch = datachannels.get(pc_id)
+        ch = runtime.datachannels.get(pc_id)
         if ch and ch.readyState == "open":
             try:
                 ch.send(json.dumps({"type": "pipeline_metrics", **metrics_payload}))
@@ -1285,11 +1236,11 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
     analyzer = _get_smart_turn_analyzer()
     if analyzer:
         st_session = SmartTurnSession(analyzer)
-        smart_turn_sessions[pc_id] = st_session
+        runtime.smart_turn_sessions[pc_id] = st_session
 
         # Wire up fallback callback: when silence exceeds stop_secs, force-complete
         async def on_fallback_complete(text: str):
-            timing = turn_timing.setdefault(pc_id, {})
+            timing = runtime.turn_timing.setdefault(pc_id, {})
             timing["smart_turn_result"] = "fallback"
             await _process_user_turn(pc_id, text)
 
@@ -1327,11 +1278,11 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                     transcript[:40],
                 )
 
-            ch = datachannels.get(pc_id)
-            tts_was_active = tts_interrupt_flags.get(pc_id, False)
+            ch = runtime.datachannels.get(pc_id)
+            tts_was_active = runtime.tts_interrupt_flags.get(pc_id, False)
 
             # ── Timing: record first speech detection ──
-            timing = turn_timing.setdefault(pc_id, {})
+            timing = runtime.turn_timing.setdefault(pc_id, {})
             if transcript.strip() and "speech_start_ts" not in timing:
                 timing["speech_start_ts"] = time.perf_counter()
 
@@ -1343,7 +1294,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                         pc_id,
                         transcript[:30],
                     )
-                    tts_interrupt_flags[pc_id] = False
+                    runtime.tts_interrupt_flags[pc_id] = False
                     if st_session:
                         st_session._reset_turn()
                         logger.info("[%s] Smart Turn reset for new turn after interrupt", pc_id)
@@ -1383,7 +1334,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
                                     pc_id,
                                     text[:60],
                                 )
-                                timing = turn_timing.setdefault(pc_id, {})
+                                timing = runtime.turn_timing.setdefault(pc_id, {})
                                 timing["smart_turn_result"] = "watchdog"
                                 st_session._reset_turn()
                                 await _process_user_turn(pc_id, text)
@@ -1475,7 +1426,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         )
 
         async def on_deepgram_connected():
-            ch = datachannels.get(pc_id)
+            ch = runtime.datachannels.get(pc_id)
             if ch and ch.readyState == "open":
                 ch.send(json.dumps({"type": "ready"}))
                 logger.info("[%s] Sent ready signal to client", pc_id)
@@ -1526,7 +1477,7 @@ async def consume_audio_track(track: MediaStreamTrack, pc_id: str):
         # Cleanup Smart Turn session
         if st_session:
             st_session.cleanup()
-            smart_turn_sessions.pop(pc_id, None)
+            runtime.smart_turn_sessions.pop(pc_id, None)
 
         logger.info("[%s] Consumer finished", pc_id)
 
@@ -1587,7 +1538,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
             session_id = str(uuid.uuid4())
 
     # Get or create session pipeline with memory and tools
-    if session_id not in chat_sessions:
+    if session_id not in runtime.chat_sessions:
         try:
             # Use agent system prompt and capabilities when available
             if agent:
@@ -1657,7 +1608,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
             if agent and ready_resources:
                 _register_agent_resource_tool(pipeline, agent.id, ready_resources)
 
-            chat_sessions[session_id] = pipeline
+            runtime.chat_sessions[session_id] = pipeline
             _touch_chat_session(session_id)
             logger.info(
                 "Created chat session %s for user=%s with %d tools (canvas_mode=%s, agent=%s, persistent=%s)",
@@ -1680,7 +1631,7 @@ async def chat(chat_msg: ChatMessage, request: Request):
         except Exception:
             pass
 
-    pipeline = chat_sessions[session_id]
+    pipeline = runtime.chat_sessions[session_id]
     _touch_chat_session(session_id)
 
     if pipeline.memory:
@@ -1834,7 +1785,7 @@ async def set_canvas_mode(session_id: str, req: CanvasModeRequest, request: Requ
     if owner_id != user["id"]:
         return JSONResponse({"error": "Forbidden"}, status_code=403)
 
-    pipeline = chat_sessions.get(session_id)
+    pipeline = runtime.chat_sessions.get(session_id)
     if not pipeline:
         return JSONResponse({"error": "Session not found"}, status_code=404)
 
@@ -2294,8 +2245,8 @@ async def end_session(session_id: str, request: Request):
         logger.warning("Failed to extract topic mastery: %s", e)
 
     # Also clean up in-memory pipeline if it exists
-    pipeline = chat_sessions.pop(session_id, None)
-    chat_session_activity.pop(session_id, None)
+    pipeline = runtime.chat_sessions.pop(session_id, None)
+    runtime.chat_session_activity.pop(session_id, None)
     if pipeline:
         try:
             pipeline.end_session(summary)
@@ -2477,14 +2428,14 @@ async def offer(body: Offer, request: Request):
 
     pc = RTCPeerConnection()
     pc_id = f"pc-{id(pc)}"
-    peer_user_ids[pc_id] = user_id
+    runtime.peer_user_ids[pc_id] = user_id
     if agent_id:
-        peer_agent_ids[pc_id] = agent_id
+        runtime.peer_agent_ids[pc_id] = agent_id
     if persistent_session_id:
-        peer_session_ids[pc_id] = persistent_session_id
+        runtime.peer_session_ids[pc_id] = persistent_session_id
     _touch_voice_session(pc_id)
     canvas_mode = body.canvas_mode
-    peer_canvas_modes[pc_id] = canvas_mode
+    runtime.peer_canvas_modes[pc_id] = canvas_mode
     logger.info(
         "[%s] User ID: %s, Canvas Mode: %s, Agent: %s, Session: %s",
         pc_id,
@@ -2496,7 +2447,7 @@ async def offer(body: Offer, request: Request):
 
     @pc.on("datachannel")
     def on_datachannel(channel):
-        datachannels[pc_id] = channel
+        runtime.datachannels[pc_id] = channel
 
         @channel.on("message")
         def on_message(message):
@@ -2505,8 +2456,8 @@ async def offer(body: Offer, request: Request):
                 # Handle stop_tts command from client
                 if data.get("type") == "stop_tts":
                     logger.warning("[%s] Client requested TTS stop", pc_id)
-                    tts_interrupt_flags[pc_id] = False
-                    st = smart_turn_sessions.get(pc_id)
+                    runtime.tts_interrupt_flags[pc_id] = False
+                    st = runtime.smart_turn_sessions.get(pc_id)
                     if st:
                         st._reset_turn()
             except (json.JSONDecodeError, TypeError) as exc:
@@ -2517,7 +2468,7 @@ async def offer(body: Offer, request: Request):
             logger.info("[%s] DataChannel closed", pc_id)
             await _finalize_voice_session(pc_id, background=True, pc=pc)
 
-    pcs.add(pc)
+    runtime.peer_connections.add(pc)
     logger.info("[%s] created for incoming offer", pc_id)
 
     media_blackhole = MediaBlackhole()
@@ -2560,53 +2511,6 @@ async def offer(body: Offer, request: Request):
             "agent_id": agent_id,
         }
     )
-
-
-@app.on_event("startup")
-async def on_startup():
-    global _session_sweeper_task
-    init_db()
-    try:
-        register_web_search_tool()
-    except Exception as exc:
-        logger.warning("Failed to register web_search tool: %s", exc)
-
-    if _session_sweeper_task is None or _session_sweeper_task.done():
-        _session_sweeper_task = asyncio.create_task(_session_sweeper_loop())
-        logger.info("Session sweeper started")
-
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    global _session_sweeper_task
-    if _session_sweeper_task is not None:
-        _session_sweeper_task.cancel()
-        try:
-            await _session_sweeper_task
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.warning("Session sweeper shutdown error: %s", e)
-        _session_sweeper_task = None
-
-    coros = [pc.close() for pc in pcs]
-    await asyncio.gather(*coros, return_exceptions=True)
-    pcs.clear()
-    chat_sessions.clear()
-    voice_sessions.clear()
-    datachannels.clear()
-    peer_user_ids.clear()
-    peer_canvas_modes.clear()
-    tts_interrupt_flags.clear()
-    _pending_sdl.clear()
-    smart_turn_sessions.clear()
-    turn_processing_tasks.clear()
-    turn_timing.clear()
-    chat_session_activity.clear()
-    voice_session_activity.clear()
-    chat_session_finalizing.clear()
-    voice_session_finalizing.clear()
-    logger.info("Server shutdown, pcs closed")
 
 
 if __name__ == "__main__":
