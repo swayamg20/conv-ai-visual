@@ -37,6 +37,8 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 18:23 IST: Replaced the 1,522-line canvas component with a typed canvas feature boundary: canonical operation/sequence contracts, pure normalization, SVG primitives and plot projection, shared timeline execution, viewport controls, and image export. The React shell is 542 lines and no extracted canvas module exceeds 431 lines. Twelve frontend tests now cover normalization, primitive geometry, timeline planning, the existing SDL compiler, and a mounted component driven through its public handle; lint, strict typecheck, zero-vulnerability audit, and the production build pass. A headless Chrome smoke also proved the protected `/canvas` route loads and redirects an unauthenticated browser to the login UI.
 - [x] 2026-08-11 18:31 IST: Verified GitHub Actions run `31493556477`: the canvas-feature checkpoint passed both hosted jobs.
 - [x] 2026-08-11 18:31 IST: Retired the transitional `funcs` source package by moving authentication, prompting, configuration, canvas, memory, resources, tools, model routing, Smart Turn, and TTS into canonical `murmur` domains; removed three unreferenced legacy audio helpers; repaired persisted built-in tool handler paths at startup; and added an architecture-boundary test that rejects legacy source/import paths and proves canonical handlers import. Thirty-five backend tests, application imports, and a cleanly staged wheel pass with no `funcs` entries.
+- [x] 2026-08-11 18:34 IST: Verified GitHub Actions run `31494081527`: the canonical-package checkpoint passed both hosted jobs.
+- [x] 2026-08-11 18:36 IST: Split the 770-line memory hotspot into a 158-line conversation/budget module, 278-line durable-layer adapters, and a 331-line orchestration manager. Added direct tests for sliding-window retention, priority-based prompt assembly, hard budget accounting, and one occurrence of each memory layer; all thirty-eight backend tests pass.
 - [x] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [x] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [x] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
@@ -88,6 +90,8 @@ The built-in tool catalog stores Python handler module paths in SQLite, so sourc
 
 The first wheel built after deleting `funcs` still contained its modules because setuptools reused generated files under an ignored `build/lib` directory. Rebuilding after moving that exact generated directory to a temporary backup produced a wheel with zero `funcs` entries. Final packaging validation must therefore begin from clean build staging rather than treating source-tree deletion as proof of artifact contents.
 
+Moving prompt-budget logic into a pure module exposed a small arithmetic mismatch: selection used the full residual budget and only added the three-token reply overhead afterward, so metadata could report an over-budget prompt even when every chosen section had supposedly fit. The selector now reserves that overhead before admitting memory sections, and a boundary test proves the reported total stays within the configured budget.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -125,6 +129,8 @@ The first wheel built after deleting `funcs` still contained its modules because
 2026-08-11, Codex: Canvas data is a feature contract, not a WebRTC contract. All producers consume `features/canvas/types.ts`; normalization and geometric projection are pure, primitives own DOM creation, timeline code owns GSAP step semantics, viewport code owns pan/zoom interaction, and the React component owns refs, registries, and the public imperative handle. Queued and externally synchronized timelines share identical step support.
 
 2026-08-11, Codex: `backend/murmur` is the only supported backend package. The migration will not retain a compatibility `funcs` package: active imports and database-backed built-in handler strings move to canonical domains, while unreferenced legacy audio helpers are deleted. A checked wheel, not only the working tree, is the acceptance boundary for package removal.
+
+2026-08-11, Codex: Memory boundaries follow responsibility: `context.py` owns token estimation, budget selection, and the short-term window; `layers.py` adapts durable episodic, semantic, profile, and decision stores; `manager.py` coordinates persistence and context assembly. Budget calculations remain pure and provider-free so they can be tested without a database or Mem0 client.
 
 ## Outcomes & Retrospective
 
