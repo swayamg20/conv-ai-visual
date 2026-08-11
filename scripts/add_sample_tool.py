@@ -1,61 +1,61 @@
 #!/usr/bin/env python3
-"""
-Add a sample tool to the database.
-Run this script to test tool calling.
-"""
+"""Register two optional sample tools in the configured Murmur database."""
 
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from murmur.persistence import init_db
 from murmur.persistence.repositories.tools import ToolRepo
 
-# Add get_current_time tool
-ToolRepo.upsert(
-    name="get_current_time",
-    description="Get the current date and time. Use when user asks what time or date it is.",
-    parameters={"type": "object", "properties": {}, "required": []},
-    code="""
+
+def register_sample_tools() -> None:
+    """Create or update the sample tools without duplicating database rows."""
+    init_db()
+    ToolRepo.upsert(
+        name="get_current_time",
+        description="Get the current date and time. Use when user asks what time or date it is.",
+        parameters={"type": "object", "properties": {}, "required": []},
+        code="""
 def get_current_time():
     now = datetime.datetime.now()
     return f"Current time is {now.strftime('%H:%M:%S')} on {now.strftime('%B %d, %Y')}"
 """,
-)
-print("Added: get_current_time")
+    )
+    print("Added: get_current_time")
 
-# Add simple calculator
-ToolRepo.upsert(
-    name="calculate",
-    description="Evaluate a mathematical expression. Use for any math calculations.",
-    parameters={
-        "type": "object",
-        "properties": {
-            "expression": {
-                "type": "string",
-                "description": "Math expression to evaluate, e.g. '2 + 2', '15 * 7'",
-            }
+    ToolRepo.upsert(
+        name="calculate",
+        description="Apply one basic arithmetic operation to two numbers.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "left": {"type": "number"},
+                "right": {"type": "number"},
+                "operation": {
+                    "type": "string",
+                    "enum": ["add", "subtract", "multiply", "divide"],
+                },
+            },
+            "required": ["left", "right", "operation"],
         },
-        "required": ["expression"],
-    },
-    code="""
-def calculate(expression):
-    # Safe eval for basic math
-    allowed = set("0123456789+-*/.() ")
-    if not all(c in allowed for c in expression):
-        return "Error: Invalid characters"
-    try:
-        result = eval(expression)
-        return str(result)
-    except Exception as e:
-        return f"Error: {e}"
+        code="""
+def calculate(left, right, operation):
+    if operation == "add":
+        return str(left + right)
+    if operation == "subtract":
+        return str(left - right)
+    if operation == "multiply":
+        return str(left * right)
+    if operation == "divide":
+        return "Error: division by zero" if right == 0 else str(left / right)
+    return "Error: unsupported operation"
 """,
-)
-print("Added: calculate")
+    )
+    print("Added: calculate")
 
-# List all tools
-print("\nAll tools in database:")
-for tool in ToolRepo.list_all():
-    print(f"  - {tool.name}: {tool.description[:50]}...")
-    print(f"    Has code: {bool(tool.code)}")
-    print(f"    Enabled: {tool.enabled}")
+    print("\nAll tools in database:")
+    for tool in ToolRepo.list_all():
+        print(f"  - {tool.name}: {tool.description[:50]}...")
+        print(f"    Has code: {bool(tool.code)}")
+        print(f"    Enabled: {tool.enabled}")
+
+
+if __name__ == "__main__":
+    register_sample_tools()

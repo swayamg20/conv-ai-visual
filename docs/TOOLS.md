@@ -1,255 +1,99 @@
-# Tool Calling System
+# LLM tools
 
-## Overview
+Murmur stores enabled tool definitions in SQLite and exposes them to supported model providers through a provider-neutral registry.
 
-The tool calling system allows the LLM to invoke external functions. Tools are stored in SQLite and executed in a sandboxed environment.
+## Tool kinds
 
-**Two ways to define handlers:**
-1. **Inline code** - Store Python code directly in DB (easy, remote-friendly)
-2. **Module-based** - Reference a Python module/function (for complex logic)
+### Module handlers
 
-## Architecture
-
-```
-User Message → LLM (with tool schemas) → Tool Call Decision
-                                              ↓
-                                      ToolExecutor
-                                              ↓
-                                    Fetch from DB → Resolve Handler → Execute in Sandbox
-                                              ↓
-                                      Return Result to LLM
-                                              ↓
-                                      Final Response
-```
-
-## Method 1: Inline Code (Recommended for Simple Tools)
-
-Store the function code directly in the `code` column. The code runs in a restricted sandbox.
+Use a module handler for application-owned behavior. The database stores a stable import path and function name:
 
 ```python
-from funcs import ToolRepo
+from murmur.persistence.repositories.tools import ToolRepo
 
 ToolRepo.upsert(
-    name="get_weather",
-    description="Get current weather for a location",
+    name="lookup_course",
+    description="Look up one course by code.",
     parameters={
         "type": "object",
-        "properties": {
-            "location": {"type": "string", "description": "City name"}
-        },
-        "required": ["location"]
+        "properties": {"code": {"type": "string"}},
+        "required": ["code"],
     },
-    code='''
-def get_weather(location):
-    # httpx is available for HTTP calls
-    response = httpx.get(f"https://api.weather.com/{location}")
-    data = response.json()
-    return f"Weather in {location}: {data['temp']}°C"
-'''
+    handler_module="murmur.tools.course",
+    handler_function="lookup_course",
+    enabled=True,
 )
 ```
 
-**Available in sandbox:**
-- `json`, `datetime`, `re`, `math`, `base64`, `hashlib`, `urllib_parse`
-- `httpx` (for HTTP requests)
-- Basic builtins: `str`, `int`, `list`, `dict`, `len`, `range`, etc.
+The handler may be synchronous or asynchronous. Keep production handlers under the `murmur` package so installed wheels and database paths agree.
 
-**Not available (security):**
-- `os`, `subprocess`, `open`, `eval`, `exec`, `__import__`
-- File system access
-- Arbitrary imports
+### Inline handlers
 
-### SQL Example (direct DB insert):
-
-```sql
-INSERT INTO tools (name, description, parameters, code, enabled, created_at, updated_at)
-VALUES (
-    'get_weather',
-    'Get current weather for a location',
-    '{"type": "object", "properties": {"location": {"type": "string"}}, "required": ["location"]}',
-    'def get_weather(location):
-    return f"Weather in {location}: 24°C, Sunny"',
-    1,
-    datetime('now'),
-    datetime('now')
-);
-```
-
-## Method 2: Module-Based (For Complex Tools)
-
-### 1. Create a handler module
+For trusted local experiments, a tool row may contain RestrictedPython source defining a function with the same name:
 
 ```python
-# myapp/tools/weather.py
-
-async def get_weather(location: str, unit: str = "celsius") -> str:
-    """Fetch weather from API."""
-    # Your implementation
-    response = await weather_api.get(location)
-    return f"Weather in {location}: {response.temp}°{unit[0].upper()}"
-
-def calculate(expression: str) -> str:
-    """Evaluate math expression."""
-    return str(eval(expression))  # Use proper parser in production
-```
-
-### 2. Register in database
-
-```python
-from funcs import ToolRepo
-
-# Using ToolRepo directly
 ToolRepo.upsert(
-    name="get_weather",
-    description="Get current weather for a location. Use when user asks about weather.",
+    name="double",
+    description="Double a number.",
     parameters={
         "type": "object",
-        "properties": {
-            "location": {
-                "type": "string",
-                "description": "City name, e.g. 'Delhi', 'New York'"
-            },
-            "unit": {
-                "type": "string",
-                "enum": ["celsius", "fahrenheit"],
-                "description": "Temperature unit"
-            }
-        },
-        "required": ["location"]
+        "properties": {"value": {"type": "number"}},
+        "required": ["value"],
     },
-    handler_module="myapp.tools.weather",
-    handler_function="get_weather",
-    enabled=True
-)
-
-# Or using ToolStore
-from funcs import default_store
-
-default_store.register(
-    name="calculate",
-    description="Evaluate a mathematical expression",
-    parameters={
-        "type": "object",
-        "properties": {
-            "expression": {"type": "string"}
-        },
-        "required": ["expression"]
-    },
-    handler_module="myapp.tools.weather",
-    handler_function="calculate"
+    code="""
+def double(value):
+    return value * 2
+""",
+    enabled=True,
 )
 ```
 
-### 3. Use with LLMPipeline
+Inline code is intended for trusted operators. RestrictedPython and a timeout reduce accidental capability, but they are not operating-system process isolation. Do not let untrusted users write tool code. Use a separate sandbox service before exposing arbitrary code creation.
 
-```python
-from funcs import LLMPipeline
+## Built-ins
 
-pipeline = LLMPipeline()
-pipeline.load_tools_from_db()
+Application startup upserts two database-backed tools:
 
-response = await pipeline.chat_with_tools("What's the weather in Mumbai?")
-# LLM will call get_weather tool, executor fetches from DB, runs handler, returns result
+- `web_search` resolves `murmur.tools.search.web_search` and uses Tavily when `TAVILY_API_KEY` is set.
+- `canvas_update` resolves `murmur.canvas.state.canvas_update` and applies validated operations to session canvas state.
+
+Visual teaching through SDL uses the typed `teach_with_visuals` schema alongside the database-backed tool registry. The browser compiles its semantic steps into canvas operations.
+
+Because handler paths are persisted, source moves must update the registration definition. Startup upserts repair existing local rows; `tests/test_architecture_boundaries.py` proves built-in paths are canonical and importable.
+
+## Execution flow
+
+```text
+provider tool call
+  -> ToolCall
+  -> enabled database definition
+  -> inline compile or module resolution
+  -> bounded execution
+  -> ToolResult
+  -> provider-specific result message
 ```
 
-## Tool Schema (JSON Schema)
+The LLM tool runtime executes read-only calls in parallel when configured, but preserves order for mutating calls. It limits tool rounds and converts failures into explicit result messages rather than abandoning the whole conversation.
 
-Tools use JSON Schema to define parameters:
+## Add a module tool
 
-```python
-{
-    "type": "object",
-    "properties": {
-        "param_name": {
-            "type": "string",  # string, number, boolean, array, object
-            "description": "What this parameter is for",
-            "enum": ["option1", "option2"]  # Optional: restrict values
-        }
-    },
-    "required": ["param_name"]  # Required parameters
-}
+1. Put the handler in a focused `backend/murmur/...` module.
+2. Define a strict JSON Schema with required fields and narrow enums.
+3. Upsert its database definition during application startup or an explicit maintenance command.
+4. Add a provider-free test for resolution, success, invalid arguments, and failure behavior.
+5. If it mutates state, ensure the runtime classifies it as ordered rather than parallel work.
+
+The optional `scripts/add_sample_tool.py` command initializes the configured database and registers a clock plus basic calculator example:
+
+```bash
+uv run python scripts/add_sample_tool.py
 ```
 
-## Sandbox Configuration
+## Relevant modules
 
-```python
-from funcs import ToolExecutor, SandboxConfig
-
-executor = ToolExecutor(
-    sandbox_config=SandboxConfig(
-        timeout_seconds=30.0,  # Kill if exceeds
-        blocked_modules=["subprocess", "os.system"]  # Security blacklist
-    )
-)
-
-pipeline = LLMPipeline()
-pipeline.set_executor(executor)
-```
-
-## Managing Tools
-
-```python
-from funcs import ToolRepo
-
-# List all tools
-tools = ToolRepo.list_all()
-
-# Get specific tool
-tool = ToolRepo.get("get_weather")
-
-# Disable a tool (won't be sent to LLM)
-ToolRepo.set_enabled("get_weather", False)
-
-# Delete a tool
-ToolRepo.delete("old_tool")
-
-# Get tools in OpenAI format
-schemas = ToolRepo.to_openai_format()
-```
-
-## Direct Executor Usage
-
-```python
-from funcs import default_executor
-from funcs.tools import ToolCall
-
-# Execute by name
-result = await default_executor.execute("get_weather", {"location": "Delhi"})
-print(result.content)  # "Weather in Delhi: 24°C"
-print(result.success)  # True
-
-# Execute ToolCall object (from LLM response)
-tool_call = ToolCall(id="call_123", name="get_weather", arguments={"location": "NYC"})
-result = await default_executor.execute_tool_call(tool_call)
-```
-
-## Database Schema
-
-```sql
-CREATE TABLE tools (
-    name TEXT PRIMARY KEY,
-    description TEXT NOT NULL,
-    parameters TEXT NOT NULL,      -- JSON Schema
-    handler_module TEXT,           -- e.g. 'myapp.tools.weather' (optional)
-    handler_function TEXT,         -- e.g. 'get_weather' (optional)
-    code TEXT,                     -- Inline Python code (optional, preferred)
-    enabled BOOLEAN DEFAULT 1,
-    created_at TIMESTAMP,
-    updated_at TIMESTAMP
-)
-```
-
-**Priority:** If `code` is set, it's used. Otherwise falls back to `handler_module`/`handler_function`.
-
-## Best Practices
-
-1. **Description matters**: LLM uses description to decide when to call tools. Be specific.
-
-2. **Handle errors gracefully**: Return error messages, don't raise exceptions.
-
-3. **Async preferred**: Use async handlers for I/O operations.
-
-4. **Keep handlers focused**: One tool = one action.
-
-5. **Validate in handler**: Don't trust LLM arguments blindly.
-
+- `murmur.tools.contracts` — schemas, registry, provider adapters, and database store
+- `murmur.tools.executor` — inline compilation, handler invocation, and timeouts
+- `murmur.llm.tool_runtime` — multi-round orchestration and ordering policy
+- `murmur.persistence.repositories.tools` — tool definitions and provider schemas
+- `murmur.tools.search` — built-in web search
+- `murmur.canvas.state` — built-in canvas update handler

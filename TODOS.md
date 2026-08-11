@@ -1,44 +1,29 @@
-# TODOS
+# Engineering follow-ups
 
-Deferred items from engineering review, 2026-03-19.
-Branch at time of review: `feat/full-platform-launch`
+Verified deferred work after the August 2026 modularization. This file lists known limitations, not completed work or speculative roadmap ideas.
 
----
+## Move synchronous database I/O off the event loop
 
-## TODO-1: Async DB Layer
-**What:** Replace synchronous SQLAlchemy sessions with aiosqlite + async SQLModel sessions across all repo classes.
-**Why:** Every DB call currently blocks the async event loop. Fine for 10 users. Will cause cascading latency under real load (50+ concurrent sessions). Symptoms: slow LLM responses, piling up async tasks.
-**Pros:** Fully non-blocking I/O; correct async architecture.
-**Cons:** Multi-file refactor across all repo classes (~15 static methods). Risk of introducing subtle transaction scope bugs during migration.
-**Context:** `funcs/models.py:16` creates a sync engine. `get_session()` returns a sync `Session`. All repo methods use `with get_session()` pattern. The WAL mode fix (this PR) reduces locking issues but doesn't fix the event loop blocking.
-**Depends on / blocked by:** WAL mode PR (this sprint). Effort: human ~3 days / CC ~2 hours.
+Repository calls use synchronous SQLModel sessions. That is simple and adequate for the current local/small-pilot shape, but calls made from async chat and voice flows can block under concurrent load.
 
----
+Choose either bounded thread offloading at service boundaries or an async SQLAlchemy/SQLModel engine. Preserve repository ownership and add concurrent session tests before changing the access model.
 
-## TODO-2: Token-Budget Enforcement in Context Window
-**What:** Add token counting to `ConversationContext._trim()` so that long sessions don't silently exceed LLM token limits.
-**Why:** `ConversationContext` trims by message count (now 20) but not by tokens. System prompt + semantic/episodic context injections + 20 messages can exceed model limits on long sessions. When exceeded, the LLM API returns an error; the pipeline catches it silently and the user gets no response.
-**Pros:** Prevents silent failures on long sessions; makes context management deterministic.
-**Cons:** Token counting requires a tokenizer (e.g., `tiktoken`), adds a dependency and per-message overhead.
-**Context:** `funcs/memory.py:27` — `ConversationContext` has `max_tokens=4000` as a field but never uses it (no token counting logic). `funcs/llm_pipeline.py:163` builds context without token guard. Groq's Llama-3.3-70b context window is 128k tokens, so this is low risk at current scale but a real failure mode at scale.
-**Depends on / blocked by:** None. Effort: human ~1 day / CC ~30 min.
+## Introduce versioned schema migrations before production data evolves
 
----
+Startup currently uses `SQLModel.metadata.create_all()`. It creates missing tables but cannot safely rename columns, transform data, or roll forward an existing schema.
 
-## TODO-3: Session Summary on Abrupt Disconnect
-**What:** Trigger a lightweight session summary when a chat or voice session ends unexpectedly (browser crash, network loss, WebRTC disconnect) — not just on explicit `DELETE /session/{id}`.
-**Why:** Cross-session memory depends on summaries. Currently, summaries only generate on clean session close. Any dropped tab, crashed browser, or network failure loses the entire session's context permanently.
-**Pros:** Memory becomes reliable; agent can reference previous sessions even if the user never clicked "end session."
-**Cons:** Adds async LLM call on session teardown. Edge case: session with no messages shouldn't trigger a summary call.
-**Context:** `main.py:1519` — `end_session` endpoint is the only summary trigger. WebRTC disconnect cleanup at `main.py:1744-1754` and TTL eviction (this PR) are the natural hooks. Best approach: fire-and-forget background task on eviction/disconnect, only if `len(messages) > 2`.
-**Depends on / blocked by:** TTL eviction implementation (this PR). Effort: human ~1 day / CC ~20 min.
+Adopt a guarded, append-only migration mechanism before the first incompatible production schema change. Include backup/restore instructions and an upgrade test from the oldest supported schema.
 
----
+## Add a credentialed end-to-end staging suite
 
-## TODO-4: CORS Origin Lockdown
-**What:** Replace `allow_origins=["*"]` with explicit allowed origins once the production URL is known.
-**Why:** Wildcard CORS without `allow_credentials` is safe for a public API, but best practice is to enumerate allowed origins. Prevents any web page from making credentialed calls if `allow_credentials` is accidentally re-added.
-**Pros:** Defense-in-depth; explicit is better than implicit.
-**Cons:** Requires knowing the prod URL. Must be updated on every domain change.
-**Context:** `main.py:99-105` — CORS middleware. The `allow_credentials=True` bug is fixed in this PR. This TODO is for the full lockdown once deployed.
-**Depends on / blocked by:** Needs prod deployment URL. Effort: human ~15 min / CC ~2 min.
+CI proves contracts with fake providers and an in-memory database. It does not currently prove a real Firebase login, Deepgram stream, LLM response, TTS stream, and synchronized browser canvas in one environment.
+
+Build a separately triggered staging suite with tightly scoped credentials, cost ceilings, captured latency, and cleanup. Keep it out of pull-request CI.
+
+## Replace keyword-only resource retrieval when quality data justifies it
+
+Agent resource retrieval currently relies on SQLite keyword matching. Evaluate embeddings or hybrid retrieval against a curated tutoring question set before adopting another storage service. Ship only if relevance gains are measured.
+
+## Harden arbitrary tool execution before exposing authoring
+
+Inline tools use RestrictedPython and bounded waiting, but they are not process or container isolation. Tool rows are therefore trusted-operator configuration. Any future user-authored tool feature requires a separate execution boundary, strict network policy, resource limits, and adversarial tests.

@@ -1,298 +1,158 @@
-# VoiceAI Setup Guide
+# Local setup
 
-Complete setup guide for running the VoiceAI project locally.
+These steps reproduce the development environment used by CI.
 
 ## Prerequisites
 
-- Python 3.11+
-- SQLite (comes with Python)
-- Conda or pip for package management
+- Python 3.11 or 3.12
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 22 and npm
+- A Firebase project for login and backend token verification
+- One supported LLM provider account: OpenAI, Groq, or Gemini
+- Deepgram and a TTS provider only when exercising voice
 
-## 1. Clone & Environment Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/your-username/voiceai.git
-cd voiceai
-
-# Create conda environment (recommended)
-conda create -n voiceai python=3.11
-conda activate voiceai
-# Or use venv
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# venv\Scripts\activate   # Windows
-```
-
-## 2. Install Dependencies
+## Install
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/swayamg20/conv-ai-visual.git
+cd conv-ai-visual
+
+uv sync --locked --extra dev
+
+cd web
+npm ci
+cd ..
 ```
 
-Key dependencies:
-- `fastapi`, `uvicorn` - Web server
-- `openai` - LLM API
-- `sqlmodel` - Database ORM
-- `httpx` - HTTP client for tools
-- `RestrictedPython` - Sandbox for tool execution
-- `mem0ai` - Semantic memory (optional)
+`requirements.txt` is an exported compatibility file. Use `uv.lock` for development and CI.
 
-## 3. Environment Variables
-
-Create a `.env` file in the project root:
+## Configure the backend
 
 ```bash
-# Required: set LLM_PROVIDER to openai, groq, or gemini and provide the matching key
-# OpenAI example shown below
-OPENAI_API_KEY=sk-your-openai-api-key
-# Or use GROQ_API_KEY / GEMINI_API_KEY instead
-
-# Optional - Voic–e features
-DEEPGRAM_KEY=your-deepgram-key
-DEEPGRAM_ENDPOINTING=700
-ELEVENLABS_API_KEY=your-elevenlabs-key
-ELEVENLABS_VOICE_ID=your-voice-id
-
-# Optional - Memory
-MEM0_API_KEY=your-mem0-key
-
-# Server config (optional)
-ALLOWED_CORS_ORIGINS=http://localhost:3000
-HOST=0.0.0.0
-PORT=8000
+cp .env.example .env
 ```
 
-Local `.env` values override the defaults documented in this repo. If you copied an older `.env`, review `LLM_MAX_CONTEXT_MESSAGES`, `DEEPGRAM_ENDPOINTING`, and `ALLOWED_CORS_ORIGINS` before assuming the new defaults are active.
+For authenticated text chat, set:
 
-### Getting API Keys
-
-| Service | Purpose | Get Key |
-|---------|---------|---------|
-| OpenAI | LLM (required) | https://platform.openai.com/api-keys |
-| Deepgram | Speech-to-text | https://console.deepgram.com/ |
-| ElevenLabs | Text-to-speech | https://elevenlabs.io/ |
-| Mem0 | Semantic memory | https://mem0.ai/ |
-
-## 4. Database Initialization
-
-The SQLite database (`memory.db`) is auto-created on first run. Tables:
-
-- `tools` - Function calling tools
-- `episodic_memory` - Conversation summaries
-- `user_profile` - User identity
-- `decision_memory` - Tool execution logs
-
-To manually initialize:
-
-```python
-from funcs.models import init_db
-init_db()
+```dotenv
+LLM_PROVIDER=groq
+GROQ_API_KEY=...
+FIREBASE_PROJECT_ID=your-firebase-project-id
 ```
 
-## 5. Add Tools (Optional but Recommended)
+Use `OPENAI_API_KEY` with `LLM_PROVIDER=openai`, or `GEMINI_API_KEY` with `LLM_PROVIDER=gemini`.
 
-Tools enable the LLM to perform actions. Add a sample tool:
+For voice, also set:
+
+```dotenv
+DEEPGRAM_KEY=...
+TTS_PROVIDER=elevenlabs
+ELEVENLABS_API_KEY=...
+```
+
+To use local Kokoro instead:
 
 ```bash
-sqlite3 memory.db
+uv sync --locked --extra dev --extra local-tts
 ```
 
-```sql
-INSERT INTO tools (name, description, parameters, code, enabled, created_at, updated_at)
-VALUES (
-    'get_weather',
-    'Get current weather for any city.',
-    '{"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}',
-    'def get_weather(city):
-    geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1"
-    geo_resp = httpx.get(geo_url)
-    geo_data = geo_resp.json()
-    if not geo_data.get("results"):
-        return f"Could not find: {city}"
-    loc = geo_data["results"][0]
-    weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={loc[''latitude'']}&longitude={loc[''longitude'']}&current=temperature_2m,weather_code"
-    weather_resp = httpx.get(weather_url)
-    data = weather_resp.json()
-    temp = data["current"]["temperature_2m"]
-    return f"Weather in {city}: {temp}°C"',
-    1,
-    datetime('now'),
-    datetime('now')
-);
+```dotenv
+TTS_PROVIDER=kokoro
 ```
 
-Or via Python:
+Smart Turn is enabled by default and initializes lazily. Set `SMART_TURN_ENABLED=false` to use Deepgram endpointing alone.
 
-```python
-from funcs import ToolRepo
+Optional services:
 
-ToolRepo.upsert(
-    name="get_current_time",
-    description="Get current date and time",
-    parameters={"type": "object", "properties": {}, "required": []},
-    code='''
-def get_current_time():
-    now = datetime.datetime.now()
-    return f"It is {now.strftime('%H:%M on %B %d, %Y')}"
-'''
-)
-```
+- `MEM0_API_KEY` enables semantic memory; the other memory layers work without it.
+- `TAVILY_API_KEY` enables live results from the built-in web-search tool.
+- `FIREBASE_SERVICE_ACCOUNT_PATH` selects an explicit Firebase Admin credential file. Otherwise the Admin SDK uses the configured project and application-default credentials.
 
-See [TOOLS.md](./TOOLS.md) for more details.
+The backend loads the repository-root `.env`. Shell environment variables take precedence.
 
-## 6. Run the Server
-
-```bash
-# Development (with auto-reload)
-python main.py
-
-# Or directly with uvicorn
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-Server runs at: http://localhost:8000
-
-## 7. Configure the Frontend
-
-Create `web/.env.local` from the checked-in example:
+## Configure the frontend
 
 ```bash
 cd web
 cp .env.example .env.local
 ```
 
-Required frontend variables:
+Fill in the Firebase web-app values and keep this local API URL unless the backend runs elsewhere:
 
-```env
+```dotenv
 NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_FIREBASE_API_KEY=...
-NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=omnisave-21c05.firebaseapp.com
-NEXT_PUBLIC_FIREBASE_PROJECT_ID=omnisave-21c05
-NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=omnisave-21c05.firebasestorage.app
-NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=459462156017
-NEXT_PUBLIC_FIREBASE_APP_ID=1:459462156017:web:5eb152d98390b4158dd350
-NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-BN2BQ7ZQ66
 ```
 
-## 8. Test the API
+Firebase web configuration is distinct from backend Admin credentials.
 
-Protected routes now require a Firebase ID token:
+## Run
+
+Use two terminals from the repository root:
 
 ```bash
-export FIREBASE_ID_TOKEN=your-firebase-id-token
+uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
-
-### Chat Endpoint (SSE Streaming)
 
 ```bash
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello, what can you do?"}'
+cd web
+npm run dev
 ```
 
-### With Session Persistence
+Open <http://localhost:3000>. The backend contract is at <http://localhost:8000/docs>.
+
+The first application startup creates `var/murmur.db` and registers the built-in `web_search` and `canvas_update` tools. The entire `var/` directory is ignored by Git.
+
+## Verify the checkout
+
+Backend:
 
 ```bash
-# First message - get session_id
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "My name is John"}'
-
-# Subsequent messages - use same session
-curl -X POST http://localhost:8000/chat \
-  -H "Authorization: Bearer $FIREBASE_ID_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "What is my name?", "session_id": "SESSION_ID_FROM_RESPONSE"}'
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+uv run python -c "from main import app; print(app.title)"
 ```
 
-### End Session (Saves to Episodic Memory)
+Frontend:
 
 ```bash
-curl -X DELETE http://localhost:8000/chat/SESSION_ID \
-  -H "Authorization: Bearer $FIREBASE_ID_TOKEN"
+cd web
+npm run lint
+npm run typecheck
+npm run test
+npm run build
 ```
 
-## 9. WebRTC Voice (Optional)
+The production build requires valid-looking `NEXT_PUBLIC_FIREBASE_*` values; CI provides deterministic test values.
 
-For voice interaction, open `client/test.html` in a browser after starting the server.
+## Optional sample tools
 
-Requirements:
-- Deepgram API key (speech-to-text)
-- ElevenLabs API key (text-to-speech)
+After configuration, register two local demonstration tools with:
 
-## Project Structure
-
-```
-voiceai/
-├── main.py              # FastAPI server
-├── funcs/
-│   ├── llm_pipeline.py  # LLM with memory & tools
-│   ├── memory.py        # 4-layer memory system
-│   ├── models.py        # SQLModel ORM
-│   ├── tools.py         # Tool registry
-│   ├── tool_executor.py # Sandboxed execution
-│   ├── tts_pipeline.py  # Text-to-speech
-│   └── vad_gate.py      # Voice activity detection
-├── docs/
-│   ├── SETUP.md         # This file
-│   ├── TOOLS.md         # Tool creation guide
-│   └── DATABASE.md      # Database reference
-├── memory.db            # SQLite database (auto-created)
-└── requirements.txt
+```bash
+uv run python scripts/add_sample_tool.py
 ```
 
-## Memory Architecture
-
-The system uses 4 memory layers:
-
-| Layer | Storage | Purpose |
-|-------|---------|---------|
-| 1. Context | In-memory | Current conversation (sliding window) |
-| 2. Episodic | SQLite | Past conversation summaries |
-| 3. Semantic | Mem0 Cloud | Facts & entities (vector search) |
-| 4. Profile | SQLite | User identity (name, preferences) |
+Built-in tools do not need a setup script; startup keeps their definitions and canonical handler paths current.
 
 ## Troubleshooting
 
-### Database Locked
+### Every product request returns 401
 
-```
-Error: database is locked
-```
+Confirm the frontend and backend point at the same Firebase project. Protected API calls must carry `Authorization: Bearer <Firebase ID token>`; `X-User-ID` is not an authentication mechanism.
 
-Stop the running server, then access the DB. SQLite only allows one writer.
+### Chat starts but providers fail
 
-### Tools Not Working
+Check that `LLM_PROVIDER` matches the populated key. Placeholder strings copied from `.env.example` are not valid credentials.
 
-1. Check tools exist: `sqlite3 memory.db "SELECT name FROM tools;"`
-2. Check logs for compilation errors
-3. Restart server to clear handler cache
+### Voice is unavailable
 
-### Import Errors
+Voice startup degrades without stopping the HTTP app. Check the startup log for the missing Deepgram or TTS configuration. For Kokoro, install the `local-tts` extra.
 
-```bash
-# Ensure you're in the correct environment
-conda activate voiceai
+### Smart Turn cannot initialize
 
-# Reinstall dependencies
-pip install -r requirements.txt
-```
+The voice path falls back to Deepgram endpointing. Set `SMART_TURN_ENABLED=false` if the ONNX runtime or model is intentionally unavailable.
 
-### Mem0 Not Working
+### Database path is unexpected
 
-Mem0 is optional. If not configured, semantic memory is skipped. Set `MEM0_API_KEY` in `.env` to enable.
-
-## Next Steps
-
-1. [Add custom tools](./TOOLS.md)
-2. [Explore the database](./DATABASE.md)
-3. Build a frontend that connects to the chat API
-4. Integrate with voice via WebRTC
-
-## Support
-
-- Check existing docs in `/docs`
-- Open an issue on GitHub
+The default is `var/murmur.db`. `MURMUR_DATA_DIR` changes the runtime directory; `MURMUR_DATABASE_URL` overrides the full SQLAlchemy URL.

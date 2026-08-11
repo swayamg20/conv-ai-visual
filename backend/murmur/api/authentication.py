@@ -1,7 +1,4 @@
-"""
-Authentication and user identity middleware.
-Uses Firebase Admin SDK for token verification.
-"""
+"""Firebase authentication and trusted user resolution."""
 
 import logging
 
@@ -15,9 +12,6 @@ from murmur.persistence.repositories.identities import UserRepo
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Lazy Firebase Admin SDK initialisation
-# ---------------------------------------------------------------------------
 _firebase_app: firebase_admin.App | None = None
 _firebase_init_attempted: bool = False
 
@@ -52,11 +46,6 @@ def _ensure_firebase() -> firebase_admin.App | None:
     return _firebase_app
 
 
-# ---------------------------------------------------------------------------
-# Token helpers
-# ---------------------------------------------------------------------------
-
-
 def verify_firebase_token(token: str) -> dict | None:
     """Verify a Firebase ID token.  Returns decoded claims dict or None."""
     app = _ensure_firebase()
@@ -69,11 +58,6 @@ def verify_firebase_token(token: str) -> dict | None:
     except Exception as exc:
         logger.warning("Firebase token verification failed: %s", exc)
         return None
-
-
-# ---------------------------------------------------------------------------
-# FastAPI dependencies
-# ---------------------------------------------------------------------------
 
 
 def get_current_user(request: Request) -> dict | None:
@@ -97,32 +81,8 @@ def get_current_user(request: Request) -> dict | None:
     if not uid:
         return None
 
-    # Auto-provision user in DB
     user = UserRepo.get_or_create(uid=uid, email=email, name=name)
     return {"id": user.id, "email": user.email, "name": user.name}
-
-
-def get_current_user_id(request: Request) -> str:
-    """
-    Backwards-compatible helper.
-    Returns the authenticated user's ID, or a legacy header/query fallback.
-    Returns an empty string if no identity is available.
-    """
-    user = get_current_user(request)
-    if user:
-        return user["id"]
-
-    # Legacy fallbacks
-    user_id = request.headers.get("X-User-ID")
-    if user_id:
-        logger.debug("Using legacy X-User-ID fallback for %s", request.url.path)
-        return user_id
-    user_id = request.query_params.get("user_id")
-    if user_id:
-        logger.debug("Using legacy query user_id fallback for %s", request.url.path)
-        return user_id
-    logger.debug("No authenticated user identity available for %s", request.url.path)
-    return ""
 
 
 def require_auth(request: Request) -> str:

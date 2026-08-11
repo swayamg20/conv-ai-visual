@@ -558,7 +558,6 @@ These are the shared components. Their requirements are described in context abo
 | `session-history-panel` | Session | Collapsible past-session list + mastery heatmap. Collapsed by default on mobile. |
 | `mastery-heatmap` | Session History Panel | Topic coverage grid. Read-only, scannable, not interactive. |
 | `canvas-renderer` | Session | Translates canvas operation events into SVG draw calls. Not a visible component — logic layer. |
-| `excalidraw-canvas` | Session (alternative) | Alternative canvas renderer using Excalidraw. |
 | `murmur-doodles` | Landing, Dashboard | Decorative hand-drawn SVG elements for visual identity. Not interactive. |
 | `glassmorphic-card` | Dashboard, Wizard | Card container with frosted-glass aesthetic. Contains agent cards, wizard steps. |
 | `floating-button` | Session | Fixed-position button for secondary actions (e.g., opening the technical drawer). |

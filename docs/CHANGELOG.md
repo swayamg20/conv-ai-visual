@@ -36,7 +36,7 @@ This branch consolidated the active education-first workstream on top of the ful
 
 ### Docs + Planning
 - Added `AGENTS.md`, `.agent/PLANS.md`, and `plans/` ExecPlan scaffolding
-- Rewrote `docs/NEXT_PLAN.md` around the education-first roadmap
+- Rewrote the now-archived `docs/archive/NEXT_PLAN.md` around the education-first roadmap
 - Updated setup and environment documentation for backend + frontend Firebase configuration
 
 ### Verification
@@ -64,7 +64,7 @@ After the initial build, fixed several integration issues discovered during test
 - "Skip" button appears when a step has no selection
 
 ### Planning
-- Created `docs/NEXT_PLAN.md` — 4-phase plan for core engineering & AI/ML quality
+- Created the now-archived `docs/archive/NEXT_PLAN.md` — 4-phase plan for core engineering & AI/ML quality
 - CTO assessment identified 20 issues (5 P0, 7 P1, 8 P2)
 - PM prioritized: context window, embedding search, adaptive difficulty, physics-specific prompts
 - Creative feature: **Adaptive Difficulty Detection** — agent detects confusion in real-time and silently adjusts pace, vocabulary, and examples

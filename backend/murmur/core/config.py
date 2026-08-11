@@ -1,6 +1,4 @@
-"""
-Configuration module for voice AI application.
-"""
+"""Environment-backed application configuration."""
 
 import os
 from pathlib import Path
@@ -8,9 +6,16 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-env_path = Path(__file__).parent.parent / ".env"
-load_dotenv(dotenv_path=env_path)
+
+def default_env_path() -> Path:
+    """Resolve the documented project-level ``.env`` file."""
+    source_root = Path(__file__).resolve().parents[3]
+    if (source_root / "pyproject.toml").is_file():
+        return source_root / ".env"
+    return Path.cwd() / ".env"
+
+
+load_dotenv(dotenv_path=default_env_path())
 
 
 def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:

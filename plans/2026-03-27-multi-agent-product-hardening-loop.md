@@ -32,7 +32,7 @@ This plan is intentionally a living control document for long-running work. It m
 
 The repository is already partway through a hardening cycle on `feat/gstack-review`, and the working tree is dirty with substantial backend, frontend, and documentation changes. That means this plan must assume in-flight work exists and should focus on the next highest-confidence product bottlenecks rather than starting from a blank slate.
 
-The strongest local signal is consistent across `docs/NEXT_PLAN.md`, `docs/PRODUCT_BRIEF.md`, and the existing plans in `plans/`: Murmur should remain education-first on this branch. The next work should not pivot into a broader assistant or a new market narrative. It should make the existing tutoring loop trustworthy and visibly better.
+The strongest local signal is consistent across the historical `docs/archive/NEXT_PLAN.md`, `docs/PRODUCT_BRIEF.md`, and the existing plans in `plans/`: Murmur should remain education-first on this branch. The next work should not pivot into a broader assistant or a new market narrative. It should make the existing tutoring loop trustworthy and visibly better.
 
 The official Codex guidance aligns with this repo's planning style. Long-running work should keep the main thread focused on requirements, decisions, and final outputs, while bounded subagents handle exploration, tests, or triage. Multi-agent workflows are helpful precisely because they reduce context pollution and keep noisy intermediate work off the main thread.
 
@@ -111,7 +111,7 @@ Murmur is a voice-first AI tutor that teaches by drawing. In this repository, a 
 
 `web/src/` contains the Next.js frontend. `web/src/app/login/page.tsx`, `web/src/hooks/use-auth.ts`, and `web/src/app/obs/page.tsx` are the most likely frontend surfaces for the next branch cycle if operator visibility, auth continuity, or product observability needs to improve.
 
-This branch already contains planning context in `docs/NEXT_PLAN.md`, `docs/PRODUCT_BRIEF.md`, and older ExecPlans in `plans/`. This ExecPlan must stand on its own, but it intentionally continues the product direction those documents already establish: Murmur should become a trustworthy tutoring product before broader positioning or architecture expansion.
+This branch already contains planning context in `docs/archive/NEXT_PLAN.md`, `docs/PRODUCT_BRIEF.md`, and older ExecPlans in `plans/`. This ExecPlan must stand on its own, but it intentionally continues the product direction those documents already establish: Murmur should become a trustworthy tutoring product before broader positioning or architecture expansion.
 
 ## Plan of Work
 
