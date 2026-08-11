@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { Inter, JetBrains_Mono, Caveat, Patrick_Hand } from "next/font/google";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
-import "@excalidraw/excalidraw/index.css";
 
 const inter = Inter({
   subsets: ["latin"],
@@ -49,4 +48,3 @@ export default function RootLayout({
     </html>
   );
 }
-

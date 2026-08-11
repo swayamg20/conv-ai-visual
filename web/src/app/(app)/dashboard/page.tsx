@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { Plus, Play, Pencil, Trash2, Loader2, Bot, Sparkles, History, FolderOpen } from "lucide-react";
@@ -22,34 +22,40 @@ export default function DashboardPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<Agent | null>(null);
 
-  const loadAgents = useCallback(async () => {
+  const reloadAgents = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-      const data = await fetchAgents();
-      setAgents(data);
+      setAgents(await fetchAgents());
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load agents";
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  };
 
   useEffect(() => {
-    if (authLoading) {
-      return;
-    }
+    if (authLoading || !user) return;
 
-    if (!user) {
-      setAgents([]);
-      setError(null);
-      setLoading(false);
-      return;
-    }
+    let cancelled = false;
+    fetchAgents()
+      .then((data) => {
+        if (!cancelled) setAgents(data);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to load agents";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
 
-    void loadAgents();
-  }, [authLoading, loadAgents, user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, user]);
 
   const handleDeleteConfirm = async (agentId: string) => {
     setConfirmDeleteId(null);
@@ -153,7 +159,7 @@ export default function DashboardPage() {
           >
             <p className="text-ember mb-4">{error}</p>
             <button
-              onClick={loadAgents}
+              onClick={reloadAgents}
               className="text-amber hover:underline font-medium text-sm"
             >
               Try again

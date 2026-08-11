@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -157,10 +157,10 @@ export default function ResourcesPage() {
   // Delete state
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  const loadData = useCallback(async () => {
+  const reloadData = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setError(null);
-      setLoading(true);
       const [agentData, resourcesData] = await Promise.all([
         fetchAgent(agentId),
         fetchResources(agentId),
@@ -173,11 +173,29 @@ export default function ResourcesPage() {
     } finally {
       setLoading(false);
     }
-  }, [agentId]);
+  };
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    let cancelled = false;
+    Promise.all([fetchAgent(agentId), fetchResources(agentId)])
+      .then(([agentData, resourcesData]) => {
+        if (cancelled) return;
+        setAgent(agentData);
+        setResources(resourcesData);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to load data";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
 
   const handleFileUpload = async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -385,7 +403,7 @@ export default function ResourcesPage() {
             <div className="text-center py-8">
               <p className="text-ember text-sm mb-3">{error}</p>
               <button
-                onClick={loadData}
+                onClick={reloadData}
                 className="text-amber hover:underline font-medium text-sm"
               >
                 Try again

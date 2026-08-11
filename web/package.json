@@ -1,15 +1,17 @@
 {
-  "name": "voiceai-web",
+  "name": "murmur-web",
   "version": "1.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
-    "@excalidraw/excalidraw": "^0.18.0",
     "@ricky0123/vad-react": "^0.0.36",
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",
@@ -19,12 +21,12 @@
     "gsap": "^3.12.5",
     "katex": "^0.16.9",
     "lucide-react": "^0.469.0",
-    "next": "^14.2.23",
+    "next": "^16.3.0",
     "next-themes": "^0.4.6",
     "perfect-freehand": "^1.2.3",
     "postcss": "^8.4.49",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "react-katex": "^3.0.1",
     "roughjs": "^4.6.6",
     "tailwind-merge": "^2.6.0",
@@ -33,8 +35,11 @@
   "devDependencies": {
     "@types/katex": "^0.16.7",
     "@types/node": "^22.0.0",
-    "@types/react": "^18.2.0",
-    "@types/react-dom": "^18.2.0",
-    "typescript": "^5.7.2"
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^16.3.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.10"
   }
 }

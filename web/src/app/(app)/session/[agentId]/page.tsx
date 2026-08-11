@@ -171,9 +171,10 @@ export default function AgentSessionPage() {
 
   // Kill any in-flight GSAP timelines on unmount to prevent memory leaks
   useEffect(() => {
+    const stepTimelines = stepTimelinesRef.current;
     return () => {
-      stepTimelinesRef.current.forEach(({ tl }) => tl.kill());
-      stepTimelinesRef.current.clear();
+      stepTimelines.forEach(({ tl }) => tl.kill());
+      stepTimelines.clear();
     };
   }, []);
 
@@ -269,7 +270,7 @@ export default function AgentSessionPage() {
     toggleTTS,
   } = useWebRTC({
     agentId,
-    sessionId: sessionIdRef.current ?? undefined,
+    sessionId: sessionId ?? undefined,
     onSessionReady: handleVoiceSessionReady,
     onTranscript: handleTranscript,
     onLLMResponse: handleLLMResponse,

@@ -13,7 +13,7 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 15:17 IST: Audited the current `main` branch, file sizes, tracked artifacts, route auth boundaries, frontend build/typecheck state, dependency audit, and available tests.
 - [x] 2026-08-11 15:17 IST: Re-read `.agent/PLANS.md` and created this living ExecPlan before beginning the cross-cutting refactor.
 - [x] 2026-08-11 15:31 IST: Replaced the hand-maintained Python freeze with a bounded `pyproject.toml`, reproducible `uv.lock`, exported compatibility requirements, a Python 3.12 environment, and enforced Ruff lint/format gates; the authenticated session-continuity test passes against an isolated in-memory database.
-- [ ] Establish deterministic repository gates: Python lint/test configuration, frontend non-interactive lint/typecheck/test/build scripts, and CI.
+- [x] 2026-08-11 15:39 IST: Added deterministic backend and frontend install/lint/format/typecheck/test/build gates and a two-job GitHub Actions workflow; both dependency graphs install from their lockfiles and all local gates pass.
 - [x] 2026-08-11 15:26 IST: Moved the existing SQLite/vector-store data and generated audio into gitignored `var/` storage, removed generated artifacts from version control, and separated experiments and manual provider scripts from the tested application surface.
 - [ ] Protect and user-scope chat-control and observability routes before moving them into routers.
 - [ ] Extract database engine/session setup, SQLModel declarations, and repositories from `funcs/models.py`; make the database path configurable and test-isolatable.
@@ -22,7 +22,7 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
 - [ ] Split LLM provider clients and pipeline policies into focused modules while preserving the existing provider/tool contracts.
 - [ ] Split the 1,520-line SVG renderer into typed scene normalization, render primitives, and timeline execution modules.
-- [ ] Remove unused Excalidraw/legacy canvas implementations, duplicate Next.js configuration, stale routes, and their dependencies.
+- [x] 2026-08-11 15:39 IST: Removed the unused Excalidraw and legacy canvas renderers, Excalidraw types/global CSS/dependency, and duplicate Next.js configuration; the active SDL-to-SVG renderer remains the single canvas implementation.
 - [ ] Update README/setup/architecture documentation to describe only the resulting active system.
 - [ ] Complete the security, build, test, and end-to-end acceptance audit and record the outcome here.
 
@@ -42,6 +42,8 @@ The first `uv lock` exposed a real incompatibility hidden by the old flat requir
 
 The first Python 3.12 environment sync exposed a second stale binary pin: `aiortc==1.13.0` forces `av==14.4.0`, which has no matching macOS ARM64 wheel and cannot compile against the workstation's FFmpeg 8 headers. Resolving the supported `aiortc>=1.13,<2` range selects `aiortc==1.15.0` with a prebuilt-compatible `av==17.1.0`; the repository will keep the bounded compatibility range and prove it through a clean sync and runtime checks.
 
+Removing Excalidraw cut the production frontend audit from eight findings to two; both remaining findings originated in the unpatched Next.js 14 runtime. Upgrading to Next.js 16.3, React 19.2, the flat ESLint configuration, and current Vitest removed all reported npm vulnerabilities. The stricter React lint rules also exposed render-time ref access and uncancelled data-loading effects, which were corrected rather than suppressed. Turbopack now builds the browser VAD/ONNX bundle without the former Webpack dynamic-require warnings.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -53,6 +55,8 @@ The first Python 3.12 environment sync exposed a second stale binary pin: `aiort
 2026-08-11, Codex: SQLite remains acceptable for local development and a small pilot, but all database access must be isolated behind a database module and repository interfaces. The initial structural migration will not pretend that synchronous SQLModel calls are async; a subsequent milestone will either move those calls off the event loop or adopt SQLAlchemy async sessions with focused tests.
 
 2026-08-11, Codex: There will be one production canvas implementation. The active SDL-to-SVG path stays; the unused Excalidraw component, legacy canvas renderer, global Excalidraw stylesheet, and dependency will be removed after reference checks.
+
+2026-08-11, Codex: Keep the frontend on a currently patched framework line. Next.js 14 could not satisfy the production audit, so the repository now targets Next.js 16.3, React 19.2, Node 22, ESLint 9 flat config, and Vitest 4. This migration is accepted only because clean install, zero-warning lint, strict typecheck, unit tests, and the production Turbopack build all pass.
 
 2026-08-11, Codex: The user authorized ongoing GitHub pushes. Each coherent checkpoint will be committed and pushed to `origin/main` only after its relevant checks pass; partial dependency or refactor breakage will not be published as a checkpoint.
 

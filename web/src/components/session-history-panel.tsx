@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Plus, MessageSquare, Clock, Loader2, BarChart3 } from "lucide-react";
@@ -62,23 +62,38 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadSessions = useCallback(async () => {
+  const reloadSessions = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setError(null);
-      setLoading(true);
-      const data = await fetchSessions(agent.id);
-      setSessions(data);
+      setSessions(await fetchSessions(agent.id));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load sessions";
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, [agent.id]);
+  };
 
   useEffect(() => {
-    loadSessions();
-  }, [loadSessions]);
+    let cancelled = false;
+    fetchSessions(agent.id)
+      .then((data) => {
+        if (!cancelled) setSessions(data);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to load sessions";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agent.id]);
 
   const handleNewSession = () => {
     router.push(`/session/${agent.id}`);
@@ -185,7 +200,7 @@ export function SessionHistoryPanel({ agent, onClose }: SessionHistoryPanelProps
                   <div className="text-center py-8">
                     <p className="text-ember text-sm mb-3">{error}</p>
                     <button
-                      onClick={loadSessions}
+                      onClick={reloadSessions}
                       className="text-amber hover:underline font-medium text-sm"
                     >
                       Try again

@@ -331,11 +331,13 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     // Kill all in-flight GSAP timelines on unmount
     useEffect(() => {
+      const timelines = timelinesRef.current;
+      const sequenceQueue = sequenceQueueRef.current;
       return () => {
-        timelinesRef.current.forEach((tl) => tl.kill());
-        timelinesRef.current.clear();
-        sequenceQueueRef.current.forEach((tl) => tl.kill());
-        sequenceQueueRef.current = [];
+        timelines.forEach((tl) => tl.kill());
+        timelines.clear();
+        sequenceQueue.forEach((tl) => tl.kill());
+        sequenceQueue.length = 0;
       };
     }, []);
 
@@ -1286,7 +1288,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const clear = useCallback(() => {
       sequenceQueueRef.current.forEach((tl) => tl.kill());
-      sequenceQueueRef.current = [];
+      sequenceQueueRef.current.length = 0;
       isPlayingRef.current = false;
       timelinesRef.current.forEach((tl) => tl.kill());
       timelinesRef.current.clear();

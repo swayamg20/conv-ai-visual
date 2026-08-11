@@ -197,9 +197,12 @@ export default function Dashboard() {
   }, [modeFilter]);
 
   useEffect(() => {
-    fetchData();
+    const initialFetch = window.setTimeout(() => void fetchData(), 0);
     const interval = setInterval(fetchData, 10000);
-    return () => clearInterval(interval);
+    return () => {
+      clearTimeout(initialFetch);
+      clearInterval(interval);
+    };
   }, [fetchData]);
 
   const toggleRow = (id: number) => {

@@ -300,23 +300,38 @@ export function MasteryHeatmap({ agentId }: MasteryHeatmapProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const loadData = useCallback(async () => {
+  const reloadData = async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setError(null);
-      setLoading(true);
-      const mastery = await fetchMastery(agentId);
-      setData(mastery);
+      setData(await fetchMastery(agentId));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : "Failed to load mastery data";
       setError(message);
     } finally {
       setLoading(false);
     }
-  }, [agentId]);
+  };
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    let cancelled = false;
+    fetchMastery(agentId)
+      .then((mastery) => {
+        if (!cancelled) setData(mastery);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        const message = err instanceof Error ? err.message : "Failed to load mastery data";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
 
   // Group topics by chapter
   const topicsByChapter = useMemo(() => {
@@ -339,7 +354,7 @@ export function MasteryHeatmap({ agentId }: MasteryHeatmapProps) {
       <div className="text-center py-8">
         <p className="text-ember text-sm mb-3">{error}</p>
         <button
-          onClick={loadData}
+          onClick={reloadData}
           className="text-amber hover:underline font-medium text-sm"
         >
           Try again

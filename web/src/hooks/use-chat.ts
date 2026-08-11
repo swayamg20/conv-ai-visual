@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CanvasOperation } from "./use-webrtc";
 import type { SDLScene } from "@/lib/scene-kit";
 import { getAuthHeaders } from "@/lib/firebase";
@@ -35,10 +35,12 @@ export function useChat(options: UseChatOptions = {}) {
   const [isLoading, setIsLoading] = useState(false);
   const sessionIdRef = useRef<string | null>(externalSessionId ?? null);
 
-  // Sync external sessionId into the ref when it changes
-  if (externalSessionId !== undefined && externalSessionId !== null) {
-    sessionIdRef.current = externalSessionId;
-  }
+  // Sync external sessionId into the ref without mutating it during render.
+  useEffect(() => {
+    if (externalSessionId !== undefined && externalSessionId !== null) {
+      sessionIdRef.current = externalSessionId;
+    }
+  }, [externalSessionId]);
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim()) return;
@@ -138,7 +140,7 @@ export function useChat(options: UseChatOptions = {}) {
     } finally {
       setIsLoading(false);
     }
-  }, [agentId, apiUrl, canvasMode, externalSessionId, onCanvasUpdate, onSDLScene]);
+  }, [agentId, apiUrl, canvasMode, onCanvasUpdate, onSDLScene]);
 
   const clearChat = useCallback(async () => {
     if (sessionIdRef.current) {
