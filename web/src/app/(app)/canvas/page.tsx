@@ -6,8 +6,13 @@ import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
 import Link from "next/link";
 // Switch removed - canvas is always enabled
 import { gsap } from "gsap";
-import { SVGCanvas, type SVGCanvasHandle, type TeachingSequence } from "@/components/svg-canvas";
-import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
+import { SVGCanvas } from "@/components/svg-canvas";
+import type {
+  CanvasOperation,
+  SVGCanvasHandle,
+  TeachingSequence,
+} from "@/features/canvas/types";
+import { useWebRTC, type TranscriptEvent, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
 import { compileScene, type SDLScene, type RenderPlan } from "@/lib/scene-kit";
 import { cn } from "@/lib/utils";

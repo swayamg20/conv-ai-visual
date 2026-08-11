@@ -5,6 +5,7 @@ import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
 import { getAuthHeaders } from "@/lib/firebase";
+import type { CanvasOperation } from "@/features/canvas/types";
 
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
 export type PipelineState = "idle" | "listening" | "processing" | "speaking";
@@ -25,23 +26,6 @@ export interface LatencyMetrics {
   llmComplete?: number;
   ttsComplete?: number;
   totalPipeline?: number;
-}
-
-export interface CanvasOperation {
-  id?: string;
-  action: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  color?: string;
-  fill?: string;
-  stroke_width?: number;
-  points?: [number, number][];
-  text?: string;
-  font_size?: number;
-  font_family?: string;
-  target_id?: string;
 }
 
 interface UseWebRTCOptions {

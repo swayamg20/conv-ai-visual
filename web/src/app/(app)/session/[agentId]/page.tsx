@@ -5,8 +5,13 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { Mic, ArrowLeft, ChevronUp, Loader2 } from "lucide-react";
 import { gsap } from "gsap";
-import { SVGCanvas, type SVGCanvasHandle, type TeachingSequence } from "@/components/svg-canvas";
-import { useWebRTC, type TranscriptEvent, type CanvasOperation, type PipelineState } from "@/hooks/use-webrtc";
+import { SVGCanvas } from "@/components/svg-canvas";
+import type {
+  CanvasOperation,
+  SVGCanvasHandle,
+  TeachingSequence,
+} from "@/features/canvas/types";
+import { useWebRTC, type TranscriptEvent, type PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
 import { compileScene, type SDLScene } from "@/lib/scene-kit";
 import { VoiceOrb, type VoiceState } from "@/components/voice-orb";

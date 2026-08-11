@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { CanvasOperation } from "./use-webrtc";
+import type { CanvasOperation } from "@/features/canvas/types";
 import type { SDLScene } from "@/lib/scene-kit";
 import { getAuthHeaders } from "@/lib/firebase";
 

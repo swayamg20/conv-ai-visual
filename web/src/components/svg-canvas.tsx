@@ -1,216 +1,56 @@
 "use client";
 
+import { gsap } from "gsap";
 import {
-  useRef,
-  useEffect,
-  useImperativeHandle,
   forwardRef,
   useCallback,
+  useEffect,
+  useImperativeHandle,
+  useRef,
   useState,
 } from "react";
 import rough from "roughjs";
 import type { RoughSVG } from "roughjs/bin/svg";
-import { gsap } from "gsap";
+
+import { saveCanvasImage } from "@/features/canvas/export-image";
+import { normalizeOperation, normalizeTeachingSteps } from "@/features/canvas/normalization";
+import { createSvgPrimitiveRenderer } from "@/features/canvas/primitives";
+import { createTeachingTimeline } from "@/features/canvas/timeline";
+import type {
+  AnimationOperation,
+  CanvasOperation,
+  FunctionPlotData,
+  LatexOperation,
+  SVGCanvasHandle,
+  SVGCanvasProps,
+  SVGElementData,
+  TeachingSequence,
+  TeachingStep,
+} from "@/features/canvas/types";
+import { useCanvasViewport } from "@/features/canvas/viewport";
+import { getCanvasPalette, GRID_SNAP, renderGrid } from "@/lib/canvas-utils";
 import {
-  createTimeline,
-  animateDrawOn,
-  animateProgressivePath,
   animateColorPulse,
   animateCrossOut,
-  animateSceneFadeOut,
+  animateDrawOn,
   animateInkReveal,
-  EASING,
+  animateProgressivePath,
+  animateSceneFadeOut,
   DURATION,
+  EASING,
 } from "@/lib/gsap-setup";
-import { getInkStrokePath } from "@/lib/freehand-stroke";
-import { getCanvasPalette, snap, snapPoints, GRID_SNAP, renderGrid } from "@/lib/canvas-utils";
-import type { CanvasOperation } from "@/hooks/use-webrtc";
-import katex from "katex";
 import "katex/dist/katex.min.css";
 
-// ============= Types =============
-
-export interface AnimationOperation {
-  type: "animation";
-  target_id: string;
-  properties: {
-    x?: number;
-    y?: number;
-    opacity?: number;
-    scale?: number;
-    rotation?: number;
-    [key: string]: any;
+function sequenceFocus(steps: TeachingStep[]): { x: number; y: number } | null {
+  const firstPositionedStep = steps.find(
+    (step) => step.y !== undefined || step.element?.y !== undefined
+  );
+  if (!firstPositionedStep) return null;
+  return {
+    x: firstPositionedStep.x ?? firstPositionedStep.element?.x ?? 0,
+    y: firstPositionedStep.y ?? firstPositionedStep.element?.y ?? 0,
   };
-  duration: number;
-  ease: string;
-  delay?: number;
 }
-
-export interface LatexOperation {
-  type: "latex";
-  id: string;
-  latex: string;
-  x: number;
-  y: number;
-  font_size: number;
-  color: string;
-}
-
-export interface TeachingStep {
-  action: string;
-  element?: CanvasOperation;
-  target_id?: string;
-  properties?: Record<string, any>;
-  duration?: number;
-  speech_cue?: string;
-  latex?: string;
-  text?: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  font_size?: number;
-  color?: string;
-  fill?: string;
-  stroke_width?: number;
-  points?: [number, number][];
-  font_family?: string;
-  label?: string;
-  roughness?: number;
-  animate_style?: "draw" | "fade" | "scale" | "none";
-  highlight_color?: string;
-}
-
-export interface TeachingSequence {
-  steps: TeachingStep[];
-}
-
-export interface FunctionPlotData {
-  type: "function_plot";
-  function: string;
-  points: number[][];
-  x_range: number[];
-  y_range: number[];
-  color: string;
-  animate: boolean;
-  show_axes: boolean;
-}
-
-interface SVGElementData {
-  element: SVGElement;
-  id: string;
-  type: string;
-  x: number;
-  y: number;
-  data: any;
-}
-
-export interface SVGCanvasHandle {
-  render(operations: CanvasOperation[]): void;
-  animate(animation: AnimationOperation): gsap.core.Tween | null;
-  renderLatex(latex: LatexOperation): void;
-  createSequence(sequence: TeachingSequence): gsap.core.Timeline;
-  createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
-  renderFunctionPlot(plot: FunctionPlotData): void;
-  clear(): void;
-  saveAsImage(): void;
-  zoomIn(): void;
-  zoomOut(): void;
-  resetZoom(): void;
-  panTo(x: number, y: number): void;
-}
-
-interface SVGCanvasProps {
-  width?: number;
-  height?: number;
-  className?: string;
-  showGrid?: boolean;
-}
-
-// ============= Layout Normalization =============
-
-type ShapeBounds = { x: number; y: number; w: number; h: number };
-
-/**
- * Pre-process a list of teaching steps to improve layout:
- * 1. Snap all coordinates to a 20px grid
- * 2. Auto-center text labels inside the most recent preceding shape
- * 3. Ensure minimum shape sizes
- */
-function normalizeSteps(steps: TeachingStep[]): TeachingStep[] {
-  let lastShapeBounds: ShapeBounds | null = null;
-  const SHAPE_ACTIONS = new Set(["rect", "circle", "ellipse"]);
-
-  return steps.map((step) => {
-    const s = { ...step };
-
-    // Snap coordinates
-    if (s.x != null) s.x = snap(s.x);
-    if (s.y != null) s.y = snap(s.y);
-    if (s.width != null) s.width = Math.max(snap(s.width), 40);
-    if (s.height != null) s.height = Math.max(snap(s.height), 40);
-    if (s.points) s.points = snapPoints(s.points);
-
-    // Track shape bounds
-    if (SHAPE_ACTIONS.has(s.action) && s.x != null && s.y != null) {
-      const w = s.width ?? (s.action === "circle" ? s.width ?? 60 : 100);
-      const h = s.height ?? (s.action === "circle" ? w : 60);
-      lastShapeBounds = { x: s.x, y: s.y, w, h };
-    }
-
-    // Auto-center text inside preceding shape if it looks like a label
-    if (s.action === "text" && lastShapeBounds && s.text) {
-      const isShortLabel = (s.text.length <= 20);
-      const b = lastShapeBounds;
-      // Check if the text position is roughly near the shape (within 40px)
-      const textX = s.x ?? 0;
-      const textY = s.y ?? 0;
-      const nearShape =
-        Math.abs(textX - b.x) < b.w + 40 &&
-        Math.abs(textY - b.y) < b.h + 40;
-
-      if (isShortLabel && nearShape) {
-        const fontSize = s.font_size ?? 16;
-        const estTextWidth = s.text.length * fontSize * 0.55;
-        s.x = snap(b.x + b.w / 2 - estTextWidth / 2);
-        s.y = snap(b.y + b.h / 2 + fontSize / 3);
-        s.font_size = Math.min(fontSize, b.h * 0.4);
-        // Also set text-anchor to middle for precise centering
-        (s as any)._centered = true;
-      }
-
-      // If text is a standalone label below a shape, center it under the shape
-      if (isShortLabel && nearShape && textY > b.y + b.h - 10) {
-        s.x = snap(b.x + b.w / 2 - (s.text.length * (s.font_size ?? 14) * 0.55) / 2);
-        s.y = snap(b.y + b.h + 20);
-      }
-    }
-
-    // For non-shape/non-text actions, don't update lastShapeBounds
-    if (s.action === "text" || s.action === "latex") {
-      // don't overwrite lastShapeBounds
-    } else if (!SHAPE_ACTIONS.has(s.action)) {
-      lastShapeBounds = null;
-    }
-
-    return s;
-  });
-}
-
-/**
- * Normalize a single CanvasOperation (snap to grid, minimum sizes).
- */
-function normalizeOp(op: CanvasOperation): CanvasOperation {
-  const o = { ...op };
-  if (o.x != null) o.x = snap(o.x);
-  if (o.y != null) o.y = snap(o.y);
-  if (o.width != null) o.width = Math.max(snap(o.width), 40);
-  if (o.height != null) o.height = Math.max(snap(o.height), 40);
-  if (o.points) o.points = snapPoints(o.points);
-  return o;
-}
-
-// ============= Component =============
 
 export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
   ({ width = 800, height = 600, className, showGrid = true }, ref) => {
@@ -220,1225 +60,383 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const timelinesRef = useRef<Map<string, gsap.core.Timeline>>(new Map());
     const sequenceQueueRef = useRef<gsap.core.Timeline[]>([]);
     const isPlayingRef = useRef(false);
-    const [, setForceUpdate] = useState(0);
-    const [zoomLevel, setZoomLevel] = useState(1);
+    const [, forceRender] = useState(0);
     const paletteRef = useRef(getCanvasPalette());
+    const {
+      applyViewBox,
+      handlePointerDown,
+      handlePointerMove,
+      handlePointerUp,
+      isPanning,
+      panRef,
+      panTo,
+      resetZoom,
+      zoomIn,
+      zoomLevel,
+      zoomOut,
+    } = useCanvasViewport({ svgRef, width, height });
 
-    // ============= Pan State =============
-    const panRef = useRef({ x: 0, y: 0 });
-    const isPanningRef = useRef(false);
-    const [isPanning, setIsPanning] = useState(false);
-    const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-
-    const applyViewBox = useCallback(
-      (zoom: number, pan: { x: number; y: number }, animate = false) => {
-        if (!svgRef.current) return;
-        const vbW = width / zoom;
-        const vbH = height / zoom;
-        const vb = `${pan.x} ${pan.y} ${vbW} ${vbH}`;
-        if (animate) {
-          gsap.to(svgRef.current, {
-            attr: { viewBox: vb },
-            duration: DURATION.fast,
-            ease: EASING.smooth,
-          });
-        } else {
-          svgRef.current.setAttribute("viewBox", vb);
-        }
-      },
-      [width, height]
-    );
-
-    const panTo = useCallback(
-      (x: number, y: number, zoom?: number) => {
-        const z = zoom ?? zoomLevel;
-        const vbW = width / z;
-        const vbH = height / z;
-        // Center the target point in the viewport
-        panRef.current = { x: x - vbW / 2, y: y - vbH / 2 };
-        applyViewBox(z, panRef.current, true);
-      },
-      [width, height, zoomLevel, applyViewBox]
-    );
-
-    // ============= Pan Handlers =============
-
-    const handlePointerDown = useCallback(
-      (e: React.PointerEvent) => {
-        // Only pan with left mouse button or touch
-        if (e.button !== 0) return;
-        isPanningRef.current = true;
-        setIsPanning(true);
-        panStartRef.current = {
-          x: e.clientX,
-          y: e.clientY,
-          panX: panRef.current.x,
-          panY: panRef.current.y,
-        };
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
-      },
-      []
-    );
-
-    const handlePointerMove = useCallback(
-      (e: React.PointerEvent) => {
-        if (!isPanningRef.current) return;
-        const svg = svgRef.current;
-        if (!svg) return;
-        // Convert screen pixels to SVG coordinate delta
-        const rect = svg.getBoundingClientRect();
-        const scaleX = (width / zoomLevel) / rect.width;
-        const scaleY = (height / zoomLevel) / rect.height;
-        const dx = (e.clientX - panStartRef.current.x) * scaleX;
-        const dy = (e.clientY - panStartRef.current.y) * scaleY;
-        panRef.current = {
-          x: panStartRef.current.panX - dx,
-          y: panStartRef.current.panY - dy,
-        };
-        applyViewBox(zoomLevel, panRef.current);
-      },
-      [width, height, zoomLevel, applyViewBox]
-    );
-
-    const handlePointerUp = useCallback(() => {
-      isPanningRef.current = false;
-      setIsPanning(false);
-    }, []);
-
-    // Refresh palette + grid when theme changes
     useEffect(() => {
-      const html = document.documentElement;
-      const refresh = () => {
+      const refreshPalette = () => {
         paletteRef.current = getCanvasPalette();
         if (svgRef.current && showGrid) renderGrid(svgRef.current, width, height);
       };
       const observer = new MutationObserver((mutations) => {
-        for (const m of mutations) {
-          if (m.attributeName === "class") { refresh(); break; }
+        if (mutations.some((mutation) => mutation.attributeName === "class")) {
+          refreshPalette();
         }
       });
-      observer.observe(html, { attributes: true });
+      observer.observe(document.documentElement, { attributes: true });
       return () => observer.disconnect();
-    }, [width, height, showGrid]);
+    }, [height, showGrid, width]);
 
     useEffect(() => {
       paletteRef.current = getCanvasPalette();
-      if (svgRef.current) {
-        roughRef.current = rough.svg(svgRef.current);
-        if (showGrid) renderGrid(svgRef.current, width, height);
-      }
-    }, [width, height, showGrid]);
+      if (!svgRef.current) return;
+      roughRef.current = rough.svg(svgRef.current);
+      if (showGrid) renderGrid(svgRef.current, width, height);
+    }, [height, showGrid, width]);
 
-    // Kill all in-flight GSAP timelines on unmount
     useEffect(() => {
       const timelines = timelinesRef.current;
       const sequenceQueue = sequenceQueueRef.current;
       return () => {
-        timelines.forEach((tl) => tl.kill());
+        timelines.forEach((timeline) => timeline.kill());
         timelines.clear();
-        sequenceQueue.forEach((tl) => tl.kill());
+        sequenceQueue.forEach((timeline) => timeline.kill());
         sequenceQueue.length = 0;
       };
     }, []);
-
-    // ============= Helpers =============
 
     const generateId = useCallback(
       () => `elem_${Math.random().toString(36).substring(2, 10)}`,
       []
     );
 
-    const createGroup = useCallback((id: string): SVGGElement => {
-      const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      g.setAttribute("id", id);
-      g.setAttribute("data-element-id", id);
-      return g;
-    }, []);
-
-    const createArrowhead = useCallback((id: string, color: string) => {
-      if (!svgRef.current) return;
-      const defs =
-        svgRef.current.querySelector("defs") ||
-        document.createElementNS("http://www.w3.org/2000/svg", "defs");
-      if (!svgRef.current.querySelector("defs")) {
-        svgRef.current.appendChild(defs);
-      }
-      const markerId = `arrowhead-${id}`;
-      if (defs.querySelector(`#${markerId}`)) return markerId;
-
-      const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
-      marker.setAttribute("id", markerId);
-      marker.setAttribute("markerWidth", "10");
-      marker.setAttribute("markerHeight", "10");
-      marker.setAttribute("refX", "8");
-      marker.setAttribute("refY", "3");
-      marker.setAttribute("orient", "auto");
-      marker.setAttribute("markerUnits", "strokeWidth");
-
-      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-      path.setAttribute("d", "M0,0 L0,6 L9,3 z");
-      path.setAttribute("fill", color);
-      marker.appendChild(path);
-      defs.appendChild(marker);
-      return markerId;
-    }, []);
-
-    const getRoughOptions = useCallback(
-      (op: CanvasOperation & { roughness?: number }) => ({
-        stroke: op.color ?? paletteRef.current.stroke,
-        strokeWidth: op.stroke_width ?? 1.5,
-        fill: op.fill || undefined,
-        roughness: op.roughness ?? 1.2,
-        fillStyle: op.fill ? "solid" : undefined,
-      }),
-      []
-    );
-
-    // ============= Drawing Primitives =============
-
-    const drawRect = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current) return null;
-        const g = createGroup(op.id || generateId());
-        const node = roughRef.current.rectangle(
-          op.x ?? 0,
-          op.y ?? 0,
-          op.width ?? 100,
-          op.height ?? 100,
-          getRoughOptions(op)
-        );
-        g.appendChild(node);
-        return g;
-      },
-      [createGroup, generateId, getRoughOptions]
-    );
-
-    const drawCircle = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current) return null;
-        const g = createGroup(op.id || generateId());
-        const cx = (op.x ?? 0) + (op.width ?? 50) / 2;
-        const cy = (op.y ?? 0) + (op.width ?? 50) / 2;
-        const diameter = op.width ?? 50;
-        const node = roughRef.current.circle(cx, cy, diameter, getRoughOptions(op));
-        g.appendChild(node);
-        return g;
-      },
-      [createGroup, generateId, getRoughOptions]
-    );
-
-    const drawEllipse = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current) return null;
-        const g = createGroup(op.id || generateId());
-        const cx = (op.x ?? 0) + (op.width ?? 100) / 2;
-        const cy = (op.y ?? 0) + (op.height ?? 80) / 2;
-        const node = roughRef.current.ellipse(
-          cx,
-          cy,
-          op.width ?? 100,
-          op.height ?? 80,
-          getRoughOptions(op)
-        );
-        g.appendChild(node);
-        return g;
-      },
-      [createGroup, generateId, getRoughOptions]
-    );
-
-    const drawLine = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!roughRef.current || !svgRef.current || !op.points || op.points.length < 2) return null;
-        const g = createGroup(op.id || generateId());
-        const start = op.points[0];
-        const end = op.points[op.points.length - 1];
-        const node = roughRef.current.line(
-          start[0],
-          start[1],
-          end[0],
-          end[1],
-          getRoughOptions(op)
-        );
-        g.appendChild(node);
-        return g;
-      },
-      [createGroup, generateId, getRoughOptions]
-    );
-
-    const drawArrow = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!svgRef.current || !op.points || op.points.length < 2) return null;
-        const g = createGroup(op.id || generateId());
-        const start = op.points[0];
-        const end = op.points[op.points.length - 1];
-        const color = op.color ?? paletteRef.current.stroke;
-        const strokeWidth = op.stroke_width ?? 1.5;
-
-        // Ink stroke body (variable-width filled path)
-        const inkD = getInkStrokePath(op.points, { size: strokeWidth * 2 });
-        const inkPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        inkPath.setAttribute("d", inkD);
-        inkPath.setAttribute("fill", color);
-        inkPath.setAttribute("stroke", "none");
-        g.appendChild(inkPath);
-
-        // Arrowhead via invisible marker line
-        const markerId = createArrowhead(op.id || generateId(), color);
-        const markerLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-        markerLine.setAttribute("x1", String(start[0]));
-        markerLine.setAttribute("y1", String(start[1]));
-        markerLine.setAttribute("x2", String(end[0]));
-        markerLine.setAttribute("y2", String(end[1]));
-        markerLine.setAttribute("stroke", "transparent");
-        markerLine.setAttribute("stroke-width", "1");
-        if (markerId) markerLine.setAttribute("marker-end", `url(#${markerId})`);
-        g.appendChild(markerLine);
-
-        return g;
-      },
-      [createGroup, generateId, createArrowhead]
-    );
-
-    const drawText = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!svgRef.current) return null;
-        const g = createGroup(op.id || generateId());
-        const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-        text.setAttribute("x", String(op.x ?? 0));
-        text.setAttribute("y", String(op.y ?? 0));
-        text.setAttribute("fill", op.color ?? paletteRef.current.stroke);
-        text.setAttribute("font-size", String(op.font_size ?? 16));
-        text.setAttribute("font-family", op.font_family ?? "var(--font-handwriting), var(--font-handwriting-alt), cursive, sans-serif");
-        if ((op as any)._centered) {
-          text.setAttribute("text-anchor", "middle");
-          text.setAttribute("dominant-baseline", "central");
-        }
-        text.textContent = op.text ?? "";
-        g.appendChild(text);
-        return g;
-      },
-      [createGroup, generateId]
-    );
-
-    const drawPath = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!svgRef.current || !op.points || op.points.length < 2) return null;
-        const g = createGroup(op.id || generateId());
-        const color = op.color ?? paletteRef.current.stroke;
-        const strokeWidth = op.stroke_width ?? 1.5;
-
-        // Ink stroke (variable-width filled path)
-        const inkD = getInkStrokePath(op.points, { size: strokeWidth * 2 });
-        const inkPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        inkPath.setAttribute("d", inkD);
-        inkPath.setAttribute("fill", color);
-        inkPath.setAttribute("stroke", "none");
-        g.appendChild(inkPath);
-
-        return g;
-      },
-      [createGroup, generateId]
-    );
-
-    /** Smooth stroked curve through points (for function plots, not hand-drawn ink) */
-    const drawCurve = useCallback(
-      (op: CanvasOperation): SVGElement | null => {
-        if (!svgRef.current || !op.points || op.points.length < 2) return null;
-        const g = createGroup(op.id || generateId());
-        const color = op.color ?? paletteRef.current.stroke;
-        const strokeWidth = op.stroke_width ?? 2.5;
-
-        const pts = op.points;
-        let d = `M${pts[0][0].toFixed(1)},${pts[0][1].toFixed(1)}`;
-
-        if (pts.length === 2) {
-          d += ` L${pts[1][0].toFixed(1)},${pts[1][1].toFixed(1)}`;
-        } else {
-          // Quadratic Bezier through midpoints for smooth curve
-          for (let i = 0; i < pts.length - 1; i++) {
-            const [x0, y0] = pts[i];
-            const [x1, y1] = pts[i + 1];
-            if (i === 0) {
-              const mx = (x0 + x1) / 2;
-              const my = (y0 + y1) / 2;
-              d += ` L${mx.toFixed(1)},${my.toFixed(1)}`;
-            } else if (i === pts.length - 2) {
-              d += ` Q${x0.toFixed(1)},${y0.toFixed(1)} ${x1.toFixed(1)},${y1.toFixed(1)}`;
-            } else {
-              const mx = (x0 + x1) / 2;
-              const my = (y0 + y1) / 2;
-              d += ` Q${x0.toFixed(1)},${y0.toFixed(1)} ${mx.toFixed(1)},${my.toFixed(1)}`;
-            }
-          }
-        }
-
-        const curvePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        curvePath.setAttribute("d", d);
-        curvePath.setAttribute("fill", "none");
-        curvePath.setAttribute("stroke", color);
-        curvePath.setAttribute("stroke-width", String(strokeWidth));
-        curvePath.setAttribute("stroke-linecap", "round");
-        curvePath.setAttribute("stroke-linejoin", "round");
-        g.appendChild(curvePath);
-
-        return g;
-      },
-      [createGroup, generateId]
-    );
-
-    const drawLatex = useCallback(
-      (latexOp: LatexOperation): SVGElement | null => {
-        if (!svgRef.current) return null;
-        const g = createGroup(latexOp.id);
-        const html = katex.renderToString(latexOp.latex, {
-          throwOnError: false,
-          displayMode: true,
-        });
-        const fo = document.createElementNS("http://www.w3.org/2000/svg", "foreignObject");
-        fo.setAttribute("x", String(latexOp.x));
-        fo.setAttribute("y", String(latexOp.y));
-        fo.setAttribute("width", "500");
-        fo.setAttribute("height", "120");
-        const div = document.createElement("div");
-        div.innerHTML = html;
-        div.style.color = latexOp.color;
-        div.style.fontSize = `${latexOp.font_size}px`;
-        fo.appendChild(div);
-        g.appendChild(fo);
-        return g;
-      },
-      [createGroup]
-    );
-
-    // ============= Function Plot =============
+    const primitiveRenderer = useCallback(() => {
+      if (!svgRef.current) return null;
+      return createSvgPrimitiveRenderer({
+        svg: svgRef.current,
+        rough: roughRef.current,
+        palette: paletteRef.current,
+        generateId,
+      });
+    }, [generateId]);
 
     const renderFunctionPlot = useCallback(
       (plot: FunctionPlotData) => {
-        if (!svgRef.current || !plot.points || plot.points.length < 2) return;
+        const svg = svgRef.current;
+        const renderer = primitiveRenderer();
+        if (!svg || !renderer) return;
+        const result = renderer.drawFunctionPlot(plot, { width, height });
+        if (!result) return;
 
-        const plotId = `plot_${generateId()}`;
-        const g = createGroup(plotId);
-
-        const canvasW = width;
-        const canvasH = height;
-        const margin = 60;
-        const plotW = canvasW - margin * 2;
-        const plotH = canvasH - margin * 2;
-
-        const [minX, maxX] = plot.x_range;
-        const [minY, maxY] = plot.y_range;
-        const scaleX = (x: number) => margin + ((x - minX) / (maxX - minX)) * plotW;
-        const scaleY = (y: number) => margin + ((maxY - y) / (maxY - minY)) * plotH;
-
-        if (plot.show_axes) {
-          // X-axis
-          const xAxisY = scaleY(0);
-          if (xAxisY >= margin && xAxisY <= canvasH - margin) {
-            const xLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            xLine.setAttribute("x1", String(margin));
-            xLine.setAttribute("y1", String(xAxisY));
-            xLine.setAttribute("x2", String(canvasW - margin));
-            xLine.setAttribute("y2", String(xAxisY));
-            xLine.setAttribute("stroke", paletteRef.current.axis);
-            xLine.setAttribute("stroke-width", "1.5");
-            g.appendChild(xLine);
-
-            // X tick labels
-            const xStep = (maxX - minX) / 8;
-            for (let v = Math.ceil(minX / xStep) * xStep; v <= maxX; v += xStep) {
-              if (Math.abs(v) < 0.001) continue;
-              const tx = scaleX(v);
-              const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
-              tick.setAttribute("x1", String(tx));
-              tick.setAttribute("y1", String(xAxisY - 4));
-              tick.setAttribute("x2", String(tx));
-              tick.setAttribute("y2", String(xAxisY + 4));
-              tick.setAttribute("stroke", paletteRef.current.axis);
-              tick.setAttribute("stroke-width", "1");
-              g.appendChild(tick);
-
-              const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-              label.setAttribute("x", String(tx));
-              label.setAttribute("y", String(xAxisY + 18));
-              label.setAttribute("text-anchor", "middle");
-              label.setAttribute("fill", paletteRef.current.axis);
-              label.setAttribute("font-size", "11");
-              label.textContent = Number(v.toFixed(1)).toString();
-              g.appendChild(label);
-            }
-          }
-
-          // Y-axis
-          const yAxisX = scaleX(0);
-          if (yAxisX >= margin && yAxisX <= canvasW - margin) {
-            const yLine = document.createElementNS("http://www.w3.org/2000/svg", "line");
-            yLine.setAttribute("x1", String(yAxisX));
-            yLine.setAttribute("y1", String(margin));
-            yLine.setAttribute("x2", String(yAxisX));
-            yLine.setAttribute("y2", String(canvasH - margin));
-            yLine.setAttribute("stroke", paletteRef.current.axis);
-            yLine.setAttribute("stroke-width", "1.5");
-            g.appendChild(yLine);
-
-            const yStep = (maxY - minY) / 6;
-            for (let v = Math.ceil(minY / yStep) * yStep; v <= maxY; v += yStep) {
-              if (Math.abs(v) < 0.001) continue;
-              const ty = scaleY(v);
-              const tick = document.createElementNS("http://www.w3.org/2000/svg", "line");
-              tick.setAttribute("x1", String(yAxisX - 4));
-              tick.setAttribute("y1", String(ty));
-              tick.setAttribute("x2", String(yAxisX + 4));
-              tick.setAttribute("y2", String(ty));
-              tick.setAttribute("stroke", paletteRef.current.axis);
-              tick.setAttribute("stroke-width", "1");
-              g.appendChild(tick);
-
-              const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-              label.setAttribute("x", String(yAxisX - 10));
-              label.setAttribute("y", String(ty + 4));
-              label.setAttribute("text-anchor", "end");
-              label.setAttribute("fill", paletteRef.current.axis);
-              label.setAttribute("font-size", "11");
-              label.textContent = Number(v.toFixed(1)).toString();
-              g.appendChild(label);
-            }
-          }
-        }
-
-        // Build the curve path
-        const pathD = plot.points
-          .map(([px, py], i) => {
-            const sx = scaleX(px);
-            const sy = scaleY(py);
-            return `${i === 0 ? "M" : "L"}${sx.toFixed(1)},${sy.toFixed(1)}`;
-          })
-          .join(" ");
-
-        const curvePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        curvePath.setAttribute("d", pathD);
-        curvePath.setAttribute("fill", "none");
-        curvePath.setAttribute("stroke", plot.color);
-        curvePath.setAttribute("stroke-width", "2.5");
-        curvePath.setAttribute("stroke-linecap", "round");
-        curvePath.setAttribute("stroke-linejoin", "round");
-        g.appendChild(curvePath);
-
-        svgRef.current.appendChild(g);
-
-        // Animate: progressive draw or instant
+        svg.appendChild(result.group);
         if (plot.animate) {
-          gsap.set(g, { opacity: 1 });
-          // Fade in axes
-          const axes = g.querySelectorAll("line, text");
-          gsap.fromTo(axes, { opacity: 0 }, { opacity: 1, duration: DURATION.fast, stagger: 0.02 });
-          // Progressive draw of the curve
-          animateProgressivePath(curvePath, DURATION.verySlow, EASING.draw);
+          gsap.set(result.group, { opacity: 1 });
+          gsap.fromTo(
+            result.axes,
+            { opacity: 0 },
+            { opacity: 1, duration: DURATION.fast, stagger: 0.02 }
+          );
+          animateProgressivePath(result.curve, DURATION.verySlow, EASING.draw);
         }
 
-        elementsRef.current.set(plotId, {
-          element: g,
-          id: plotId,
+        elementsRef.current.set(result.id, {
+          element: result.group,
+          id: result.id,
           type: "function_plot",
-          x: margin,
-          y: margin,
+          x: result.margin,
+          y: result.margin,
           data: plot,
         });
-
-        setForceUpdate((n) => n + 1);
+        forceRender((revision) => revision + 1);
       },
-      [width, height, generateId, createGroup]
+      [height, primitiveRenderer, width]
     );
-
-    // ============= Render Operations =============
 
     const render = useCallback(
       (operations: CanvasOperation[]) => {
-        if (!svgRef.current) return;
+        const svg = svgRef.current;
+        const renderer = primitiveRenderer();
+        if (!svg || !renderer) return;
 
-        for (const rawOp of operations) {
-          const op = (rawOp.action === "clear" || rawOp.action === "delete" || rawOp.action === "highlight" || rawOp.action === "crossout")
-            ? rawOp
-            : normalizeOp(rawOp);
-          if (op.action === "clear") {
-            if (svgRef.current) {
-              const svg = svgRef.current;
-              const fadeOut = animateSceneFadeOut(svg);
-              fadeOut.then(() => {
-                Array.from(svg.children)
-                  .filter((el) => el.id !== "canvas-grid" && el.tagName !== "defs")
-                  .forEach((el) => el.remove());
-              });
-            }
+        for (const rawOperation of operations) {
+          const operation = ["clear", "delete", "highlight", "crossout"].includes(
+            rawOperation.action
+          )
+            ? rawOperation
+            : normalizeOperation(rawOperation);
+
+          if (operation.action === "clear") {
+            animateSceneFadeOut(svg).then(() => {
+              Array.from(svg.children)
+                .filter((element) => element.id !== "canvas-grid" && element.tagName !== "defs")
+                .forEach((element) => element.remove());
+            });
             elementsRef.current.clear();
             continue;
           }
 
-          if (op.action === "delete") {
-            const targetId = op.id || op.target_id;
-            if (targetId && elementsRef.current.has(targetId)) {
-              const data = elementsRef.current.get(targetId);
-              if (data) {
-                gsap.to(data.element, {
-                  opacity: 0,
-                  duration: DURATION.fast,
-                  ease: EASING.smooth,
-                  onComplete: () => data.element.remove(),
-                });
-              }
+          if (operation.action === "delete") {
+            const targetId = operation.id || operation.target_id;
+            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            if (target && targetId) {
+              gsap.to(target.element, {
+                opacity: 0,
+                duration: DURATION.fast,
+                ease: EASING.smooth,
+                onComplete: () => target.element.remove(),
+              });
               elementsRef.current.delete(targetId);
             }
             continue;
           }
 
-          if (op.action === "crossout") {
-            const targetId = op.id || op.target_id;
-            if (targetId && elementsRef.current.has(targetId) && svgRef.current) {
-              const data = elementsRef.current.get(targetId);
-              if (data) {
-                animateCrossOut(
-                  svgRef.current,
-                  data.element,
-                  op.color ?? paletteRef.current.error,
-                  DURATION.fast
-                );
-              }
+          if (operation.action === "crossout") {
+            const targetId = operation.id || operation.target_id;
+            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            if (target) {
+              animateCrossOut(
+                svg,
+                target.element,
+                operation.color ?? paletteRef.current.error,
+                DURATION.fast
+              );
             }
             continue;
           }
 
-          let element: SVGElement | null = null;
-          const elemId = op.id || generateId();
-          const animateStyle = (op as any).animate_style ?? "draw";
-
-          switch (op.action) {
-            case "rect":
-              element = drawRect({ ...op, id: elemId });
-              break;
-            case "circle":
-              element = drawCircle({ ...op, id: elemId });
-              break;
-            case "ellipse":
-              element = drawEllipse({ ...op, id: elemId });
-              break;
-            case "line":
-              element = drawLine({ ...op, id: elemId });
-              break;
-            case "arrow":
-              element = drawArrow({ ...op, id: elemId });
-              break;
-            case "text":
-              element = drawText({ ...op, id: elemId });
-              break;
-            case "path":
-              element = drawPath({ ...op, id: elemId });
-              break;
-            case "curve":
-              element = drawCurve({ ...op, id: elemId });
-              break;
-            case "highlight": {
-              const hTargetId = op.id || op.target_id;
-              if (hTargetId && elementsRef.current.has(hTargetId)) {
-                const data = elementsRef.current.get(hTargetId);
-                if (data) {
-                  const hColor = (op as any).highlight_color;
-                  if (hColor) {
-                    animateColorPulse(data.element, hColor, 0.4, 2);
-                  } else {
-                    gsap.set(data.element, { transformOrigin: "center center" });
-                    gsap.to(data.element, {
-                      scale: 1.15,
-                      duration: 0.3,
-                      yoyo: true,
-                      repeat: 1,
-                      ease: EASING.teaching,
-                    });
-                  }
-                }
-              }
-              continue;
-            }
-          }
-
-          if (element) {
-            gsap.set(element, { opacity: 0 });
-            svgRef.current.appendChild(element);
-
-            // Use draw-on for shapes, ink reveal for arrows/paths, progressive for curves, fade for text
-            const hasStrokePaths = element.querySelectorAll("path[stroke]:not([stroke='none'])").length > 0;
-            const isInkElement = (op.action === "arrow" || op.action === "path") && !hasStrokePaths;
-            const isCurve = op.action === "curve";
-
-            if (isCurve) {
-              // Progressive stroke reveal for smooth curves
-              gsap.set(element, { opacity: 1 });
-              const curvePath = element.querySelector("path");
-              if (curvePath) {
-                animateProgressivePath(curvePath as SVGPathElement, DURATION.verySlow, EASING.draw);
-              }
-            } else if (animateStyle === "draw" && isInkElement) {
-              animateInkReveal(element, DURATION.draw, EASING.draw);
-            } else if (
-              animateStyle === "draw" &&
-              op.action !== "text" &&
-              element.querySelectorAll("path").length > 0
-            ) {
-              animateDrawOn(element, DURATION.draw, EASING.draw);
-            } else if (animateStyle === "scale") {
-              gsap.fromTo(
-                element,
-                { opacity: 0, scale: 0, transformOrigin: "center center" },
-                { opacity: 1, scale: 1, duration: DURATION.normal, ease: EASING.back }
-              );
+          if (operation.action === "highlight") {
+            const targetId = operation.id || operation.target_id;
+            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            if (!target) continue;
+            if (operation.highlight_color) {
+              animateColorPulse(target.element, operation.highlight_color, 0.4, 2);
             } else {
-              gsap.to(element, {
-                opacity: 1,
-                duration: DURATION.fast,
+              gsap.set(target.element, { transformOrigin: "center center" });
+              gsap.to(target.element, {
+                scale: 1.15,
+                duration: 0.3,
+                yoyo: true,
+                repeat: 1,
                 ease: EASING.teaching,
               });
             }
+            continue;
+          }
 
-            elementsRef.current.set(elemId, {
+          const elementId = operation.id || generateId();
+          const animateStyle = operation.animate_style ?? "draw";
+          const element = renderer.draw({ ...operation, id: elementId });
+          if (!element) continue;
+
+          gsap.set(element, { opacity: 0 });
+          svg.appendChild(element);
+          const hasStrokePaths =
+            element.querySelectorAll("path[stroke]:not([stroke='none'])").length > 0;
+          const isInkElement =
+            (operation.action === "arrow" || operation.action === "path") && !hasStrokePaths;
+
+          if (operation.action === "curve") {
+            gsap.set(element, { opacity: 1 });
+            const curve = element.querySelector("path");
+            if (curve) animateProgressivePath(curve, DURATION.verySlow, EASING.draw);
+          } else if (animateStyle === "draw" && isInkElement) {
+            animateInkReveal(element, DURATION.draw, EASING.draw);
+          } else if (
+            animateStyle === "draw" &&
+            operation.action !== "text" &&
+            element.querySelectorAll("path").length > 0
+          ) {
+            animateDrawOn(element, DURATION.draw, EASING.draw);
+          } else if (animateStyle === "scale") {
+            gsap.fromTo(
               element,
-              id: elemId,
-              type: op.action,
-              x: op.x ?? 0,
-              y: op.y ?? 0,
-              data: op,
+              { opacity: 0, scale: 0, transformOrigin: "center center" },
+              { opacity: 1, scale: 1, duration: DURATION.normal, ease: EASING.back }
+            );
+          } else {
+            gsap.to(element, {
+              opacity: 1,
+              duration: DURATION.fast,
+              ease: EASING.teaching,
             });
           }
+
+          elementsRef.current.set(elementId, {
+            element,
+            id: elementId,
+            type: operation.action,
+            x: operation.x ?? 0,
+            y: operation.y ?? 0,
+            data: operation,
+          });
         }
 
-        setForceUpdate((n) => n + 1);
+        forceRender((revision) => revision + 1);
       },
-      [
-        drawRect, drawCircle, drawEllipse, drawLine, drawArrow, drawText, drawPath, drawCurve,
-        generateId,
-      ]
+      [generateId, primitiveRenderer]
     );
 
-    // ============= Animate Element =============
-
-    const animate = useCallback(
-      (animation: AnimationOperation): gsap.core.Tween | null => {
-        const targetData = elementsRef.current.get(animation.target_id);
-        if (!targetData) {
-          console.warn(`Animation target not found: ${animation.target_id}`);
-          return null;
-        }
-        return gsap.to(targetData.element, {
-          ...animation.properties,
-          duration: animation.duration,
-          ease: animation.ease,
-          delay: animation.delay || 0,
-        });
-      },
-      []
-    );
-
-    // ============= Render LaTeX =============
+    const animate = useCallback((animation: AnimationOperation): gsap.core.Tween | null => {
+      const target = elementsRef.current.get(animation.target_id);
+      if (!target) {
+        console.warn(`Animation target not found: ${animation.target_id}`);
+        return null;
+      }
+      return gsap.to(target.element, {
+        ...animation.properties,
+        duration: animation.duration,
+        ease: animation.ease,
+        delay: animation.delay || 0,
+      });
+    }, []);
 
     const renderLatex = useCallback(
-      (latexOp: LatexOperation) => {
-        if (!svgRef.current) return;
-        const element = drawLatex(latexOp);
-        if (element) {
-          gsap.set(element, { opacity: 0 });
-          svgRef.current.appendChild(element);
-          gsap.to(element, {
-            opacity: 1,
-            duration: DURATION.fast,
-            ease: EASING.teaching,
-          });
-          elementsRef.current.set(latexOp.id, {
-            element,
-            id: latexOp.id,
-            type: "latex",
-            x: latexOp.x,
-            y: latexOp.y,
-            data: latexOp,
-          });
-        }
+      (operation: LatexOperation) => {
+        const svg = svgRef.current;
+        const renderer = primitiveRenderer();
+        if (!svg || !renderer) return;
+        const element = renderer.drawLatex(operation);
+        gsap.set(element, { opacity: 0 });
+        svg.appendChild(element);
+        gsap.to(element, {
+          opacity: 1,
+          duration: DURATION.fast,
+          ease: EASING.teaching,
+        });
+        elementsRef.current.set(operation.id, {
+          element,
+          id: operation.id,
+          type: "latex",
+          x: operation.x,
+          y: operation.y,
+          data: operation,
+        });
       },
-      [drawLatex]
+      [primitiveRenderer]
     );
 
-    // ============= Sequence Queue =============
+    const clearTimelineScene = useCallback(() => {
+      const svg = svgRef.current;
+      if (!svg) {
+        elementsRef.current.clear();
+        return;
+      }
+      const children = Array.from(svg.children).filter(
+        (element) => element.id !== "canvas-grid" && element.tagName !== "defs"
+      );
+      gsap.to(children, {
+        opacity: 0,
+        duration: DURATION.fast,
+        ease: EASING.smooth,
+        stagger: 0.02,
+        onComplete: () => children.forEach((element) => element.remove()),
+      });
+      elementsRef.current.clear();
+    }, []);
+
+    const buildTimeline = useCallback(
+      (steps: TeachingStep[]) =>
+        createTeachingTimeline(steps, {
+          render,
+          renderLatex,
+          clearScene: clearTimelineScene,
+          getElement: (id) => elementsRef.current.get(id)?.element ?? null,
+          getSvg: () => svgRef.current,
+          generateId,
+          palette: paletteRef.current,
+        }),
+      [clearTimelineScene, generateId, render, renderLatex]
+    );
 
     const playNextSequence = useCallback(() => {
-      if (sequenceQueueRef.current.length === 0) {
+      const next = sequenceQueueRef.current.shift();
+      if (!next) {
         isPlayingRef.current = false;
         return;
       }
       isPlayingRef.current = true;
-      const next = sequenceQueueRef.current.shift()!;
-      next.eventCallback("onComplete", () => playNextSequence());
+      next.eventCallback("onComplete", playNextSequence);
       next.play();
     }, []);
 
-    // ============= Teaching Sequence =============
-
     const createSequence = useCallback(
       (sequence: TeachingSequence): gsap.core.Timeline => {
-        const tl = createTimeline({ paused: true });
+        const steps = normalizeTeachingSteps(sequence.steps);
+        const timeline = buildTimeline(steps);
         const timelineId = `tl_${Math.random().toString(36).substring(2, 10)}`;
-        const normalizedSteps = normalizeSteps(sequence.steps);
+        timelinesRef.current.set(timelineId, timeline);
+        sequenceQueueRef.current.push(timeline);
 
-        for (const step of normalizedSteps) {
-          const entryStyle = step.animate_style ?? "draw";
-
-          switch (step.action) {
-            case "clear":
-              tl.add(() => {
-                if (svgRef.current) {
-                  const children = Array.from(svgRef.current.children).filter(
-                    (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
-                  );
-                  gsap.to(children, {
-                    opacity: 0,
-                    duration: DURATION.fast,
-                    ease: EASING.smooth,
-                    stagger: 0.02,
-                    onComplete: () => {
-                      children.forEach((el) => el.remove());
-                    },
-                  });
-                }
-                elementsRef.current.clear();
-              });
-              // Spacer so next steps wait for fade-out to finish
-              tl.to({}, { duration: DURATION.fast + 0.1 });
-              break;
-
-            case "draw":
-              if (step.element) {
-                tl.add(() => {
-                  render([{ ...step.element!, animate_style: entryStyle } as any]);
-                }, "+=0.15");
-              }
-              break;
-
-            case "animate":
-              if (step.target_id && step.properties) {
-                const targetId = step.target_id;
-                const props = step.properties;
-                const dur = step.duration ?? DURATION.normal;
-                tl.add(() => {
-                  const targetData = elementsRef.current.get(targetId);
-                  if (targetData) {
-                    gsap.to(targetData.element, { ...props, duration: dur });
-                  }
-                }, ">");
-              }
-              break;
-
-            case "latex":
-              if (step.latex && step.x !== undefined && step.y !== undefined) {
-                const latexOp: LatexOperation = {
-                  type: "latex",
-                  id: step.target_id || `latex_${generateId()}`,
-                  latex: step.latex,
-                  x: step.x,
-                  y: step.y,
-                  font_size: step.font_size ?? 20,
-                  color: step.color ?? paletteRef.current.stroke,
-                };
-                tl.add(() => renderLatex(latexOp), "+=0.15");
-              }
-              break;
-
-            case "text": {
-              const textId = step.target_id || `text_${generateId()}`;
-              const textOp: CanvasOperation = {
-                action: "text",
-                id: textId,
-                text: step.text ?? step.speech_cue ?? "",
-                x: step.x ?? 0,
-                y: step.y ?? 0,
-                color: step.color ?? paletteRef.current.stroke,
-                font_size: step.font_size ?? 16,
-                font_family: step.font_family,
-              };
-              tl.add(() => render([textOp]), "+=0.15");
-              break;
-            }
-
-            case "highlight":
-              if (step.target_id) {
-                const hTargetId = step.target_id;
-                const hDuration = step.duration ?? 0.3;
-                const hColor = step.highlight_color;
-                tl.add(() => {
-                  const targetData = elementsRef.current.get(hTargetId);
-                  if (targetData) {
-                    if (hColor) {
-                      animateColorPulse(targetData.element, hColor, hDuration, 2);
-                    } else {
-                      gsap.set(targetData.element, { transformOrigin: "center center" });
-                      gsap.to(targetData.element, {
-                        scale: 1.15,
-                        duration: hDuration,
-                        yoyo: true,
-                        repeat: 1,
-                        ease: EASING.teaching,
-                      });
-                    }
-                  }
-                }, ">");
-              }
-              break;
-
-            case "crossout":
-              if (step.target_id) {
-                const coTargetId = step.target_id;
-                const coColor = step.color ?? paletteRef.current.error;
-                tl.add(() => {
-                  const targetData = elementsRef.current.get(coTargetId);
-                  if (targetData && svgRef.current) {
-                    animateCrossOut(svgRef.current, targetData.element, coColor, DURATION.fast);
-                  }
-                }, ">");
-              }
-              break;
-
-            case "pause":
-              tl.to({}, { duration: step.duration ?? 0.5 });
-              break;
-
-            default: {
-              // Shape primitives (rect, circle, ellipse, line, arrow, path)
-              const shapeOp: CanvasOperation & { roughness?: number; animate_style?: string } = {
-                action: step.action,
-                id: step.target_id || step.label || `${step.action}_${generateId()}`,
-                x: step.x,
-                y: step.y,
-                width: step.width,
-                height: step.height,
-                color: step.color,
-                fill: step.fill,
-                stroke_width: step.stroke_width,
-                points: step.points,
-                text: step.text,
-                font_size: step.font_size,
-                font_family: step.font_family,
-                roughness: step.roughness,
-                animate_style: entryStyle,
-              };
-              tl.add(() => render([shapeOp as CanvasOperation]), "+=0.15");
-              break;
-            }
-          }
-        }
-
-        timelinesRef.current.set(timelineId, tl);
-        sequenceQueueRef.current.push(tl);
-
-        // Auto-pan to new content if it's outside the current view
-        const firstStep = normalizedSteps.find(
-          (s) => s.y !== undefined || s.element?.y !== undefined
-        );
-        if (firstStep) {
-          const targetY = firstStep.y ?? firstStep.element?.y ?? 0;
-          const targetX = firstStep.x ?? firstStep.element?.x ?? 0;
-          const vbH = height / zoomLevel;
-          const vbW = width / zoomLevel;
+        const focus = sequenceFocus(steps);
+        if (focus) {
           const pan = panRef.current;
-          const outOfView =
-            targetY < pan.y || targetY > pan.y + vbH - 80 ||
-            targetX < pan.x || targetX > pan.x + vbW - 80;
-          if (outOfView) {
-            panTo(targetX, targetY);
-          }
+          const outsideView =
+            focus.y < pan.y ||
+            focus.y > pan.y + height / zoomLevel - GRID_SNAP * 4 ||
+            focus.x < pan.x ||
+            focus.x > pan.x + width / zoomLevel - GRID_SNAP * 4;
+          if (outsideView) panTo(focus.x, focus.y);
         }
 
-        if (!isPlayingRef.current) {
-          playNextSequence();
-        }
-
-        return tl;
+        if (!isPlayingRef.current) playNextSequence();
+        return timeline;
       },
-      [render, renderLatex, generateId, playNextSequence, width, height, zoomLevel, panTo]
+      [buildTimeline, height, panRef, panTo, playNextSequence, width, zoomLevel]
     );
-
-    // ============= Paused Sequence (for step-pipelined sync) =============
 
     const createPausedSequence = useCallback(
       (sequence: TeachingSequence): gsap.core.Timeline => {
-        const tl = createTimeline({ paused: true });
+        const timeline = buildTimeline(normalizeTeachingSteps(sequence.steps));
         const timelineId = `tl_${Math.random().toString(36).substring(2, 10)}`;
-        const normalizedSteps = normalizeSteps(sequence.steps);
-
-        for (const step of normalizedSteps) {
-          const entryStyle = step.animate_style ?? "draw";
-
-          switch (step.action) {
-            case "clear":
-              tl.add(() => {
-                if (svgRef.current) {
-                  const children = Array.from(svgRef.current.children).filter(
-                    (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
-                  );
-                  gsap.to(children, {
-                    opacity: 0,
-                    duration: DURATION.fast,
-                    ease: EASING.smooth,
-                    stagger: 0.02,
-                    onComplete: () => children.forEach((el) => el.remove()),
-                  });
-                }
-                elementsRef.current.clear();
-              });
-              tl.to({}, { duration: DURATION.fast + 0.1 });
-              break;
-
-            case "draw":
-              if (step.element) {
-                tl.add(() => {
-                  render([{ ...step.element!, animate_style: entryStyle } as any]);
-                }, "+=0.15");
-              }
-              break;
-
-            case "latex":
-              if (step.latex && step.x !== undefined && step.y !== undefined) {
-                const latexOp: LatexOperation = {
-                  type: "latex",
-                  id: step.target_id || `latex_${generateId()}`,
-                  latex: step.latex,
-                  x: step.x,
-                  y: step.y,
-                  font_size: step.font_size ?? 20,
-                  color: step.color ?? paletteRef.current.stroke,
-                };
-                tl.add(() => renderLatex(latexOp), "+=0.15");
-              }
-              break;
-
-            case "text": {
-              const textOp: CanvasOperation = {
-                action: "text",
-                id: step.target_id || `text_${generateId()}`,
-                text: step.text ?? step.speech_cue ?? "",
-                x: step.x ?? 0,
-                y: step.y ?? 0,
-                color: step.color ?? paletteRef.current.stroke,
-                font_size: step.font_size ?? 16,
-                font_family: step.font_family,
-              };
-              tl.add(() => render([textOp]), "+=0.15");
-              break;
-            }
-
-            case "highlight":
-              if (step.target_id) {
-                const hTargetId = step.target_id;
-                const hDuration = step.duration ?? 0.3;
-                const hColor = step.highlight_color;
-                tl.add(() => {
-                  const targetData = elementsRef.current.get(hTargetId);
-                  if (targetData) {
-                    if (hColor) {
-                      animateColorPulse(targetData.element, hColor, hDuration, 2);
-                    } else {
-                      gsap.set(targetData.element, { transformOrigin: "center center" });
-                      gsap.to(targetData.element, {
-                        scale: 1.15,
-                        duration: hDuration,
-                        yoyo: true,
-                        repeat: 1,
-                        ease: EASING.teaching,
-                      });
-                    }
-                  }
-                }, ">");
-              }
-              break;
-
-            default: {
-              const shapeOp = {
-                action: step.action,
-                id: step.target_id || generateId(),
-                x: step.x,
-                y: step.y,
-                width: step.width,
-                height: step.height,
-                color: step.color,
-                fill: step.fill,
-                stroke_width: step.stroke_width,
-                points: step.points,
-                text: step.text,
-                font_size: step.font_size,
-                font_family: step.font_family,
-                roughness: step.roughness,
-                animate_style: entryStyle,
-              };
-              tl.add(() => render([shapeOp as CanvasOperation]), "+=0.15");
-              break;
-            }
-          }
-        }
-
-        timelinesRef.current.set(timelineId, tl);
-        // NOT queued — caller controls playback via .play()
-        return tl;
+        timelinesRef.current.set(timelineId, timeline);
+        return timeline;
       },
-      [render, renderLatex, generateId]
+      [buildTimeline]
     );
 
-    // ============= Clear =============
-
     const clear = useCallback(() => {
-      sequenceQueueRef.current.forEach((tl) => tl.kill());
+      sequenceQueueRef.current.forEach((timeline) => timeline.kill());
       sequenceQueueRef.current.length = 0;
       isPlayingRef.current = false;
-      timelinesRef.current.forEach((tl) => tl.kill());
+      timelinesRef.current.forEach((timeline) => timeline.kill());
       timelinesRef.current.clear();
-      // Reset pan to origin
       panRef.current = { x: 0, y: 0 };
-      applyViewBox(zoomLevel, { x: 0, y: 0 }, true);
+      applyViewBox(zoomLevel, panRef.current, true);
 
-      if (svgRef.current) {
-        const children = Array.from(svgRef.current.children).filter(
-          (el) => el.id !== "canvas-grid" && el.tagName !== "defs"
-        );
-        if (children.length > 0) {
-          gsap.to(children, {
-            opacity: 0,
-            duration: DURATION.fast,
-            ease: EASING.smooth,
-            onComplete: () => {
-              children.forEach((el) => el.remove());
-              elementsRef.current.clear();
-              setForceUpdate((n) => n + 1);
-            },
-          });
-        } else {
-          elementsRef.current.clear();
-          setForceUpdate((n) => n + 1);
-        }
-      } else {
+      const svg = svgRef.current;
+      if (!svg) {
         elementsRef.current.clear();
-        setForceUpdate((n) => n + 1);
+        forceRender((revision) => revision + 1);
+        return;
       }
-    }, [zoomLevel, applyViewBox]);
-
-    // ============= Zoom =============
-
-    const zoomIn = useCallback(() => {
-      setZoomLevel((z) => {
-        const next = Math.min(z + 0.25, 3);
-        // Zoom toward current view center
-        const oldVbW = width / z;
-        const oldVbH = height / z;
-        const centerX = panRef.current.x + oldVbW / 2;
-        const centerY = panRef.current.y + oldVbH / 2;
-        const newVbW = width / next;
-        const newVbH = height / next;
-        panRef.current = { x: centerX - newVbW / 2, y: centerY - newVbH / 2 };
-        applyViewBox(next, panRef.current, true);
-        return next;
+      const children = Array.from(svg.children).filter(
+        (element) => element.id !== "canvas-grid" && element.tagName !== "defs"
+      );
+      if (children.length === 0) {
+        elementsRef.current.clear();
+        forceRender((revision) => revision + 1);
+        return;
+      }
+      gsap.to(children, {
+        opacity: 0,
+        duration: DURATION.fast,
+        ease: EASING.smooth,
+        onComplete: () => {
+          children.forEach((element) => element.remove());
+          elementsRef.current.clear();
+          forceRender((revision) => revision + 1);
+        },
       });
-    }, [width, height, applyViewBox]);
-
-    const zoomOut = useCallback(() => {
-      setZoomLevel((z) => {
-        const next = Math.max(z - 0.25, 0.5);
-        const oldVbW = width / z;
-        const oldVbH = height / z;
-        const centerX = panRef.current.x + oldVbW / 2;
-        const centerY = panRef.current.y + oldVbH / 2;
-        const newVbW = width / next;
-        const newVbH = height / next;
-        panRef.current = { x: centerX - newVbW / 2, y: centerY - newVbH / 2 };
-        applyViewBox(next, panRef.current, true);
-        return next;
-      });
-    }, [width, height, applyViewBox]);
-
-    const resetZoom = useCallback(() => {
-      setZoomLevel(1);
-      panRef.current = { x: 0, y: 0 };
-      applyViewBox(1, { x: 0, y: 0 }, true);
-    }, [applyViewBox]);
-
-    // ============= Save As Image =============
+    }, [applyViewBox, panRef, zoomLevel]);
 
     const saveAsImage = useCallback(() => {
       const svg = svgRef.current;
       if (!svg) return;
-
-      const clone = svg.cloneNode(true) as SVGSVGElement;
-      clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-      clone.setAttribute("xmlns:xlink", "http://www.w3.org/1999/xlink");
-      // Reset viewBox for export
-      clone.setAttribute("viewBox", `0 0 ${width} ${height}`);
-
-      const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-      bgRect.setAttribute("width", String(width));
-      bgRect.setAttribute("height", String(height));
-      bgRect.setAttribute("fill", "#ffffff");
-      clone.insertBefore(bgRect, clone.firstChild);
-
-      let katexCss = "";
-      try {
-        for (const sheet of Array.from(document.styleSheets)) {
-          if (sheet.href?.includes("katex")) {
-            for (const rule of Array.from(sheet.cssRules)) {
-              katexCss += rule.cssText + "\n";
-            }
-          }
-        }
-      } catch {
-        /* CORS */
-      }
-      if (katexCss) {
-        const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
-        styleEl.textContent = katexCss;
-        clone.insertBefore(styleEl, clone.firstChild);
-      }
-
-      const serializer = new XMLSerializer();
-      const svgString = serializer.serializeToString(clone);
-      const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
-      const url = URL.createObjectURL(svgBlob);
-
-      const hasForeignObject = clone.querySelector("foreignObject") !== null;
-      const timestamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
-
-      if (hasForeignObject) {
-        const a = document.createElement("a");
-        a.download = `canvas_${timestamp}.svg`;
-        a.href = url;
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 100);
-      } else {
-        const img = new Image();
-        img.onload = () => {
-          const canvas = document.createElement("canvas");
-          const scale = 2;
-          canvas.width = width * scale;
-          canvas.height = height * scale;
-          const ctx = canvas.getContext("2d")!;
-          ctx.scale(scale, scale);
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, width, height);
-          ctx.drawImage(img, 0, 0, width, height);
-
-          canvas.toBlob((blob) => {
-            if (!blob) return;
-            const pngUrl = URL.createObjectURL(blob);
-            const a = document.createElement("a");
-            a.download = `canvas_${timestamp}.png`;
-            a.href = pngUrl;
-            a.click();
-            URL.revokeObjectURL(pngUrl);
-          }, "image/png");
-          URL.revokeObjectURL(url);
-        };
-        img.src = url;
-      }
-    }, [width, height]);
-
-    // ============= Expose Handle =============
+      saveCanvasImage(svg, width, height);
+    }, [height, width]);
 
     useImperativeHandle(
       ref,
@@ -1456,7 +454,20 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         resetZoom,
         panTo,
       }),
-      [render, animate, renderLatex, createSequence, createPausedSequence, renderFunctionPlot, clear, saveAsImage, zoomIn, zoomOut, resetZoom, panTo]
+      [
+        animate,
+        clear,
+        createPausedSequence,
+        createSequence,
+        panTo,
+        render,
+        renderFunctionPlot,
+        renderLatex,
+        resetZoom,
+        saveAsImage,
+        zoomIn,
+        zoomOut,
+      ]
     );
 
     return (
@@ -1478,7 +489,6 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             touchAction: "none",
           }}
         />
-        {/* Toolbar */}
         <div className="absolute top-3 right-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
             onClick={zoomIn}
@@ -1507,7 +517,17 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all"
             title="Save as PNG"
           >
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
               <polyline points="7 10 12 15 17 10" />
               <line x1="12" y1="15" x2="12" y2="3" />
