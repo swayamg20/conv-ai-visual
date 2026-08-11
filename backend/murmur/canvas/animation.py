@@ -9,7 +9,7 @@ and rendering — the backend only relays the SDL and extracts speech text.
 import logging
 from typing import Dict, List
 
-logger = logging.getLogger("animation_pipeline")
+logger = logging.getLogger(__name__)
 
 
 def teach_with_visuals(steps: List[Dict], session_id: str = "default") -> Dict:

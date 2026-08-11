@@ -5,8 +5,8 @@ Determines when a user has finished their conversational turn by analyzing
 raw audio waveforms (prosody, intonation, grammar cues) rather than just
 silence duration.
 
-Works alongside Silero VAD: VAD detects silence, Smart Turn decides if
-the silence means the user is done or just pausing mid-thought.
+Works alongside Deepgram endpointing: endpointing detects a speech gap,
+then Smart Turn decides whether the user is done or pausing mid-thought.
 
 Model: Whisper Tiny encoder + linear classifier head (~8M params, 8MB ONNX)
 Speed: <60ms on most CPUs
@@ -21,7 +21,7 @@ from typing import Callable, Coroutine, Optional, Tuple
 import numpy as np
 import onnxruntime as ort
 
-logger = logging.getLogger("voiceai.smart_turn")
+logger = logging.getLogger(__name__)
 
 # HuggingFace model coordinates
 HF_REPO_ID = "pipecat-ai/smart-turn-v3"

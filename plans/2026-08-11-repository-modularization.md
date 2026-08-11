@@ -41,6 +41,8 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 18:36 IST: Split the 770-line memory hotspot into a 158-line conversation/budget module, 278-line durable-layer adapters, and a 331-line orchestration manager. Added direct tests for sliding-window retention, priority-based prompt assembly, hard budget accounting, and one occurrence of each memory layer; all thirty-eight backend tests pass.
 - [x] 2026-08-11 18:43 IST: Verified GitHub Actions run `31494360228`: the decomposed-memory checkpoint passed both hosted jobs.
 - [x] 2026-08-11 18:43 IST: Replaced the stale setup/database/tooling guides with current canonical documentation, added an architecture and development guide plus a documentation index, moved superseded plans and integrations into an explicit archive, rewrote all tracked Claude specialist profiles around the `murmur` package, and removed obsolete cached agent memories. Corrected root `.env` loading, completed provider examples, removed the dead header/query identity fallback and duplicate canvas registration script, and made the sample-tool command import-safe. Thirty-nine backend tests, twelve frontend tests, both production builds/static gates, a zero-finding npm audit, and an internal-link check pass.
+- [x] 2026-08-11 18:54 IST: Verified GitHub Actions run `31495119347`: the documentation/setup checkpoint passed both hosted jobs.
+- [x] 2026-08-11 18:54 IST: Removed the last module-global canvas-session store and made each `LLMPipeline` own its canvas state; aligned the canvas schema with the actions the SVG client actually supports; added semantic-label and session-isolation coverage; made synchronous and asynchronous tool calls return bounded timeout failures; removed the unused server-side Silero dependency group; and replaced ignored browser-VAD options and unconditional production console output with the actual vendor timing option and development-only diagnostics. Forty-six backend tests and twelve frontend tests pass with lint, formatting, strict typecheck, production build, and a zero-finding npm audit.
 - [x] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
 - [x] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [x] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
@@ -98,6 +100,12 @@ The setup guides consistently told developers to create `.env` at the repository
 
 Repository-local Claude profiles were executable engineering guidance rather than harmless notes, and nearly every profile still directed work into deleted `funcs` modules or process-global session maps. They now reference the canonical architecture and focused source map; their March project-memory snapshots were removed because product and implementation truth live in maintained docs and Git history.
 
+The backend canvas helper retained a module-global session dictionary even after voice and chat state moved under typed runtime ownership. It was never cleared and could preserve drawing context beyond a pipeline's lifetime. The same audit found that `update` was advertised in the backend schema while the SVG client had no implementation for it, and the old response construction accidentally overwrote the requested action. Canvas state is now pipeline-owned, semantic labels resolve consistently for controls, duplicate IDs and unknown actions are rejected, and the schema contains only end-to-end-supported operations.
+
+The tool executor configured a timeout but applied it only to coroutine handlers; synchronous handlers could block the awaiting turn indefinitely. Both paths now use `asyncio.wait_for`, with sync handlers running in a bounded shared thread pool. This bounds caller latency but does not terminate a Python thread that has already begun, reinforcing that database inline tools are trusted operator code rather than a hostile-code sandbox.
+
+The browser VAD wrapper exposed `minSpeechFrames` and `redemptionFrames`, but neither option was passed to the installed VAD library. The wrapper now exposes and forwards the real `redemptionMs` option, and its diagnostic output is development-only. The separate Python `legacy-vad` dependency group was unused by the active Deepgram plus Smart Turn server path and has been removed from the lock graph.
+
 ## Decision Log
 
 2026-08-11, Codex: Preserve behavior first, but do not preserve accidental module boundaries. The target is a `backend/murmur/` package with explicit subpackages and a minimal root `main.py` compatibility entrypoint so existing `uvicorn main:app` workflows keep working during and after migration.
@@ -139,6 +147,10 @@ Repository-local Claude profiles were executable engineering guidance rather tha
 2026-08-11, Codex: Memory boundaries follow responsibility: `context.py` owns token estimation, budget selection, and the short-term window; `layers.py` adapts durable episodic, semantic, profile, and decision stores; `manager.py` coordinates persistence and context assembly. Budget calculations remain pure and provider-free so they can be tested without a database or Mem0 client.
 
 2026-08-11, Codex: Current operating documentation and historical design notes must be visibly separate. `README.md` and the top-level `docs/` guides describe only active paths and verified commands; superseded integration, launch, and architecture documents live under `docs/archive/` with an explicit stale-content warning. Agent profiles depend on the current architecture docs instead of embedding another copy of it.
+
+2026-08-11, Codex: Canvas state lifetime follows pipeline lifetime. `LLMPipeline` owns the state supplied to canvas tool execution; the database handler retains its existing importable signature but direct invocation uses transient state instead of a process-global fallback. The tool schema will advertise only actions implemented by both backend normalization and frontend rendering.
+
+2026-08-11, Codex: Inline database tools are trusted extensions with restricted globals, not a security boundary for hostile code. Execution limits bound how long a conversation awaits a handler; a stronger guarantee would require process or container isolation and belongs in a separate deployment-hardening milestone.
 
 ## Outcomes & Retrospective
 

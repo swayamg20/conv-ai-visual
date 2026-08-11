@@ -1,13 +1,13 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { useMicVAD, utils } from "@ricky0123/vad-react";
+import { useMicVAD } from "@ricky0123/vad-react";
 
 /**
  * Speed-optimized VAD hook for instant interruption detection
  *
  * Uses Silero VAD (WebAssembly) for accurate, low-latency speech detection
- * Target latency: 10-30ms detection
+ * Runs only during assistant playback so speech can interrupt the active turn.
  */
 
 export interface UseVADOptions {
@@ -38,18 +38,9 @@ export interface UseVADOptions {
   negativeSpeechThreshold?: number;
 
   /**
-   * Minimum number of speech frames before triggering
-   * Default: 3 (for ~30-50ms confirmation)
-   * - Lower = faster but more false positives
-   * - Higher = more reliable but slower
+   * Silence after speech before the detector resets, in milliseconds.
    */
-  minSpeechFrames?: number;
-
-  /**
-   * Frames of silence before considering speech ended
-   * Default: 8
-   */
-  redemptionFrames?: number;
+  redemptionMs?: number;
 
   /**
    * Show debug logs
@@ -69,8 +60,7 @@ export function useVAD(options: UseVADOptions) {
     onSpeechDetected,
     positiveSpeechThreshold = 0.6,
     negativeSpeechThreshold = 0.5,
-    minSpeechFrames = 3,
-    redemptionFrames = 8,
+    redemptionMs = 500,
     debug = false,
   } = options;
 
@@ -87,13 +77,13 @@ export function useVAD(options: UseVADOptions) {
     // Debounce check
     if (hasTriggeredRef.current && timeSinceLastTrigger < DEBOUNCE_MS) {
       if (debug) {
-        console.log(`[VAD] Debouncing (${timeSinceLastTrigger}ms since last trigger)`);
+        console.debug(`[VAD] Debouncing (${timeSinceLastTrigger}ms since last trigger)`);
       }
       return;
     }
 
     if (debug) {
-      console.log("[VAD] 🎤 Speech detected - triggering interrupt");
+      console.debug("[VAD] Speech detected - triggering interrupt");
     }
 
     hasTriggeredRef.current = true;
@@ -103,7 +93,7 @@ export function useVAD(options: UseVADOptions) {
 
   const handleSpeechEnd = useCallback(() => {
     if (debug) {
-      console.log("[VAD] 🔇 Speech ended");
+      console.debug("[VAD] Speech ended");
     }
     // Reset trigger flag when speech ends
     hasTriggeredRef.current = false;
@@ -118,29 +108,16 @@ export function useVAD(options: UseVADOptions) {
     onSpeechStart: handleSpeechStart,
     onSpeechEnd: handleSpeechEnd,
 
-    // Speed-optimized thresholds
     positiveSpeechThreshold,
     negativeSpeechThreshold,
-    // minSpeechFrames, // TODO: Fix - should be minSpeechMs
-    // redemptionFrames, // TODO: Fix - should be redemptionMs
-
-    // Optimize for low latency
-    // preSpeechPadFrames: 1,  // TODO: Fix - should be preSpeechPadMs
-
-    // Model loading
-    // modelURL: undefined,  // Use default CDN model
-    // workletURL: undefined, // Use default CDN worklet
+    redemptionMs,
 
     // Error handling
     onVADMisfire: () => {
       if (debug) {
-        console.log("[VAD] ⚠️ Misfire detected");
+        console.debug("[VAD] Misfire detected");
       }
     },
-
-    // onError: (error) => {
-    //   console.error("[VAD] ❌ Error:", error);
-    // },
   });
 
   // Control VAD based on enabled state
@@ -149,14 +126,14 @@ export function useVAD(options: UseVADOptions) {
 
     if (enabled && !vad.listening) {
       if (debug) {
-        console.log("[VAD] ▶️ Starting VAD (monitoring for speech)");
+        console.debug("[VAD] Starting interruption monitoring");
       }
-      vad.start();
+      void vad.start();
     } else if (!enabled && vad.listening) {
       if (debug) {
-        console.log("[VAD] ⏸️ Pausing VAD");
+        console.debug("[VAD] Pausing interruption monitoring");
       }
-      vad.pause();
+      void vad.pause();
       // Reset state when stopping
       hasTriggeredRef.current = false;
     }
@@ -166,7 +143,7 @@ export function useVAD(options: UseVADOptions) {
   useEffect(() => {
     return () => {
       if (vad?.listening) {
-        vad.pause();
+        void vad.pause();
       }
     };
   }, [vad]);
@@ -188,23 +165,20 @@ export const VAD_PRESETS = {
   // Best for quiet environments
   ultraFast: {
     positiveSpeechThreshold: 0.5,
-    minSpeechFrames: 1,
-    redemptionFrames: 5,
+    redemptionMs: 300,
   },
 
   // Balanced: Good speed and accuracy
   // Recommended starting point
   balanced: {
     positiveSpeechThreshold: 0.6,
-    minSpeechFrames: 3,
-    redemptionFrames: 8,
+    redemptionMs: 500,
   },
 
   // Conservative: Prioritize accuracy over speed
   // Best for noisy environments
   conservative: {
     positiveSpeechThreshold: 0.75,
-    minSpeechFrames: 5,
-    redemptionFrames: 10,
+    redemptionMs: 800,
   },
 };

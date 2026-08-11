@@ -24,7 +24,7 @@ from murmur.persistence.repositories.sessions import (
     SessionRepo,
 )
 
-logger = logging.getLogger("memory")
+logger = logging.getLogger(__name__)
 
 
 class MemoryManager:

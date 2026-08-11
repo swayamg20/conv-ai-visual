@@ -39,12 +39,12 @@ dev = [
   "ruff>=0.12,<1",
 ]
 local-tts = ["kokoro-onnx>=0.4,<1"]
-legacy-vad = ["silero-vad>=6.2,<7", "torch>=2.8,<3"]
 experiments = [
   "accelerate>=1.10,<2",
   "bitsandbytes>=0.42,<1",
   "snac>=1.2,<2",
   "soundfile>=0.13,<1",
+  "torch>=2.8,<3",
   "transformers>=4.57,<5",
   "ten-vad @ git+https://github.com/TEN-framework/ten-vad.git@81fc1791e1a198b4028559504ebf6da6061a4b26",
 ]

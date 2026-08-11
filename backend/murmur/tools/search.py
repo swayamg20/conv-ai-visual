@@ -7,7 +7,7 @@ import logging
 from murmur.core.config import config
 from murmur.persistence.repositories.tools import ToolRepo
 
-logger = logging.getLogger("search")
+logger = logging.getLogger(__name__)
 
 
 async def web_search(query: str, max_results: int = 5) -> str:

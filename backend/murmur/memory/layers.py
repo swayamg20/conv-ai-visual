@@ -13,7 +13,7 @@ from murmur.persistence.repositories.memory import (
     UserProfileRepo,
 )
 
-logger = logging.getLogger("memory")
+logger = logging.getLogger(__name__)
 
 
 class EpisodicMemory:

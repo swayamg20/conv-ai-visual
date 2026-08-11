@@ -15,7 +15,7 @@ from typing import Any
 from murmur.persistence.models import ToolModel
 from murmur.persistence.repositories.tools import ToolRepo
 
-logger = logging.getLogger("tools")
+logger = logging.getLogger(__name__)
 
 
 @dataclass

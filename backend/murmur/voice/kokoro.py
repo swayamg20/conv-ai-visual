@@ -8,7 +8,7 @@ Requires: pip install kokoro-onnx
 import logging
 from typing import AsyncIterator, Optional
 
-logger = logging.getLogger("kokoro-tts")
+logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 4096
 

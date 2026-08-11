@@ -11,7 +11,7 @@ from murmur.canvas.state import canvas_update
 from murmur.core.config import config
 from murmur.tools.contracts import ToolCall, ToolResult
 
-logger = logging.getLogger("llm-pipeline")
+logger = logging.getLogger(__name__)
 
 
 class ToolConversationMixin:
@@ -54,7 +54,11 @@ class ToolConversationMixin:
         """Execute one tool call, including canvas/animation side effects."""
         if tc.name == "canvas_update":
             operations = tc.arguments.get("operations", [])
-            result = canvas_update(operations, session_id=self.session_id)
+            result = canvas_update(
+                operations,
+                session_id=self.session_id,
+                state=self.canvas_state,
+            )
 
             if self.canvas_callback and result.get("operations"):
                 try:

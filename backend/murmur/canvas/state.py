@@ -6,17 +6,15 @@ Frontend integration uses the typed SVG canvas feature and supports rect,
 circle, ellipse, line, arrow, text, path, and teaching-sequence operations.
 """
 
-import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
 
 from murmur.canvas.animation import TEACH_WITH_VISUALS_SCHEMA
 from murmur.persistence.repositories.tools import ToolRepo
 
-logger = logging.getLogger("canvas")
+logger = logging.getLogger(__name__)
 
 
 class CanvasAction(str, Enum):
@@ -31,13 +29,7 @@ class CanvasAction(str, Enum):
     PATH = "path"  # freeform drawing
     CLEAR = "clear"
     DELETE = "delete"
-    UPDATE = "update"
     HIGHLIGHT = "highlight"
-    # Animation actions
-    ANIMATE = "animate"  # Animate existing element
-    LATEX = "latex"  # Render LaTeX equation
-    MORPH = "morph"  # Shape morphing
-    GRAPH = "graph"  # Plot function graph
 
 
 @dataclass
@@ -56,46 +48,33 @@ class CanvasElement:
     stroke_width: float = 2
     font_size: float = 16
     font_family: str = "Arial"
-    points: List[List[float]] = field(default_factory=list)  # for line/arrow/path
-    label: str = ""  # semantic label for AI reference
-    # Animation state fields
-    initial_state: Dict[str, Any] = field(default_factory=dict)  # For animation resets
-    animation_state: str = "idle"  # idle, animating, paused
-    timeline_id: Optional[str] = None  # Associated timeline
+    points: list[list[float]] = field(default_factory=list)
+    label: str = ""
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return asdict(self)
 
-    def get_bounds(self) -> Dict[str, float]:
+    def get_bounds(self) -> dict[str, float]:
         """Get bounding box for position awareness."""
         if self.action in [CanvasAction.LINE, CanvasAction.ARROW, CanvasAction.PATH]:
-            if self.points:
+            valid_points: list[tuple[float, float]] = []
+            for point in self.points:
+                if not isinstance(point, (list, tuple)) or len(point) < 2:
+                    continue
                 try:
-                    # Handle different point formats: [[x,y], ...] or [(x,y), ...]
-                    # Filter out invalid points (e.g., integers, dicts)
-                    valid_points = []
-                    for p in self.points:
-                        # Only accept lists or tuples with at least 2 numeric elements
-                        if isinstance(p, (list, tuple)) and len(p) >= 2:
-                            try:
-                                # Verify we can extract x, y as numbers
-                                x, y = float(p[0]), float(p[1])
-                                valid_points.append((x, y))
-                            except (ValueError, TypeError, IndexError):
-                                continue
+                    valid_points.append((float(point[0]), float(point[1])))
+                except (TypeError, ValueError):
+                    continue
 
-                    if valid_points:
-                        xs = [p[0] for p in valid_points]
-                        ys = [p[1] for p in valid_points]
-                        return {
-                            "min_x": min(xs),
-                            "min_y": min(ys),
-                            "max_x": max(xs),
-                            "max_y": max(ys),
-                        }
-                except (TypeError, IndexError, ValueError, KeyError):
-                    # If points are malformed, fall back to x,y,width,height
-                    pass
+            if valid_points:
+                xs = [point[0] for point in valid_points]
+                ys = [point[1] for point in valid_points]
+                return {
+                    "min_x": min(xs),
+                    "min_y": min(ys),
+                    "max_x": max(xs),
+                    "max_y": max(ys),
+                }
 
         return {
             "min_x": self.x,
@@ -103,34 +82,6 @@ class CanvasElement:
             "max_x": self.x + self.width,
             "max_y": self.y + self.height,
         }
-
-
-@dataclass
-class CanvasOperation:
-    """Single operation to be rendered on canvas."""
-
-    action: str
-    id: Optional[str] = None
-    x: float = 0
-    y: float = 0
-    width: float = 0
-    height: float = 0
-    text: str = ""
-    color: str = "#3b82f6"  # nice blue default
-    fill: str = ""
-    stroke_width: float = 2
-    font_size: float = 16
-    font_family: str = "Arial"
-    points: List[List[float]] = field(default_factory=list)
-    label: str = ""
-    target_id: str = ""  # for delete/update/highlight
-
-    def to_dict(self) -> Dict:
-        d = asdict(self)
-        # Generate ID if not provided (except for control actions)
-        if not d["id"] and d["action"] not in ["clear", "delete", "update", "highlight"]:
-            d["id"] = f"el_{uuid.uuid4().hex[:8]}"
-        return d
 
 
 class CanvasState:
@@ -142,10 +93,24 @@ class CanvasState:
     def __init__(self, width: float = 800, height: float = 600):
         self.width = width
         self.height = height
-        self.elements: Dict[str, CanvasElement] = {}
-        self._history: List[Dict] = []  # for undo
+        self.elements: dict[str, CanvasElement] = {}
 
-    def apply_operations(self, operations: List[Dict]) -> List[Dict]:
+    def _resolve_reference(self, reference: str | None) -> str | None:
+        """Resolve either a concrete element ID or a unique semantic label."""
+        if not reference:
+            return None
+        if reference in self.elements:
+            return reference
+        return next(
+            (
+                element_id
+                for element_id, element in self.elements.items()
+                if element.label == reference
+            ),
+            None,
+        )
+
+    def apply_operations(self, operations: list[dict]) -> list[dict]:
         """
         Apply a batch of operations and return normalized ops for client.
         """
@@ -153,37 +118,32 @@ class CanvasState:
 
         for op in operations:
             action = op.get("action", "")
+            try:
+                CanvasAction(action)
+            except ValueError:
+                logger.warning("Ignoring unsupported canvas action: %s", action)
+                continue
 
             if action == "clear":
-                self._history.append({"elements": self.elements.copy()})
                 self.elements.clear()
                 results.append({"action": "clear"})
 
             elif action == "delete":
-                target = op.get("target_id") or op.get("id")
-                if target and target in self.elements:
-                    self._history.append({"deleted": self.elements[target].to_dict()})
+                target = self._resolve_reference(op.get("target_id") or op.get("id"))
+                if target:
                     del self.elements[target]
                     results.append({"action": "delete", "id": target})
 
             elif action == "highlight":
-                target = op.get("target_id") or op.get("id")
-                if target and target in self.elements:
+                target = self._resolve_reference(op.get("target_id") or op.get("id"))
+                if target:
                     results.append({"action": "highlight", "id": target})
 
-            elif action == "update":
-                target = op.get("target_id") or op.get("id")
-                if target and target in self.elements:
-                    elem = self.elements[target]
-                    # Update only provided fields
-                    for k, v in op.items():
-                        if k not in ["action", "target_id"] and hasattr(elem, k):
-                            setattr(elem, k, v)
-                    results.append({"action": "update", **elem.to_dict()})
-
             else:
-                # Drawing operation - create element
                 elem_id = op.get("id") or f"el_{uuid.uuid4().hex[:8]}"
+                if elem_id in self.elements:
+                    logger.warning("Ignoring duplicate canvas element ID: %s", elem_id)
+                    continue
 
                 elem = CanvasElement(
                     id=elem_id,
@@ -245,47 +205,13 @@ class CanvasState:
 
         return "\n".join(lines)
 
-    def to_json(self) -> str:
-        """Serialize full state for persistence/transfer."""
-        return json.dumps(
-            {
-                "width": self.width,
-                "height": self.height,
-                "elements": [e.to_dict() for e in self.elements.values()],
-            }
-        )
 
-    @classmethod
-    def from_json(cls, data: str) -> "CanvasState":
-        """Deserialize from JSON."""
-        d = json.loads(data)
-        state = cls(width=d.get("width", 800), height=d.get("height", 600))
-        for elem_data in d.get("elements", []):
-            elem = CanvasElement(**elem_data)
-            state.elements[elem.id] = elem
-        return state
-
-
-# Per-session canvas states
-_canvas_sessions: Dict[str, CanvasState] = {}
-
-
-def get_canvas_state(session_id: str) -> CanvasState:
-    """Get or create canvas state for a session."""
-    if session_id not in _canvas_sessions:
-        _canvas_sessions[session_id] = CanvasState()
-    return _canvas_sessions[session_id]
-
-
-def clear_canvas_session(session_id: str):
-    """Remove canvas state for a session."""
-    _canvas_sessions.pop(session_id, None)
-
-
-# ============= Canvas Tool Handler =============
-
-
-def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
+def canvas_update(
+    operations: list[dict],
+    session_id: str = "default",
+    *,
+    state: CanvasState | None = None,
+) -> dict:
     """
     Tool handler for canvas updates.
     Called by LLM via tool system.
@@ -301,14 +227,16 @@ def canvas_update(operations: List[Dict], session_id: str = "default") -> Dict:
                 "fill": str,
                 "points": [[x,y], ...],  # for arrow/line
                 "label": str,  # semantic label
-                "target_id": str  # for delete/update/highlight
+                "target_id": str  # for delete/highlight
             }
-        session_id: Session identifier
+        session_id: Session identifier retained for the model-tool contract
+        state: Pipeline-owned canvas state. Direct calls use a transient state.
 
     Returns:
         Dict with applied operations and canvas summary
     """
-    state = get_canvas_state(session_id)
+    del session_id
+    state = state or CanvasState()
     applied = state.apply_operations(operations)
 
     return {
@@ -324,20 +252,19 @@ CANVAS_TOOL_SCHEMA = {
     "type": "function",
     "function": {
         "name": "canvas_update",
-        "description": """Draw on the shared Excalidraw canvas to illustrate concepts visually while explaining.
+        "description": """Draw on the shared SVG canvas to illustrate concepts visually while explaining.
 Use this to create diagrams, flowcharts, highlight relationships, or sketch ideas.
 The canvas renders with a hand-drawn aesthetic and is visible to the user in real-time.
 
 IMPORTANT:
 - Send all related drawings in a single call to minimize latency
 - Use semantic labels (via 'label' field) to reference elements later
-- To MODIFY existing elements, use "update" action with the element's ID or label
-- Only draw NEW elements - don't redraw existing ones unless updating them
+- Only draw NEW elements; delete an old element before replacing it
 - Check [Current Canvas State] in your context to see what's already drawn
 
 Coordinate system: (0,0) is top-left. Canvas is 800x600 by default.
 Colors: Use hex codes like "#3b82f6" (blue), "#ef4444" (red), "#10b981" (green), "#f59e0b" (orange).
-Rendered style: Hand-drawn sketch look via Excalidraw.
+Rendered style: Hand-drawn SVG strokes via Rough.js.
 """,
         "parameters": {
             "type": "object",
@@ -399,7 +326,7 @@ Rendered style: Hand-drawn sketch look via Excalidraw.
                             },
                             "target_id": {
                                 "type": "string",
-                                "description": "ID of element to delete/update/highlight",
+                                "description": "ID or semantic label of an element to delete/highlight",
                             },
                         },
                         "required": ["action"],

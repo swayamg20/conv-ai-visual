@@ -5,7 +5,7 @@ from typing import AsyncIterator, Optional
 from elevenlabs import AsyncElevenLabs
 from elevenlabs.types import VoiceSettings
 
-logger = logging.getLogger("tts-pipeline")
+logger = logging.getLogger(__name__)
 
 _RETRYABLE_TTS_MARKERS = (
     "429",

@@ -3,7 +3,7 @@ import logging
 from collections.abc import AsyncGenerator, Callable
 from typing import Any, ClassVar
 
-from murmur.canvas.state import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, get_canvas_state
+from murmur.canvas.state import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, CanvasState
 from murmur.core.config import config
 from murmur.llm.base import LLMClient
 from murmur.llm.factory import create_llm_client
@@ -15,7 +15,7 @@ from murmur.tools.executor import ToolExecutor, default_executor
 # Number of recent messages used when generating a session summary
 _SUMMARY_RECENT_MESSAGES = 10
 
-logger = logging.getLogger("llm-pipeline")
+logger = logging.getLogger(__name__)
 
 
 class LLMPipeline(ToolConversationMixin):
@@ -115,6 +115,7 @@ class LLMPipeline(ToolConversationMixin):
 
         # Canvas support
         self.session_id = session_id or "default"
+        self.canvas_state = CanvasState()
         self.canvas_callback: Callable[[list[dict]], Any] | None = None
         self.animation_callback: Callable[[dict], Any] | None = None
 
@@ -438,8 +439,7 @@ class LLMPipeline(ToolConversationMixin):
 
     def get_canvas_context(self) -> str:
         """Get current canvas state summary for LLM context."""
-        state = get_canvas_state(self.session_id)
-        return state.get_context_summary()
+        return self.canvas_state.get_context_summary()
 
     def get_tools_schema(self, include_canvas: bool | None = None) -> list[dict]:
         """
