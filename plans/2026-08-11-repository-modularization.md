@@ -27,8 +27,10 @@ A **chat session** is one text conversation backed by an `LLMPipeline`. A **voic
 - [x] 2026-08-11 16:31 IST: Extracted all three chat endpoints into a thin SSE router and a transport-neutral `ChatService`; centralized agent prompt/resource/mastery assembly; replaced three parallel chat-state collections with an owned `ChatRuntimeSession` record and per-session turn lock; and added cross-user active-session, serialized-turn, and idempotent-finalization tests. Seventeen backend tests pass and `main.py` is down to 1,425 lines, with only voice signaling left as an entrypoint route.
 - [x] 2026-08-11 16:34 IST: Verified GitHub Actions run `31484924514`: the isolated-chat-service checkpoint passed both hosted jobs.
 - [x] 2026-08-11 16:38 IST: Moved the final `/offer` endpoint into an authenticated voice router, introduced an application-owned `VoiceService` and shared session supervisor, delayed provider setup until FastAPI lifespan startup, and reduced root `main.py` from 2,600 baseline lines to a 13-line compatibility entrypoint. Nineteen backend tests pass, including proof that authentication and ownership are decided before peer allocation and a locally faked successful offer/answer exchange.
+- [x] 2026-08-11 16:40 IST: Verified GitHub Actions run `31485374951`: the thin-entrypoint and isolated-voice-service checkpoint passed both hosted jobs.
+- [x] 2026-08-11 16:42 IST: Replaced eleven parallel voice dictionaries/sets with one typed `VoiceRuntimeSession` record per peer, containing trusted identity, persistence binding, peer/channel, pipeline, TTS/SDL/Smart Turn state, timing, active task, activity, and finalization state. Direct teardown coverage proves active turns are cancelled and Smart Turn, peer, pipeline, and registry state are cleaned exactly once; twenty backend tests pass.
 - [x] Introduce an application factory and focused FastAPI routers; reduce root `main.py` to a compatibility entrypoint.
-- [ ] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
+- [x] Replace the collection of process-global session dictionaries with a typed session registry owned by application state.
 - [ ] Extract the WebRTC/STT/turn/TTS orchestration from the API layer and cover interruption and cleanup invariants with tests.
 - [ ] Split LLM provider clients and pipeline policies into focused modules while preserving the existing provider/tool contracts.
 - [ ] Split the 1,520-line SVG renderer into typed scene normalization, render primitives, and timeline execution modules.
@@ -93,6 +95,8 @@ The old module allocated and registered a peer before WebRTC negotiation, but di
 2026-08-11, Codex: Chat is an application service, not an HTTP handler. `ChatService` owns trusted session/agent resolution, pipeline setup, streaming events, observability, summaries, and eviction; the router maps its transport-neutral events to SSE. Each active chat is one typed record with a per-session lock, so callbacks and memory cannot be mutated by overlapping turns. Expected service failures use transport-independent domain exceptions that the API layer maps to the established JSON error contract.
 
 2026-08-11, Codex: Root `main.py` is now only the documented `uvicorn main:app` compatibility surface. Application construction owns the runtime registry, chat service, voice service, and session supervisor. Voice provider initialization runs in lifespan startup instead of import time; signaling owns only request mapping, while `VoiceService` owns authenticated peer negotiation and runtime behavior. The voice implementation still requires internal decomposition and a typed peer record before its milestone is complete.
+
+2026-08-11, Codex: Runtime identity and lifecycle state must be structurally inseparable. `ChatRuntimeSession` and `VoiceRuntimeSession` are now the only values stored under session/peer IDs; activity, finalization, active tasks, provider state, and trusted ownership no longer live in independently mutable maps. Registry shutdown traverses those records and remains idempotent.
 
 ## Outcomes & Retrospective
 

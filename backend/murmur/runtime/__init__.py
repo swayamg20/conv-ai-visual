@@ -1,5 +1,5 @@
 """In-process runtime state for chat and voice sessions."""
 
-from murmur.runtime.registry import ChatRuntimeSession, RuntimeRegistry
+from murmur.runtime.registry import ChatRuntimeSession, RuntimeRegistry, VoiceRuntimeSession
 
-__all__ = ["ChatRuntimeSession", "RuntimeRegistry"]
+__all__ = ["ChatRuntimeSession", "RuntimeRegistry", "VoiceRuntimeSession"]

@@ -309,7 +309,9 @@ class ApiSecurityTest(unittest.TestCase):
         )
         peer_factory.assert_called_once_with()
         self.assertEqual(peer.remote_description.sdp, "offer-sdp")
-        self.assertIn(peer, main.runtime.peer_connections)
+        self.assertTrue(
+            any(session.peer is peer for session in main.runtime.voice_sessions.values())
+        )
 
     def test_resource_delete_binds_id_to_owned_agent(self) -> None:
         self.current_user = self.owner

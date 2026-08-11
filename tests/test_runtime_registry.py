@@ -40,17 +40,21 @@ async def test_runtime_shutdown_is_complete_and_idempotent() -> None:
             cancelled += 1
 
     registry.sweeper_task = asyncio.create_task(wait_forever())
-    registry.turn_processing_tasks["peer"] = asyncio.create_task(wait_forever())
     registry.background_tasks.add(asyncio.create_task(wait_forever()))
 
     peer = _FakePeer()
     smart_turn = _FakeSmartTurnSession()
-    registry.peer_connections.add(peer)
-    registry.smart_turn_sessions["peer"] = smart_turn
+    voice_session = registry.register_voice(
+        "peer",
+        peer,
+        user_id="user",
+        agent_id="agent",
+        persistent_session_id="session",
+        canvas_mode=True,
+    )
+    voice_session.smart_turn = smart_turn
+    voice_session.turn_task = asyncio.create_task(wait_forever())
     registry.register_chat("chat", object(), user_id="user", agent_id="agent")
-    registry.peer_user_ids["peer"] = "user"
-    registry.peer_agent_ids["peer"] = "agent"
-    registry.peer_session_ids["peer"] = "session"
 
     await asyncio.sleep(0)
     await registry.shutdown()

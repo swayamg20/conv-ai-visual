@@ -30,25 +30,33 @@ class ChatRuntimeSession:
 
 
 @dataclass(slots=True)
+class VoiceRuntimeSession:
+    """All process-local state for one authenticated WebRTC peer."""
+
+    peer_id: str
+    peer: RTCPeerConnection
+    user_id: str
+    agent_id: str | None = None
+    persistent_session_id: str | None = None
+    canvas_mode: bool = False
+    pipeline: LLMPipeline | None = None
+    datachannel: RTCDataChannel | None = None
+    tts_active: bool = False
+    pending_sdl: dict[str, Any] | None = None
+    smart_turn: SmartTurnSession | None = None
+    turn_task: asyncio.Task[Any] | None = None
+    turn_timing: dict[str, Any] = field(default_factory=dict)
+    last_activity: float = field(default_factory=time.monotonic)
+    finalizing: bool = False
+
+
+@dataclass(slots=True)
 class RuntimeRegistry:
     """Own all process-local session state and provide idempotent teardown."""
 
     chat_sessions: dict[str, ChatRuntimeSession] = field(default_factory=dict)
 
-    voice_sessions: dict[str, LLMPipeline] = field(default_factory=dict)
-    voice_session_activity: dict[str, float] = field(default_factory=dict)
-    voice_session_finalizing: set[str] = field(default_factory=set)
-    peer_connections: set[RTCPeerConnection] = field(default_factory=set)
-    datachannels: dict[str, RTCDataChannel] = field(default_factory=dict)
-    peer_user_ids: dict[str, str] = field(default_factory=dict)
-    peer_agent_ids: dict[str, str] = field(default_factory=dict)
-    peer_session_ids: dict[str, str] = field(default_factory=dict)
-    peer_canvas_modes: dict[str, bool] = field(default_factory=dict)
-    tts_interrupt_flags: dict[str, bool] = field(default_factory=dict)
-    pending_sdl: dict[str, dict[str, Any]] = field(default_factory=dict)
-    smart_turn_sessions: dict[str, SmartTurnSession] = field(default_factory=dict)
-    turn_processing_tasks: dict[str, asyncio.Task[Any]] = field(default_factory=dict)
-    turn_timing: dict[str, dict[str, Any]] = field(default_factory=dict)
+    voice_sessions: dict[str, VoiceRuntimeSession] = field(default_factory=dict)
 
     background_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
     sweeper_task: asyncio.Task[Any] | None = None
@@ -81,25 +89,41 @@ class RuntimeRegistry:
         return self.chat_sessions.pop(session_id, None)
 
     def touch_voice(self, peer_id: str) -> None:
-        self.voice_session_activity[peer_id] = time.monotonic()
+        session = self.voice_sessions.get(peer_id)
+        if session:
+            session.last_activity = time.monotonic()
+
+    def register_voice(
+        self,
+        peer_id: str,
+        peer: RTCPeerConnection,
+        *,
+        user_id: str,
+        agent_id: str | None,
+        persistent_session_id: str | None,
+        canvas_mode: bool,
+    ) -> VoiceRuntimeSession:
+        session = VoiceRuntimeSession(
+            peer_id=peer_id,
+            peer=peer,
+            user_id=user_id,
+            agent_id=agent_id,
+            persistent_session_id=persistent_session_id,
+            canvas_mode=canvas_mode,
+        )
+        self.voice_sessions[peer_id] = session
+        return session
+
+    def get_voice(self, peer_id: str) -> VoiceRuntimeSession | None:
+        return self.voice_sessions.get(peer_id)
+
+    def pop_voice(self, peer_id: str) -> VoiceRuntimeSession | None:
+        return self.voice_sessions.pop(peer_id, None)
 
     def clear(self) -> None:
         """Clear references after work has been cancelled and peers have been closed."""
         self.chat_sessions.clear()
         self.voice_sessions.clear()
-        self.voice_session_activity.clear()
-        self.voice_session_finalizing.clear()
-        self.peer_connections.clear()
-        self.datachannels.clear()
-        self.peer_user_ids.clear()
-        self.peer_agent_ids.clear()
-        self.peer_session_ids.clear()
-        self.peer_canvas_modes.clear()
-        self.tts_interrupt_flags.clear()
-        self.pending_sdl.clear()
-        self.smart_turn_sessions.clear()
-        self.turn_processing_tasks.clear()
-        self.turn_timing.clear()
         self.background_tasks.clear()
 
     async def shutdown(self) -> None:
@@ -108,16 +132,22 @@ class RuntimeRegistry:
         self.sweeper_task = None
         await self._cancel_tasks({sweeper_task} if sweeper_task else set())
 
-        owned_tasks = set(self.turn_processing_tasks.values()) | set(self.background_tasks)
+        turn_tasks = {
+            session.turn_task for session in self.voice_sessions.values() if session.turn_task
+        }
+        owned_tasks = turn_tasks | set(self.background_tasks)
         await self._cancel_tasks(owned_tasks)
 
-        for smart_turn_session in list(self.smart_turn_sessions.values()):
+        for session in list(self.voice_sessions.values()):
+            smart_turn_session = session.smart_turn
+            if not smart_turn_session:
+                continue
             try:
                 smart_turn_session.cleanup()
             except Exception as exc:
                 logger.warning("Smart Turn cleanup failed during shutdown: %s", exc)
 
-        peers = list(self.peer_connections)
+        peers = [session.peer for session in self.voice_sessions.values()]
         if peers:
             await asyncio.gather(*(peer.close() for peer in peers), return_exceptions=True)
 
