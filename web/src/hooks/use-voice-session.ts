@@ -1,17 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  DataPacket_Kind,
-  Room,
-  RoomEvent,
-  isAudioTrack,
-  type RemoteAudioTrack,
-  type RemoteParticipant,
-  type RemoteTrack,
-  type RemoteTrackPublication,
-} from "livekit-client";
 
+import { AssignmentReleaseScheduler } from "@/features/voice/assignment-release";
 import {
   createInitialVoiceEventState,
   reduceVoiceEvent,
@@ -24,9 +15,9 @@ import {
   transitionVoiceSession,
   type VoiceSessionPhase,
 } from "@/features/voice/session-machine";
+import { LiveKitVoiceTransport } from "@/features/voice/livekit-transport";
 import {
   bootstrapVoiceSession,
-  endVoiceSession,
   VOICE_V2_EVENT_TOPIC,
   VoiceSessionApiError,
   type VoiceSessionBootstrap,
@@ -35,9 +26,6 @@ import {
 const BOOTSTRAP_TIMEOUT_MS = 15_000;
 const AGENT_READY_TIMEOUT_MS = 15_000;
 const SESSION_END_TIMEOUT_MS = 5_000;
-const RELEASE_MAX_ATTEMPTS = 3;
-const RELEASE_ATTEMPT_TIMEOUT_MS = 5_000;
-const RELEASE_RETRY_DELAYS_MS = [100, 250] as const;
 
 type LocalTransportEventType =
   | "transport_connected"
@@ -117,13 +105,6 @@ function settleOnAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
       }
     );
   });
-}
-
-function isRetryableReleaseFailure(error: unknown): boolean {
-  if (!(error instanceof VoiceSessionApiError)) return true;
-  if (error.status === undefined) return true;
-  // Release conflicts encode a durable scope/state mismatch; rate limits do not.
-  return error.status === 429 || error.status >= 500;
 }
 
 interface VoiceCallIdentity {
@@ -224,13 +205,22 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isTTSEnabled, setIsTTSEnabled] = useState(true);
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
+  // Group the stable React writers behind one immutable owner for transport
+  // callbacks and the session orchestrator.
+  const [stateWriters] = useState(() => ({
+    setAssignment,
+    setAudioPlaybackBlocked,
+    setCallIdentity,
+    setEventState,
+    setIsMicMuted,
+    setIsTTSEnabled,
+  }));
 
   const eventStateRef = useRef(eventState);
   const assignmentRef = useRef<VoiceSessionBootstrap | null>(null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
-  const roomRef = useRef<Room | null>(null);
-  const listenerCleanupRef = useRef<readonly (() => void)[]>([]);
+  const transportRef = useRef<LiveKitVoiceTransport | null>(null);
   const bootstrapAbortRef = useRef<AbortController | null>(null);
   const bootstrapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -240,18 +230,14 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const localProducerIdRef = useRef<string>("browser:unassigned:0");
   const activeVoiceCallIdRef = useRef<string | null>(null);
   const activeBrowserTraceIdRef = useRef<string | null>(null);
-  const reconnectAttemptRef = useRef(0);
-  const remoteAudioTracksRef = useRef<Set<RemoteAudioTrack>>(new Set());
-  const audioElementsRef = useRef<Set<HTMLMediaElement>>(new Set());
   const ttsEnabledRef = useRef(true);
-  const releasedCallIdsRef = useRef<Set<string>>(new Set());
-  const releaseRetryTimersRef = useRef<
-    Map<string, ReturnType<typeof setTimeout>>
-  >(new Map());
-  const releaseAttemptTimersRef = useRef<
-    Map<string, ReturnType<typeof setTimeout>>
-  >(new Map());
-  const releaseAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const [releaseScheduler] = useState(
+    () =>
+      new AssignmentReleaseScheduler({
+        apiUrl: options.apiUrl,
+        onLog: options.onLog,
+      })
+  );
 
   const log = useCallback((message: string) => {
     optionsRef.current.onLog?.(message);
@@ -259,105 +245,8 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
 
   const releaseCallIdentity = useCallback(() => {
     callIdentityRef.current = null;
-    if (mountedRef.current) setCallIdentity(null);
-  }, []);
-
-  const clearReleaseWork = useCallback(() => {
-    for (const timer of releaseRetryTimersRef.current.values()) {
-      clearTimeout(timer);
-    }
-    releaseRetryTimersRef.current.clear();
-    for (const timer of releaseAttemptTimersRef.current.values()) {
-      clearTimeout(timer);
-    }
-    releaseAttemptTimersRef.current.clear();
-    for (const controller of releaseAbortControllersRef.current.values()) {
-      controller.abort();
-    }
-    releaseAbortControllersRef.current.clear();
-  }, []);
-
-  const releaseServerAssignment = useCallback(
-    (assignment: Pick<VoiceSessionBootstrap, "session_id" | "voice_call_id"> | null) => {
-      if (!assignment || releasedCallIdsRef.current.has(assignment.voice_call_id)) return;
-      const callId = assignment.voice_call_id;
-      releasedCallIdsRef.current.add(callId);
-
-      if (!mountedRef.current) {
-        // keepalive owns best-effort page-exit delivery; no timers may outlive the hook.
-        void endVoiceSession(
-          { session_id: assignment.session_id, voice_call_id: callId },
-          { apiUrl: optionsRef.current.apiUrl }
-        ).catch(() => undefined);
-        return;
-      }
-
-      const attemptRelease = (attempt: number) => {
-        const handleFailure = (error: unknown) => {
-          if (!mountedRef.current) return;
-          const retryable = isRetryableReleaseFailure(error);
-          const canRetry =
-            attempt < RELEASE_MAX_ATTEMPTS && retryable;
-          if (!canRetry) {
-            if (retryable) releasedCallIdsRef.current.delete(callId);
-            log(`Voice assignment release failed: ${errorMessage(error)}`);
-            return;
-          }
-
-          const delay =
-            RELEASE_RETRY_DELAYS_MS[attempt - 1] ??
-            RELEASE_RETRY_DELAYS_MS[RELEASE_RETRY_DELAYS_MS.length - 1];
-          const timer = setTimeout(() => {
-            releaseRetryTimersRef.current.delete(callId);
-            if (mountedRef.current) attemptRelease(attempt + 1);
-          }, delay);
-          releaseRetryTimersRef.current.set(callId, timer);
-          log(
-            `Voice assignment release failed; retrying ${attempt + 1}/${RELEASE_MAX_ATTEMPTS}`
-          );
-        };
-
-        const abortController = new AbortController();
-        releaseAbortControllersRef.current.set(callId, abortController);
-        const attemptTimer = setTimeout(() => {
-          abortController.abort();
-        }, RELEASE_ATTEMPT_TIMEOUT_MS);
-        releaseAttemptTimersRef.current.set(callId, attemptTimer);
-
-        const finishAttempt = () => {
-          if (releaseAbortControllersRef.current.get(callId) === abortController) {
-            releaseAbortControllersRef.current.delete(callId);
-          }
-          if (releaseAttemptTimersRef.current.get(callId) === attemptTimer) {
-            clearTimeout(attemptTimer);
-            releaseAttemptTimersRef.current.delete(callId);
-          }
-        };
-
-        try {
-          void settleOnAbort(
-            endVoiceSession(
-              {
-                session_id: assignment.session_id,
-                voice_call_id: callId,
-              },
-              { apiUrl: optionsRef.current.apiUrl, signal: abortController.signal }
-            ),
-            abortController.signal
-          ).then(finishAttempt, (error: unknown) => {
-            finishAttempt();
-            handleFailure(error);
-          });
-        } catch (error) {
-          finishAttempt();
-          handleFailure(error);
-        }
-      };
-
-      attemptRelease(1);
-    },
-    [log]
-  );
+    if (mountedRef.current) stateWriters.setCallIdentity(null);
+  }, [stateWriters]);
 
   const clearBootstrapTimer = useCallback(() => {
     if (bootstrapTimerRef.current !== null) {
@@ -384,19 +273,11 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     const previousPhase = eventStateRef.current.session.phase;
     eventStateRef.current = nextState;
     if (!mountedRef.current) return;
-    setEventState(nextState);
+    stateWriters.setEventState(nextState);
     if (nextState.session.phase !== previousPhase) {
       optionsRef.current.onPhaseChange?.(nextState.session.phase);
     }
-  }, []);
-
-  const detachAudioTrack = useCallback((track: RemoteAudioTrack) => {
-    remoteAudioTracksRef.current.delete(track);
-    for (const element of track.detach()) {
-      audioElementsRef.current.delete(element);
-      element.remove();
-    }
-  }, []);
+  }, [stateWriters]);
 
   const cleanupTransport = useCallback((releaseAssignment = false): Promise<void> => {
     generationRef.current += 1;
@@ -407,18 +288,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     bootstrapAbortRef.current = null;
     connectPromiseRef.current = null;
 
-    const cleanups = listenerCleanupRef.current;
-    listenerCleanupRef.current = [];
-    for (const cleanup of cleanups) cleanup();
-
-    for (const track of remoteAudioTracksRef.current) {
-      detachAudioTrack(track);
-    }
-    remoteAudioTracksRef.current.clear();
-    for (const element of audioElementsRef.current) element.remove();
-    audioElementsRef.current.clear();
-
-    const room = roomRef.current;
+    const transport = transportRef.current;
     const activeAssignment = assignmentRef.current;
     const assignmentLocator = activeAssignment ?? (
       eventStateRef.current.sessionId && activeVoiceCallIdRef.current
@@ -428,24 +298,17 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           }
         : null
     );
-    roomRef.current = null;
+    transportRef.current = null;
     assignmentRef.current = null;
-    if (releaseAssignment) releaseServerAssignment(assignmentLocator);
-    if (mountedRef.current) setAssignment(null);
-    reconnectAttemptRef.current = 0;
-    if (!room) return Promise.resolve();
-    void room.localParticipant.setMicrophoneEnabled(false).catch(() => {
-      // Disconnect remains authoritative if the capture track already ended.
-    });
-    return room.disconnect(true).catch(() => {
-      // Teardown is idempotent; a concurrently closed room needs no recovery.
-    });
+    if (releaseAssignment) releaseScheduler.release(assignmentLocator);
+    if (mountedRef.current) stateWriters.setAssignment(null);
+    return transport?.disconnect() ?? Promise.resolve();
   }, [
     clearBootstrapTimer,
     clearReadyTimer,
     clearSessionEndTimer,
-    detachAudioTrack,
-    releaseServerAssignment,
+    releaseScheduler,
+    stateWriters,
   ]);
 
   const applyReduction = useCallback(
@@ -537,7 +400,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       message: string,
       options: ActiveCallFailureOptions = {}
     ) => {
-      if (generationRef.current !== generation || !roomRef.current) return;
+      if (generationRef.current !== generation || !transportRef.current) return;
       const canRetry = options.canRetry ?? false;
       if (!(options.retainCallIdentity ?? false)) releaseCallIdentity();
       const reduction = applyLocalEvent("agent_unavailable", {
@@ -557,7 +420,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
 
   const handleTransportInput = useCallback(
     (input: unknown, generation: number) => {
-      if (generationRef.current !== generation || !roomRef.current) return;
+      if (generationRef.current !== generation || !transportRef.current) return;
       const decoded = decodeVoiceEvent(input);
       const expectedTraceId = assignmentRef.current?.trace_id;
       if (
@@ -637,7 +500,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           log("Voice V2 is disabled for this runtime assignment");
           return;
         }
-        if (roomRef.current) return;
+        if (transportRef.current) return;
 
         const sessionId = overrides.sessionId ?? optionsRef.current.sessionId;
         if (!sessionId) {
@@ -662,12 +525,12 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         if (requiresNewCallIdentity) {
           activeCallIdentity = createVoiceCallIdentity();
           callIdentityRef.current = activeCallIdentity;
-          setCallIdentity(activeCallIdentity);
+          stateWriters.setCallIdentity(activeCallIdentity);
         }
         if (activeCallIdentity === null) {
           activeCallIdentity = createVoiceCallIdentity();
           callIdentityRef.current = activeCallIdentity;
-          setCallIdentity(activeCallIdentity);
+          stateWriters.setCallIdentity(activeCallIdentity);
         }
         const activeVoiceCallId = activeCallIdentity.voiceCallId;
         activeVoiceCallIdRef.current = activeVoiceCallId;
@@ -677,34 +540,103 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         generationRef.current = generation;
         localProducerSequenceRef.current = 0;
         localProducerIdRef.current = `browser:${activeVoiceCallId}:${generation}`;
-        reconnectAttemptRef.current = 0;
 
         const initial = createInitialVoiceEventState(sessionId, activeVoiceCallId);
         publishState({
           ...initial,
           session: transitionVoiceSession(initial.session, { type: "connect_requested" }),
         });
-        setAssignment(null);
+        stateWriters.setAssignment(null);
         assignmentRef.current = null;
-        setIsMicMuted(false);
-        setAudioPlaybackBlocked(false);
+        stateWriters.setIsMicMuted(false);
+        stateWriters.setAudioPlaybackBlocked(false);
         log("Requesting Voice V2 assignment");
 
-        const room = new Room({
-          adaptiveStream: false,
-          dynacast: false,
-          disconnectOnPageLeave: true,
-          stopLocalTrackOnUnpublish: true,
+        let transport: LiveKitVoiceTransport;
+        const isCurrentTransport = () =>
+          generationRef.current === generation &&
+          transportRef.current === transport;
+        transport = new LiveKitVoiceTransport({
+          voiceCallId: activeVoiceCallId,
+          ttsEnabled: ttsEnabledRef.current,
+          callbacks: {
+            isCurrent: isCurrentTransport,
+            onConnected: () => {
+              if (!isCurrentTransport()) return;
+              const reduction = applyLocalEvent("transport_connected", {});
+              if (reduction.disposition !== "applied") return;
+              log("Transport connected; waiting for genuine agent readiness");
+              clearReadyTimer();
+              readyTimerRef.current = setTimeout(() => {
+                readyTimerRef.current = null;
+                failActiveCall(
+                  generation,
+                  "agent_ready_timeout",
+                  "The voice agent did not become ready in time. Continue in text mode.",
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              }, AGENT_READY_TIMEOUT_MS);
+            },
+            onReconnecting: (attempt) => {
+              if (!isCurrentTransport()) return;
+              clearReadyTimer();
+              applyLocalEvent("transport_reconnecting", {
+                attempt,
+                reason: "livekit_reconnecting",
+              });
+              log("Voice transport reconnecting");
+            },
+            onReconnected: () => {
+              if (!isCurrentTransport()) return;
+              failActiveCall(
+                generation,
+                "reconnect_not_supported",
+                "Voice transport reconnected, but this runtime cannot safely restore the event stream yet. Start a fresh voice call.",
+                { canRetry: true, retainCallIdentity: false }
+              );
+            },
+            onDisconnected: () => {
+              if (!isCurrentTransport()) return;
+              failActiveCall(
+                generation,
+                "transport_unavailable",
+                "Voice transport disconnected",
+                { canRetry: true, retainCallIdentity: false }
+              );
+            },
+            onTransportInput: (input) => {
+              if (!isCurrentTransport()) return;
+              handleTransportInput(input, generation);
+            },
+            onInvalidEventChannel: () => {
+              if (!isCurrentTransport()) return;
+              failActiveCall(
+                generation,
+                "invalid_event_channel",
+                "Voice received data outside its authenticated reliable event channel"
+              );
+            },
+            onMicrophoneUnavailable: (error) => {
+              if (!isCurrentTransport()) return;
+              failActiveCall(
+                generation,
+                "microphone_unavailable",
+                `Microphone unavailable: ${error.message}`,
+                { canRetry: true, retainCallIdentity: false }
+              );
+            },
+            onAudioPlaybackBlockedChange: (blocked) => {
+              if (isCurrentTransport() && mountedRef.current) {
+                stateWriters.setAudioPlaybackBlocked(blocked);
+              }
+            },
+          },
         });
-        roomRef.current = room;
+        transportRef.current = transport;
 
         // Invoke this before the first awaited bootstrap step so the connect click
         // can satisfy restrictive browser audio-playback policies.
-        void room.startAudio().catch(() => {
-          if (generationRef.current === generation && mountedRef.current) {
-            setAudioPlaybackBlocked(true);
-          }
-        });
+        transport.primeAudioPlayback();
 
         const abortController = new AbortController();
         bootstrapAbortRef.current = abortController;
@@ -744,7 +676,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           }
         }
 
-        if (generationRef.current !== generation || roomRef.current !== room) return;
+        if (!isCurrentTransport()) return;
         if (
           bootstrap.agent_id !== optionsRef.current.agentId ||
           bootstrap.session_id !== sessionId ||
@@ -760,170 +692,13 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         }
 
         assignmentRef.current = bootstrap;
-        releasedCallIdsRef.current.delete(bootstrap.voice_call_id);
-        if (mountedRef.current) setAssignment(bootstrap);
-
-        const onConnected = () => {
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          reconnectAttemptRef.current = 0;
-          const reduction = applyLocalEvent("transport_connected", {});
-          if (reduction.disposition !== "applied") return;
-          log("Transport connected; waiting for genuine agent readiness");
-          clearReadyTimer();
-          readyTimerRef.current = setTimeout(() => {
-            readyTimerRef.current = null;
-            failActiveCall(
-              generation,
-              "agent_ready_timeout",
-              "The voice agent did not become ready in time. Continue in text mode.",
-              { canRetry: true, retainCallIdentity: false }
-            );
-          }, AGENT_READY_TIMEOUT_MS);
-        };
-
-        const onReconnecting = () => {
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          clearReadyTimer();
-          reconnectAttemptRef.current += 1;
-          applyLocalEvent("transport_reconnecting", {
-            attempt: reconnectAttemptRef.current,
-            reason: "livekit_reconnecting",
-          });
-          log("Voice transport reconnecting");
-        };
-
-        const onReconnected = () => {
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          failActiveCall(
-            generation,
-            "reconnect_not_supported",
-            "Voice transport reconnected, but this runtime cannot safely restore the event stream yet. Start a fresh voice call.",
-            { canRetry: true, retainCallIdentity: false }
-          );
-        };
-
-        const onDisconnected = () => {
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          failActiveCall(
-            generation,
-            "transport_unavailable",
-            "Voice transport disconnected",
-            { canRetry: true, retainCallIdentity: false }
-          );
-        };
-
-        const onDataReceived = (
-          payload: Uint8Array,
-          participant?: RemoteParticipant,
-          kind?: DataPacket_Kind,
-          topic?: string
-        ) => {
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          if (
-            topic !== bootstrap.event_topic ||
-            kind !== DataPacket_Kind.RELIABLE ||
-            participant?.isAgent !== true ||
-            participant.identity !== bootstrap.agent_participant_identity
-          ) {
-            failActiveCall(
-              generation,
-              "invalid_event_channel",
-              "Voice received data outside its authenticated reliable event channel"
-            );
-            return;
-          }
-
-          let input: unknown;
-          try {
-            input = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
-          } catch {
-            input = null;
-          }
-          handleTransportInput(input, generation);
-        };
-
-        const onTrackSubscribed = (
-          track: RemoteTrack,
-          _publication: RemoteTrackPublication,
-          participant: RemoteParticipant
-        ) => {
-          if (
-            generationRef.current !== generation ||
-            roomRef.current !== room ||
-            participant.isAgent !== true ||
-            participant.identity !== bootstrap.agent_participant_identity ||
-            !isAudioTrack(track) ||
-            track.isLocal
-          ) {
-            return;
-          }
-          const audioTrack = track as RemoteAudioTrack;
-          audioTrack.setVolume(ttsEnabledRef.current ? 1 : 0);
-          const element = audioTrack.attach();
-          element.autoplay = true;
-          element.setAttribute("data-murmur-voice-call", activeVoiceCallId);
-          element.className = "hidden";
-          document.body.appendChild(element);
-          remoteAudioTracksRef.current.add(audioTrack);
-          audioElementsRef.current.add(element);
-        };
-
-        const onTrackUnsubscribed = (track: RemoteTrack) => {
-          if (isAudioTrack(track) && !track.isLocal) {
-            detachAudioTrack(track as RemoteAudioTrack);
-          }
-        };
-
-        const onMediaDevicesError = (error: Error, kind?: MediaDeviceKind) => {
-          if (kind && kind !== "audioinput") return;
-          failActiveCall(
-            generation,
-            "microphone_unavailable",
-            `Microphone unavailable: ${error.message}`,
-            { canRetry: true, retainCallIdentity: false }
-          );
-        };
-
-        const onAudioPlaybackChanged = (playing: boolean) => {
-          if (generationRef.current === generation && mountedRef.current) {
-            setAudioPlaybackBlocked(!playing);
-          }
-        };
-
-        room.on(RoomEvent.Connected, onConnected);
-        room.on(RoomEvent.Reconnecting, onReconnecting);
-        room.on(RoomEvent.Reconnected, onReconnected);
-        room.on(RoomEvent.Disconnected, onDisconnected);
-        room.on(RoomEvent.DataReceived, onDataReceived);
-        room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
-        room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
-        room.on(RoomEvent.MediaDevicesError, onMediaDevicesError);
-        room.on(RoomEvent.AudioPlaybackStatusChanged, onAudioPlaybackChanged);
-        listenerCleanupRef.current = [
-          () => room.off(RoomEvent.Connected, onConnected),
-          () => room.off(RoomEvent.Reconnecting, onReconnecting),
-          () => room.off(RoomEvent.Reconnected, onReconnected),
-          () => room.off(RoomEvent.Disconnected, onDisconnected),
-          () => room.off(RoomEvent.DataReceived, onDataReceived),
-          () => room.off(RoomEvent.TrackSubscribed, onTrackSubscribed),
-          () => room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed),
-          () => room.off(RoomEvent.MediaDevicesError, onMediaDevicesError),
-          () => room.off(RoomEvent.AudioPlaybackStatusChanged, onAudioPlaybackChanged),
-        ];
+        releaseScheduler.markAssigned(bootstrap.voice_call_id);
+        if (mountedRef.current) stateWriters.setAssignment(bootstrap);
 
         try {
-          await room.connect(bootstrap.server_url, bootstrap.participant_token, {
-            autoSubscribe: true,
-          });
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          await room.localParticipant.setMicrophoneEnabled(true, {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          });
-          if (generationRef.current !== generation || roomRef.current !== room) return;
-          setIsMicMuted(false);
-          setAudioPlaybackBlocked(!room.canPlaybackAudio);
+          await transport.connect(bootstrap);
+          if (!isCurrentTransport()) return;
+          stateWriters.setIsMicMuted(false);
           log(`Joined assigned room ${bootstrap.room_name}`);
         } catch (error) {
           if (generationRef.current !== generation || isAbortError(error)) return;
@@ -949,11 +724,12 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       cleanupTransport,
       clearBootstrapTimer,
       clearReadyTimer,
-      detachAudioTrack,
       failActiveCall,
       handleTransportInput,
       log,
       publishState,
+      releaseScheduler,
+      stateWriters,
     ]
   );
 
@@ -978,14 +754,17 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   }, [cleanupTransport, log, publishState, releaseCallIdentity]);
 
   const toggleMicMute = useCallback(async () => {
-    const room = roomRef.current;
-    if (!room || !eventStateRef.current.session.voiceReady) return;
+    const transport = transportRef.current;
+    if (!transport || !eventStateRef.current.session.voiceReady) return;
     const generation = generationRef.current;
     const nextMuted = !isMicMuted;
     try {
-      await room.localParticipant.setMicrophoneEnabled(!nextMuted);
-      if (generationRef.current === generation && roomRef.current === room) {
-        setIsMicMuted(nextMuted);
+      await transport.setMicrophoneEnabled(!nextMuted);
+      if (
+        generationRef.current === generation &&
+        transportRef.current === transport
+      ) {
+        stateWriters.setIsMicMuted(nextMuted);
       }
     } catch (error) {
       failActiveCall(
@@ -995,35 +774,20 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         { canRetry: true, retainCallIdentity: false }
       );
     }
-  }, [failActiveCall, isMicMuted]);
+  }, [failActiveCall, isMicMuted, stateWriters]);
 
   const toggleTTS = useCallback(() => {
     const nextEnabled = !ttsEnabledRef.current;
     ttsEnabledRef.current = nextEnabled;
-    setIsTTSEnabled(nextEnabled);
-    for (const track of remoteAudioTracksRef.current) {
-      track.setVolume(nextEnabled ? 1 : 0);
-    }
-    if (nextEnabled && roomRef.current) {
-      void roomRef.current.startAudio().then(
-        () => {
-          if (mountedRef.current) setAudioPlaybackBlocked(false);
-        },
-        () => {
-          if (mountedRef.current) setAudioPlaybackBlocked(true);
-        }
-      );
-    }
-  }, []);
+    stateWriters.setIsTTSEnabled(nextEnabled);
+    transportRef.current?.setTtsEnabled(nextEnabled);
+  }, [stateWriters]);
 
   const resumeAudio = useCallback(async () => {
-    const room = roomRef.current;
-    if (!room) return;
+    const transport = transportRef.current;
+    if (!transport) return;
     try {
-      await room.startAudio();
-      if (roomRef.current === room && mountedRef.current) {
-        setAudioPlaybackBlocked(false);
-      }
+      await transport.resumeAudio();
     } catch (error) {
       optionsRef.current.onError?.(`Audio playback remains blocked: ${errorMessage(error)}`);
     }
@@ -1031,19 +795,24 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
 
   useEffect(() => {
     mountedRef.current = true;
+    releaseScheduler.mount();
     return () => {
       mountedRef.current = false;
-      clearReleaseWork();
+      releaseScheduler.dispose();
       void cleanupTransport(true);
     };
-  }, [cleanupTransport, clearReleaseWork]);
+  }, [cleanupTransport, releaseScheduler]);
 
   useEffect(() => {
     optionsRef.current = options;
-  }, [options]);
+    releaseScheduler.configure({
+      apiUrl: options.apiUrl,
+      onLog: options.onLog,
+    });
+  }, [options, releaseScheduler]);
 
   useEffect(() => {
-    if (!options.enabled && roomRef.current) {
+    if (!options.enabled && transportRef.current) {
       void cleanupTransport(true);
     }
   }, [cleanupTransport, options.enabled]);

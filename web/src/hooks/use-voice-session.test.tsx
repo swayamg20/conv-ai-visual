@@ -894,11 +894,12 @@ describe("useVoiceSession", () => {
     await act(async () => mounted.root.unmount());
   });
 
-  it("clears a pending assignment-release retry when the hook unmounts", async () => {
+  it("replaces a pending assignment-release retry with one timer-free unmount release", async () => {
     vi.useFakeTimers();
     api.endVoiceSession.mockRejectedValueOnce(new TypeError("network unavailable"));
     const mounted = await mountHook();
     await connectHook(mounted);
+    const activeCallId = mounted.read().voiceCallId;
 
     act(() => mounted.read().cancelConnection());
     await act(async () => Promise.resolve());
@@ -908,7 +909,14 @@ describe("useVoiceSession", () => {
     await act(async () => mounted.root.unmount());
     expect(vi.getTimerCount()).toBe(0);
     await vi.runAllTimersAsync();
-    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
+    expect(api.endVoiceSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ voice_call_id: activeCallId }),
+      expect.objectContaining({ apiUrl: undefined })
+    );
+    expect(api.endVoiceSession.mock.calls.at(-1)?.[1]).not.toHaveProperty(
+      "signal"
+    );
   });
 
   it("cancels an in-flight bootstrap without surfacing a false failure", async () => {

@@ -35,6 +35,7 @@ from murmur.voice.bootstrap import (
     VoiceBootstrapService,
     VoiceBootstrapSettings,
     VoiceBootstrapUnavailable,
+    VoiceScope,
     derive_room_name,
     normalize_server_url,
     verify_signed_metadata,
@@ -1431,24 +1432,15 @@ async def test_default_bootstrap_degrades_invalid_v2_numeric_to_unavailable(
 
 def test_room_derivation_changes_with_every_trusted_scope_dimension() -> None:
     settings = _settings()
-    base = SimpleNamespace(
+    base = VoiceScope(
         user_id="user-1", session_id="session-1", agent_id="agent-1", voice_call_id="call-1"
     )
     baseline = derive_room_name(settings, base)
 
     assert derive_room_name(_settings(environment="prod"), base) != baseline
-    assert (
-        derive_room_name(settings, SimpleNamespace(**{**vars(base), "user_id": "user-2"}))
-        != baseline
-    )
-    assert (
-        derive_room_name(settings, SimpleNamespace(**{**vars(base), "session_id": "session-2"}))
-        != baseline
-    )
-    assert (
-        derive_room_name(settings, SimpleNamespace(**{**vars(base), "voice_call_id": "call-2"}))
-        != baseline
-    )
+    assert derive_room_name(settings, replace(base, user_id="user-2")) != baseline
+    assert derive_room_name(settings, replace(base, session_id="session-2")) != baseline
+    assert derive_room_name(settings, replace(base, voice_call_id="call-2")) != baseline
 
 
 class _FakeAccessToken:

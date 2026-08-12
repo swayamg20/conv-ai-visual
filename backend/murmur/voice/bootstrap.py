@@ -3,21 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
-import hmac
-import json
-import math
-import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal, Protocol, TypeVar
-from urllib.parse import urlsplit, urlunsplit
+from typing import TypeVar
 from uuid import uuid4
 
-from murmur.persistence.models import AgentModel, SessionModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.voice.blocking import (
@@ -25,256 +17,83 @@ from murmur.voice.blocking import (
     BoundedSyncRunnerUnavailable,
     default_repository_runner,
 )
+from murmur.voice.bootstrap_contracts import (
+    RELEASE_TOMBSTONE_TTL_SECONDS,
+    SIGNED_METADATA_ALGORITHM,
+    SIGNED_METADATA_VERSION,
+    VOICE_V2_EVENT_TOPIC,
+    VOICE_V2_RUNTIME,
+    AgentRepository,
+    CreateDispatchSpec,
+    CreateRoomSpec,
+    DispatchRecord,
+    ParticipantGrants,
+    ParticipantTokenSpec,
+    RoomRecord,
+    SessionRepository,
+    VoiceBootstrapConflict,
+    VoiceBootstrapError,
+    VoiceBootstrapForbidden,
+    VoiceBootstrapNotFound,
+    VoiceBootstrapper,
+    VoiceBootstrapResult,
+    VoiceBootstrapSettings,
+    VoiceBootstrapUnavailable,
+    VoiceControlPlane,
+    VoiceScope,
+    build_job_metadata_payload,
+    derive_agent_participant_identity,
+    derive_participant_identity,
+    derive_room_name,
+    is_contract_id,
+    normalize_server_url,
+    sign_metadata,
+    verify_signed_metadata,
+)
+from murmur.voice.bootstrap_lifecycle import CallLockRegistry
 
-VOICE_V2_RUNTIME = "livekit_v2"
-VOICE_V2_EVENT_TOPIC = "murmur.voice.v2.events"
-SIGNED_METADATA_VERSION = 1
-SIGNED_METADATA_ALGORITHM = "hmac-sha256"
-RELEASE_TOMBSTONE_TTL_SECONDS = 900
+__all__ = [
+    "RELEASE_TOMBSTONE_TTL_SECONDS",
+    "SIGNED_METADATA_ALGORITHM",
+    "SIGNED_METADATA_VERSION",
+    "VOICE_V2_EVENT_TOPIC",
+    "VOICE_V2_RUNTIME",
+    "AgentRepository",
+    "CreateDispatchSpec",
+    "CreateRoomSpec",
+    "DispatchRecord",
+    "ParticipantGrants",
+    "ParticipantTokenSpec",
+    "RoomRecord",
+    "SessionRepository",
+    "UnavailableVoiceBootstrapService",
+    "VoiceBootstrapConflict",
+    "VoiceBootstrapError",
+    "VoiceBootstrapForbidden",
+    "VoiceBootstrapNotFound",
+    "VoiceBootstrapResult",
+    "VoiceBootstrapService",
+    "VoiceBootstrapSettings",
+    "VoiceBootstrapUnavailable",
+    "VoiceBootstrapper",
+    "VoiceControlPlane",
+    "VoiceScope",
+    "build_job_metadata_payload",
+    "derive_agent_participant_identity",
+    "derive_participant_identity",
+    "derive_room_name",
+    "is_contract_id",
+    "normalize_server_url",
+    "sign_metadata",
+    "verify_signed_metadata",
+]
+
 _ControlResult = TypeVar("_ControlResult")
-_CONTRACT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-
-
-class VoiceBootstrapError(Exception):
-    """Base class for expected Voice V2 bootstrap failures."""
-
-
-class VoiceBootstrapUnavailable(VoiceBootstrapError):
-    """The Voice V2 control plane cannot safely serve a bootstrap."""
-
-
-class VoiceBootstrapNotFound(VoiceBootstrapError):
-    """An authoritative session or agent does not exist."""
-
-
-class VoiceBootstrapForbidden(VoiceBootstrapError):
-    """The authenticated identity does not own the requested scope."""
-
-
-class VoiceBootstrapConflict(VoiceBootstrapError):
-    """Existing control-plane state conflicts with the trusted assignment."""
-
-
-@dataclass(frozen=True)
-class VoiceBootstrapSettings:
-    """Server-controlled Voice V2 assignment and token policy."""
-
-    server_url: str
-    environment: str
-    profile_id: str
-    worker_name: str
-    event_topic: str
-    signing_secret: str = field(repr=False)
-    token_ttl_seconds: int = 300
-    job_metadata_ttl_seconds: int = 300
-    room_empty_timeout_seconds: int = 60
-    room_departure_timeout_seconds: int = 30
-    control_plane_timeout_seconds: float = 5.0
-    repository_timeout_seconds: float = 2.0
-    max_concurrent_bootstraps: int = 100
-    max_active_calls: int = 1
-    max_call_assignments: int = 10_000
-    runtime: Literal["livekit_v2"] = VOICE_V2_RUNTIME
-
-    def __post_init__(self) -> None:
-        required = {
-            "server_url": self.server_url,
-            "environment": self.environment,
-            "profile_id": self.profile_id,
-            "worker_name": self.worker_name,
-            "event_topic": self.event_topic,
-            "signing_secret": self.signing_secret,
-        }
-        missing = [name for name, value in required.items() if not value.strip()]
-        if missing:
-            raise ValueError("missing Voice V2 settings: " + ", ".join(sorted(missing)))
-        for name in ("environment", "profile_id", "worker_name", "event_topic"):
-            if not _CONTRACT_ID.fullmatch(getattr(self, name)):
-                raise ValueError(f"Voice V2 {name} is not a valid contract identifier")
-        if self.event_topic != VOICE_V2_EVENT_TOPIC:
-            raise ValueError(f"Voice V2 event_topic must be {VOICE_V2_EVENT_TOPIC}")
-        if len(self.signing_secret.encode("utf-8")) < 32:
-            raise ValueError("Voice V2 signing secret must contain at least 32 bytes")
-        if self.runtime != VOICE_V2_RUNTIME:
-            raise ValueError(f"Voice V2 runtime must be {VOICE_V2_RUNTIME}")
-        normalize_server_url(self.server_url)
-        if not 30 <= self.token_ttl_seconds <= RELEASE_TOMBSTONE_TTL_SECONDS:
-            raise ValueError("Voice V2 participant token TTL must be between 30 and 900 seconds")
-        if not 30 <= self.job_metadata_ttl_seconds <= RELEASE_TOMBSTONE_TTL_SECONDS:
-            raise ValueError("Voice V2 job metadata TTL must be between 30 and 900 seconds")
-        if self.room_empty_timeout_seconds <= 0 or self.room_departure_timeout_seconds <= 0:
-            raise ValueError("Voice V2 room timeouts must be positive")
-        if (
-            not math.isfinite(self.control_plane_timeout_seconds)
-            or self.control_plane_timeout_seconds <= 0
-            or self.control_plane_timeout_seconds > 30
-        ):
-            raise ValueError("Voice V2 control-plane timeout must be between 0 and 30 seconds")
-        if (
-            isinstance(self.repository_timeout_seconds, bool)
-            or not math.isfinite(self.repository_timeout_seconds)
-            or self.repository_timeout_seconds <= 0
-            or self.repository_timeout_seconds > 30
-        ):
-            raise ValueError("Voice V2 repository timeout must be between 0 and 30 seconds")
-        if self.max_concurrent_bootstraps <= 0:
-            raise ValueError("Voice V2 concurrent-bootstrap limit must be positive")
-        if self.max_active_calls <= 0:
-            raise ValueError("Voice V2 active-call limit must be positive")
-        if self.max_call_assignments <= 0:
-            raise ValueError("Voice V2 call-assignment limit must be positive")
-        if self.max_active_calls > self.max_call_assignments:
-            raise ValueError("Voice V2 active-call limit cannot exceed assignment capacity")
-
-
-@dataclass(frozen=True)
-class RoomRecord:
-    name: str
-    metadata: str
-    num_participants: int = 0
-
-
-@dataclass(frozen=True)
-class DispatchRecord:
-    id: str
-    room_name: str
-    agent_name: str
-    metadata: str
-    deleted_at: int = 0
-
-
-@dataclass(frozen=True)
-class CreateRoomSpec:
-    name: str
-    metadata: str
-    empty_timeout_seconds: int
-    departure_timeout_seconds: int
-    max_participants: int = 2
-
-
-@dataclass(frozen=True)
-class CreateDispatchSpec:
-    room_name: str
-    agent_name: str
-    metadata: str
-    restart_policy: Literal["never"] = "never"
-
-    def __post_init__(self) -> None:
-        if self.restart_policy != "never":
-            raise ValueError("Voice V2 dispatch restart policy must be never")
-
-
-@dataclass(frozen=True)
-class ParticipantGrants:
-    """Minimum grants required by the browser participant."""
-
-    room_name: str
-    room_join: bool = True
-    can_publish: bool = True
-    can_subscribe: bool = True
-    # Browser data publication is intentionally disabled. Voice V2 events are
-    # server-to-browser only; accepting arbitrary client data would create a
-    # second, unaudited path into the agent runtime.
-    can_publish_data: bool = False
-    can_update_own_metadata: bool = False
-    can_publish_sources: tuple[str, ...] = ("microphone",)
-    room_create: bool = False
-    room_list: bool = False
-    room_admin: bool = False
-    room_record: bool = False
-    ingress_admin: bool = False
-    agent: bool = False
-    can_manage_agent_session: bool = False
-
-
-@dataclass(frozen=True)
-class ParticipantTokenSpec:
-    identity: str
-    name: str
-    metadata: str
-    issued_at: datetime
-    expires_at: datetime
-    grants: ParticipantGrants
-
-
-@dataclass(frozen=True)
-class VoiceBootstrapResult:
-    runtime: Literal["livekit_v2"]
-    profile_id: str
-    server_url: str
-    room_name: str
-    participant_token: str = field(repr=False)
-    participant_identity: str
-    agent_participant_identity: str
-    session_id: str
-    agent_id: str
-    voice_call_id: str
-    dispatch_id: str
-    worker_name: str
-    event_topic: str
-    trace_id: str
-    expires_at: datetime
-
-
-class SessionRepository(Protocol):
-    @staticmethod
-    def get_by_id(session_id: str) -> SessionModel | None: ...
-
-
-class AgentRepository(Protocol):
-    @staticmethod
-    def get_by_id(agent_id: str) -> AgentModel | None: ...
-
-
-class VoiceControlPlane(Protocol):
-    """LiveKit-shaped operations expressed without LiveKit SDK objects."""
-
-    async def get_room(self, room_name: str) -> RoomRecord | None: ...
-
-    async def create_room(self, spec: CreateRoomSpec) -> RoomRecord: ...
-
-    async def list_dispatches(self, room_name: str) -> Sequence[DispatchRecord]: ...
-
-    async def create_dispatch(self, spec: CreateDispatchSpec) -> DispatchRecord: ...
-
-    async def delete_dispatch(self, dispatch_id: str, room_name: str) -> None: ...
-
-    async def delete_room(self, room_name: str) -> None: ...
-
-    def issue_participant_token(self, spec: ParticipantTokenSpec) -> str: ...
-
-
-class VoiceBootstrapper(Protocol):
-    async def bootstrap(
-        self,
-        *,
-        user_id: str,
-        session_id: str,
-        voice_call_id: str,
-    ) -> VoiceBootstrapResult: ...
-
-    async def release(
-        self,
-        *,
-        user_id: str,
-        session_id: str,
-        voice_call_id: str,
-    ) -> None: ...
-
-    async def aclose(self) -> None: ...
-
-
-@dataclass(frozen=True)
-class _TrustedScope:
-    user_id: str
-    session_id: str
-    agent_id: str
-    voice_call_id: str
 
 
 @dataclass(frozen=True)
 class _CallAssignment:
-    scope: _TrustedScope
+    scope: VoiceScope
     trace_id: str
     job_issued_at: int
     job_expires_at: int
@@ -284,53 +103,8 @@ class _CallAssignment:
 
 @dataclass(frozen=True)
 class _ReleaseTombstone:
-    scope: _TrustedScope
+    scope: VoiceScope
     expires_at: int
-
-
-@dataclass
-class _LockEntry:
-    lock: asyncio.Lock
-    users: int = 0
-
-
-class _KeyedLockRegistry:
-    """Reference-counted per-key locks that do not leak completed call IDs."""
-
-    def __init__(self) -> None:
-        self._guard = asyncio.Lock()
-        self._entries: dict[str, _LockEntry] = {}
-
-    @asynccontextmanager
-    async def hold(
-        self,
-        key: str,
-        *,
-        timeout_seconds: float | None = None,
-    ) -> AsyncIterator[None]:
-        async with self._guard:
-            entry = self._entries.setdefault(key, _LockEntry(lock=asyncio.Lock()))
-            entry.users += 1
-
-        acquired = False
-        try:
-            if timeout_seconds is None:
-                await entry.lock.acquire()
-            else:
-                await asyncio.wait_for(entry.lock.acquire(), timeout=timeout_seconds)
-            acquired = True
-            yield
-        finally:
-            if acquired:
-                entry.lock.release()
-            async with self._guard:
-                entry.users -= 1
-                if entry.users == 0 and self._entries.get(key) is entry:
-                    self._entries.pop(key, None)
-
-    @property
-    def active_key_count(self) -> int:
-        return len(self._entries)
 
 
 class UnavailableVoiceBootstrapService:
@@ -382,7 +156,7 @@ class VoiceBootstrapService:
         self._agent_repo = agent_repo
         self._repository_runner = repository_runner
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._call_locks = _KeyedLockRegistry()
+        self._call_locks = CallLockRegistry()
         self._assignments_guard = asyncio.Lock()
         self._bootstrap_capacity = asyncio.BoundedSemaphore(settings.max_concurrent_bootstraps)
         # Release must never queue behind bootstrap admission: a user cancel
@@ -450,7 +224,7 @@ class VoiceBootstrapService:
         user_id: str,
         session_id: str,
         voice_call_id: str,
-    ) -> _TrustedScope:
+    ) -> VoiceScope:
         session = await self._repository_lookup(self._session_repo.get_by_id, session_id)
         if session is None:
             raise VoiceBootstrapNotFound("Session not found")
@@ -463,7 +237,7 @@ class VoiceBootstrapService:
         if agent.user_id != user_id or agent.id != session.agent_id:
             raise VoiceBootstrapForbidden("Forbidden")
 
-        scope = _TrustedScope(
+        scope = VoiceScope(
             user_id=user_id,
             session_id=session.id,
             agent_id=agent.id,
@@ -476,7 +250,7 @@ class VoiceBootstrapService:
             ("agent_id", scope.agent_id),
             ("voice_call_id", scope.voice_call_id),
         ):
-            if not _CONTRACT_ID.fullmatch(value):
+            if not is_contract_id(value):
                 raise VoiceBootstrapConflict(
                     f"authoritative {name} is not compatible with Voice V2"
                 )
@@ -539,7 +313,7 @@ class VoiceBootstrapService:
         except Exception as exc:
             raise VoiceBootstrapUnavailable("Voice V2 repository lookup failed") from exc
 
-    async def _bootstrap_locked(self, scope: _TrustedScope) -> VoiceBootstrapResult:
+    async def _bootstrap_locked(self, scope: VoiceScope) -> VoiceBootstrapResult:
         blocker = await self._bootstrap_blocker(scope, include_overflow=False)
         self._raise_bootstrap_blocker(blocker)
 
@@ -572,14 +346,15 @@ class VoiceBootstrapService:
         room_name = derive_room_name(self.settings, scope)
         participant_identity = derive_participant_identity(self.settings, scope)
         agent_participant_identity = derive_agent_participant_identity(self.settings, scope)
-        metadata_payload = self._metadata_payload(
+        metadata_payload = build_job_metadata_payload(
+            self.settings,
             scope,
-            room_name,
-            assignment.trace_id,
-            participant_identity,
-            agent_participant_identity,
-            assignment.job_issued_at,
-            assignment.job_expires_at,
+            room_name=room_name,
+            trace_id=assignment.trace_id,
+            participant_identity=participant_identity,
+            agent_participant_identity=agent_participant_identity,
+            job_issued_at=assignment.job_issued_at,
+            job_expires_at=assignment.job_expires_at,
         )
         room_metadata = sign_metadata(
             metadata_payload,
@@ -668,7 +443,7 @@ class VoiceBootstrapService:
             expires_at=expires_at,
         )
 
-    async def _admit_new_assignment(self, scope: _TrustedScope) -> _CallAssignment:
+    async def _admit_new_assignment(self, scope: VoiceScope) -> _CallAssignment:
         """Atomically reserve capacity, reclaiming only provably inactive stale calls."""
         async with self._assignments_guard:
             now = int(self._aware_now().timestamp())
@@ -699,7 +474,7 @@ class VoiceBootstrapService:
                 raise VoiceBootstrapUnavailable("Voice V2 call-assignment capacity is exhausted")
             return self._create_assignment(scope)
 
-    def _create_assignment(self, scope: _TrustedScope) -> _CallAssignment:
+    def _create_assignment(self, scope: VoiceScope) -> _CallAssignment:
         if self._registry_size_locked() >= self.settings.max_call_assignments:
             raise VoiceBootstrapUnavailable("Voice V2 call-assignment capacity is exhausted")
         job_issued_at = int(self._aware_now().timestamp())
@@ -724,7 +499,7 @@ class VoiceBootstrapService:
 
     async def _bootstrap_blocker(
         self,
-        scope: _TrustedScope,
+        scope: VoiceScope,
         *,
         include_overflow: bool,
     ) -> str | None:
@@ -738,7 +513,7 @@ class VoiceBootstrapService:
 
     def _bootstrap_blocker_locked(
         self,
-        scope: _TrustedScope,
+        scope: VoiceScope,
         now: int,
         *,
         include_overflow: bool = True,
@@ -764,7 +539,7 @@ class VoiceBootstrapService:
         if blocker == "saturated":
             raise VoiceBootstrapUnavailable("Voice V2 cancellation state is saturated; retry later")
 
-    async def _record_release_intent(self, scope: _TrustedScope) -> None:
+    async def _record_release_intent(self, scope: VoiceScope) -> None:
         now = int(self._aware_now().timestamp())
         async with self._assignments_guard:
             self._prune_release_tombstones(now)
@@ -1015,14 +790,15 @@ class VoiceBootstrapService:
     ) -> tuple[str, str, str]:
         scope = assignment.scope
         room_name = derive_room_name(self.settings, scope)
-        payload = self._metadata_payload(
+        payload = build_job_metadata_payload(
+            self.settings,
             scope,
-            room_name,
-            assignment.trace_id,
-            derive_participant_identity(self.settings, scope),
-            derive_agent_participant_identity(self.settings, scope),
-            assignment.job_issued_at,
-            assignment.job_expires_at,
+            room_name=room_name,
+            trace_id=assignment.trace_id,
+            participant_identity=derive_participant_identity(self.settings, scope),
+            agent_participant_identity=derive_agent_participant_identity(self.settings, scope),
+            job_issued_at=assignment.job_issued_at,
+            job_expires_at=assignment.job_expires_at,
         )
         return (
             room_name,
@@ -1085,34 +861,6 @@ class VoiceBootstrapService:
             raise VoiceBootstrapConflict("Voice dispatch identity changed during retry")
         return dispatch
 
-    def _metadata_payload(
-        self,
-        scope: _TrustedScope,
-        room_name: str,
-        trace_id: str,
-        participant_identity: str,
-        agent_participant_identity: str,
-        job_issued_at: int,
-        job_expires_at: int,
-    ) -> dict[str, object]:
-        return {
-            "agent_id": scope.agent_id,
-            "agent_participant_identity": agent_participant_identity,
-            "environment": self.settings.environment,
-            "event_topic": self.settings.event_topic,
-            "job_expires_at": job_expires_at,
-            "job_issued_at": job_issued_at,
-            "participant_identity": participant_identity,
-            "profile_id": self.settings.profile_id,
-            "room_name": room_name,
-            "runtime": self.settings.runtime,
-            "session_id": scope.session_id,
-            "trace_id": trace_id,
-            "user_id": scope.user_id,
-            "voice_call_id": scope.voice_call_id,
-            "worker_name": self.settings.worker_name,
-        }
-
     async def _control_call(
         self,
         operation: Awaitable[_ControlResult],
@@ -1153,142 +901,3 @@ class VoiceBootstrapService:
         close = getattr(self._control_plane, "aclose", None)
         if close is not None:
             await close()
-
-
-def normalize_server_url(server_url: str) -> str:
-    """Return the WebSocket URL expected by LiveKit browser clients."""
-    value = server_url.strip()
-    try:
-        parsed = urlsplit(value)
-        # Accessing port also rejects malformed/out-of-range explicit ports.
-        _parsed_port = parsed.port
-    except ValueError as exc:
-        raise VoiceBootstrapUnavailable("LIVEKIT_URL is malformed") from exc
-    schemes = {"http": "ws", "https": "wss", "ws": "ws", "wss": "wss"}
-    target_scheme = schemes.get(parsed.scheme.lower())
-    if target_scheme is None:
-        raise VoiceBootstrapUnavailable("LIVEKIT_URL must use http, https, ws, or wss")
-    if (
-        not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.query
-        or parsed.fragment
-        or parsed.path not in {"", "/"}
-    ):
-        raise VoiceBootstrapUnavailable(
-            "LIVEKIT_URL must be an origin without credentials, path, query, or fragment"
-        )
-    return urlunsplit((target_scheme, parsed.netloc, "", "", ""))
-
-
-def derive_room_name(settings: VoiceBootstrapSettings, scope: _TrustedScope) -> str:
-    """Derive an opaque room name from trusted ownership and retry key."""
-    trusted = _canonical_json(
-        {
-            "environment": settings.environment,
-            "session_id": scope.session_id,
-            "user_id": scope.user_id,
-            "voice_call_id": scope.voice_call_id,
-        }
-    )
-    digest = _mac(settings.signing_secret, b"room:v1\x00" + trusted)[:32]
-    environment = re.sub(r"[^a-z0-9-]+", "-", settings.environment.lower()).strip("-")
-    safe_environment = (environment or "env")[:20].rstrip("-")
-    return f"murmur-{safe_environment}-{digest}"
-
-
-def derive_participant_identity(
-    settings: VoiceBootstrapSettings,
-    scope: _TrustedScope,
-) -> str:
-    trusted = _canonical_json(
-        {
-            "environment": settings.environment,
-            "session_id": scope.session_id,
-            "user_id": scope.user_id,
-            "voice_call_id": scope.voice_call_id,
-        }
-    )
-    return "user-" + _mac(settings.signing_secret, b"participant:v1\x00" + trusted)[:24]
-
-
-def derive_agent_participant_identity(
-    settings: VoiceBootstrapSettings,
-    scope: _TrustedScope,
-) -> str:
-    """Derive the identity the named worker must use when accepting this job."""
-    trusted = _canonical_json(
-        {
-            "environment": settings.environment,
-            "session_id": scope.session_id,
-            "user_id": scope.user_id,
-            "voice_call_id": scope.voice_call_id,
-            "worker_name": settings.worker_name,
-        }
-    )
-    return "agent-" + _mac(settings.signing_secret, b"agent-participant:v1\x00" + trusted)[:24]
-
-
-def sign_metadata(payload: dict[str, object], secret: str, *, purpose: str) -> str:
-    """Create a canonical, purpose-bound HMAC envelope for opaque metadata."""
-    if not purpose:
-        raise ValueError("signed metadata purpose is required")
-    body = _canonical_json(payload)
-    signature = _mac(secret, f"metadata:{purpose}:v1\x00".encode() + body)
-    return _canonical_json(
-        {
-            "algorithm": SIGNED_METADATA_ALGORITHM,
-            "payload": payload,
-            "purpose": purpose,
-            "schema_version": SIGNED_METADATA_VERSION,
-            "signature": signature,
-        }
-    ).decode("utf-8")
-
-
-def verify_signed_metadata(encoded: str, secret: str, *, purpose: str) -> dict[str, object]:
-    """Verify and return a strict metadata payload, raising on any mismatch."""
-    try:
-        envelope = json.loads(encoded)
-    except (TypeError, json.JSONDecodeError) as exc:
-        raise ValueError("signed metadata is not valid JSON") from exc
-    if not isinstance(envelope, dict) or set(envelope) != {
-        "algorithm",
-        "payload",
-        "purpose",
-        "schema_version",
-        "signature",
-    }:
-        raise ValueError("signed metadata envelope has unexpected fields")
-    if (
-        envelope["algorithm"] != SIGNED_METADATA_ALGORITHM
-        or envelope["schema_version"] != SIGNED_METADATA_VERSION
-        or envelope["purpose"] != purpose
-        or not isinstance(envelope["payload"], dict)
-        or not isinstance(envelope["signature"], str)
-    ):
-        raise ValueError("signed metadata envelope is invalid")
-
-    expected = _mac(
-        secret,
-        f"metadata:{purpose}:v1\x00".encode() + _canonical_json(envelope["payload"]),
-    )
-    if not hmac.compare_digest(envelope["signature"], expected):
-        raise ValueError("signed metadata signature is invalid")
-    return envelope["payload"]
-
-
-def _canonical_json(value: object) -> bytes:
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def _mac(secret: str, message: bytes) -> str:
-    digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
