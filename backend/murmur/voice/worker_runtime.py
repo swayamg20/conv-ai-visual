@@ -69,7 +69,7 @@ class VoiceJobRequestHandler:
         try:
             authorized = await self.authorizer.authorize(request.job)
             await asyncio.wait_for(
-                self.profiles.preflight(authorized.profile_scope),
+                self.profiles.admit(authorized.profile_scope),
                 timeout=self.settings.preflight_timeout_seconds,
             )
         except Exception:
@@ -349,6 +349,8 @@ def build_agent_server(
         num_idle_processes=1,
         load_fnc=single_job_load,
         load_threshold=0.5,
+        # This retries only the worker's control-plane WebSocket registration;
+        # provider retries are bounded independently by SessionConnectOptions.
         max_retry=2,
     )
     server.rtc_session(

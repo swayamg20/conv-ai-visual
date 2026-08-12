@@ -6,14 +6,23 @@ retains the original public import surface and constructs the one CLI server.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from murmur.core.config import config
 from murmur.voice.bootstrap_contracts import VOICE_V2_EVENT_TOPIC, VOICE_V2_RUNTIME
 from murmur.voice.profile import (
     PreparedVoiceProfile,
+    ProfileAdmission,
     ProfilePreflight,
+    ProfileReadiness,
+    ProviderModelReadiness,
     UnavailableVoiceProfileProvider,
+    VoiceAPIConnectionPolicy,
+    VoiceConnectionPolicy,
     VoiceMediaPolicy,
+    VoiceProfileProvider,
     VoiceProfileRegistry,
+    VoiceProfileUnavailable,
     VoiceSessionPolicy,
 )
 from murmur.voice.worker_authorization import VoiceJobAuthorizer, parse_job_metadata
@@ -60,9 +69,14 @@ __all__ = [
     "OwnedAgentSession",
     "OwnedRoomIO",
     "PreparedVoiceProfile",
+    "ProfileAdmission",
     "ProfilePreflight",
+    "ProfileReadiness",
+    "ProviderModelReadiness",
     "ReadyPublisher",
     "SessionRepository",
+    "VoiceAPIConnectionPolicy",
+    "VoiceConnectionPolicy",
     "VoiceEventChannel",
     "VoiceJobAuthorizer",
     "VoiceJobEntrypoint",
@@ -89,7 +103,12 @@ _single_job_load = single_job_load
 _wait_for_microphone_input = wait_for_microphone_input
 
 
-def _default_worker() -> tuple[VoiceWorkerSettings, VoiceProfileRegistry]:
+ProfileProviderFactory = Callable[[object], VoiceProfileProvider]
+
+
+def _default_worker(
+    *, provider_factory: ProfileProviderFactory | None = None
+) -> tuple[VoiceWorkerSettings, VoiceProfileRegistry]:
     settings = VoiceWorkerSettings(
         signing_secret=str(getattr(config, "VOICE_V2_SIGNING_SECRET", "") or "").strip(),
         environment=str(getattr(config, "MURMUR_ENVIRONMENT", "") or "").strip(),
@@ -116,11 +135,43 @@ def _default_worker() -> tuple[VoiceWorkerSettings, VoiceProfileRegistry]:
             getattr(config, "VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS", 3)
         ),
     )
-    provider = UnavailableVoiceProfileProvider(
-        settings.profile_id,
-        "direct Voice V2 provider adapters are not installed or configured",
-    )
+    provider = _default_profile_provider(settings, provider_factory=provider_factory)
     return settings, VoiceProfileRegistry({settings.profile_id: provider})
+
+
+def _default_profile_provider(
+    settings: VoiceWorkerSettings,
+    *,
+    provider_factory: ProfileProviderFactory | None,
+) -> VoiceProfileProvider:
+    """Load the optional direct profile without weakening worker startup safety."""
+    factory = provider_factory
+    if factory is None:
+        try:
+            from murmur.voice.provider_profiles.livekit_cascade import (
+                build_direct_cascade_provider_from_config,
+            )
+        except ImportError:
+            build_direct_cascade_provider_from_config = None
+        factory = build_direct_cascade_provider_from_config
+    if factory is None:
+        return UnavailableVoiceProfileProvider(
+            settings.profile_id,
+            "direct Voice V2 provider adapters are not installed",
+        )
+    try:
+        provider = factory(config)
+    except (ImportError, ValueError, VoiceProfileUnavailable) as exc:
+        reason = str(exc).strip() or "direct Voice V2 provider configuration is unavailable"
+        return UnavailableVoiceProfileProvider(settings.profile_id, reason)
+    if not callable(getattr(provider, "admit", None)) or not callable(
+        getattr(provider, "prepare", None)
+    ):
+        return UnavailableVoiceProfileProvider(
+            settings.profile_id,
+            "direct Voice V2 provider factory returned an invalid adapter",
+        )
+    return provider
 
 
 # The LiveKit 1.6.9 CLI discovers this native AgentServer global with:

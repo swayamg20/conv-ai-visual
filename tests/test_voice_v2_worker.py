@@ -30,8 +30,11 @@ from murmur.voice.bootstrap import (
 from murmur.voice.profile import (
     DeterministicVoiceProfileProvider,
     PreparedVoiceProfile,
-    ProfilePreflight,
+    ProfileAdmission,
+    ProfileReadiness,
     VoiceProfileRegistry,
+    VoiceProfileScope,
+    VoiceProfileUnavailable,
 )
 
 _original_signing_secret = config.VOICE_V2_SIGNING_SECRET
@@ -491,6 +494,53 @@ def test_default_worker_wires_repository_timeout_without_providers(
     assert settings.event_topic == VOICE_V2_EVENT_TOPIC
 
 
+@pytest.mark.asyncio
+async def test_default_worker_provider_factory_is_injectable_and_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(config, "VOICE_V2_SIGNING_SECRET", SECRET)
+    monkeypatch.setattr(config, "MURMUR_ENVIRONMENT", "test")
+    monkeypatch.setattr(config, "VOICE_V2_PROFILE_ID", PROFILE_ID)
+    provider = DeterministicVoiceProfileProvider(PROFILE_ID)
+    captured: list[object] = []
+
+    def factory(config_object: object) -> DeterministicVoiceProfileProvider:
+        captured.append(config_object)
+        return provider
+
+    _, profiles = _worker._default_worker(provider_factory=factory)
+    scope = VoiceProfileScope(
+        profile_id=PROFILE_ID,
+        user_id="user-1",
+        session_id="session-1",
+        agent_id="agent-1",
+        voice_call_id="call-1",
+        trace_id="trace-1",
+        system_prompt="Answer briefly.",
+    )
+
+    admission = await profiles.admit(scope)
+
+    assert captured == [config]
+    assert admission.profile_id == PROFILE_ID
+    assert provider.admission_calls == 1
+
+    def unavailable_factory(_: object) -> DeterministicVoiceProfileProvider:
+        raise VoiceProfileUnavailable("selected provider configuration is unavailable")
+
+    _, unavailable_profiles = _worker._default_worker(
+        provider_factory=unavailable_factory,
+    )
+    with pytest.raises(VoiceProfileUnavailable, match="configuration is unavailable"):
+        await unavailable_profiles.admit(scope)
+
+    def broken_factory(_: object) -> DeterministicVoiceProfileProvider:
+        raise RuntimeError("provider factory programming fault")
+
+    with pytest.raises(RuntimeError, match="programming fault"):
+        _worker._default_worker(provider_factory=broken_factory)
+
+
 def test_worker_settings_reject_noncanonical_event_topic() -> None:
     with pytest.raises(ValueError, match="event_topic must be"):
         _settings(event_topic="murmur.voice.v2.custom")
@@ -640,18 +690,18 @@ class HangingProfileProvider:
         self.stage = stage
         self.cancelled = False
 
-    async def preflight(self, scope: object) -> ProfilePreflight:
+    async def admit(self, scope: object) -> ProfileAdmission:
         del scope
-        if self.stage == "preflight":
+        if self.stage == "admit":
             try:
                 await asyncio.Future()
             except asyncio.CancelledError:
                 self.cancelled = True
                 raise
-        return ProfilePreflight(
+        return ProfileAdmission(
             profile_id=PROFILE_ID,
             required_components=("stt", "llm", "tts"),
-            ready_components=("stt", "llm", "tts"),
+            config_hash="0" * 64,
         )
 
     async def prepare(self, scope: object) -> PreparedVoiceProfile:
@@ -668,6 +718,11 @@ class HangingProfileProvider:
             stt=object(),
             llm=object(),
             tts=object(),
+            readiness=ProfileReadiness(
+                profile_id=PROFILE_ID,
+                required_components=("stt", "llm", "tts"),
+                ready_components=("stt", "llm", "tts"),
+            ),
         )
 
 
@@ -711,7 +766,7 @@ async def test_request_preflight_controls_availability_and_uses_signed_agent_ide
 
 @pytest.mark.asyncio
 async def test_request_rejects_when_profile_preflight_times_out() -> None:
-    provider = HangingProfileProvider(stage="preflight")
+    provider = HangingProfileProvider(stage="admit")
     handler = build_request_handler(
         _authorizer(),
         VoiceProfileRegistry({PROFILE_ID: provider}),  # type: ignore[dict-item]
@@ -929,7 +984,9 @@ async def test_entrypoint_publishes_genuine_ready_only_after_preflight_connect_a
 
     await entrypoint(ctx)  # type: ignore[arg-type]
 
-    assert provider.preflight_calls == 1
+    # Request admission and authoritative job preparation are separate. This
+    # entrypoint-only test must not perform an additional admission/network check.
+    assert provider.preflight_calls == 0
     assert provider.prepare_calls == 1
     assert events == [
         "session_construct",
@@ -1249,11 +1306,14 @@ async def test_session_owner_bounds_interruption_and_cleanup_is_idempotent() -> 
 async def test_session_owner_uses_one_cleanup_deadline_and_preserves_cancellation() -> None:
     events: list[str] = []
     provider_started = False
+    release_provider = asyncio.Event()
+    provider_close_calls = 0
 
     async def slow_provider_close() -> None:
-        nonlocal provider_started
+        nonlocal provider_close_calls, provider_started
+        provider_close_calls += 1
         provider_started = True
-        await asyncio.Future()
+        await release_provider.wait()
 
     provider = DeterministicVoiceProfileProvider(
         PROFILE_ID,
@@ -1271,6 +1331,15 @@ async def test_session_owner_uses_one_cleanup_deadline_and_preserves_cancellatio
     with pytest.raises(VoiceSessionLifecycleError, match="cleanup timed out"):
         await owner.close()
     assert provider_started is True
+    assert owner.closed is False
+    assert provider_close_calls == 1
+
+    release_provider.set()
+    await owner.close()
+    await owner.close()
+
+    assert owner.closed is True
+    assert provider_close_calls == 2
 
     provider = DeterministicVoiceProfileProvider(PROFILE_ID)
     _, prepared = await VoiceProfileRegistry({PROFILE_ID: provider}).prepare(scope)
@@ -1288,6 +1357,14 @@ async def test_session_owner_uses_one_cleanup_deadline_and_preserves_cancellatio
     )
     with pytest.raises(asyncio.CancelledError):
         await owner.close()
+    assert owner.closed is False
+
+    async def successful_close() -> None:
+        hanging_session.close_calls += 1
+
+    hanging_session.aclose = successful_close  # type: ignore[method-assign]
+    await owner.close()
+    assert owner.closed is True
 
 
 def test_agent_server_registers_exactly_one_named_rtc_session() -> None:

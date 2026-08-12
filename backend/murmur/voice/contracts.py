@@ -41,6 +41,11 @@ PayloadText = Annotated[
     StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=16_000),
 ]
 TranscriptText = Annotated[str, StringConstraints(strict=True, max_length=64_000)]
+ProfileConfigHash = Annotated[
+    str,
+    StringConstraints(strict=True, min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$"),
+]
+ProviderModelName = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
 
 
 class EventPayload(BaseModel):
@@ -84,6 +89,19 @@ class TransportDisconnectedPayload(EventPayload):
     reason: PayloadText | None = None
 
 
+class ProviderModelPayload(EventPayload):
+    component: ContractId
+    provider: ProviderModelName
+    model: ProviderModelName
+
+    @field_validator("provider", "model")
+    @classmethod
+    def reject_blank_names(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("provider and model names must not be blank")
+        return value
+
+
 class AgentReadyPayload(EventPayload):
     REQUIRED_COMPONENTS: ClassVar[frozenset[str]] = frozenset(
         {"worker", "input", "output", "event_channel"}
@@ -92,6 +110,10 @@ class AgentReadyPayload(EventPayload):
     profile_id: ContractId
     required_components: Annotated[tuple[ContractId, ...], Field(min_length=1)]
     ready_components: Annotated[tuple[ContractId, ...], Field(min_length=1)]
+    # Schema v1 originally omitted provider metadata. Decoders retain that
+    # legacy shape, while current workers always publish these fields together.
+    profile_config_hash: ProfileConfigHash | None = None
+    provider_models: tuple[ProviderModelPayload, ...] | None = None
 
     @model_validator(mode="after")
     def validate_components(self) -> Self:
@@ -105,6 +127,13 @@ class AgentReadyPayload(EventPayload):
             raise ValueError("required_components is missing a core voice component")
         if not required.issubset(ready):
             raise ValueError("every required component must be ready")
+        if (self.profile_config_hash is None) != (self.provider_models is None):
+            raise ValueError("profile_config_hash and provider_models must be supplied together")
+        provider_components = [descriptor.component for descriptor in (self.provider_models or ())]
+        if len(provider_components) != len(set(provider_components)):
+            raise ValueError("provider_models components must be unique")
+        if not set(provider_components).issubset(ready):
+            raise ValueError("provider_models described a component that is not ready")
         return self
 
 

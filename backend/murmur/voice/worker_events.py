@@ -158,6 +158,15 @@ class VoiceEventChannel:
                         "profile_id": self._metadata.profile_id,
                         "required_components": required,
                         "ready_components": ready,
+                        "profile_config_hash": preflight.config_hash,
+                        "provider_models": [
+                            {
+                                "component": descriptor.component,
+                                "provider": descriptor.provider,
+                                "model": descriptor.model,
+                            }
+                            for descriptor in preflight.provider_models
+                        ],
                     },
                 ),
                 acknowledged=acknowledged,

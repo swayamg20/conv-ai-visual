@@ -57,6 +57,7 @@ _FRAME_SIZE_MS = 20
 _SPEECH_RMS_THRESHOLD = 250.0
 _SPEECH_PEAK_THRESHOLD = 500
 _TRAILING_SILENCE_SECONDS = 0.30
+_PROFILE_CONFIG_HASH = hashlib.sha256(b"murmur-fake-rtc-profile-v1").hexdigest()
 
 ClockNs = Callable[[], int]
 Sleep = Callable[[float], Awaitable[None]]
@@ -555,16 +556,14 @@ class FakeRtcProfileProvider:
         self._assistant_fixture_path = assistant_fixture_path
         self._evidence_path = evidence_path
 
-    async def preflight(
-        self, scope: voice_profile.VoiceProfileScope
-    ) -> voice_profile.ProfilePreflight:
+    async def admit(self, scope: voice_profile.VoiceProfileScope) -> voice_profile.ProfileAdmission:
         self._validate_scope(scope)
         _load_pcm_fixture(self._assistant_fixture_path, expected_sample_rate=_OUTPUT_SAMPLE_RATE)
         _probe_evidence_path(self._evidence_path)
-        return voice_profile.ProfilePreflight(
+        return voice_profile.ProfileAdmission(
             profile_id=FAKE_RTC_PROFILE_ID,
             required_components=_REQUIRED_COMPONENTS,
-            ready_components=_REQUIRED_COMPONENTS,
+            config_hash=_PROFILE_CONFIG_HASH,
         )
 
     async def prepare(
@@ -610,6 +609,15 @@ class FakeRtcProfileProvider:
                 close_callback=close_profile,
                 session_policy=voice_profile.VoiceSessionPolicy(),
                 media_policy=voice_profile.VoiceMediaPolicy(),
+                readiness=voice_profile.ProfileReadiness(
+                    profile_id=FAKE_RTC_PROFILE_ID,
+                    required_components=_REQUIRED_COMPONENTS,
+                    ready_components=_REQUIRED_COMPONENTS,
+                    config_hash=_PROFILE_CONFIG_HASH,
+                    limitations=(
+                        "deterministic local media does not prove external provider readiness",
+                    ),
+                ),
             )
         except Exception:
             await close_profile()

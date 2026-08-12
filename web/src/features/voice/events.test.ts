@@ -7,6 +7,23 @@ import {
 } from "./events";
 import sharedCanvasPatchFixture from "./voice-event.fixture.json";
 
+const PROFILE_CONFIG_HASH = "a".repeat(64);
+
+function readyPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    profile_id: "cascade-v1",
+    required_components: [...REQUIRED_VOICE_READY_COMPONENTS, "stt", "llm", "tts"],
+    ready_components: [...REQUIRED_VOICE_READY_COMPONENTS, "stt", "llm", "tts"],
+    profile_config_hash: PROFILE_CONFIG_HASH,
+    provider_models: [
+      { component: "stt", provider: "deepgram", model: "nova-3" },
+      { component: "llm", provider: "openai", model: "gpt-5-mini" },
+      { component: "tts", provider: "cartesia", model: "sonic-3" },
+    ],
+    ...overrides,
+  };
+}
+
 function rawEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     schema_version: VOICE_EVENT_SCHEMA_VERSION,
@@ -31,11 +48,7 @@ describe("Voice V2 event decoding", () => {
         event_id: "ready-1",
         producer_sequence: 2,
         correlation_id: "call-1",
-        payload: {
-          profile_id: "cascade-v1",
-          required_components: [...REQUIRED_VOICE_READY_COMPONENTS, "stt", "llm", "tts"],
-          ready_components: [...REQUIRED_VOICE_READY_COMPONENTS, "stt", "llm", "tts"],
-        },
+        payload: readyPayload(),
       })
     );
 
@@ -50,7 +63,24 @@ describe("Voice V2 event decoding", () => {
     });
     if (decoded.event.event_type === "agent_ready") {
       expect(decoded.event.payload.profile_id).toBe("cascade-v1");
+      expect(decoded.event.payload.profile_config_hash).toBe(PROFILE_CONFIG_HASH);
+      expect(decoded.event.payload.provider_models).toHaveLength(3);
     }
+  });
+
+  it("retains schema-v1 decoder compatibility for legacy readiness events", () => {
+    const decoded = decodeVoiceEvent(
+      rawEvent({
+        event_type: "agent_ready",
+        payload: {
+          profile_id: "cascade-v1",
+          required_components: REQUIRED_VOICE_READY_COMPONENTS,
+          ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+        },
+      })
+    );
+
+    expect(decoded.ok).toBe(true);
   });
 
   it("fails closed on unknown schema versions and event types", () => {
@@ -80,6 +110,64 @@ describe("Voice V2 event decoding", () => {
     );
 
     expect(decoded).toMatchObject({ ok: false, error: { code: "invalid_payload" } });
+  });
+
+  it("bounds provider metadata and rejects unreviewed or secret-bearing keys", () => {
+    const invalidPayloads = [
+      readyPayload({ profile_config_hash: "a".repeat(63) }),
+      readyPayload({ profile_config_hash: "A".repeat(64) }),
+      readyPayload({
+        provider_models: [
+          { component: "stt", provider: "p".repeat(257), model: "nova-3" },
+        ],
+      }),
+      readyPayload({
+        provider_models: [{ component: "stt", provider: "deepgram", model: "   " }],
+      }),
+      readyPayload({
+        provider_models: [
+          {
+            component: "stt",
+            provider: "deepgram",
+            model: "nova-3",
+            api_key: "must-not-cross-the-wire",
+          },
+        ],
+      }),
+      readyPayload({
+        provider_models: [
+          { component: "stt", provider: "deepgram", model: "nova-3" },
+          { component: "stt", provider: "deepgram", model: "nova-2" },
+        ],
+      }),
+      readyPayload({
+        provider_models: [{ component: "vad", provider: "silero", model: "v5" }],
+      }),
+      readyPayload({ limitations: ["not browser-safe"] }),
+      readyPayload({ profile_config_hash: undefined }),
+      readyPayload({ provider_models: undefined }),
+    ];
+
+    for (const payload of invalidPayloads) {
+      expect(
+        decodeVoiceEvent(rawEvent({ event_type: "agent_ready", payload }))
+      ).toMatchObject({ ok: false, error: { code: "invalid_payload" } });
+    }
+  });
+
+  it("accepts provider and model names at the exact 256-character bound", () => {
+    const decoded = decodeVoiceEvent(
+      rawEvent({
+        event_type: "agent_ready",
+        payload: readyPayload({
+          provider_models: [
+            { component: "stt", provider: "p".repeat(256), model: "m".repeat(256) },
+          ],
+        }),
+      })
+    );
+
+    expect(decoded.ok).toBe(true);
   });
 
   it("requires task identity and generation together for task transitions", () => {

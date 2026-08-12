@@ -8,9 +8,11 @@ from typing import Protocol
 
 from livekit import rtc
 from livekit.agents import Agent, AgentSession
+from livekit.agents.types import APIConnectOptions
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
 
-from murmur.voice.profile import PreparedVoiceProfile
+from murmur.voice.profile import PreparedVoiceProfile, VoiceAPIConnectionPolicy
 from murmur.voice.worker_contracts import VoiceSessionLifecycleError
 
 
@@ -61,6 +63,9 @@ class AgentSessionOwner:
         self._start_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._started = False
+        self._shutdown_requested = False
+        self._session_close_complete = False
+        self._provider_close_complete = prepared.close_callback is None
         self._closed = False
 
     @property
@@ -78,8 +83,8 @@ class AgentSessionOwner:
 
     async def start(self, *, room: object, participant_identity: str) -> None:
         async with self._start_lock:
-            if self._closed:
-                raise VoiceSessionLifecycleError("voice session owner is already closed")
+            if self._shutdown_requested or self._closed:
+                raise VoiceSessionLifecycleError("voice session owner is closing or closed")
             if self._started:
                 return
             await self._session.start(
@@ -91,10 +96,12 @@ class AgentSessionOwner:
             # is the proof that participant selection and audio output publication
             # have actually completed.
             await self._session.room_io.wait_for_ready()
+            if self._shutdown_requested:
+                raise VoiceSessionLifecycleError("voice session owner closed during startup")
             self._started = True
 
     async def interrupt(self) -> None:
-        if not self._started or self._closed:
+        if not self._started or self._shutdown_requested or self._closed:
             raise VoiceSessionLifecycleError("voice session is not running")
         try:
             await asyncio.wait_for(
@@ -109,20 +116,26 @@ class AgentSessionOwner:
         async with self._close_lock:
             if self._closed:
                 return
-            self._closed = True
-            self._session.shutdown(drain=False)
+            if not self._shutdown_requested:
+                self._session.shutdown(drain=False)
+                self._shutdown_requested = True
             errors: list[Exception] = []
 
             async def cleanup() -> None:
-                try:
-                    await self._session.aclose()
-                except Exception as exc:
-                    errors.append(exc)
-                if self._prepared.close_callback is not None:
+                if not self._session_close_complete:
+                    try:
+                        await self._session.aclose()
+                    except Exception as exc:
+                        errors.append(exc)
+                    else:
+                        self._session_close_complete = True
+                if not self._provider_close_complete and self._prepared.close_callback is not None:
                     try:
                         await self._prepared.close_callback()
                     except Exception as exc:
                         errors.append(exc)
+                    else:
+                        self._provider_close_complete = True
 
             try:
                 await asyncio.wait_for(cleanup(), timeout=self._cleanup_timeout_seconds)
@@ -132,6 +145,7 @@ class AgentSessionOwner:
                 raise VoiceSessionLifecycleError(
                     "voice session cleanup did not complete"
                 ) from errors[0]
+            self._closed = self._session_close_complete and self._provider_close_complete
 
 
 def livekit_session_factory(prepared: PreparedVoiceProfile) -> tuple[OwnedAgentSession, Agent]:
@@ -169,11 +183,27 @@ def livekit_session_factory(prepared: PreparedVoiceProfile) -> tuple[OwnedAgentS
             },
             aec_warmup_duration=policy.aec_warmup_duration_seconds,
         )
+    connection_policy = prepared.connection_policy
+    if connection_policy is not None:
+        session_kwargs["conn_options"] = SessionConnectOptions(
+            stt_conn_options=_api_connect_options(connection_policy.stt),
+            llm_conn_options=_api_connect_options(connection_policy.llm),
+            tts_conn_options=_api_connect_options(connection_policy.tts),
+            max_unrecoverable_errors=connection_policy.max_unrecoverable_errors,
+        )
     session = AgentSession(
         **session_kwargs,  # type: ignore[arg-type]
     )
     agent = Agent(instructions=prepared.instructions)
     return session, agent
+
+
+def _api_connect_options(policy: VoiceAPIConnectionPolicy) -> APIConnectOptions:
+    return APIConnectOptions(
+        max_retry=policy.max_retry,
+        retry_interval=policy.retry_interval_seconds,
+        timeout=policy.timeout_seconds,
+    )
 
 
 def _room_options(prepared: PreparedVoiceProfile, participant_identity: str) -> RoomOptions:

@@ -4,11 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import importlib.util
 import json
 import os
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -21,6 +23,12 @@ from murmur.voice.evaluation import (
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DIRECT_CASCADE_PROFILE_ID = "livekit-agents-cascade-v1"
+
+_STATIC_ADMISSION_LIMITATIONS = (
+    "Static admission does not verify provider authentication, model visibility, "
+    "streaming audio, quota, latency, browser media, or RTC connectivity.",
+)
 
 
 def _is_real_secret(value: str | None) -> bool:
@@ -162,6 +170,97 @@ def _legacy_preflight() -> dict[str, Any]:
     }
 
 
+def _direct_profile_provider_factory(app_config: object) -> object:
+    """Construct the direct profile while keeping optional imports off replay paths."""
+
+    from murmur.voice.provider_profiles.livekit_cascade import (
+        build_direct_cascade_provider_from_config,
+    )
+
+    return build_direct_cascade_provider_from_config(app_config)
+
+
+def _direct_profile_preflight(
+    app_config: object = config,
+    *,
+    provider_factory: Callable[[object], object] | None = None,
+) -> dict[str, Any]:
+    """Perform local-only admission for the named direct-provider profile.
+
+    This path intentionally calls ``admit`` rather than ``prepare``. The direct
+    profile's admission contract validates the exact profile ID, non-placeholder
+    configuration, and installed adapter surface without probing a provider.
+    """
+
+    from murmur.voice.profile import VoiceProfileScope
+
+    scope = VoiceProfileScope(
+        profile_id=DIRECT_CASCADE_PROFILE_ID,
+        user_id="voice_eval_static_user",
+        session_id="voice_eval_static_session",
+        agent_id="voice_eval_static_agent",
+        voice_call_id="voice_eval_static_call",
+        trace_id="voice_eval_static_trace",
+        system_prompt="Validate static Voice V2 profile admission only.",
+    )
+    try:
+        provider = (provider_factory or _direct_profile_provider_factory)(app_config)
+        admit = getattr(provider, "admit", None)
+        if not callable(admit):
+            raise TypeError("direct profile provider has no admission contract")
+        admission = asyncio.run(admit(scope))
+        if admission.profile_id != DIRECT_CASCADE_PROFILE_ID:
+            raise ValueError("direct profile admission returned a different profile")
+        required_components = tuple(admission.required_components)
+        if not required_components:
+            raise ValueError("direct profile admission returned no required components")
+        config_hash = admission.config_hash
+        if (
+            not isinstance(config_hash, str)
+            or len(config_hash) != 64
+            or any(character not in "0123456789abcdef" for character in config_hash)
+        ):
+            raise ValueError("direct profile admission returned an invalid config hash")
+    except Exception:
+        # Admission failures can originate in environment-backed configuration.
+        # Never echo exception text, which could accidentally contain credentials.
+        return {
+            "schema_version": 1,
+            "profile": DIRECT_CASCADE_PROFILE_ID,
+            "status": "blocked",
+            "admission_mode": "static",
+            "network_verified": False,
+            "config_hash": None,
+            "components": {},
+            "blocking_components": ["profile_admission"],
+            "degraded_components": [],
+            "limitations": list(_STATIC_ADMISSION_LIMITATIONS),
+            "note": "Static admission failed; inspect local Voice V2 configuration and installed adapters. No provider call was made.",
+        }
+
+    components = {
+        component: _component(
+            "configured",
+            "Required by the accepted static profile manifest",
+            required=True,
+        )
+        for component in required_components
+    }
+    return {
+        "schema_version": 1,
+        "profile": DIRECT_CASCADE_PROFILE_ID,
+        "status": "configured",
+        "admission_mode": "static",
+        "network_verified": False,
+        "config_hash": config_hash,
+        "components": components,
+        "blocking_components": [],
+        "degraded_components": [],
+        "limitations": list(_STATIC_ADMISSION_LIMITATIONS),
+        "note": "Local static admission only; authoritative readiness requires the guarded live qualification path.",
+    }
+
+
 def _git_commit() -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -190,8 +289,10 @@ def _run_preflight(args: argparse.Namespace) -> int:
             "degraded_components": [],
             "note": "Provider-free deterministic profile.",
         }
-    else:
+    elif args.profile == "legacy":
         report = _legacy_preflight()
+    else:
+        report = _direct_profile_preflight()
     print(json.dumps(report, indent=2))
     return 1 if report["blocking_components"] else 0
 
@@ -271,7 +372,11 @@ def _parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     preflight = subparsers.add_parser("preflight", help="Check local profile readiness")
-    preflight.add_argument("--profile", choices=("fake", "legacy"), required=True)
+    preflight.add_argument(
+        "--profile",
+        choices=("fake", "legacy", DIRECT_CASCADE_PROFILE_ID),
+        required=True,
+    )
     preflight.set_defaults(handler=_run_preflight)
 
     replay = subparsers.add_parser("replay", help="Replay provider events deterministically")

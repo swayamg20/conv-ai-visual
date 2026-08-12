@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -17,6 +17,8 @@ from murmur.voice.contracts import EventEnvelope, EventType
 from murmur.voice.profile import (
     PreparedVoiceProfile,
     ProfilePreflight,
+    ProviderModelReadiness,
+    VoiceConnectionPolicy,
     VoiceMediaPolicy,
     VoiceSessionPolicy,
 )
@@ -27,6 +29,7 @@ from murmur.voice.worker_session import AgentSessionOwner, livekit_session_facto
 
 FIXED_NOW = datetime(2026, 8, 12, 10, 30, tzinfo=UTC)
 PARTICIPANT_IDENTITY = "user-a1b2c3"
+PROFILE_CONFIG_HASH = "c" * 64
 
 
 def _metadata() -> VoiceJobMetadata:
@@ -54,6 +57,13 @@ def _preflight() -> ProfilePreflight:
         profile_id="fake-rtc-v1",
         required_components=("stt", "llm", "tts", "fake_media"),
         ready_components=("stt", "llm", "tts", "fake_media"),
+        config_hash=PROFILE_CONFIG_HASH,
+        provider_models=(
+            ProviderModelReadiness(component="stt", provider="deepgram", model="nova-3"),
+            ProviderModelReadiness(component="llm", provider="openai", model="gpt-5-mini"),
+            ProviderModelReadiness(component="tts", provider="cartesia", model="sonic-3"),
+        ),
+        limitations=("probe does not prove streaming latency",),
     )
 
 
@@ -239,6 +249,34 @@ def test_livekit_factory_maps_only_explicit_session_policy(
     }
 
 
+def test_livekit_factory_maps_bounded_provider_connection_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[dict[str, object]] = []
+
+    class CapturingSession:
+        def __init__(self, **kwargs: object) -> None:
+            captured.append(kwargs)
+
+    monkeypatch.setattr(worker_session, "AgentSession", CapturingSession)
+    monkeypatch.setattr(
+        worker_session,
+        "Agent",
+        lambda *, instructions: SimpleNamespace(instructions=instructions),
+    )
+    prepared = replace(_prepared(), connection_policy=VoiceConnectionPolicy())
+
+    livekit_session_factory(prepared)
+
+    options = captured[0]["conn_options"]
+    assert options.stt_conn_options.max_retry == 1  # type: ignore[union-attr]
+    assert options.stt_conn_options.retry_interval == 0.25  # type: ignore[union-attr]
+    assert options.stt_conn_options.timeout == 5.0  # type: ignore[union-attr]
+    assert options.llm_conn_options.timeout == 8.0  # type: ignore[union-attr]
+    assert options.tts_conn_options.timeout == 5.0  # type: ignore[union-attr]
+    assert options.max_unrecoverable_errors == 1  # type: ignore[union-attr]
+
+
 class FakeRoomIO:
     def __init__(self, lifecycle: list[str], ready: asyncio.Event | None = None) -> None:
         self.lifecycle = lifecycle
@@ -385,6 +423,35 @@ async def test_event_channel_serializes_targets_and_readies_before_buffered_even
     ]
     assert [event.producer_sequence for event in events] == [1, 2, 3]
     assert [event.event_id for event in events] == ["event-1", "event-2", "event-3"]
+    assert events[0].model_dump(mode="json")["payload"] == {
+        "profile_id": "fake-rtc-v1",
+        "required_components": [
+            "worker",
+            "input",
+            "output",
+            "event_channel",
+            "stt",
+            "llm",
+            "tts",
+            "fake_media",
+        ],
+        "ready_components": [
+            "worker",
+            "input",
+            "output",
+            "event_channel",
+            "stt",
+            "llm",
+            "tts",
+            "fake_media",
+        ],
+        "profile_config_hash": PROFILE_CONFIG_HASH,
+        "provider_models": [
+            {"component": "stt", "provider": "deepgram", "model": "nova-3"},
+            {"component": "llm", "provider": "openai", "model": "gpt-5-mini"},
+            {"component": "tts", "provider": "cartesia", "model": "sonic-3"},
+        ],
+    }
     assert publisher.max_concurrent == 1
     assert channel.producer_sequence == 3
     assert all(call["reliable"] is True for call in publisher.calls)

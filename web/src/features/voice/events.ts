@@ -50,6 +50,12 @@ export const REQUIRED_VOICE_READY_COMPONENTS = [
   "event_channel",
 ] as const;
 
+export interface VoiceProviderModel {
+  readonly component: string;
+  readonly provider: string;
+  readonly model: string;
+}
+
 export interface VoiceEventPayloads {
   readonly session_starting: Readonly<Record<string, never>>;
   readonly session_started: Readonly<Record<string, never>>;
@@ -68,6 +74,10 @@ export interface VoiceEventPayloads {
     readonly profile_id: string;
     readonly required_components: readonly string[];
     readonly ready_components: readonly string[];
+    /** Omitted only by legacy schema-v1 producers. Current workers always publish it. */
+    readonly profile_config_hash?: string;
+    /** Omitted only by legacy schema-v1 producers. Current workers always publish it. */
+    readonly provider_models?: readonly VoiceProviderModel[];
   };
   readonly agent_unavailable: {
     readonly code: string;
@@ -222,6 +232,7 @@ export type VoiceEventDecodeResult =
 const eventTypeSet: ReadonlySet<string> = new Set(VOICE_EVENT_TYPES);
 const speechStopReasons = new Set(["completed", "interrupted", "cancelled", "error"]);
 const contractIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const profileConfigHashPattern = /^[0-9a-f]{64}$/;
 
 const envelopeKeys: ReadonlySet<string> = new Set([
   "schema_version",
@@ -289,7 +300,13 @@ const payloadKeysByEventType: Readonly<{
   transport_connected: ["connection_id"],
   transport_reconnecting: ["attempt", "reason"],
   transport_disconnected: ["recoverable", "reason"],
-  agent_ready: ["profile_id", "required_components", "ready_components"],
+  agent_ready: [
+    "profile_id",
+    "required_components",
+    "ready_components",
+    "profile_config_hash",
+    "provider_models",
+  ],
   agent_unavailable: ["code", "message", "retryable"],
   transcript_segment: ["segment_id", "text", "is_final"],
   turn_committed: ["text"],
@@ -499,8 +516,25 @@ function hasArtifactId(payload: JsonObject): boolean {
   return isContractId(payload.artifact_id);
 }
 
-function hasOnlyKeys(record: JsonObject, allowedKeys: readonly string[]): boolean {
+function hasOnlyKeys(
+  record: Readonly<Record<string, unknown>>,
+  allowedKeys: readonly string[]
+): boolean {
   return Object.keys(record).every((key) => allowedKeys.includes(key));
+}
+
+function isProviderModel(value: unknown): value is VoiceProviderModel {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["component", "provider", "model"]) &&
+    isContractId(value.component) &&
+    typeof value.provider === "string" &&
+    value.provider.trim().length > 0 &&
+    value.provider.length <= 256 &&
+    typeof value.model === "string" &&
+    value.model.trim().length > 0 &&
+    value.model.length <= 256
+  );
 }
 
 function isReadyPayload(payload: JsonObject): boolean {
@@ -516,9 +550,35 @@ function isReadyPayload(payload: JsonObject): boolean {
 
   const required = new Set(payload.required_components);
   const ready = new Set(payload.ready_components);
+  if (
+    !REQUIRED_VOICE_READY_COMPONENTS.every((component) => required.has(component)) ||
+    !payload.required_components.every((component) => ready.has(component))
+  ) {
+    return false;
+  }
+
+  const hasConfigHash = payload.profile_config_hash !== undefined;
+  const hasProviderModels = payload.provider_models !== undefined;
+  if (hasConfigHash !== hasProviderModels) {
+    return false;
+  }
+  if (!hasConfigHash) {
+    return true;
+  }
+  if (
+    typeof payload.profile_config_hash !== "string" ||
+    !profileConfigHashPattern.test(payload.profile_config_hash) ||
+    !Array.isArray(payload.provider_models) ||
+    !payload.provider_models.every(isProviderModel)
+  ) {
+    return false;
+  }
+  const providerComponents = payload.provider_models.map(
+    (descriptor) => descriptor.component
+  );
   return (
-    REQUIRED_VOICE_READY_COMPONENTS.every((component) => required.has(component)) &&
-    payload.required_components.every((component) => ready.has(component))
+    hasUniqueValues(providerComponents) &&
+    providerComponents.every((component) => ready.has(component))
   );
 }
 

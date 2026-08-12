@@ -46,6 +46,10 @@ smart-turn = [
 voice-v2 = [
   "livekit-agents==1.6.9",
   "livekit-api==1.2.0",
+  "livekit-plugins-deepgram==1.6.9",
+  "livekit-plugins-elevenlabs==1.6.9",
+  "livekit-plugins-groq==1.6.9",
+  "livekit-plugins-openai==1.6.9",
 ]
 experiments = [
   "accelerate>=1.10,<2",
@@ -75,6 +79,7 @@ packages = [
   "murmur.runtime",
   "murmur.tools",
   "murmur.voice",
+  "murmur.voice.provider_profiles",
 ]
 package-dir = { murmur = "backend/murmur" }
 py-modules = ["main"]

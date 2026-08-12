@@ -19,6 +19,7 @@ from murmur.voice.contracts import EventEnvelope, EventType
 from pydantic import TypeAdapter, ValidationError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROFILE_CONFIG_HASH = "a" * 64
 
 
 def _event(**overrides: object) -> EventEnvelope:
@@ -35,6 +36,24 @@ def _event(**overrides: object) -> EventEnvelope:
     }
     values.update(overrides)
     return EventEnvelope.model_validate(values)
+
+
+def _ready_payload(*, include_provider_metadata: bool = True) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "profile_id": "cascade-v1",
+        "required_components": ["worker", "input", "output", "event_channel", "stt", "llm", "tts"],
+        "ready_components": ["worker", "input", "output", "event_channel", "stt", "llm", "tts"],
+    }
+    if include_provider_metadata:
+        payload.update(
+            profile_config_hash=PROFILE_CONFIG_HASH,
+            provider_models=[
+                {"component": "stt", "provider": "deepgram", "model": "nova-3"},
+                {"component": "llm", "provider": "openai", "model": "gpt-5-mini"},
+                {"component": "tts", "provider": "cartesia", "model": "sonic-3"},
+            ],
+        )
+    return payload
 
 
 def _operations_artifact(**overrides: object) -> dict[str, object]:
@@ -213,14 +232,12 @@ def test_event_envelope_is_frozen() -> None:
 
 
 def test_event_payloads_are_typed_and_fail_closed() -> None:
-    ready_payload = {
-        "profile_id": "cascade-v1",
-        "required_components": ["worker", "input", "output", "event_channel", "tts"],
-        "ready_components": ["worker", "input", "output", "event_channel", "tts"],
-    }
+    ready_payload = _ready_payload()
     assert (
         _event(event_type="agent_ready", payload=ready_payload).event_type is EventType.AGENT_READY
     )
+    # Schema v1 Ready events predate provider metadata and remain decodable.
+    assert _event(event_type="agent_ready", payload=_ready_payload(include_provider_metadata=False))
 
     with pytest.raises(ValidationError):
         _event(event_type="agent_ready", payload={})
@@ -231,6 +248,104 @@ def test_event_payloads_are_typed_and_fail_closed() -> None:
         )
     with pytest.raises(ValidationError):
         _event(event_type="transport_connected", payload={"future": True})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_ready_payload(), "profile_config_hash": "a" * 63},
+        {**_ready_payload(), "profile_config_hash": "A" * 64},
+        {
+            **_ready_payload(),
+            "provider_models": [{"component": "stt", "provider": "p" * 257, "model": "nova-3"}],
+        },
+        {
+            **_ready_payload(),
+            "provider_models": [{"component": "stt", "provider": "deepgram", "model": "   "}],
+        },
+        {
+            **_ready_payload(),
+            "provider_models": [
+                {
+                    "component": "stt",
+                    "provider": "deepgram",
+                    "model": "nova-3",
+                    "api_key": "must-not-cross-the-wire",
+                }
+            ],
+        },
+        {
+            **_ready_payload(),
+            "provider_models": [
+                {"component": "stt", "provider": "deepgram", "model": "nova-3"},
+                {"component": "stt", "provider": "deepgram", "model": "nova-2"},
+            ],
+        },
+        {
+            **_ready_payload(),
+            "provider_models": [{"component": "vad", "provider": "silero", "model": "v5"}],
+        },
+        {**_ready_payload(), "limitations": ["not browser-safe"]},
+        {key: value for key, value in _ready_payload().items() if key != "profile_config_hash"},
+        {key: value for key, value in _ready_payload().items() if key != "provider_models"},
+    ],
+    ids=(
+        "short-config-hash",
+        "uppercase-config-hash",
+        "oversized-provider",
+        "blank-model",
+        "secret-entry-key",
+        "duplicate-component",
+        "component-not-ready",
+        "limitations-key",
+        "models-without-hash",
+        "hash-without-models",
+    ),
+)
+def test_agent_ready_provider_metadata_is_bounded_and_fail_closed(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        _event(event_type="agent_ready", payload=payload)
+
+
+def test_agent_ready_provider_metadata_accepts_exact_string_bounds() -> None:
+    payload = _ready_payload()
+    payload["provider_models"] = [{"component": "stt", "provider": "p" * 256, "model": "m" * 256}]
+
+    event = _event(event_type="agent_ready", payload=payload)
+
+    assert event.payload["profile_config_hash"] == PROFILE_CONFIG_HASH
+    assert event.model_dump(mode="json")["payload"]["provider_models"] == payload["provider_models"]
+
+
+@pytest.mark.parametrize(
+    "null_fields",
+    [
+        ("profile_config_hash",),
+        ("provider_models",),
+        ("profile_config_hash", "provider_models"),
+    ],
+    ids=("config-hash-null", "provider-models-null", "both-null"),
+)
+def test_agent_ready_rejects_explicit_null_metadata_from_model_and_json(
+    null_fields: tuple[str, ...],
+) -> None:
+    model_payload = _ready_payload()
+    for field in null_fields:
+        model_payload[field] = None
+
+    with pytest.raises(ValidationError, match="must be omitted instead of null"):
+        _event(event_type="agent_ready", payload=model_payload)
+
+    wire_event = _event(event_type="agent_ready", payload=_ready_payload()).model_dump(mode="json")
+    wire_payload = wire_event["payload"]
+    assert isinstance(wire_payload, dict)
+    for field in null_fields:
+        wire_payload[field] = None
+
+    with pytest.raises(ValidationError, match="must be omitted instead of null"):
+        EventEnvelope.model_validate_json(json.dumps(wire_event))
 
 
 def test_typescript_fixture_round_trips_through_python_contract() -> None:

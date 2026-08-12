@@ -25,6 +25,8 @@ from murmur.voice.fake_rtc import (
     create_fake_rtc_profile_provider_from_environment,
 )
 from murmur.voice.profile import (
+    ProfileAdmission,
+    ProfileReadiness,
     VoiceMediaPolicy,
     VoiceProfileScope,
     VoiceProfileUnavailable,
@@ -203,18 +205,20 @@ def test_factory_refuses_symlink_and_invalid_pcm_fixture(
 
 
 @pytest.mark.asyncio
-async def test_profile_preflight_prepare_policy_and_idempotent_close(
+async def test_profile_admission_prepare_policy_and_idempotent_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fixture, evidence = _guarded_paths(tmp_path, monkeypatch)
     provider = create_fake_rtc_profile_provider(**_valid_factory_kwargs(fixture, evidence))
 
-    preflight = await provider.preflight(_scope())
+    admission = await provider.admit(_scope())
     prepared = await provider.prepare(_scope())
 
-    assert preflight.required_components == ("stt", "llm", "tts", "fake_media")
-    assert preflight.ready_components == preflight.required_components
+    assert isinstance(admission, ProfileAdmission)
+    assert admission.required_components == ("stt", "llm", "tts", "fake_media")
+    assert isinstance(prepared.readiness, ProfileReadiness)
+    assert prepared.readiness.ready_components == admission.required_components
     assert prepared.session_policy == VoiceSessionPolicy()
     assert prepared.media_policy == VoiceMediaPolicy()
     assert isinstance(prepared.stt, DeterministicStreamingSTT)
