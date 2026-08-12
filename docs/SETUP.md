@@ -17,7 +17,7 @@ These steps reproduce the development environment used by CI.
 git clone https://github.com/swayamg20/conv-ai-visual.git
 cd conv-ai-visual
 
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra voice-v2
 
 cd web
 npm ci

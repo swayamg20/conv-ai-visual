@@ -104,7 +104,7 @@ class SemanticMemory:
             results = self.client.search(
                 query,
                 filters={"user_id": self.user_id},
-                limit=limit,
+                top_k=limit,
             )
             if isinstance(results, list):
                 return results
@@ -118,7 +118,7 @@ class SemanticMemory:
             return []
 
         try:
-            results = self.client.get_all(user_id=self.user_id)
+            results = self.client.get_all(filters={"user_id": self.user_id})
             if isinstance(results, list):
                 return results
             return results.get("results", [])
@@ -161,7 +161,7 @@ class SemanticMemory:
                 results = await self.client.search_async(
                     query,
                     filters={"user_id": self.user_id},
-                    limit=limit,
+                    top_k=limit,
                 )
                 memories = results if isinstance(results, list) else results.get("results", [])
             else:

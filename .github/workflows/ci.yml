@@ -33,7 +33,7 @@ jobs:
           enable-cache: true
 
       - name: Install locked backend dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra dev --extra voice-v2
 
       - name: Lint backend
         run: uv run ruff check .

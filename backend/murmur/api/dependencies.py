@@ -11,6 +11,7 @@ from murmur.persistence.models import AgentModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.runtime import RuntimeRegistry
 from murmur.voice import VoiceService
+from murmur.voice.bootstrap import VoiceBootstrapper
 
 
 class CurrentUser(TypedDict):
@@ -67,3 +68,13 @@ def get_voice_service(request: Request) -> VoiceService:
 
 
 VoiceServiceDependency = Annotated[VoiceService, Depends(get_voice_service)]
+
+
+def get_voice_bootstrap_service(request: Request) -> VoiceBootstrapper:
+    return cast(VoiceBootstrapper, request.app.state.voice_bootstrap_service)
+
+
+VoiceBootstrapServiceDependency = Annotated[
+    VoiceBootstrapper,
+    Depends(get_voice_bootstrap_service),
+]

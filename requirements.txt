@@ -367,6 +367,7 @@ httpx==0.28.1 \
     # via
     #   elevenlabs
     #   firebase-admin
+    #   mem0ai
     #   murmur-backend
     #   openai
     #   qdrant-client
@@ -425,9 +426,9 @@ jiter==0.16.0 \
     --hash=sha256:f17d61a28b4b3e0e3e2ba98490c70501403b4d196f78732439160e7fd3678127 \
     --hash=sha256:f4444a83f946605990c98f625cdd3d2725bfb818158760c5748c653170a20e0e
     # via openai
-mem0ai==0.1.118 \
-    --hash=sha256:c2b371224a340fd5529d608dfbd2e77c610c7ffe421005ff7e862fd6f322cca8 \
-    --hash=sha256:d62497286616357f8726b849afc20031cd0ab56d1cf312fa289b006be33c3ce7
+mem0ai==2.0.18 \
+    --hash=sha256:2c20c78dec21c512e1daf6b7c2cacc306cb34eaab7dd24c2edc81b71386b0a10 \
+    --hash=sha256:7dfd23b119448fe631f2a20c025eeaee2bb2fb28b155e18b791486d2aa01896f
     # via murmur-backend
 msgpack==1.2.1 \
     --hash=sha256:020e881a764b20d8d7ca1a54fc01b8175519d108e3c3f194fddc200bda95951a \
@@ -492,9 +493,9 @@ onnxruntime==1.28.0 \
     --hash=sha256:e02feeb0165c5f13b4cc954738078d59b90128516ac12b671ee24a530242bf02 \
     --hash=sha256:f5c5daabd28aad610f83fdcf32acec8fb57e6adc6c6a39fe2a3c755db957b410
     # via murmur-backend
-openai==1.109.1 \
-    --hash=sha256:6bcaf57086cf59159b8e27447e4e7dd019db5d29a438072fbd49c290c7e65315 \
-    --hash=sha256:d173ed8dbca665892a6db099b4a2dfac624f94d20a93f46eb0b56aae940ed869
+openai==2.54.0 \
+    --hash=sha256:89089789197ccdb87f173a03145ed1598d00795220c93e96cf712b1cbf5e5f2b \
+    --hash=sha256:e3e6f8bc1ba30ddf381ace1a14340eed381cb984a1a59bd0f34b5be3b5d49cfa
     # via
     #   mem0ai
     #   murmur-backend

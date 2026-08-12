@@ -16,10 +16,10 @@ dependencies = [
   "firebase-admin>=6,<8",
   "google-generativeai>=0.8,<0.9",
   "httpx>=0.27.2,<1",
-  "mem0ai>=0.1,<1",
+  "mem0ai>=2,<3",
   "numpy>=1.26.4,<2.3",
   "onnxruntime>=1.20.1,<2",
-  "openai>=1.54,<3",
+  "openai>=2,<3",
   "pydantic>=2.12,<3",
   "pymupdf>=1.24,<2",
   "python-dotenv>=1.2,<2",
@@ -42,6 +42,10 @@ local-tts = ["kokoro-onnx>=0.4,<1"]
 smart-turn = [
   "huggingface-hub>=0.34,<1",
   "transformers>=4.57,<5",
+]
+voice-v2 = [
+  "livekit-agents==1.6.9",
+  "livekit-api==1.2.0",
 ]
 experiments = [
   "accelerate>=1.10,<2",

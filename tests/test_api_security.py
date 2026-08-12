@@ -141,6 +141,22 @@ class ApiSecurityTest(unittest.TestCase):
                 {"enabled": True},
             ),
             ("post", "/offer", {"sdp": "offer-sdp", "type": "offer"}),
+            (
+                "post",
+                "/api/voice/session",
+                {
+                    "session_id": self.owner_session.id,
+                    "voice_call_id": "10000000-0000-4000-8000-000000000004",
+                },
+            ),
+            (
+                "post",
+                "/api/voice/session/end",
+                {
+                    "session_id": self.owner_session.id,
+                    "voice_call_id": "10000000-0000-4000-8000-000000000004",
+                },
+            ),
         ]
 
         for method, path, body in requests:

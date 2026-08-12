@@ -21,6 +21,8 @@ from murmur.runtime import RuntimeRegistry
 from murmur.runtime.supervisor import SessionSupervisor
 from murmur.tools.search import register_web_search_tool
 from murmur.voice import VoiceService
+from murmur.voice.bootstrap import VoiceBootstrapper
+from murmur.voice.livekit_control import create_default_voice_bootstrap_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +43,13 @@ def create_application(
     runtime: RuntimeRegistry | None = None,
     chat_service: ChatService | None = None,
     voice_service: VoiceService | None = None,
+    voice_bootstrap_service: VoiceBootstrapper | None = None,
 ) -> FastAPI:
     """Build the HTTP application around an explicit runtime owner."""
     runtime = runtime or RuntimeRegistry()
     chat_service = chat_service or ChatService(runtime)
     voice_service = voice_service or VoiceService(runtime)
+    voice_bootstrap_service = voice_bootstrap_service or create_default_voice_bootstrap_service()
     supervisor = SessionSupervisor(chat_service, voice_service)
 
     @asynccontextmanager
@@ -65,13 +69,24 @@ def create_application(
         try:
             yield
         finally:
-            await runtime.shutdown()
+            shutdown_results = await asyncio.gather(
+                runtime.shutdown(),
+                voice_bootstrap_service.aclose(),
+                return_exceptions=True,
+            )
+            for result in shutdown_results:
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "Application component shutdown failed",
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
             logger.info("Application runtime shut down")
 
     app = FastAPI(lifespan=lifespan)
     app.state.runtime = runtime
     app.state.chat_service = chat_service
     app.state.voice_service = voice_service
+    app.state.voice_bootstrap_service = voice_bootstrap_service
     app.state.session_supervisor = supervisor
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(MurmurError, domain_error_handler)

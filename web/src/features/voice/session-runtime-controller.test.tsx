@@ -1,0 +1,173 @@
+/** @vitest-environment happy-dom */
+
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
+
+const hooks = vi.hoisted(() => ({
+  useWebRTC: vi.fn(),
+  useVoiceSession: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-webrtc", () => ({
+  useWebRTC: hooks.useWebRTC,
+}));
+
+vi.mock("@/hooks/use-voice-session", () => ({
+  useVoiceSession: hooks.useVoiceSession,
+}));
+
+import {
+  SessionVoiceRuntimeController,
+  type SessionVoiceCallbacks,
+  type SessionVoiceRuntime,
+} from "./session-runtime-controller";
+
+const callbacks: SessionVoiceCallbacks = {
+  onSessionReady: () => undefined,
+  onTranscript: () => undefined,
+  onAssistantSpeech: () => undefined,
+  onCanvasUpdate: () => undefined,
+  onSDLScene: () => undefined,
+  onSDLStart: () => undefined,
+  onSDLStepAudioStart: () => undefined,
+  onSDLStepComplete: () => undefined,
+  onSDLComplete: () => undefined,
+  onPipelineMetrics: () => undefined,
+  onError: () => undefined,
+  onLog: () => undefined,
+  onStateChange: () => undefined,
+};
+
+function legacyResult() {
+  return {
+    status: "idle",
+    pipelineState: "idle",
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(),
+    cancelConnection: vi.fn(),
+    initAudio: vi.fn(),
+    isMicMuted: false,
+    isTTSEnabled: true,
+    toggleMicMute: vi.fn(),
+    toggleTTS: vi.fn(),
+  };
+}
+
+function v2Result() {
+  return {
+    phase: "idle",
+    session: {
+      phase: "idle",
+      transportConnected: false,
+      voiceReady: false,
+      reconnectAttempt: 0,
+    },
+    connect: vi.fn(async () => undefined),
+    disconnect: vi.fn(),
+    cancelConnection: vi.fn(),
+    isMicMuted: false,
+    isTTSEnabled: true,
+    toggleMicMute: vi.fn(async () => undefined),
+    toggleTTS: vi.fn(),
+    audioPlaybackBlocked: false,
+    resumeAudio: vi.fn(async () => undefined),
+  };
+}
+
+describe("SessionVoiceRuntimeController", () => {
+  it("mounts only the assigned media runtime", async () => {
+    hooks.useWebRTC.mockReset().mockReturnValue(legacyResult());
+    hooks.useVoiceSession.mockReset().mockReturnValue(v2Result());
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let rendered: SessionVoiceRuntime | undefined;
+
+    await act(async () => {
+      root.render(
+        <SessionVoiceRuntimeController
+          runtime="livekit_v2"
+          agentId="agent-1"
+          sessionId="session-1"
+          callbacks={callbacks}
+        >
+          {(voice) => {
+            rendered = voice;
+            return null;
+          }}
+        </SessionVoiceRuntimeController>
+      );
+    });
+
+    expect(rendered?.runtime).toBe("livekit_v2");
+    expect(rendered?.unavailableReason).toBeUndefined();
+    expect(hooks.useVoiceSession).toHaveBeenCalledTimes(1);
+    expect(hooks.useWebRTC).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.render(
+        <SessionVoiceRuntimeController
+          runtime="legacy"
+          agentId="agent-1"
+          sessionId="session-1"
+          callbacks={callbacks}
+        >
+          {(voice) => {
+            rendered = voice;
+            return null;
+          }}
+        </SessionVoiceRuntimeController>
+      );
+    });
+
+    expect(rendered?.runtime).toBe("legacy");
+    expect(hooks.useWebRTC).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("exposes the exact V2 failure and safe retry decision", async () => {
+    hooks.useWebRTC.mockReset().mockReturnValue(legacyResult());
+    hooks.useVoiceSession.mockReset().mockReturnValue({
+      ...v2Result(),
+      phase: "unavailable",
+      session: {
+        phase: "unavailable",
+        transportConnected: false,
+        voiceReady: false,
+        reconnectAttempt: 0,
+        unavailableReason: {
+          code: "bootstrap_unauthenticated",
+          message: "Sign in again before starting voice.",
+          retryable: false,
+        },
+      },
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let rendered: SessionVoiceRuntime | undefined;
+
+    await act(async () => {
+      root.render(
+        <SessionVoiceRuntimeController
+          runtime="livekit_v2"
+          agentId="agent-1"
+          sessionId="session-1"
+          callbacks={callbacks}
+        >
+          {(voice) => {
+            rendered = voice;
+            return null;
+          }}
+        </SessionVoiceRuntimeController>
+      );
+    });
+
+    expect(rendered?.canStartVoice).toBe(false);
+    expect(rendered?.unavailableReason).toEqual({
+      code: "bootstrap_unauthenticated",
+      message: "Sign in again before starting voice.",
+      retryable: false,
+    });
+    await act(async () => root.unmount());
+  });
+});

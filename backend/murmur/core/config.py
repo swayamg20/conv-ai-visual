@@ -174,6 +174,51 @@ EXAMPLE — "Explain the Pythagorean theorem":
     SMART_TURN_STOP_SECS: float = float(os.getenv("SMART_TURN_STOP_SECS", "2.0"))
     SMART_TURN_MODEL_PATH: Optional[str] = os.getenv("SMART_TURN_MODEL_PATH")
 
+    # Voice runtime selection and LiveKit V2 control-plane configuration.
+    # Profile, worker, and signing policy are deliberately server-controlled.
+    VOICE_RUNTIME: str = os.getenv("VOICE_RUNTIME", "legacy").lower()
+    MURMUR_ENVIRONMENT: str = os.getenv("MURMUR_ENVIRONMENT", "development")
+    LIVEKIT_URL: str = os.getenv("LIVEKIT_URL", "")
+    LIVEKIT_API_KEY: str = os.getenv("LIVEKIT_API_KEY", "")
+    LIVEKIT_API_SECRET: str = os.getenv("LIVEKIT_API_SECRET", "")
+    VOICE_V2_SIGNING_SECRET: str = os.getenv("VOICE_V2_SIGNING_SECRET", "")
+    VOICE_V2_PROFILE_ID: str = os.getenv("VOICE_V2_PROFILE_ID", "livekit-agents-cascade-v1")
+    VOICE_V2_WORKER_NAME: str = os.getenv("VOICE_V2_WORKER_NAME", "murmur-voice-v2")
+    # Keep optional Voice V2 numerics raw at application import time. The V2
+    # factories parse and validate them only when that runtime is selected.
+    VOICE_V2_TOKEN_TTL_SECONDS: str = os.getenv("VOICE_V2_TOKEN_TTL_SECONDS", "300")
+    VOICE_V2_JOB_METADATA_TTL_SECONDS: str = os.getenv("VOICE_V2_JOB_METADATA_TTL_SECONDS", "300")
+    VOICE_V2_JOB_METADATA_CLOCK_SKEW_SECONDS: str = os.getenv(
+        "VOICE_V2_JOB_METADATA_CLOCK_SKEW_SECONDS", "30"
+    )
+    VOICE_V2_REPOSITORY_TIMEOUT_SECONDS: str = os.getenv("VOICE_V2_REPOSITORY_TIMEOUT_SECONDS", "2")
+    VOICE_V2_PREFLIGHT_TIMEOUT_SECONDS: str = os.getenv("VOICE_V2_PREFLIGHT_TIMEOUT_SECONDS", "5")
+    VOICE_V2_CONNECT_TIMEOUT_SECONDS: str = os.getenv("VOICE_V2_CONNECT_TIMEOUT_SECONDS", "10")
+    VOICE_V2_PARTICIPANT_WAIT_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_PARTICIPANT_WAIT_TIMEOUT_SECONDS", "15"
+    )
+    VOICE_V2_INPUT_WAIT_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_INPUT_WAIT_TIMEOUT_SECONDS", "10"
+    )
+    VOICE_V2_SESSION_START_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_SESSION_START_TIMEOUT_SECONDS", "10"
+    )
+    VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS", "3"
+    )
+    VOICE_V2_ROOM_EMPTY_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_ROOM_EMPTY_TIMEOUT_SECONDS", "60"
+    )
+    VOICE_V2_ROOM_DEPARTURE_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_ROOM_DEPARTURE_TIMEOUT_SECONDS", "30"
+    )
+    VOICE_V2_CONTROL_PLANE_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_V2_CONTROL_PLANE_TIMEOUT_SECONDS", "5"
+    )
+    VOICE_V2_MAX_CONCURRENT_BOOTSTRAPS: str = os.getenv("VOICE_V2_MAX_CONCURRENT_BOOTSTRAPS", "100")
+    VOICE_V2_MAX_ACTIVE_CALLS: str = os.getenv("VOICE_V2_MAX_ACTIVE_CALLS", "1")
+    VOICE_V2_MAX_CALL_ASSIGNMENTS: str = os.getenv("VOICE_V2_MAX_CALL_ASSIGNMENTS", "10000")
+
     # TTS provider: "elevenlabs" (cloud, high quality) or "kokoro" (local ONNX, low latency)
     TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "elevenlabs")
     KOKORO_MODEL_PATH: Optional[str] = os.getenv("KOKORO_MODEL_PATH")

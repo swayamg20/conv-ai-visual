@@ -69,7 +69,7 @@ git clone https://github.com/swayamg20/conv-ai-visual.git
 cd conv-ai-visual
 
 cp .env.example .env
-uv sync --locked --extra dev
+uv sync --locked --extra dev --extra voice-v2
 
 cd web
 cp .env.example .env.local

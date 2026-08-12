@@ -11,10 +11,16 @@ import type {
   SVGCanvasHandle,
   TeachingSequence,
 } from "@/features/canvas/types";
-import { useWebRTC, type TranscriptEvent, type PipelineState } from "@/hooks/use-webrtc";
+import type { TranscriptEvent, PipelineState } from "@/hooks/use-webrtc";
 import { useChat } from "@/hooks/use-chat";
+import { resolveVoiceRuntimeAssignment } from "@/features/voice/session-view";
+import {
+  SessionVoiceRuntimeController,
+  type SessionVoiceCallbacks,
+} from "@/features/voice/session-runtime-controller";
+import { VoiceFallbackPanel } from "@/features/voice/voice-fallback-panel";
 import { compileScene, type SDLScene } from "@/lib/scene-kit";
-import { VoiceOrb, type VoiceState } from "@/components/voice-orb";
+import { VoiceOrb } from "@/components/voice-orb";
 import { StatusIndicator } from "@/components/status-indicator";
 import { FloatingButton } from "@/components/ui/floating-button";
 import { GlassmorphicCard } from "@/components/ui/glassmorphic-card";
@@ -33,6 +39,9 @@ export default function AgentSessionPage() {
   const searchParams = useSearchParams();
   const agentId = params.agentId as string;
   const existingSessionId = searchParams.get("session");
+  const voiceRuntime = resolveVoiceRuntimeAssignment(
+    process.env.NEXT_PUBLIC_VOICE_RUNTIME
+  );
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [agentLoading, setAgentLoading] = useState(true);
@@ -264,22 +273,10 @@ export default function AgentSessionPage() {
     }
   }, [agentId]);
 
-  const {
-    status,
-    pipelineState,
-    connect,
-    disconnect,
-    initAudio,
-    isMicMuted,
-    isTTSEnabled,
-    toggleMicMute,
-    toggleTTS,
-  } = useWebRTC({
-    agentId,
-    sessionId: sessionId ?? undefined,
+  const voiceCallbacks = useMemo<SessionVoiceCallbacks>(() => ({
     onSessionReady: handleVoiceSessionReady,
     onTranscript: handleTranscript,
-    onLLMResponse: handleLLMResponse,
+    onAssistantSpeech: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
     onSDLScene: handleSDLScene,
     onSDLStart: handleSDLStart,
@@ -290,62 +287,26 @@ export default function AgentSessionPage() {
     onError: handleError,
     onLog: handleLog,
     onStateChange: handleStateChange,
-  });
-
-  const handleConnect = useCallback(async () => {
-    initAudio();
-    const ensuredSessionId = await ensureSessionId();
-    connect({ agentId, sessionId: ensuredSessionId ?? undefined });
-  }, [agentId, connect, ensureSessionId, initAudio]);
-
-  const handleEndSession = useCallback(async () => {
-    if (isEndingSession) return;
-    setIsEndingSession(true);
-    try {
-      if (sessionIdRef.current) {
-        const result = await endSession(sessionIdRef.current);
-        setSessionEndResult(result);
-        sessionIdRef.current = null;
-        setSessionId(null);
-      }
-    } catch {
-      setSessionEndResult({
-        id: sessionIdRef.current ?? "",
-        summary: null,
-        mastery_count: 0,
-        status: "ended",
-      });
-    } finally {
-      disconnect();
-      setIsEndingSession(false);
-    }
-  }, [disconnect, isEndingSession]);
-
-  const isConnected = status === "connected";
-  const isConnecting = status === "connecting";
-
-  const voiceState: VoiceState = useMemo(() => {
-    if (status === "error") return "error";
-    if (status === "connecting") return "connecting";
-    if (status === "idle" || status === "disconnected") return "idle";
-    if (pipelineState === "listening") return "listening";
-    if (pipelineState === "processing") return "processing";
-    if (pipelineState === "speaking") return "speaking";
-    return "listening";
-  }, [status, pipelineState]);
+  }), [
+    handleCanvasUpdate,
+    handleError,
+    handleLLMResponse,
+    handleLog,
+    handlePipelineMetrics,
+    handleSDLComplete,
+    handleSDLScene,
+    handleSDLStart,
+    handleSDLStepAudioStart,
+    handleSDLStepComplete,
+    handleStateChange,
+    handleTranscript,
+    handleVoiceSessionReady,
+  ]);
 
   const latestTranscript = useMemo(() => {
     const nonEmpty = transcripts.filter(t => t.trim() !== "" && !t.startsWith("Assistant:"));
     return nonEmpty[nonEmpty.length - 1] || "";
   }, [transcripts]);
-
-  const statusLabel = useMemo(() => {
-    if (status === "idle") return "Start voice";
-    if (status === "connecting") return "Checking voice...";
-    if (status === "connected") return "Voice ready";
-    if (status === "error") return "Voice unavailable";
-    return "Disconnected";
-  }, [status]);
 
   // Loading state for agent
   if (agentLoading) {
@@ -373,6 +334,53 @@ export default function AgentSessionPage() {
   }
 
   return (
+    <SessionVoiceRuntimeController
+      runtime={voiceRuntime}
+      agentId={agentId}
+      sessionId={sessionId ?? undefined}
+      callbacks={voiceCallbacks}
+    >
+      {(voice) => {
+        const handleConnect = async () => {
+          const ensuredSessionId = await ensureSessionId();
+          if (!ensuredSessionId) {
+            handleError("A session is required before starting voice");
+            return;
+          }
+          await voice.connect(ensuredSessionId);
+        };
+
+        const handleModeChange = (nextMode: AppMode) => {
+          if (appMode === "voice" && nextMode === "chat") {
+            voice.cancelConnection();
+          }
+          setAppMode(nextMode);
+        };
+
+        const handleEndSession = async () => {
+          if (isEndingSession) return;
+          setIsEndingSession(true);
+          voice.disconnect();
+          try {
+            if (sessionIdRef.current) {
+              const result = await endSession(sessionIdRef.current);
+              setSessionEndResult(result);
+              sessionIdRef.current = null;
+              setSessionId(null);
+            }
+          } catch {
+            setSessionEndResult({
+              id: sessionIdRef.current ?? "",
+              summary: null,
+              mastery_count: 0,
+              status: "ended",
+            });
+          } finally {
+            setIsEndingSession(false);
+          }
+        };
+
+        return (
     <div className="relative min-h-screen bg-background">
       {/* Top Navigation Bar */}
       <nav className="fixed top-0 left-0 right-0 z-30 glass-card border-b border-chalk-faint/30">
@@ -397,8 +405,8 @@ export default function AgentSessionPage() {
           <div className="flex items-center gap-6">
             <ModeToggle
               mode={appMode}
-              onChange={setAppMode}
-              disabled={isConnected || isConnecting}
+              onChange={handleModeChange}
+              disabled={isEndingSession}
             />
             <ThemeToggle />
           </div>
@@ -423,11 +431,15 @@ export default function AgentSessionPage() {
                 transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
               >
                 <VoiceOrb
-                  state={voiceState}
+                  state={voice.voiceState}
                   size="lg"
                   audioLevel={0.3}
-                  onClick={isConnected ? handleEndSession : handleConnect}
-                  disabled={isConnecting || isEndingSession}
+                  onClick={voice.isConnected ? handleEndSession : voice.canStartVoice ? handleConnect : undefined}
+                  disabled={
+                    voice.isConnecting ||
+                    isEndingSession ||
+                    (!voice.isConnected && !voice.canStartVoice)
+                  }
                 />
               </motion.div>
 
@@ -437,24 +449,53 @@ export default function AgentSessionPage() {
                 transition={{ delay: 0.4 }}
               >
                 <StatusIndicator
-                  status={status === "connected" ? "connected" : status === "connecting" ? "connecting" : status === "error" ? "error" : "idle"}
-                  label={statusLabel}
-                  pulse={status === "connected"}
+                  status={voice.indicatorState}
+                  label={voice.statusLabel}
+                  pulse={voice.isVoiceReady}
                   showDot
                 />
               </motion.div>
 
-              {isConnected && (
+              {voice.isConnecting && (
+                <button
+                  type="button"
+                  onClick={voice.cancelConnection}
+                  className="rounded-full border border-chalk-faint/50 px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-graphite"
+                >
+                  Cancel connection
+                </button>
+              )}
+
+              {voice.unavailableReason && (
+                <VoiceFallbackPanel
+                  reason={voice.unavailableReason}
+                  canRetry={voice.canStartVoice}
+                  onRetry={() => void handleConnect()}
+                  onContinueInText={() => handleModeChange("chat")}
+                />
+              )}
+
+              {voice.isVoiceReady && (
                 <ControlButtons
-                  isMicMuted={isMicMuted}
-                  isTTSEnabled={isTTSEnabled}
-                  onToggleMic={toggleMicMute}
-                  onToggleTTS={toggleTTS}
+                  isMicMuted={voice.isMicMuted}
+                  isTTSEnabled={voice.isTTSEnabled}
+                  onToggleMic={voice.toggleMicMute}
+                  onToggleTTS={voice.toggleTTS}
                   disabled={false}
                 />
               )}
 
-              {!isConnected && !isConnecting && (
+              {voice.runtime === "livekit_v2" && voice.audioPlaybackBlocked && voice.isVoiceReady && (
+                <button
+                  type="button"
+                  onClick={() => void voice.resumeAudio()}
+                  className="rounded-full border border-amber/40 bg-amber/10 px-4 py-2 text-sm text-amber transition-colors hover:bg-amber/20"
+                >
+                  Enable agent audio
+                </button>
+              )}
+
+              {!voice.isConnected && !voice.isConnecting && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -464,7 +505,7 @@ export default function AgentSessionPage() {
                 </motion.div>
               )}
 
-              {!isConnected && !isConnecting && (
+              {voice.canStartVoice && (
                 <motion.div
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
@@ -481,7 +522,7 @@ export default function AgentSessionPage() {
                 </motion.div>
               )}
 
-              {isConnected && latestTranscript && (
+              {voice.isVoiceReady && latestTranscript && (
                 <motion.div
                   initial={{ opacity: 0, scale: 0.95 }}
                   animate={{ opacity: 1, scale: 1 }}
@@ -496,7 +537,7 @@ export default function AgentSessionPage() {
                 </motion.div>
               )}
 
-              {isConnected && transcripts.length === 0 && (
+              {voice.isVoiceReady && transcripts.length === 0 && (
                 <motion.p
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -572,7 +613,7 @@ export default function AgentSessionPage() {
           onClose={() => setDrawerOpen(false)}
           transcripts={transcripts}
           logs={logs}
-          pipelineState={pipelineState}
+          pipelineState={voice.pipelineState}
         />
       )}
 
@@ -614,5 +655,8 @@ export default function AgentSessionPage() {
         </motion.div>
       )}
     </div>
+        );
+      }}
+    </SessionVoiceRuntimeController>
   );
 }
