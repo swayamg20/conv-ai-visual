@@ -82,3 +82,55 @@ jobs:
 
       - name: Build frontend
         run: npm run build
+
+  rtc:
+    name: Offline RTC browser proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v9.0.0
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Install locked backend dependencies
+        run: uv sync --locked --extra dev --extra voice-v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked frontend dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Run real RTC browser proof
+        run: >-
+          uv run python scripts/voice_e2e_stack.py
+          --run-id ci-${{ github.run_id }}-${{ github.run_attempt }}
+          --startup-timeout 90
+          --browser-timeout 120
+          --cleanup-timeout 45
+          --web-build-timeout 300
+
+      - name: Upload RTC proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: voice-rtc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            var/voice-e2e/
+            var/evals/voice-e2e-*.jsonl
+          if-no-files-found: ignore
+          retention-days: 7

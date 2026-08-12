@@ -15,17 +15,23 @@ import {
   transitionVoiceSession,
   type VoiceSessionPhase,
 } from "@/features/voice/session-machine";
-import { LiveKitVoiceTransport } from "@/features/voice/livekit-transport";
+import {
+  LiveKitVoiceTransport,
+  type LocalMicrophonePublicationObservation,
+} from "@/features/voice/livekit-transport";
 import {
   bootstrapVoiceSession,
   VOICE_V2_EVENT_TOPIC,
   VoiceSessionApiError,
+  type VoiceAuthHeaderProvider,
   type VoiceSessionBootstrap,
 } from "@/features/voice/session-api";
 
 const BOOTSTRAP_TIMEOUT_MS = 15_000;
+const TRANSPORT_CONNECT_TIMEOUT_MS = 15_000;
 const AGENT_READY_TIMEOUT_MS = 15_000;
 const SESSION_END_TIMEOUT_MS = 5_000;
+const MAX_PENDING_READY_EVENTS = 128;
 
 type LocalTransportEventType =
   | "transport_connected"
@@ -47,9 +53,16 @@ export interface UseVoiceSessionOptions {
   readonly onTranscript?: (event: VoiceSessionTranscriptEvent) => void;
   readonly onAssistantSpeech?: (text: string) => void;
   readonly onEffect?: (effect: VoiceEventEffect) => void;
+  readonly onEvent?: (event: VoiceEvent) => void;
+  readonly onLocalMicrophoneTrack?: (track: MediaStreamTrack | null) => void;
+  readonly onLocalMicrophonePublication?: (
+    track: MediaStreamTrack,
+    observation: LocalMicrophonePublicationObservation
+  ) => void;
   readonly onError?: (message: string) => void;
   readonly onLog?: (message: string) => void;
   readonly onPhaseChange?: (phase: VoiceSessionPhase) => void;
+  readonly authHeaderProvider?: VoiceAuthHeaderProvider;
 }
 
 export interface VoiceSessionConnectOverrides {
@@ -116,6 +129,13 @@ interface VoiceCallIdentity {
 interface ActiveCallFailureOptions {
   readonly canRetry?: boolean;
   readonly retainCallIdentity?: boolean;
+}
+
+interface PendingReadyActivation {
+  readonly generation: number;
+  readonly event: VoiceEvent;
+  readonly reduction: VoiceEventReduction;
+  readonly queuedInputs: unknown[];
 }
 
 export interface VoiceBootstrapFailurePolicy {
@@ -202,7 +222,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     createInitialVoiceEventState(options.sessionId)
   );
   const [assignment, setAssignment] = useState<VoiceSessionBootstrap | null>(null);
-  const [isMicMuted, setIsMicMuted] = useState(false);
+  const [isMicMuted, setIsMicMuted] = useState(true);
   const [isTTSEnabled, setIsTTSEnabled] = useState(true);
   const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
   // Group the stable React writers behind one immutable owner for transport
@@ -223,6 +243,8 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const transportRef = useRef<LiveKitVoiceTransport | null>(null);
   const bootstrapAbortRef = useRef<AbortController | null>(null);
   const bootstrapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transportConnectAbortRef = useRef<AbortController | null>(null);
+  const transportConnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const connectPromiseRef = useRef<Promise<void> | null>(null);
@@ -230,11 +252,20 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const localProducerIdRef = useRef<string>("browser:unassigned:0");
   const activeVoiceCallIdRef = useRef<string | null>(null);
   const activeBrowserTraceIdRef = useRef<string | null>(null);
+  const localMicrophoneTrackRef = useRef<{
+    readonly generation: number;
+    readonly track: MediaStreamTrack;
+  } | null>(null);
+  const pendingReadyActivationRef = useRef<PendingReadyActivation | null>(null);
+  const transportInputHandlerRef = useRef<
+    ((input: unknown, generation: number) => void) | null
+  >(null);
   const ttsEnabledRef = useRef(true);
   const [releaseScheduler] = useState(
     () =>
       new AssignmentReleaseScheduler({
         apiUrl: options.apiUrl,
+        authHeaderProvider: options.authHeaderProvider,
         onLog: options.onLog,
       })
   );
@@ -262,6 +293,13 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     }
   }, []);
 
+  const clearTransportConnectTimer = useCallback(() => {
+    if (transportConnectTimerRef.current !== null) {
+      clearTimeout(transportConnectTimerRef.current);
+      transportConnectTimerRef.current = null;
+    }
+  }, []);
+
   const clearSessionEndTimer = useCallback(() => {
     if (sessionEndTimerRef.current !== null) {
       clearTimeout(sessionEndTimerRef.current);
@@ -282,10 +320,14 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const cleanupTransport = useCallback((releaseAssignment = false): Promise<void> => {
     generationRef.current += 1;
     clearBootstrapTimer();
+    clearTransportConnectTimer();
     clearReadyTimer();
     clearSessionEndTimer();
     bootstrapAbortRef.current?.abort();
     bootstrapAbortRef.current = null;
+    transportConnectAbortRef.current?.abort();
+    transportConnectAbortRef.current = null;
+    pendingReadyActivationRef.current = null;
     connectPromiseRef.current = null;
 
     const transport = transportRef.current;
@@ -301,10 +343,14 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     transportRef.current = null;
     assignmentRef.current = null;
     if (releaseAssignment) releaseScheduler.release(assignmentLocator);
-    if (mountedRef.current) stateWriters.setAssignment(null);
+    if (mountedRef.current) {
+      stateWriters.setAssignment(null);
+      stateWriters.setIsMicMuted(true);
+    }
     return transport?.disconnect() ?? Promise.resolve();
   }, [
     clearBootstrapTimer,
+    clearTransportConnectTimer,
     clearReadyTimer,
     clearSessionEndTimer,
     releaseScheduler,
@@ -366,7 +412,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         optionsRef.current.onAssistantSpeech?.(event.payload.text);
       } else if (event.event_type === "agent_unavailable") {
         clearReadyTimer();
-        if (!event.payload.retryable) releaseCallIdentity();
+        releaseCallIdentity();
         optionsRef.current.onError?.(event.payload.message);
       } else if (event.event_type === "session_ending") {
         clearSessionEndTimer();
@@ -434,6 +480,84 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         );
         return;
       }
+
+      const pendingReady = pendingReadyActivationRef.current;
+      if (pendingReady?.generation === generation) {
+        if (decoded.ok && decoded.event.event_type === "agent_unavailable") {
+          pendingReadyActivationRef.current = null;
+        } else {
+          if (decoded.ok && decoded.event.event_type === "agent_ready") {
+            log("Ignored duplicate agent readiness during microphone activation");
+            return;
+          }
+          if (pendingReady.queuedInputs.length >= MAX_PENDING_READY_EVENTS) {
+            pendingReadyActivationRef.current = null;
+            failActiveCall(
+              generation,
+              "ready_event_buffer_overflow",
+              "Voice received too many events before microphone activation completed"
+            );
+            return;
+          }
+          pendingReady.queuedInputs.push(input);
+          return;
+        }
+      }
+
+      if (decoded.ok && decoded.event.event_type === "agent_ready") {
+        const readyReduction = reduceVoiceEvent(eventStateRef.current, input);
+        if (readyReduction.disposition === "applied") {
+          const transport = transportRef.current;
+          const pending: PendingReadyActivation = {
+            generation,
+            event: decoded.event,
+            reduction: readyReduction,
+            queuedInputs: [],
+          };
+          pendingReadyActivationRef.current = pending;
+          void transport.activateMicrophoneAfterReady().then(
+            () => {
+              if (
+                generationRef.current !== generation ||
+                transportRef.current !== transport ||
+                pendingReadyActivationRef.current !== pending
+              ) {
+                return;
+              }
+              pendingReadyActivationRef.current = null;
+              publishState(readyReduction.state);
+              if (mountedRef.current) stateWriters.setIsMicMuted(false);
+              try {
+                optionsRef.current.onEvent?.(decoded.event);
+              } catch (error) {
+                log(`Voice event observer failed: ${errorMessage(error)}`);
+              }
+              runAppliedEvent(decoded.event, readyReduction.effects);
+              for (const queuedInput of pending.queuedInputs) {
+                transportInputHandlerRef.current?.(queuedInput, generation);
+              }
+            },
+            (error: unknown) => {
+              if (
+                generationRef.current !== generation ||
+                transportRef.current !== transport ||
+                pendingReadyActivationRef.current !== pending
+              ) {
+                return;
+              }
+              pendingReadyActivationRef.current = null;
+              failActiveCall(
+                generation,
+                "microphone_activation_failed",
+                `Could not activate microphone after agent readiness: ${errorMessage(error)}`,
+                { canRetry: true, retainCallIdentity: false }
+              );
+            }
+          );
+          return;
+        }
+      }
+
       const reduction = applyReduction(input);
       if (reduction.disposition !== "applied") {
         if (reduction.rejection) {
@@ -461,6 +585,11 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       }
 
       if (decoded.ok) {
+        try {
+          optionsRef.current.onEvent?.(decoded.event);
+        } catch (error) {
+          log(`Voice event observer failed: ${errorMessage(error)}`);
+        }
         runAppliedEvent(decoded.event, reduction.effects);
       }
 
@@ -469,16 +598,14 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         (reduction.state.session.phase === "ended" &&
           reduction.state.session.terminationStage === "ended")
       ) {
-        if (
+        const mustReleaseAssignment =
           reduction.state.session.phase === "ended" ||
-          !reduction.state.session.unavailableReason?.retryable
-        ) {
+          (decoded.ok && decoded.event.event_type === "agent_unavailable") ||
+          !reduction.state.session.unavailableReason?.retryable;
+        if (mustReleaseAssignment) {
           releaseCallIdentity();
         }
-        void cleanupTransport(
-          reduction.state.session.phase === "ended" ||
-            reduction.state.session.unavailableReason?.retryable !== true
-        );
+        void cleanupTransport(mustReleaseAssignment);
       }
     },
     [
@@ -486,10 +613,21 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       cleanupTransport,
       failActiveCall,
       log,
+      publishState,
       releaseCallIdentity,
       runAppliedEvent,
+      stateWriters,
     ]
   );
+
+  useEffect(() => {
+    transportInputHandlerRef.current = handleTransportInput;
+    return () => {
+      if (transportInputHandlerRef.current === handleTransportInput) {
+        transportInputHandlerRef.current = null;
+      }
+    };
+  }, [handleTransportInput]);
 
   const connect = useCallback(
     (overrides: VoiceSessionConnectOverrides = {}): Promise<void> => {
@@ -548,7 +686,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         });
         stateWriters.setAssignment(null);
         assignmentRef.current = null;
-        stateWriters.setIsMicMuted(false);
+        stateWriters.setIsMicMuted(true);
         stateWriters.setAudioPlaybackBlocked(false);
         log("Requesting Voice V2 assignment");
 
@@ -580,11 +718,12 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
             onReconnecting: (attempt) => {
               if (!isCurrentTransport()) return;
               clearReadyTimer();
-              applyLocalEvent("transport_reconnecting", {
-                attempt,
-                reason: "livekit_reconnecting",
-              });
-              log("Voice transport reconnecting");
+              failActiveCall(
+                generation,
+                "reconnect_not_supported",
+                `Voice transport connection was interrupted (attempt ${attempt}). Start a fresh voice call.`,
+                { canRetry: true, retainCallIdentity: false }
+              );
             },
             onReconnected: () => {
               if (!isCurrentTransport()) return;
@@ -601,6 +740,15 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
                 generation,
                 "transport_unavailable",
                 "Voice transport disconnected",
+                { canRetry: true, retainCallIdentity: false }
+              );
+            },
+            onAgentDisconnected: () => {
+              if (!isCurrentTransport()) return;
+              failActiveCall(
+                generation,
+                "agent_disconnected",
+                "Voice agent disconnected. Start a fresh voice call.",
                 { canRetry: true, retainCallIdentity: false }
               );
             },
@@ -630,6 +778,25 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
                 stateWriters.setAudioPlaybackBlocked(blocked);
               }
             },
+            onLocalMicrophoneTrack: (track) => {
+              const currentTrack = localMicrophoneTrackRef.current;
+              if (track) {
+                if (!isCurrentTransport()) return;
+                localMicrophoneTrackRef.current = { generation, track };
+                optionsRef.current.onLocalMicrophoneTrack?.(track);
+                return;
+              }
+              if (currentTrack?.generation !== generation) return;
+              localMicrophoneTrackRef.current = null;
+              optionsRef.current.onLocalMicrophoneTrack?.(null);
+            },
+            onLocalMicrophonePublication: (track, observation) => {
+              if (!isCurrentTransport()) return;
+              optionsRef.current.onLocalMicrophonePublication?.(
+                track,
+                observation
+              );
+            },
           },
         });
         transportRef.current = transport;
@@ -649,7 +816,11 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           bootstrap = await settleOnAbort(
             bootstrapVoiceSession(
               { session_id: sessionId, voice_call_id: activeVoiceCallId },
-              { apiUrl: optionsRef.current.apiUrl, signal: abortController.signal }
+              {
+                apiUrl: optionsRef.current.apiUrl,
+                signal: abortController.signal,
+                authHeaderProvider: optionsRef.current.authHeaderProvider,
+              }
             ),
             abortController.signal
           );
@@ -696,9 +867,38 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         if (mountedRef.current) stateWriters.setAssignment(bootstrap);
 
         try {
-          await transport.connect(bootstrap);
+          const transportConnectAbort = new AbortController();
+          let transportConnectTimedOut = false;
+          transportConnectAbortRef.current = transportConnectAbort;
+          transportConnectTimerRef.current = setTimeout(() => {
+            transportConnectTimedOut = true;
+            transportConnectAbort.abort();
+          }, TRANSPORT_CONNECT_TIMEOUT_MS);
+          try {
+            await settleOnAbort(
+              transport.connect(bootstrap),
+              transportConnectAbort.signal
+            );
+          } catch (error) {
+            if (generationRef.current !== generation) return;
+            if (transportConnectTimedOut) {
+              failActiveCall(
+                generation,
+                "transport_connect_timeout",
+                "Voice transport and microphone setup timed out. Start a fresh voice call.",
+                { canRetry: true, retainCallIdentity: false }
+              );
+              return;
+            }
+            if (transportConnectAbort.signal.aborted) return;
+            throw error;
+          } finally {
+            clearTransportConnectTimer();
+            if (transportConnectAbortRef.current === transportConnectAbort) {
+              transportConnectAbortRef.current = null;
+            }
+          }
           if (!isCurrentTransport()) return;
-          stateWriters.setIsMicMuted(false);
           log(`Joined assigned room ${bootstrap.room_name}`);
         } catch (error) {
           if (generationRef.current !== generation || isAbortError(error)) return;
@@ -723,6 +923,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       applyLocalEvent,
       cleanupTransport,
       clearBootstrapTimer,
+      clearTransportConnectTimer,
       clearReadyTimer,
       failActiveCall,
       handleTransportInput,
@@ -807,6 +1008,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     optionsRef.current = options;
     releaseScheduler.configure({
       apiUrl: options.apiUrl,
+      authHeaderProvider: options.authHeaderProvider,
       onLog: options.onLog,
     });
   }, [options, releaseScheduler]);

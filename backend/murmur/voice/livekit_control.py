@@ -88,12 +88,20 @@ class LiveKitControlPlane:
         )
 
     async def create_room(self, spec: CreateRoomSpec) -> RoomRecord:
+        initial_dispatch = spec.initial_dispatch
         request = self._sdk.CreateRoomRequest(
             name=spec.name,
             metadata=spec.metadata,
             empty_timeout=spec.empty_timeout_seconds,
             departure_timeout=spec.departure_timeout_seconds,
             max_participants=spec.max_participants,
+            agents=[
+                self._sdk.RoomAgentDispatch(
+                    agent_name=initial_dispatch.agent_name,
+                    metadata=initial_dispatch.metadata,
+                    restart_policy=self._sdk.JobRestartPolicy.JRP_NEVER,
+                )
+            ],
         )
         client = await self._client()
         room = await client.room.create_room(request)

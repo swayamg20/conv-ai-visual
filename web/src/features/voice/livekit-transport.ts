@@ -1,8 +1,12 @@
 import {
+  createLocalAudioTrack,
   DataPacket_Kind,
   Room,
   RoomEvent,
+  Track,
   isAudioTrack,
+  type LocalAudioTrack,
+  type LocalTrackPublication,
   type RemoteAudioTrack,
   type RemoteParticipant,
   type RemoteTrack,
@@ -11,6 +15,23 @@ import {
 
 import type { VoiceSessionBootstrap } from "./session-api";
 
+/**
+ * Immutable diagnostic snapshot captured after the exact microphone track is
+ * published and before it can be activated by canonical agent readiness.
+ *
+ * `MediaStreamTrack.muted` is intentionally absent: that browser property
+ * reports source availability, not application-controlled mute. The two valid
+ * application signals are the native track's `enabled` flag and LiveKit's
+ * local-track mute state.
+ */
+export interface LocalMicrophonePublicationObservation {
+  readonly trackId: string;
+  readonly observedAtMs: number;
+  readonly mediaStreamTrackEnabled: boolean;
+  readonly livekitMuted: boolean;
+  readonly readyState: MediaStreamTrackState;
+}
+
 interface LiveKitVoiceTransportCallbacks {
   /** Generation guard owned by the session orchestrator. */
   readonly isCurrent: () => boolean;
@@ -18,16 +39,41 @@ interface LiveKitVoiceTransportCallbacks {
   readonly onReconnecting: (attempt: number) => void;
   readonly onReconnected: () => void;
   readonly onDisconnected: () => void;
+  readonly onAgentDisconnected: () => void;
   readonly onTransportInput: (input: unknown) => void;
   readonly onInvalidEventChannel: () => void;
   readonly onMicrophoneUnavailable: (error: Error) => void;
   readonly onAudioPlaybackBlockedChange: (blocked: boolean) => void;
+  readonly onLocalMicrophoneTrack?: (track: MediaStreamTrack | null) => void;
+  readonly onLocalMicrophonePublication?: (
+    track: MediaStreamTrack,
+    observation: LocalMicrophonePublicationObservation
+  ) => void;
 }
 
 interface LiveKitVoiceTransportOptions {
   readonly voiceCallId: string;
   readonly ttsEnabled: boolean;
   readonly callbacks: LiveKitVoiceTransportCallbacks;
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (error: Error) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  // Readiness may fail before Ready is observed. Keep that expected teardown
+  // path handled while preserving rejection for a later activation waiter.
+  void promise.catch(() => undefined);
+  return { promise, resolve, reject };
 }
 
 /**
@@ -42,6 +88,12 @@ export class LiveKitVoiceTransport {
   private reconnectAttempt = 0;
   private ttsEnabled: boolean;
   private closed = false;
+  private localAudioTrack: LocalAudioTrack | null = null;
+  private microphonePublication: LocalTrackPublication | null = null;
+  private readonly microphonePublicationReady = deferred<LocalTrackPublication>();
+  private microphoneActivationPromise: Promise<void> | null = null;
+  private microphoneActivatedAfterReady = false;
+  private localMicrophoneTrack: MediaStreamTrack | null = null;
 
   constructor(private readonly options: LiveKitVoiceTransportOptions) {
     this.ttsEnabled = options.ttsEnabled;
@@ -65,25 +117,116 @@ export class LiveKitVoiceTransport {
   async connect(assignment: VoiceSessionBootstrap): Promise<void> {
     if (this.closed) throw new Error("Voice transport is already closed");
     this.attachListeners(assignment);
-    await this.room.connect(assignment.server_url, assignment.participant_token, {
-      autoSubscribe: true,
-    });
-    if (!this.isCurrent()) return;
+    let localAudioTrack: LocalAudioTrack | null = null;
+    try {
+      await this.room.connect(assignment.server_url, assignment.participant_token, {
+        autoSubscribe: true,
+      });
+      if (!this.isCurrent()) {
+        this.microphonePublicationReady.reject(
+          new Error("Voice transport closed before microphone capture")
+        );
+        return;
+      }
 
-    await this.room.localParticipant.setMicrophoneEnabled(true, {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-    });
-    if (!this.isCurrent()) return;
-    this.options.callbacks.onAudioPlaybackBlockedChange(
-      !this.room.canPlaybackAudio
-    );
+      localAudioTrack = await createLocalAudioTrack({
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      });
+      this.localAudioTrack = localAudioTrack;
+
+      // Capture must remain alive so the worker can subscribe, but no voiced frame
+      // may leave the browser before the authenticated agent_ready event. Muting
+      // before publish makes that ordering an invariant rather than a timing hope.
+      await localAudioTrack.mute();
+      if (!this.isCurrent()) {
+        localAudioTrack.stop();
+        this.localAudioTrack = null;
+        this.microphonePublicationReady.reject(
+          new Error("Voice transport closed before microphone publication")
+        );
+        return;
+      }
+
+      this.microphonePublication =
+        await this.room.localParticipant.publishTrack(localAudioTrack, {
+          source: Track.Source.Microphone,
+          stopMicTrackOnMute: false,
+        });
+      if (!this.isCurrent()) {
+        localAudioTrack.stop();
+        this.localAudioTrack = null;
+        this.microphonePublication = null;
+        this.microphonePublicationReady.reject(
+          new Error("Voice transport closed during microphone publication")
+        );
+        return;
+      }
+      this.microphonePublicationReady.resolve(this.microphonePublication);
+      const mediaStreamTrack = localAudioTrack.mediaStreamTrack;
+      const publicationObservation = Object.freeze({
+        trackId: mediaStreamTrack.id,
+        observedAtMs: performance.now(),
+        mediaStreamTrackEnabled: mediaStreamTrack.enabled,
+        livekitMuted: this.microphonePublication.isMuted,
+        readyState: mediaStreamTrack.readyState,
+      } satisfies LocalMicrophonePublicationObservation);
+      this.reportLocalMicrophoneTrack(mediaStreamTrack);
+      this.reportLocalMicrophonePublication(
+        mediaStreamTrack,
+        publicationObservation
+      );
+      this.options.callbacks.onAudioPlaybackBlockedChange(
+        !this.room.canPlaybackAudio
+      );
+    } catch (error) {
+      localAudioTrack?.stop();
+      this.localAudioTrack = null;
+      this.microphonePublication = null;
+      const failure =
+        error instanceof Error ? error : new Error("Microphone setup failed");
+      this.microphonePublicationReady.reject(failure);
+      throw error;
+    }
+  }
+
+  /**
+   * Opens the already-published microphone only after canonical readiness.
+   * Concurrent or duplicate Ready observations share one public SDK unmute.
+   */
+  activateMicrophoneAfterReady(): Promise<void> {
+    if (this.closed) {
+      return Promise.reject(new Error("Voice transport is already closed"));
+    }
+    if (this.microphoneActivatedAfterReady) return Promise.resolve();
+    if (this.microphoneActivationPromise) return this.microphoneActivationPromise;
+
+    const activation = (async () => {
+      const publication = await this.microphonePublicationReady.promise;
+      if (!this.isCurrent() || !this.localAudioTrack) {
+        throw new Error("Voice transport became stale before microphone activation");
+      }
+      await publication.unmute();
+      if (!this.isCurrent()) {
+        await publication.mute().catch(() => undefined);
+        throw new Error("Voice transport became stale during microphone activation");
+      }
+      this.microphoneActivatedAfterReady = true;
+    })();
+    this.microphoneActivationPromise = activation;
+    return activation;
   }
 
   async setMicrophoneEnabled(enabled: boolean): Promise<void> {
     if (this.closed) return;
-    await this.room.localParticipant.setMicrophoneEnabled(enabled);
+    const publication = this.microphonePublication;
+    if (!publication || !this.microphoneActivatedAfterReady) {
+      throw new Error("Microphone cannot be controlled before agent readiness");
+    }
+    if (enabled) await publication.unmute();
+    else await publication.mute();
+    if (!this.isCurrent()) return;
   }
 
   setTtsEnabled(enabled: boolean): void {
@@ -127,10 +270,16 @@ export class LiveKitVoiceTransport {
     this.remoteAudioTracks.clear();
     for (const element of this.audioElements) element.remove();
     this.audioElements.clear();
+    const localAudioTrack = this.localAudioTrack;
+    this.localAudioTrack = null;
+    this.microphonePublication = null;
+    this.microphoneActivationPromise = null;
+    this.microphonePublicationReady.reject(
+      new Error("Voice transport closed before microphone activation")
+    );
+    localAudioTrack?.stop();
+    this.reportLocalMicrophoneTrack(null);
 
-    void this.room.localParticipant.setMicrophoneEnabled(false).catch(() => {
-      // Disconnect remains authoritative if the capture track already ended.
-    });
     return this.room.disconnect(true).catch(() => {
       // Teardown is idempotent; a concurrently closed room needs no recovery.
     });
@@ -160,6 +309,15 @@ export class LiveKitVoiceTransport {
     };
     const onDisconnected = () => {
       if (this.isCurrent()) this.options.callbacks.onDisconnected();
+    };
+    const onParticipantDisconnected = (participant: RemoteParticipant) => {
+      if (
+        this.isCurrent() &&
+        participant.isAgent === true &&
+        participant.identity === assignment.agent_participant_identity
+      ) {
+        this.options.callbacks.onAgentDisconnected();
+      }
     };
     const onDataReceived = (
       payload: Uint8Array,
@@ -232,6 +390,7 @@ export class LiveKitVoiceTransport {
     this.room.on(RoomEvent.Reconnecting, onReconnecting);
     this.room.on(RoomEvent.Reconnected, onReconnected);
     this.room.on(RoomEvent.Disconnected, onDisconnected);
+    this.room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
     this.room.on(RoomEvent.DataReceived, onDataReceived);
     this.room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
     this.room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
@@ -242,6 +401,11 @@ export class LiveKitVoiceTransport {
       () => this.room.off(RoomEvent.Reconnecting, onReconnecting),
       () => this.room.off(RoomEvent.Reconnected, onReconnected),
       () => this.room.off(RoomEvent.Disconnected, onDisconnected),
+      () =>
+        this.room.off(
+          RoomEvent.ParticipantDisconnected,
+          onParticipantDisconnected
+        ),
       () => this.room.off(RoomEvent.DataReceived, onDataReceived),
       () => this.room.off(RoomEvent.TrackSubscribed, onTrackSubscribed),
       () => this.room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed),
@@ -259,6 +423,27 @@ export class LiveKitVoiceTransport {
     for (const element of track.detach()) {
       this.audioElements.delete(element);
       element.remove();
+    }
+  }
+
+  private reportLocalMicrophoneTrack(track: MediaStreamTrack | null): void {
+    if (this.localMicrophoneTrack === track) return;
+    this.localMicrophoneTrack = track;
+    try {
+      this.options.callbacks.onLocalMicrophoneTrack?.(track);
+    } catch {
+      // Diagnostics must never change production capture or teardown.
+    }
+  }
+
+  private reportLocalMicrophonePublication(
+    track: MediaStreamTrack,
+    observation: LocalMicrophonePublicationObservation
+  ): void {
+    try {
+      this.options.callbacks.onLocalMicrophonePublication?.(track, observation);
+    } catch {
+      // Diagnostics must never change production capture or readiness.
     }
   }
 }

@@ -209,15 +209,6 @@ class DispatchRecord:
 
 
 @dataclass(frozen=True)
-class CreateRoomSpec:
-    name: str
-    metadata: str
-    empty_timeout_seconds: int
-    departure_timeout_seconds: int
-    max_participants: int = 2
-
-
-@dataclass(frozen=True)
 class CreateDispatchSpec:
     room_name: str
     agent_name: str
@@ -227,6 +218,27 @@ class CreateDispatchSpec:
     def __post_init__(self) -> None:
         if self.restart_policy != "never":
             raise ValueError("Voice V2 dispatch restart policy must be never")
+
+
+@dataclass(frozen=True)
+class CreateRoomSpec:
+    """Create one room with its sole named worker dispatch atomically.
+
+    LiveKit Server creates a backward-compatible unnamed dispatch when a room
+    starts without agents. Supplying the intended dispatch during room creation
+    prevents that ambiguous state before the bootstrap service can reconcile it.
+    """
+
+    name: str
+    metadata: str
+    empty_timeout_seconds: int
+    departure_timeout_seconds: int
+    initial_dispatch: CreateDispatchSpec
+    max_participants: int = 2
+
+    def __post_init__(self) -> None:
+        if self.initial_dispatch.room_name != self.name:
+            raise ValueError("Voice V2 initial dispatch must target its room")
 
 
 @dataclass(frozen=True)

@@ -72,14 +72,18 @@ class VoiceJobAuthorizer:
         *,
         session_repo: SessionRepository = SessionRepo,
         agent_repo: AgentRepository = AgentRepo,
-        repository_runner: BoundedSyncRunner = default_repository_runner,
+        repository_runner: BoundedSyncRunner | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._settings = settings
         self._session_repo = session_repo
         self._agent_repo = agent_repo
+        # Do not retain the process-owned default executor on the authorizer.
+        # LiveKit serializes the job entrypoint into a spawned worker process;
+        # locks and executor threads cannot cross that boundary. The child uses
+        # its own module-global bounded runner after deserialization.
         self._repository_runner = repository_runner
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock or _utc_now
 
     async def authorize(self, job: JobDescriptor) -> AuthorizedVoiceJob:
         metadata = parse_job_metadata(job.metadata, self._settings.signing_secret)
@@ -135,7 +139,8 @@ class VoiceJobAuthorizer:
         key: str,
     ) -> _WorkerResult:
         try:
-            return await self._repository_runner.run(
+            runner = self._repository_runner or default_repository_runner
+            return await runner.run(
                 lookup,
                 key,
                 timeout_seconds=self._settings.repository_timeout_seconds,
@@ -152,3 +157,7 @@ class VoiceJobAuthorizer:
         if now.tzinfo is None or now.utcoffset() is None:
             raise VoiceJobRejected("Voice V2 worker clock must return an aware timestamp")
         return int(now.astimezone(UTC).timestamp())
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)

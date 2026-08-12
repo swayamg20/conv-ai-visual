@@ -6,14 +6,18 @@ import asyncio
 from collections.abc import Awaitable
 from typing import Protocol
 
+from livekit import rtc
 from livekit.agents import Agent, AgentSession
-from livekit.agents.voice.room_io import RoomOptions
+from livekit.agents.voice.room_io import AudioInputOptions, AudioOutputOptions, RoomOptions
 
 from murmur.voice.profile import PreparedVoiceProfile
 from murmur.voice.worker_contracts import VoiceSessionLifecycleError
 
 
 class OwnedAgentSession(Protocol):
+    @property
+    def room_io(self) -> OwnedRoomIO: ...
+
     async def start(
         self,
         agent: Agent,
@@ -27,6 +31,10 @@ class OwnedAgentSession(Protocol):
     def shutdown(self, *, drain: bool = True) -> None: ...
 
     async def aclose(self) -> None: ...
+
+
+class OwnedRoomIO(Protocol):
+    async def wait_for_ready(self) -> None: ...
 
 
 class AgentSessionFactory(Protocol):
@@ -63,6 +71,11 @@ class AgentSessionOwner:
     def closed(self) -> bool:
         return self._closed
 
+    @property
+    def session(self) -> OwnedAgentSession:
+        """Return the owned public session surface for lifecycle event binding."""
+        return self._session
+
     async def start(self, *, room: object, participant_identity: str) -> None:
         async with self._start_lock:
             if self._closed:
@@ -72,11 +85,12 @@ class AgentSessionOwner:
             await self._session.start(
                 self._agent,
                 room=room,
-                room_options=RoomOptions(
-                    participant_identity=participant_identity,
-                    text_input=False,
-                ),
+                room_options=_room_options(self._prepared, participant_identity),
             )
+            # AgentSession.start() creates RoomIO, but its public readiness future
+            # is the proof that participant selection and audio output publication
+            # have actually completed.
+            await self._session.room_io.wait_for_ready()
             self._started = True
 
     async def interrupt(self) -> None:
@@ -128,11 +142,67 @@ def livekit_session_factory(prepared: PreparedVoiceProfile) -> tuple[OwnedAgentS
         raise VoiceSessionLifecycleError(
             "managed-inference model strings are forbidden for: " + ", ".join(managed)
         )
+    session_kwargs: dict[str, object] = {
+        "stt": prepared.stt,
+        "llm": prepared.llm,
+        "tts": prepared.tts,
+        "vad": prepared.vad,
+    }
+    policy = prepared.session_policy
+    if policy is not None:
+        session_kwargs.update(
+            turn_handling={
+                "turn_detection": policy.turn_detection,
+                "endpointing": {
+                    "mode": policy.endpointing_mode,
+                    "min_delay": policy.min_endpointing_delay_seconds,
+                    "max_delay": policy.max_endpointing_delay_seconds,
+                },
+                "interruption": {
+                    "enabled": True,
+                    "min_duration": 0.0,
+                    "min_words": 0,
+                    "resume_false_interruption": policy.resume_false_interruption,
+                    "false_interruption_timeout": None,
+                },
+                "preemptive_generation": {"enabled": policy.preemptive_generation},
+            },
+            aec_warmup_duration=policy.aec_warmup_duration_seconds,
+        )
     session = AgentSession(
-        stt=prepared.stt,  # type: ignore[arg-type]
-        llm=prepared.llm,  # type: ignore[arg-type]
-        tts=prepared.tts,  # type: ignore[arg-type]
-        vad=prepared.vad,  # type: ignore[arg-type]
+        **session_kwargs,  # type: ignore[arg-type]
     )
     agent = Agent(instructions=prepared.instructions)
     return session, agent
+
+
+def _room_options(prepared: PreparedVoiceProfile, participant_identity: str) -> RoomOptions:
+    policy = prepared.media_policy
+    if policy is None:
+        # Preserve the foundation worker's production defaults when a profile
+        # has not opted into an explicit deterministic media contract.
+        return RoomOptions(
+            participant_identity=participant_identity,
+            text_input=False,
+        )
+
+    track_source = rtc.TrackSource.SOURCE_MICROPHONE
+    return RoomOptions(
+        participant_identity=participant_identity,
+        text_input=policy.text_input,
+        text_output=policy.text_output,
+        audio_input=AudioInputOptions(
+            sample_rate=policy.input_sample_rate,
+            num_channels=policy.input_channels,
+            frame_size_ms=policy.input_frame_size_ms,
+            noise_cancellation=None,
+            auto_gain_control=policy.input_auto_gain_control,
+            pre_connect_audio=policy.input_preconnect,
+        ),
+        audio_output=AudioOutputOptions(
+            sample_rate=policy.output_sample_rate,
+            num_channels=policy.output_channels,
+            track_publish_options=rtc.TrackPublishOptions(source=track_source),
+            track_name=policy.output_track_name,
+        ),
+    )

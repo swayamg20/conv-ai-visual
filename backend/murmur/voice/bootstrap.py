@@ -368,7 +368,11 @@ class VoiceBootstrapService:
         )
 
         try:
-            await self._reconcile_room(room_name, room_metadata)
+            await self._reconcile_room(
+                room_name,
+                room_metadata,
+                job_metadata=job_metadata,
+            )
             dispatch = await self._reconcile_dispatch(
                 assignment,
                 room_name=room_name,
@@ -806,7 +810,13 @@ class VoiceBootstrapService:
             sign_metadata(payload, self.settings.signing_secret, purpose="job"),
         )
 
-    async def _reconcile_room(self, room_name: str, expected_metadata: str) -> None:
+    async def _reconcile_room(
+        self,
+        room_name: str,
+        expected_metadata: str,
+        *,
+        job_metadata: str,
+    ) -> None:
         room = await self._control_call(self._control_plane.get_room(room_name))
         if room is None:
             room = await self._control_call(
@@ -816,6 +826,11 @@ class VoiceBootstrapService:
                         metadata=expected_metadata,
                         empty_timeout_seconds=self.settings.room_empty_timeout_seconds,
                         departure_timeout_seconds=self.settings.room_departure_timeout_seconds,
+                        initial_dispatch=CreateDispatchSpec(
+                            room_name=room_name,
+                            agent_name=self.settings.worker_name,
+                            metadata=job_metadata,
+                        ),
                     )
                 )
             )

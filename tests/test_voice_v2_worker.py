@@ -7,6 +7,7 @@ import importlib
 import json
 import threading
 from datetime import UTC, datetime
+from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
 
 import pytest
@@ -179,6 +180,13 @@ class BootstrapMetadataControlPlane:
 
     async def create_room(self, spec: CreateRoomSpec) -> RoomRecord:
         self.room = RoomRecord(name=spec.name, metadata=spec.metadata)
+        initial_dispatch = spec.initial_dispatch
+        self.dispatch = DispatchRecord(
+            id="dispatch-1",
+            room_name=spec.name,
+            agent_name=initial_dispatch.agent_name,
+            metadata=initial_dispatch.metadata,
+        )
         return self.room
 
     async def list_dispatches(self, room_name: str) -> list[DispatchRecord]:
@@ -772,6 +780,10 @@ class FakeOwnedSession:
         self.close_calls = 0
         self.never_interrupt = False
         self.room_options: object | None = None
+        self.room_io = SimpleNamespace(wait_for_ready=self._wait_for_ready)
+
+    async def _wait_for_ready(self) -> None:
+        self.events.append("room_io_ready")
 
     async def start(
         self,
@@ -924,6 +936,7 @@ async def test_entrypoint_publishes_genuine_ready_only_after_preflight_connect_a
         "connect",
         "participant_joined",
         "session_start",
+        "room_io_ready",
         "ready",
     ]
     assert len(sessions) == 1
@@ -1030,7 +1043,7 @@ async def test_entrypoint_requires_exact_subscribed_microphone_before_ready() ->
     ctx.room.emit("track_subscribed", microphone.track, microphone, participant)
     await task
 
-    assert events[-2:] == ["session_start", "ready"]
+    assert events[-3:] == ["session_start", "room_io_ready", "ready"]
     assert ctx.room.listener_count("track_subscribed") == 0
 
 
@@ -1298,12 +1311,14 @@ def test_agent_server_registers_exactly_one_named_rtc_session() -> None:
     assert created == [server]
     assert len(constructor_kwargs) == 1
     assert constructor_kwargs[0]["shutdown_process_timeout"] == 0.05
-    assert constructor_kwargs[0]["num_idle_processes"] == 0
+    assert constructor_kwargs[0]["num_idle_processes"] == 1
     assert constructor_kwargs[0]["load_threshold"] == 0.5
     assert constructor_kwargs[0]["max_retry"] == 2
     assert callable(constructor_kwargs[0]["load_fnc"])
     assert server._entrypoint_fnc is not None
     assert server._request_fnc is not None
+    assert ForkingPickler.dumps(server._entrypoint_fnc)
+    assert ForkingPickler.dumps(server._request_fnc)
     assert server._agent_name == WORKER_NAME
     with pytest.raises(RuntimeError, match="only supports registering only one"):
         server.rtc_session(server._entrypoint_fnc, agent_name=WORKER_NAME)

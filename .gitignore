@@ -14,6 +14,7 @@ htmlcov/
 # Frontend
 /web/node_modules/
 /web/.next/
+/web/.next-voice-e2e/
 *.tsbuildinfo
 
 # Local runtime state

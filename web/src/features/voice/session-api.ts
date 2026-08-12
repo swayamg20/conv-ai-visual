@@ -26,14 +26,18 @@ export interface VoiceSessionBootstrap {
   readonly expires_at: string;
 }
 
+export type VoiceAuthHeaderProvider = () => Promise<Record<string, string>>;
+
 export interface BootstrapVoiceSessionOptions {
   readonly apiUrl?: string;
   readonly signal?: AbortSignal;
+  readonly authHeaderProvider?: VoiceAuthHeaderProvider;
 }
 
 export interface EndVoiceSessionOptions {
   readonly apiUrl?: string;
   readonly signal?: AbortSignal;
+  readonly authHeaderProvider?: VoiceAuthHeaderProvider;
 }
 
 export class VoiceSessionApiError extends Error {
@@ -191,7 +195,7 @@ export async function bootstrapVoiceSession(
     throw new VoiceSessionApiError("Voice session bootstrap requires valid session and call IDs");
   }
 
-  const authHeaders = await getAuthHeaders();
+  const authHeaders = await (options.authHeaderProvider ?? getAuthHeaders)();
   if (!authHeaders.Authorization) {
     throw new VoiceSessionApiError("Authentication is required to start voice", 401);
   }
@@ -237,7 +241,7 @@ export async function endVoiceSession(
     throw new VoiceSessionApiError("Ending voice requires valid session and call IDs");
   }
 
-  const authHeaders = await getAuthHeaders();
+  const authHeaders = await (options.authHeaderProvider ?? getAuthHeaders)();
   if (!authHeaders.Authorization) {
     throw new VoiceSessionApiError("Authentication is required to end voice", 401);
   }

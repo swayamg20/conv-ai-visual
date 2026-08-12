@@ -15,7 +15,8 @@ def default_env_path() -> Path:
     return Path.cwd() / ".env"
 
 
-load_dotenv(dotenv_path=default_env_path())
+if os.getenv("PYTHON_DOTENV_DISABLED") != "1":
+    load_dotenv(dotenv_path=default_env_path())
 
 
 def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:

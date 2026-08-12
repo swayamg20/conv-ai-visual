@@ -48,7 +48,9 @@ function response(overrides: Record<string, unknown> = {}) {
 describe("Voice V2 session API", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    mocks.getAuthHeaders.mockResolvedValue({ Authorization: "Bearer firebase-token" });
+    mocks.getAuthHeaders
+      .mockReset()
+      .mockResolvedValue({ Authorization: "Bearer firebase-token" });
   });
 
   it("posts the strict retry-stable call identity with Firebase auth", async () => {
@@ -74,6 +76,43 @@ describe("Voice V2 session API", () => {
           Authorization: "Bearer firebase-token",
         },
         body: JSON.stringify(request),
+      })
+    );
+  });
+
+  it("uses an injected auth provider for both bootstrap and release", async () => {
+    const authHeaderProvider = vi.fn(async () => ({
+      Authorization: "Bearer injected-test-token",
+    }));
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(response()), { status: 200 })
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    await bootstrapVoiceSession(request, { authHeaderProvider });
+    await endVoiceSession(request, { authHeaderProvider });
+
+    expect(authHeaderProvider).toHaveBeenCalledTimes(2);
+    expect(mocks.getAuthHeaders).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "https://api.example.test/api/voice/session",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer injected-test-token",
+        }),
+      })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "https://api.example.test/api/voice/session/end",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: "Bearer injected-test-token",
+        }),
+        keepalive: true,
       })
     );
   });

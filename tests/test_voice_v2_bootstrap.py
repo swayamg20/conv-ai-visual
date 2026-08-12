@@ -136,6 +136,18 @@ class _FakeControlPlane:
         self.room_create_count += 1
         room = RoomRecord(name=spec.name, metadata=spec.metadata, num_participants=0)
         self.rooms[spec.name] = room
+        initial_dispatch = spec.initial_dispatch
+        assert initial_dispatch.room_name == spec.name
+        assert initial_dispatch.restart_policy == "never"
+        self.dispatch_create_count += 1
+        self.dispatches.setdefault(spec.name, []).append(
+            DispatchRecord(
+                id=f"dispatch-{self.dispatch_create_count}",
+                room_name=spec.name,
+                agent_name=initial_dispatch.agent_name,
+                metadata=initial_dispatch.metadata,
+            )
+        )
         return room
 
     async def list_dispatches(self, room_name: str) -> list[DispatchRecord]:
@@ -1546,6 +1558,71 @@ def test_livekit_adapter_maps_only_restricted_grants_without_network() -> None:
                 expires_at=FIXED_NOW,
                 grants=grants,
             )
+        )
+
+
+@pytest.mark.asyncio
+async def test_livekit_adapter_creates_room_with_exact_initial_dispatch() -> None:
+    requests: list[SimpleNamespace] = []
+
+    class _RoomService:
+        async def create_room(self, request: SimpleNamespace) -> SimpleNamespace:
+            requests.append(request)
+            return SimpleNamespace(
+                name=request.name,
+                metadata=request.metadata,
+                num_participants=0,
+            )
+
+    client = SimpleNamespace(room=_RoomService())
+    never = object()
+    fake_sdk = SimpleNamespace(
+        LiveKitAPI=lambda **kwargs: client,
+        CreateRoomRequest=lambda **kwargs: SimpleNamespace(**kwargs),
+        RoomAgentDispatch=lambda **kwargs: SimpleNamespace(**kwargs),
+        JobRestartPolicy=SimpleNamespace(JRP_NEVER=never),
+    )
+    adapter = LiveKitControlPlane(
+        LiveKitCredentials("wss://example.livekit.cloud", "key", "secret"),
+        sdk=fake_sdk,
+    )
+    spec = CreateRoomSpec(
+        name="room-1",
+        metadata="signed-room",
+        empty_timeout_seconds=60,
+        departure_timeout_seconds=20,
+        initial_dispatch=CreateDispatchSpec(
+            room_name="room-1",
+            agent_name="murmur-voice-v2",
+            metadata="signed-job",
+        ),
+    )
+
+    result = await adapter.create_room(spec)
+
+    assert result == RoomRecord(
+        name="room-1",
+        metadata="signed-room",
+        num_participants=0,
+    )
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.name == "room-1"
+    assert request.metadata == "signed-room"
+    assert request.empty_timeout == 60
+    assert request.departure_timeout == 20
+    assert request.max_participants == 2
+    assert len(request.agents) == 1
+    assert vars(request.agents[0]) == {
+        "agent_name": "murmur-voice-v2",
+        "metadata": "signed-job",
+        "restart_policy": never,
+    }
+
+    with pytest.raises(ValueError, match="must target its room"):
+        replace(
+            spec,
+            initial_dispatch=replace(spec.initial_dispatch, room_name="another-room"),
         )
 
 

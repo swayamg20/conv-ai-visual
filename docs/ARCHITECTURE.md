@@ -4,7 +4,7 @@ This document describes the active system. For product intent, read [VISION.md](
 
 ## System shape
 
-Murmur is a modular monolith: one FastAPI backend, one Next.js frontend, and one SQLite database by default. Provider APIs sit at explicit edges; application behavior remains local and testable with fakes.
+Murmur is a modular monolith: one FastAPI control plane, one Next.js frontend, and one SQLite database by default. The default voice runtime remains the in-process legacy path. An explicitly selected Voice V2 path assigns a restricted LiveKit room to a separate named worker process. Provider APIs sit at explicit edges; application behavior remains local and testable with fakes.
 
 ```text
                               Firebase
@@ -27,6 +27,14 @@ Browser ---- Bearer token -------+
    +<---- audio/events-+------ persistence     |
    |                                             |
    +--> SDL compiler --> timeline --> SVG renderer <+
+
+Optional Voice V2 path:
+
+Browser -- authenticated bootstrap --> FastAPI control plane
+   |                                  | room/token/dispatch metadata
+   +-- restricted LiveKit RTC -------+------> named Voice V2 worker
+              audio + reliable events          | STT / LLM / TTS profile
+                                               +-- canonical event channel
 ```
 
 ## Backend boundaries
@@ -35,7 +43,7 @@ Browser ---- Bearer token -------+
 | --- | --- |
 | `murmur.api` | Application composition, authentication dependencies, request schemas, and thin routers |
 | `murmur.chat` | Chat session resolution, SSE event production, persistence, and finalization |
-| `murmur.voice` | WebRTC negotiation, audio transport, transcription, turn confirmation, speech synthesis, and cleanup |
+| `murmur.voice` | Legacy WebRTC runtime plus Voice V2 bootstrap contracts, LiveKit control adapter, worker authorization, provider profiles, event bridge, and cleanup |
 | `murmur.runtime` | Typed process-local session records, activity tracking, supervision, and shutdown |
 | `murmur.llm` | Provider-neutral client contract, OpenAI-compatible and Gemini adapters, routing, streaming, and tool rounds |
 | `murmur.memory` | Token-bounded conversation context, durable memory adapters, and cross-session prompt assembly |
@@ -79,6 +87,8 @@ One lock per active chat session prevents overlapping turns from mutating the sa
 
 ## Voice flow
 
+### Legacy default
+
 1. The voice router authenticates and verifies session/agent ownership before allocating a peer.
 2. `VoiceService` negotiates WebRTC and registers one `VoiceRuntimeSession`.
 3. `VoiceTranscriber` streams audio to Deepgram and combines endpointing with optional Smart Turn analysis.
@@ -86,6 +96,17 @@ One lock per active chat session prevents overlapping turns from mutating the sa
 5. `SpeechSynthesizer` streams sentence audio, applying bounded ElevenLabs retries and optional Kokoro fallback.
 6. Typed data-channel events synchronize speech, canvas steps, interruption, and metrics.
 7. Disconnect, negotiation failure, idle eviction, and shutdown share idempotent cleanup paths.
+
+### Optional Voice V2
+
+1. The authenticated browser requests `/api/voice/session` with an owned session and fresh call ID.
+2. FastAPI validates ownership, creates one room with one named `JRP_NEVER` dispatch, signs exact job metadata, and returns a restricted participant token. Browser tokens can publish microphone media but not data.
+3. The browser joins through `LiveKitVoiceTransport`, creates then mutes and publishes its exact microphone track, and keeps it muted until a canonical `agent_ready` event arrives from the assigned agent identity on the fixed reliable topic.
+4. A separately started LiveKit Agents worker re-authorizes the signed assignment, waits for the exact participant microphone, prepares one provider profile, starts `AgentSession`, waits for public RoomIO readiness, and then publishes Ready.
+5. `VoiceEventChannel` is the sole serialized writer for server-to-browser semantic events. A terminal session or event-channel failure shuts down the job; exact-agent departure fails and tears down the browser call.
+6. Browser disconnect calls the authenticated release route. The control plane removes the named dispatch and room, while the worker's idempotent owner closes session and provider resources.
+
+The checked-in `fake-rtc-v1` profile is guarded to loopback test mode and is never a production fallback. `scripts/voice_e2e_stack.py` proves the path with a digest-pinned local SFU, isolated production frontend build, deterministic media, and Chromium; it does not qualify Cloud/TURN or real-provider quality and cost.
 
 ## Memory and persistence
 

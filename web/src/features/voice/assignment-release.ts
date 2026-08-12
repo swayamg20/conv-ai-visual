@@ -1,6 +1,7 @@
 import {
   endVoiceSession,
   VoiceSessionApiError,
+  type VoiceAuthHeaderProvider,
   type VoiceSessionBootstrap,
 } from "./session-api";
 
@@ -15,6 +16,7 @@ export type VoiceAssignmentLocator = Pick<
 
 interface AssignmentReleaseSchedulerOptions {
   readonly apiUrl?: string;
+  readonly authHeaderProvider?: VoiceAuthHeaderProvider;
   readonly onLog?: (message: string) => void;
 }
 
@@ -110,7 +112,10 @@ export class AssignmentReleaseScheduler {
       // Fetch keepalive owns page-exit delivery; no timers may outlive the hook.
       void endVoiceSession(
         { session_id: assignment.session_id, voice_call_id: callId },
-        { apiUrl: this.options.apiUrl }
+        {
+          apiUrl: this.options.apiUrl,
+          authHeaderProvider: this.options.authHeaderProvider,
+        }
       ).catch(() => undefined);
       return;
     }
@@ -186,7 +191,11 @@ export class AssignmentReleaseScheduler {
       void settleOnAbort(
         endVoiceSession(
           { session_id: assignment.session_id, voice_call_id: callId },
-          { apiUrl: this.options.apiUrl, signal: abortController.signal }
+          {
+            apiUrl: this.options.apiUrl,
+            signal: abortController.signal,
+            authHeaderProvider: this.options.authHeaderProvider,
+          }
         ),
         abortController.signal
       ).then(finishAttempt, (error: unknown) => {

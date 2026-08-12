@@ -7,16 +7,68 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const livekit = vi.hoisted(() => {
   type Listener = (...args: unknown[]) => void;
 
+  class FakeLocalAudioTrack {
+    readonly mediaStreamTrack: MediaStreamTrack;
+    readonly mute = vi.fn(async () => {
+      this.mediaStreamTrack.enabled = false;
+      return this;
+    });
+    readonly unmute = vi.fn(async () => {
+      this.mediaStreamTrack.enabled = true;
+      return this;
+    });
+    readonly stop = vi.fn(() => {
+      Object.defineProperty(this.mediaStreamTrack, "readyState", {
+        configurable: true,
+        value: "ended",
+      });
+    });
+
+    constructor(mediaStreamTrack?: MediaStreamTrack) {
+      this.mediaStreamTrack =
+        mediaStreamTrack ??
+        ({
+          kind: "audio",
+          id: "mic-default",
+          label: "fake microphone",
+          readyState: "live",
+          enabled: true,
+        } as MediaStreamTrack);
+    }
+  }
+
   class FakeRoom {
     static instances: FakeRoom[] = [];
     static connectError: Error | null = null;
+    static connectGate: (() => Promise<void>) | null = null;
+    static microphoneGate: (() => Promise<void>) | null = null;
+    static microphonePublication: unknown;
+    static localAudioTrack: FakeLocalAudioTrack | null = null;
+    static activationError: Error | null = null;
+    static activationGate: (() => Promise<void>) | null = null;
+    static publication: {
+      mute: ReturnType<typeof vi.fn>;
+      unmute: ReturnType<typeof vi.fn>;
+    } | null = null;
 
     readonly listeners = new Map<string, Set<Listener>>();
     readonly localParticipant = {
-      setMicrophoneEnabled: vi.fn(async () => undefined),
+      publishTrack: vi.fn(async (track: FakeLocalAudioTrack) => {
+        const publication = {
+          mute: vi.fn(async () => track.mute()),
+          unmute: vi.fn(async () => {
+            await FakeRoom.activationGate?.();
+            if (FakeRoom.activationError) throw FakeRoom.activationError;
+            return track.unmute();
+          }),
+        };
+        FakeRoom.publication = publication;
+        return publication;
+      }),
     };
     readonly connect = vi.fn(async () => {
       if (FakeRoom.connectError) throw FakeRoom.connectError;
+      await FakeRoom.connectGate?.();
     });
     readonly disconnect = vi.fn(async () => undefined);
     readonly startAudio = vi.fn(async () => undefined);
@@ -49,13 +101,28 @@ const livekit = vi.hoisted(() => {
     }
   }
 
+  const createLocalAudioTrack = vi.fn(async () => {
+    await FakeRoom.microphoneGate?.();
+    const configured = FakeRoom.microphonePublication as
+      | { audioTrack?: { mediaStreamTrack?: MediaStreamTrack } }
+      | undefined;
+    const track = new FakeLocalAudioTrack(
+      configured?.audioTrack?.mediaStreamTrack
+    );
+    FakeRoom.localAudioTrack = track;
+    return track;
+  });
+
   return {
+    createLocalAudioTrack,
     FakeRoom,
+    Track: { Source: { Microphone: "microphone" } },
     events: {
       Connected: "connected",
       Reconnecting: "reconnecting",
       Reconnected: "reconnected",
       Disconnected: "disconnected",
+      ParticipantDisconnected: "participantDisconnected",
       DataReceived: "dataReceived",
       TrackSubscribed: "trackSubscribed",
       TrackUnsubscribed: "trackUnsubscribed",
@@ -81,7 +148,11 @@ const api = vi.hoisted(() => {
     endVoiceSession: vi.fn<
       (
         request?: unknown,
-        options?: { apiUrl?: string; signal?: AbortSignal }
+        options?: {
+          apiUrl?: string;
+          signal?: AbortSignal;
+          authHeaderProvider?: () => Promise<Record<string, string>>;
+        }
       ) => Promise<void>
     >(async () => undefined),
     VoiceSessionApiError,
@@ -89,8 +160,10 @@ const api = vi.hoisted(() => {
 });
 
 vi.mock("livekit-client", () => ({
+  createLocalAudioTrack: livekit.createLocalAudioTrack,
   Room: livekit.FakeRoom,
   RoomEvent: livekit.events,
+  Track: livekit.Track,
   DataPacket_Kind: { RELIABLE: 0, LOSSY: 1 },
   isAudioTrack: (track: { kind?: string }) => track.kind === "audio",
 }));
@@ -103,6 +176,8 @@ vi.mock("@/features/voice/session-api", () => ({
 }));
 
 import { REQUIRED_VOICE_READY_COMPONENTS } from "@/features/voice/events";
+import type { VoiceEvent } from "@/features/voice/events";
+import type { VoiceAuthHeaderProvider } from "@/features/voice/session-api";
 import {
   classifyVoiceBootstrapFailure,
   useVoiceSession,
@@ -151,7 +226,10 @@ interface MountedHook {
 
 async function mountHook(callbacks: {
   onTranscript?: (event: VoiceSessionTranscriptEvent) => void;
+  onEvent?: (event: VoiceEvent) => void;
+  onLocalMicrophoneTrack?: (track: MediaStreamTrack | null) => void;
   onError?: (message: string) => void;
+  authHeaderProvider?: VoiceAuthHeaderProvider;
 } = {}): Promise<MountedHook> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -164,7 +242,10 @@ async function mountHook(callbacks: {
       agentId,
       sessionId,
       onTranscript: callbacks.onTranscript,
+      onEvent: callbacks.onEvent,
+      onLocalMicrophoneTrack: callbacks.onLocalMicrophoneTrack,
       onError: callbacks.onError,
+      authHeaderProvider: callbacks.authHeaderProvider,
     });
     return null;
   }
@@ -196,6 +277,14 @@ describe("useVoiceSession", () => {
     producerSequence = 0;
     livekit.FakeRoom.instances.length = 0;
     livekit.FakeRoom.connectError = null;
+    livekit.FakeRoom.connectGate = null;
+    livekit.FakeRoom.microphoneGate = null;
+    livekit.FakeRoom.microphonePublication = undefined;
+    livekit.FakeRoom.localAudioTrack = null;
+    livekit.FakeRoom.activationError = null;
+    livekit.FakeRoom.activationGate = null;
+    livekit.FakeRoom.publication = null;
+    livekit.createLocalAudioTrack.mockClear();
     api.bootstrapVoiceSession.mockReset();
     api.endVoiceSession.mockReset().mockResolvedValue(undefined);
     api.bootstrapVoiceSession.mockImplementation(
@@ -255,12 +344,14 @@ describe("useVoiceSession", () => {
     const room = await connectHook(mounted);
 
     expect(mounted.read().phase).toBe("connecting");
+    expect(mounted.read().isMicMuted).toBe(true);
     act(() => room.emit(livekit.events.Connected));
     expect(mounted.read().phase).toBe("transport_connected");
     expect(mounted.read().session.voiceReady).toBe(false);
+    expect(mounted.read().isMicMuted).toBe(true);
 
     const agent = { isAgent: true, identity: "agent-worker-1" };
-    act(() =>
+    await act(async () => {
       room.emit(
         livekit.events.DataReceived,
         dataPayload(
@@ -273,9 +364,13 @@ describe("useVoiceSession", () => {
         agent,
         0,
         eventTopic
-      )
-    );
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(mounted.read().phase).toBe("ready");
+    expect(mounted.read().isMicMuted).toBe(false);
+    expect(livekit.FakeRoom.publication?.unmute).toHaveBeenCalledTimes(1);
 
     act(() =>
       room.emit(
@@ -329,19 +424,363 @@ describe("useVoiceSession", () => {
     expect(mounted.read().phase).toBe("thinking");
 
     act(() => room.emit(livekit.events.Reconnecting));
-    expect(mounted.read().phase).toBe("reconnecting");
+    expect(mounted.read().phase).toBe("unavailable");
     await act(async () => mounted.root.unmount());
     expect(room.disconnect).toHaveBeenCalledTimes(1);
-    expect(room.localParticipant.setMicrophoneEnabled).toHaveBeenLastCalledWith(false);
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
     expect(audioTrack.detach).toHaveBeenCalledTimes(1);
     expect(audioElement.isConnected).toBe(false);
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: expect.any(String) },
-      { apiUrl: undefined }
+      { apiUrl: undefined, authHeaderProvider: undefined }
     );
   });
 
-  it("fails a reconnected call immediately and rotates identity for a fresh retry", async () => {
+  it("emits only immutable canonical events after successful reduction", async () => {
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent });
+    const room = await connectHook(mounted);
+    const agent = { isAgent: true, identity: "agent-worker-1" };
+    const accepted = workerEvent(mounted.read().voiceCallId, "agent_ready", {
+      profile_id: "cascade-v1",
+      required_components: REQUIRED_VOICE_READY_COMPONENTS,
+      ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+    });
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(accepted),
+        agent,
+        0,
+        eventTopic
+      );
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(accepted),
+        agent,
+        0,
+        eventTopic
+      );
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload({
+          ...workerEvent(mounted.read().voiceCallId, "transcript_segment", {
+            segment_id: "segment-stale",
+            text: "must not escape",
+            is_final: true,
+          }),
+          producer_sequence: accepted.producer_sequence,
+        }),
+        agent,
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.publication?.unmute).toHaveBeenCalledTimes(1);
+    const canonical = onEvent.mock.calls[0]?.[0];
+    expect(canonical).not.toBe(accepted);
+    expect(canonical).toMatchObject(accepted);
+    expect(Object.isFrozen(canonical)).toBe(true);
+    expect(Object.isFrozen(canonical?.payload)).toBe(true);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("releases a retryable canonical agent-unavailable call before a fresh retry", async () => {
+    const mounted = await mountHook();
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+    const agent = { isAgent: true, identity: "agent-worker-1" };
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(
+          workerEvent(originalCallId, "agent_ready", {
+            profile_id: "cascade-v1",
+            required_components: REQUIRED_VOICE_READY_COMPONENTS,
+            ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+          })
+        ),
+        agent,
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mounted.read().phase).toBe("ready");
+
+    act(() =>
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(
+          workerEvent(originalCallId, "agent_unavailable", {
+            code: "worker_capacity_exhausted",
+            message: "No voice worker is currently available",
+            retryable: true,
+          })
+        ),
+        agent,
+        0,
+        eventTopic
+      )
+    );
+
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "worker_capacity_exhausted",
+      retryable: true,
+    });
+    expect(mounted.read().voiceCallId).toBe("");
+    expect(mounted.read().assignment).toBeNull();
+    expect(room.disconnect).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    expect(api.bootstrapVoiceSession.mock.calls[1]?.[0]?.voice_call_id).not.toBe(
+      originalCallId
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("applies agent-unavailable immediately while Ready activation is pending", async () => {
+    let releaseActivation: (() => void) | undefined;
+    livekit.FakeRoom.activationGate = () =>
+      new Promise<void>((resolve) => {
+        releaseActivation = resolve;
+      });
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent });
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+    const agent = { isAgent: true, identity: "agent-worker-1" };
+    const ready = workerEvent(originalCallId, "agent_ready", {
+      profile_id: "cascade-v1",
+      required_components: REQUIRED_VOICE_READY_COMPONENTS,
+      ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+    });
+    const unavailable = workerEvent(originalCallId, "agent_unavailable", {
+      code: "worker_capacity_exhausted",
+      message: "No voice worker is currently available",
+      retryable: true,
+    });
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(ready),
+        agent,
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+    });
+    expect(onEvent).not.toHaveBeenCalled();
+
+    act(() =>
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(unavailable),
+        agent,
+        0,
+        eventTopic
+      )
+    );
+
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().voiceCallId).toBe("");
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event_id: unavailable.event_id,
+        event_type: "agent_unavailable",
+      })
+    );
+    expect(room.disconnect).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+
+    await act(async () => {
+      releaseActivation?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().isMicMuted).toBe(true);
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.publication?.mute).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.localAudioTrack?.mediaStreamTrack.enabled).toBe(false);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("fails the call without exposing Ready when microphone activation fails", async () => {
+    const onError = vi.fn();
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onError, onEvent });
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+    livekit.FakeRoom.activationError = new Error("capture permission revoked");
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(
+          workerEvent(originalCallId, "agent_ready", {
+            profile_id: "cascade-v1",
+            required_components: REQUIRED_VOICE_READY_COMPONENTS,
+            ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+          })
+        ),
+        { isAgent: true, identity: "agent-worker-1" },
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(mounted.read().isMicMuted).toBe(true);
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "microphone_activation_failed",
+      retryable: true,
+    });
+    expect(onError).toHaveBeenCalledWith(
+      "Could not activate microphone after agent readiness: capture permission revoked"
+    );
+    expect(livekit.FakeRoom.publication?.unmute).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("does not activate a stale Ready callback after teardown", async () => {
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent });
+    const room = await connectHook(mounted);
+    const voiceCallId = mounted.read().voiceCallId;
+    const staleDataReceived = room.firstListener(livekit.events.DataReceived);
+    const readyPayload = dataPayload(
+      workerEvent(voiceCallId, "agent_ready", {
+        profile_id: "cascade-v1",
+        required_components: REQUIRED_VOICE_READY_COMPONENTS,
+        ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+      })
+    );
+
+    act(() => mounted.read().cancelConnection());
+    act(() =>
+      staleDataReceived?.(
+        readyPayload,
+        { isAgent: true, identity: "agent-worker-1" },
+        0,
+        eventTopic
+      )
+    );
+
+    expect(mounted.read().phase).toBe("idle");
+    expect(mounted.read().isMicMuted).toBe(true);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(livekit.FakeRoom.publication?.unmute).not.toHaveBeenCalled();
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("waits for muted publication when Ready arrives during microphone setup", async () => {
+    let releaseMicrophone: (() => void) | undefined;
+    livekit.FakeRoom.microphoneGate = () =>
+      new Promise<void>((resolve) => {
+        releaseMicrophone = resolve;
+      });
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent });
+    let connecting: Promise<void> | undefined;
+
+    await act(async () => {
+      connecting = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const room = livekit.FakeRoom.instances.at(-1);
+    if (!room) throw new Error("Room was not created before microphone setup");
+    const ready = workerEvent(mounted.read().voiceCallId, "agent_ready", {
+      profile_id: "cascade-v1",
+      required_components: REQUIRED_VOICE_READY_COMPONENTS,
+      ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+    });
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(ready),
+        { isAgent: true, identity: "agent-worker-1" },
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+    });
+
+    expect(mounted.read().phase).toBe("transport_connected");
+    expect(mounted.read().isMicMuted).toBe(true);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(livekit.FakeRoom.publication).toBeNull();
+
+    await act(async () => {
+      releaseMicrophone?.();
+      await connecting;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(livekit.FakeRoom.localAudioTrack?.mute).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.publication?.unmute).toHaveBeenCalledTimes(1);
+    expect(mounted.read().isMicMuted).toBe(false);
+    expect(mounted.read().phase).toBe("ready");
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({
+      event_id: ready.event_id,
+      event_type: "agent_ready",
+    }));
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("forwards the exact local microphone track and clears it on cleanup", async () => {
+    const mediaStreamTrack = { kind: "audio", id: "mic-1" } as MediaStreamTrack;
+    livekit.FakeRoom.microphonePublication = {
+      audioTrack: { mediaStreamTrack },
+    };
+    const onLocalMicrophoneTrack = vi.fn();
+    const mounted = await mountHook({ onLocalMicrophoneTrack });
+
+    await connectHook(mounted);
+    expect(onLocalMicrophoneTrack).toHaveBeenCalledTimes(1);
+    expect(onLocalMicrophoneTrack).toHaveBeenLastCalledWith(mediaStreamTrack);
+
+    await act(async () => mounted.root.unmount());
+    expect(onLocalMicrophoneTrack).toHaveBeenCalledTimes(2);
+    expect(onLocalMicrophoneTrack).toHaveBeenLastCalledWith(null);
+  });
+
+  it("fails a reconnecting call immediately and rotates identity for a fresh retry", async () => {
     const onError = vi.fn();
     const mounted = await mountHook({ onError });
     const room = await connectHook(mounted);
@@ -349,8 +788,6 @@ describe("useVoiceSession", () => {
 
     act(() => room.emit(livekit.events.Connected));
     act(() => room.emit(livekit.events.Reconnecting));
-    expect(mounted.read().phase).toBe("reconnecting");
-    act(() => room.emit(livekit.events.Reconnected));
 
     expect(mounted.read().phase).toBe("unavailable");
     expect(mounted.read().session.unavailableReason).toMatchObject({
@@ -359,7 +796,7 @@ describe("useVoiceSession", () => {
     });
     expect(mounted.read().voiceCallId).toBe("");
     expect(onError).toHaveBeenCalledWith(
-      "Voice transport reconnected, but this runtime cannot safely restore the event stream yet. Start a fresh voice call."
+      "Voice transport connection was interrupted (attempt 1). Start a fresh voice call."
     );
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     expect(api.endVoiceSession).toHaveBeenCalledWith(
@@ -369,6 +806,170 @@ describe("useVoiceSession", () => {
 
     await act(async () => mounted.read().connect({ sessionId }));
     expect(mounted.read().voiceCallId).not.toBe(originalCallId);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("cannot publish stale Ready or leave mic open when reconnect races activation", async () => {
+    let releaseActivation: (() => void) | undefined;
+    livekit.FakeRoom.activationGate = () =>
+      new Promise<void>((resolve) => {
+        releaseActivation = resolve;
+      });
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent });
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+    const agent = { isAgent: true, identity: "agent-worker-1" };
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(
+          workerEvent(originalCallId, "agent_ready", {
+            profile_id: "cascade-v1",
+            required_components: REQUIRED_VOICE_READY_COMPONENTS,
+            ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+          })
+        ),
+        agent,
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+    });
+    expect(onEvent).not.toHaveBeenCalled();
+
+    act(() => room.emit(livekit.events.Reconnecting));
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().session.unavailableReason?.code).toBe(
+      "reconnect_not_supported"
+    );
+    expect(room.disconnect).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+
+    await act(async () => {
+      releaseActivation?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(mounted.read().isMicMuted).toBe(true);
+    expect(mounted.read().phase).toBe("unavailable");
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("fails and releases when the exact assigned agent departs", async () => {
+    const onError = vi.fn();
+    const mounted = await mountHook({ onError });
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+
+    act(() =>
+      room.emit(livekit.events.ParticipantDisconnected, {
+        isAgent: true,
+        identity: "other-agent",
+      })
+    );
+    expect(mounted.read().phase).toBe("connecting");
+
+    act(() =>
+      room.emit(livekit.events.ParticipantDisconnected, {
+        isAgent: true,
+        identity: "agent-worker-1",
+      })
+    );
+
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "agent_disconnected",
+      retryable: true,
+    });
+    expect(mounted.read().voiceCallId).toBe("");
+    expect(onError).toHaveBeenCalledWith(
+      "Voice agent disconnected. Start a fresh voice call."
+    );
+    expect(room.disconnect).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("bounds events queued while Ready waits for microphone activation", async () => {
+    let releaseActivation: (() => void) | undefined;
+    livekit.FakeRoom.activationGate = () =>
+      new Promise<void>((resolve) => {
+        releaseActivation = resolve;
+      });
+    const onError = vi.fn();
+    const mounted = await mountHook({ onError });
+    const room = await connectHook(mounted);
+    const originalCallId = mounted.read().voiceCallId;
+    const agent = { isAgent: true, identity: "agent-worker-1" };
+
+    act(() => room.emit(livekit.events.Connected));
+    await act(async () => {
+      room.emit(
+        livekit.events.DataReceived,
+        dataPayload(
+          workerEvent(originalCallId, "agent_ready", {
+            profile_id: "cascade-v1",
+            required_components: REQUIRED_VOICE_READY_COMPONENTS,
+            ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+          })
+        ),
+        agent,
+        0,
+        eventTopic
+      );
+      await Promise.resolve();
+    });
+
+    act(() => {
+      for (let index = 0; index <= 128; index += 1) {
+        room.emit(
+          livekit.events.DataReceived,
+          dataPayload(
+            workerEvent(originalCallId, "transcript_segment", {
+              segment_id: `segment-${index}`,
+              text: `queued ${index}`,
+              is_final: false,
+            })
+          ),
+          agent,
+          0,
+          eventTopic
+        );
+      }
+    });
+
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "ready_event_buffer_overflow",
+      retryable: false,
+    });
+    expect(onError).toHaveBeenCalledWith(
+      "Voice received too many events before microphone activation completed"
+    );
+    expect(room.disconnect).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: originalCallId },
+      expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
+    );
+
+    await act(async () => {
+      releaseActivation?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mounted.read().phase).toBe("unavailable");
     await act(async () => mounted.root.unmount());
   });
 
@@ -482,7 +1083,7 @@ describe("useVoiceSession", () => {
     const agent = { isAgent: true, identity: "agent-worker-1" };
 
     act(() => room.emit(livekit.events.Connected));
-    act(() =>
+    await act(async () => {
       room.emit(
         livekit.events.DataReceived,
         dataPayload(
@@ -495,9 +1096,11 @@ describe("useVoiceSession", () => {
         agent,
         0,
         eventTopic
-      )
-    );
-    room.localParticipant.setMicrophoneEnabled.mockRejectedValueOnce(
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    livekit.FakeRoom.publication?.mute.mockRejectedValueOnce(
       new Error("capture track ended")
     );
 
@@ -546,6 +1149,106 @@ describe("useVoiceSession", () => {
     livekit.FakeRoom.connectError = null;
     await act(async () => mounted.read().connect({ sessionId }));
     expect(mounted.read().voiceCallId).not.toBe(originalCallId);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("bounds a hung transport and microphone setup without stale effects", async () => {
+    vi.useFakeTimers();
+    let releaseMicrophone: (() => void) | undefined;
+    livekit.FakeRoom.microphoneGate = () =>
+      new Promise<void>((resolve) => {
+        releaseMicrophone = resolve;
+      });
+    const onError = vi.fn();
+    const onEvent = vi.fn();
+    const onLocalMicrophoneTrack = vi.fn();
+    livekit.FakeRoom.microphonePublication = {
+      audioTrack: {
+        mediaStreamTrack: { kind: "audio", id: "late-mic" } as MediaStreamTrack,
+      },
+    };
+    const mounted = await mountHook({
+      onError,
+      onEvent,
+      onLocalMicrophoneTrack,
+    });
+    let connecting: Promise<void> | undefined;
+
+    await act(async () => {
+      connecting = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const room = livekit.FakeRoom.instances.at(-1);
+    expect(room).toBeDefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await connecting;
+    });
+
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "transport_connect_timeout",
+      retryable: true,
+    });
+    expect(onError).toHaveBeenCalledWith(
+      "Voice transport and microphone setup timed out. Start a fresh voice call."
+    );
+    expect(room?.disconnect).toHaveBeenCalledTimes(1);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onLocalMicrophoneTrack).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseMicrophone?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    room?.emit(livekit.events.Connected);
+    expect(mounted.read().session.unavailableReason?.code).toBe(
+      "transport_connect_timeout"
+    );
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onLocalMicrophoneTrack).not.toHaveBeenCalled();
+    await act(async () => mounted.root.unmount());
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("settles a cancelled hung transport without later callbacks", async () => {
+    let releaseConnect: (() => void) | undefined;
+    livekit.FakeRoom.connectGate = () =>
+      new Promise<void>((resolve) => {
+        releaseConnect = resolve;
+      });
+    const onError = vi.fn();
+    const onLocalMicrophoneTrack = vi.fn();
+    livekit.FakeRoom.microphonePublication = {
+      audioTrack: {
+        mediaStreamTrack: { kind: "audio", id: "late-mic" } as MediaStreamTrack,
+      },
+    };
+    const mounted = await mountHook({ onError, onLocalMicrophoneTrack });
+    let connecting: Promise<void> | undefined;
+
+    await act(async () => {
+      connecting = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => mounted.read().cancelConnection());
+    await act(async () => connecting);
+
+    expect(mounted.read().phase).toBe("idle");
+    expect(onError).not.toHaveBeenCalled();
+    expect(onLocalMicrophoneTrack).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseConnect?.();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mounted.read().phase).toBe("idle");
+    expect(onError).not.toHaveBeenCalled();
+    expect(onLocalMicrophoneTrack).not.toHaveBeenCalled();
     await act(async () => mounted.root.unmount());
   });
 
@@ -724,6 +1427,26 @@ describe("useVoiceSession", () => {
     await act(async () => mounted.read().connect({ sessionId }));
     expect(api.bootstrapVoiceSession.mock.calls[1]?.[0]?.voice_call_id).toBe(
       stableCallId
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("forwards an injected auth provider through bootstrap and release", async () => {
+    const authHeaderProvider = vi.fn(async () => ({
+      Authorization: "Bearer injected-test-token",
+    }));
+    const mounted = await mountHook({ authHeaderProvider });
+
+    await connectHook(mounted);
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ authHeaderProvider })
+    );
+
+    act(() => mounted.read().cancelConnection());
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ authHeaderProvider })
     );
     await act(async () => mounted.root.unmount());
   });

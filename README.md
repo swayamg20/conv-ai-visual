@@ -114,6 +114,18 @@ npm run build
 
 Automated tests use local fakes and an in-memory database. Live provider checks live under `scripts/manual/` and are never collected by default.
 
+The provider-free RTC browser gate uses a digest-pinned local LiveKit server, a guarded deterministic worker profile, an isolated production Next.js build, and Chromium. It requires Docker and a locally installed Playwright Chromium binary, owns only dedicated loopback ports, strips ambient provider credentials from child processes, and writes ignored evidence under `var/`:
+
+```bash
+cd web
+npx playwright install chromium
+cd ..
+
+uv run python scripts/voice_e2e_stack.py
+```
+
+This gate proves browser microphone capture, real RTC/RTP transport, decoded remote PCM, turn events, interruption, and cleanup without claiming real-provider or Cloud/TURN quality.
+
 ## Core design boundaries
 
 - HTTP routers map requests and responses; application services own behavior.

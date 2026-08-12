@@ -14,7 +14,11 @@ const api = vi.hoisted(() => {
     endVoiceSession: vi.fn<
       (
         request: unknown,
-        options?: { apiUrl?: string; signal?: AbortSignal }
+        options?: {
+          apiUrl?: string;
+          signal?: AbortSignal;
+          authHeaderProvider?: () => Promise<Record<string, string>>;
+        }
       ) => Promise<void>
     >(async () => undefined),
     VoiceSessionApiError,
@@ -132,5 +136,31 @@ describe("AssignmentReleaseScheduler", () => {
 
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
     scheduler.dispose();
+  });
+
+  it("forwards the injected auth provider to scheduled and exit releases", async () => {
+    const authHeaderProvider = vi.fn(async () => ({
+      Authorization: "Bearer injected-test-token",
+    }));
+    const scheduler = new AssignmentReleaseScheduler({ authHeaderProvider });
+
+    scheduler.release(assignment);
+    await Promise.resolve();
+    expect(api.endVoiceSession).toHaveBeenLastCalledWith(
+      assignment,
+      expect.objectContaining({ authHeaderProvider })
+    );
+
+    scheduler.dispose();
+    const exitAssignment = {
+      ...assignment,
+      voice_call_id: "e42bb15d-6d10-4e58-90d6-221383fbcdf9",
+    };
+    scheduler.release(exitAssignment);
+    await Promise.resolve();
+    expect(api.endVoiceSession).toHaveBeenLastCalledWith(exitAssignment, {
+      apiUrl: undefined,
+      authHeaderProvider,
+    });
   });
 });

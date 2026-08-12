@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from murmur.core.config import config
 from murmur.voice.bootstrap_contracts import VOICE_V2_EVENT_TOPIC, VOICE_V2_RUNTIME
-from murmur.voice.profile import UnavailableVoiceProfileProvider, VoiceProfileRegistry
+from murmur.voice.profile import (
+    PreparedVoiceProfile,
+    ProfilePreflight,
+    UnavailableVoiceProfileProvider,
+    VoiceMediaPolicy,
+    VoiceProfileRegistry,
+    VoiceSessionPolicy,
+)
 from murmur.voice.worker_authorization import VoiceJobAuthorizer, parse_job_metadata
 from murmur.voice.worker_contracts import (
     AgentRepository,
@@ -21,8 +28,11 @@ from murmur.voice.worker_contracts import (
     VoiceWorkerError,
     VoiceWorkerSettings,
 )
+from murmur.voice.worker_events import AgentSessionEventBridge, VoiceEventChannel
 from murmur.voice.worker_runtime import (
     ReadyPublisher,
+    VoiceJobEntrypoint,
+    VoiceJobRequestHandler,
     build_agent_server,
     build_entrypoint,
     build_request_handler,
@@ -34,6 +44,7 @@ from murmur.voice.worker_session import (
     AgentSessionFactory,
     AgentSessionOwner,
     OwnedAgentSession,
+    OwnedRoomIO,
     livekit_session_factory,
 )
 
@@ -41,17 +52,26 @@ __all__ = [
     "VOICE_V2_EVENT_TOPIC",
     "VOICE_V2_RUNTIME",
     "AgentRepository",
+    "AgentSessionEventBridge",
     "AgentSessionFactory",
     "AgentSessionOwner",
     "AuthorizedVoiceJob",
     "JobDescriptor",
     "OwnedAgentSession",
+    "OwnedRoomIO",
+    "PreparedVoiceProfile",
+    "ProfilePreflight",
     "ReadyPublisher",
     "SessionRepository",
+    "VoiceEventChannel",
     "VoiceJobAuthorizer",
+    "VoiceJobEntrypoint",
     "VoiceJobMetadata",
     "VoiceJobRejected",
+    "VoiceJobRequestHandler",
+    "VoiceMediaPolicy",
     "VoiceSessionLifecycleError",
+    "VoiceSessionPolicy",
     "VoiceWorkerError",
     "VoiceWorkerSettings",
     "build_agent_server",

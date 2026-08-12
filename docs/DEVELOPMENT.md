@@ -33,6 +33,20 @@ uv run python -c "from main import app; print(app.openapi()['paths'].keys())"
 
 Use `uv run ruff format <paths>` before committing edited Python files. Default pytest collection is offline and provider-free.
 
+### Real local RTC gate
+
+The full provider-free media proof is intentionally separate from ordinary pytest. It starts a digest-pinned LiveKit Server container, guarded FastAPI app and fake worker, an isolated production Next.js build, and Chromium on dedicated loopback ports. Install Docker and Playwright Chromium, then run from the repository root:
+
+```bash
+cd web
+npx playwright install chromium
+cd ..
+
+uv run python scripts/voice_e2e_stack.py
+```
+
+The runner removes ambient provider credentials from its child environment and writes logs and machine-readable proof under ignored `var/voice-e2e/` and `var/evals/`. A pass requires non-zero inbound and decoded outbound media, canonical turns, interruption within the declared gate, and exact browser/worker/room/dispatch cleanup. It is not evidence of credentialed provider, LiveKit Cloud, or TURN/TLS quality.
+
 ## Frontend checks
 
 ```bash
@@ -76,7 +90,8 @@ Trace signaling, audio transport, transcription, turn confirmation, LLM/TTS sche
 ```bash
 git diff --check
 git status --short
-git ls-files | rg '\.(db|db-wal|db-shm|sqlite|wav|pcm|pyc|tsbuildinfo)$'
+git ls-files | rg '\.(db|db-wal|db-shm|sqlite|wav|pcm|pyc|tsbuildinfo)$' \
+  | rg -v '^tests/fixtures/voice/audio/.*\.wav$'
 ```
 
-The tracked-artifact query should return nothing. Commit coherent green checkpoints; do not publish a partially broken refactor.
+The tracked-artifact query should return nothing; small synthetic WAVs are allowed only under the reviewed voice-fixture directory. Commit coherent green checkpoints; do not publish a partially broken refactor.

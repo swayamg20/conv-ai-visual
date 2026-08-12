@@ -7,9 +7,12 @@ objects to the worker.  The worker remains the sole owner of ``AgentSession``.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
+
+from murmur.voice.bootstrap_contracts import is_contract_id
 
 
 class VoiceProfileError(RuntimeError):
@@ -49,6 +52,95 @@ class ProfilePreflight:
 
 
 @dataclass(frozen=True)
+class VoiceSessionPolicy:
+    """Provider-neutral turn/session behavior for deterministic voice profiles.
+
+    The policy describes Murmur semantics rather than LiveKit constructor keys.
+    ``worker_session`` is the only module that translates it to the pinned SDK.
+    """
+
+    turn_detection: Literal["stt"] = "stt"
+    endpointing_mode: Literal["fixed"] = "fixed"
+    min_endpointing_delay_seconds: float = 0.0
+    max_endpointing_delay_seconds: float = 0.0
+    interruption_mode: Literal["hard"] = "hard"
+    resume_false_interruption: bool = False
+    preemptive_generation: bool = False
+    aec_warmup_duration_seconds: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.turn_detection != "stt":
+            raise ValueError("voice session turn_detection must be stt")
+        if self.endpointing_mode != "fixed":
+            raise ValueError("voice session endpointing_mode must be fixed")
+        if self.interruption_mode != "hard":
+            raise ValueError("voice session interruption_mode must be hard")
+        for name in (
+            "min_endpointing_delay_seconds",
+            "max_endpointing_delay_seconds",
+            "aec_warmup_duration_seconds",
+        ):
+            value = getattr(self, name)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int | float)
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(f"voice session {name} must be a finite non-negative number")
+        if self.max_endpointing_delay_seconds < self.min_endpointing_delay_seconds:
+            raise ValueError("voice session maximum endpointing delay cannot be below minimum")
+        for name in ("resume_false_interruption", "preemptive_generation"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"voice session {name} must be a boolean")
+
+
+@dataclass(frozen=True)
+class VoiceMediaPolicy:
+    """Provider-neutral room media shape for one deterministic RTC profile."""
+
+    input_sample_rate: int = 16_000
+    input_channels: int = 1
+    input_frame_size_ms: int = 20
+    input_noise_cancellation: bool = False
+    input_auto_gain_control: bool = False
+    input_preconnect: bool = True
+    output_sample_rate: int = 24_000
+    output_channels: int = 1
+    output_track_source: Literal["microphone"] = "microphone"
+    output_track_name: str = "murmur_voice_v2_audio"
+    text_input: bool = False
+    text_output: bool = False
+
+    def __post_init__(self) -> None:
+        for name in (
+            "input_sample_rate",
+            "input_channels",
+            "input_frame_size_ms",
+            "output_sample_rate",
+            "output_channels",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"voice media {name} must be a positive integer")
+        for name in (
+            "input_noise_cancellation",
+            "input_auto_gain_control",
+            "input_preconnect",
+            "text_input",
+            "text_output",
+        ):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"voice media {name} must be a boolean")
+        if self.input_noise_cancellation:
+            raise ValueError("voice media noise cancellation requires an explicit processor")
+        if self.output_track_source != "microphone":
+            raise ValueError("voice media output_track_source must be microphone")
+        if not is_contract_id(self.output_track_name):
+            raise ValueError("voice media output_track_name must be a contract identifier")
+
+
+@dataclass(frozen=True)
 class PreparedVoiceProfile:
     """Explicit objects used to construct one LiveKit ``AgentSession``.
 
@@ -64,6 +156,16 @@ class PreparedVoiceProfile:
     tts: object
     vad: object | None = None
     close_callback: Callable[[], Awaitable[None]] | None = None
+    session_policy: VoiceSessionPolicy | None = None
+    media_policy: VoiceMediaPolicy | None = None
+
+    def __post_init__(self) -> None:
+        if self.session_policy is not None and not isinstance(
+            self.session_policy, VoiceSessionPolicy
+        ):
+            raise ValueError("prepared voice session_policy is invalid")
+        if self.media_policy is not None and not isinstance(self.media_policy, VoiceMediaPolicy):
+            raise ValueError("prepared voice media_policy is invalid")
 
 
 class VoiceProfileProvider(Protocol):
@@ -148,6 +250,8 @@ class DeterministicVoiceProfileProvider:
         tts: object | None = None,
         vad: object | None = None,
         close_callback: Callable[[], Awaitable[None]] | None = None,
+        session_policy: VoiceSessionPolicy | None = None,
+        media_policy: VoiceMediaPolicy | None = None,
     ) -> None:
         self._profile_id = profile_id
         self._components = tuple(components)
@@ -157,6 +261,8 @@ class DeterministicVoiceProfileProvider:
         self._tts = tts if tts is not None else object()
         self._vad = vad
         self._close_callback = close_callback
+        self._session_policy = session_policy
+        self._media_policy = media_policy
         self.preflight_calls = 0
         self.prepare_calls = 0
 
@@ -184,6 +290,8 @@ class DeterministicVoiceProfileProvider:
             tts=self._tts,
             vad=self._vad,
             close_callback=self._close_callback,
+            session_policy=self._session_policy,
+            media_policy=self._media_policy,
         )
 
 
