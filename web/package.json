@@ -14,6 +14,8 @@
     "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
+    "@pipecat-ai/client-js": "1.13.0",
+    "@pipecat-ai/small-webrtc-transport": "1.10.6",
     "@ricky0123/vad-react": "^0.0.36",
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",

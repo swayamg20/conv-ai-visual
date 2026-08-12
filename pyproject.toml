@@ -51,6 +51,7 @@ voice-v2 = [
   "livekit-plugins-groq==1.6.9",
   "livekit-plugins-openai==1.6.9",
 ]
+voice-pipecat = ["pipecat-ai[webrtc,deepgram,groq]==1.7.0"]
 experiments = [
   "accelerate>=1.10,<2",
   "bitsandbytes>=0.42,<1",
