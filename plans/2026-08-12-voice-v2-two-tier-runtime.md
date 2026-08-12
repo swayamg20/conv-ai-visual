@@ -1,10 +1,15 @@
-# Rebuild Murmur Voice as a Low-Latency Two-Tier Runtime
+# Rebuild Murmur Voice, Qualify Two Runtime Arms, and Add a Two-Tier Brain
 
 ## Purpose / Big Picture
 
 Murmur should feel like one present, interruptible thinking partner: it listens accurately, responds quickly enough to keep conversational rhythm, and can continue a deeper piece of reasoning or visualization without freezing the conversation. The current product idea remains sound. The raw realtime implementation does not.
 
-This ExecPlan replaces the realtime voice boundary while preserving Murmur's authentication, agents, memory, resources, tools, persistent sessions, text fallback, and semantic canvas. The target uses open-source LiveKit Agents in a Murmur-owned worker and LiveKit Cloud only for WebRTC transport at first. Murmur calls STT, LLM, and TTS providers directly. It does not depend on LiveKit's managed agent hosting or managed inference. The transport-specific code is kept narrow enough that LiveKit Cloud can later be replaced by self-hosted LiveKit or the runtime by Pipecat without rewriting Murmur's task and canvas contracts.
+This ExecPlan replaces the realtime voice boundary while preserving Murmur's authentication, agents, memory, resources, tools, persistent sessions, text fallback, and semantic canvas. It does not select a realtime runtime on architectural preference. Milestone 1 qualifies two concrete, mutually exclusive arms against the same Murmur contracts and evidence schema:
+
+* **Milestone 1A, `livekit_v2`:** open-source LiveKit Agents in a Murmur-owned worker, LiveKit Cloud for signaling/media/NAT traversal, and Murmur's direct STT, LLM, and TTS provider accounts. It does not use LiveKit managed-agent hosting or managed inference.
+* **Milestone 1B, `pipecat_smallwebrtc_v1`:** a Murmur-owned Pipecat pipeline, Pipecat SmallWebRTC for the browser-to-worker peer connection, and Murmur-operated Coturn for production NAT traversal, using the same direct-provider manifest and prompt revision. No LiveKit component participates in this arm.
+
+Milestone 1C selects exactly one arm from comparable deterministic and credentialed live-equivalent evidence. Both arms may exist in the repository long enough to be evaluated, but one call has one realtime owner and one transport. No LiveKit/Pipecat hybrid is allowed. Product-layer reconnection, the two-tier brain, persistence, and canvas authority remain blocked until that selection is recorded, so product logic is implemented once against the selected runtime-neutral boundary rather than twice inside two SDKs.
 
 The conversational architecture has two latency tiers but one public personality:
 
@@ -12,7 +17,7 @@ The conversational architecture has two latency tiers but one public personality
 * The **Deep Reasoner** runs tools, retrieval, research, and visualization asynchronously. It cannot speak to the user or mutate the canvas directly.
 * A deterministic task and artifact control plane connects them. The Conductor may narrate only verified results, and the canvas may apply only current, revision-compatible artifacts.
 
-This is not a big-bang rewrite. The existing `/offer` runtime stays available behind a session-sticky feature flag until Voice V2 proves itself. The first visible success is deliberately small: an authenticated browser joins a LiveKit room, the self-hosted worker becomes genuinely ready, one utterance produces one audible reply, interruption stops it, and all resources are cleaned up. Canvas and the second tier are integrated only after that slice passes.
+This is not a big-bang rewrite. The existing `/offer` runtime stays available behind a session-sticky feature flag until the selected Voice V2 arm proves itself. The first visible success is deliberately small and identical for each challenger: an authenticated browser establishes its arm's real RTC path, its self-hosted worker becomes genuinely ready, one utterance produces one audible reply, interruption stops it, bounded disconnect behavior is explicit, and all resources are cleaned up. Canvas and the second tier are integrated only after one arm wins that gate.
 
 The completed product is observable in a credentialed browser session. The UI must never say Ready while required providers are unavailable; a no-tool turn must begin audible playback within the latency gate; an interruption must silence playback promptly; a deep request must allow the user to keep speaking while work continues; cancellation or correction must prevent stale speech and stale canvas updates; and every completion statement must correspond to an authoritative task result or rendered-canvas acknowledgement.
 
@@ -33,12 +38,16 @@ This plan supersedes the runtime and fallback assumptions in `plans/2026-03-23-v
 - [x] 2026-08-12 15:43 IST: Completed a behavior-preserving Voice V2 boundary refactor before adding real media. Bootstrap contracts and lock ownership, worker authorization/session/runtime composition, assignment-release scheduling, and browser LiveKit transport now have focused modules. The stateful assignment/tombstone machine remains intact in one service. Independent comparison against `35b5835` found byte-identical signed metadata, identical bootstrap/retry/release traces, no missing public imports, an acyclic backend dependency graph, and unchanged LiveKit CLI discovery. Evidence: 237 backend tests, 96 frontend tests, Ruff lint/format, ESLint, TypeScript, Next production build, application import, lock validation, and fresh-wheel content inspection passed. Milestone 1 remains open because these are structure and contract proofs, not audible RTC proof.
 - [x] 2026-08-12 17:20 IST: Passed Milestone 1's provider-free real-media gate twice through an isolated production-shaped topology: digest-pinned LiveKit Server 1.13.1, the pinned LiveKit Agents worker running with process spawning, authenticated FastAPI bootstrap/release, production Next.js, and Chromium fake microphone capture. Run I sent 33,760 RTP bytes in 234 packets, decoded non-zero remote PCM, committed exactly two user turns, cancelled the first six-second reply, reached sustained browser silence 128.4 ms after the second acoustic onset, completed the second reply, then proved the exact room and dispatch absent, zero active worker jobs, and one matching profile close. The new independent CI job runs this same stack without provider credentials. This completes the local RTC sub-gate, not the credentialed Cloud/provider/TURN qualification, so Milestone 1 remains open.
 - [x] 2026-08-12 18:18 IST: Closed the local RTC checkpoint's terminal-ordering audit before landing it. A post-Ready event-channel or AgentSession failure now ends the worker job; a pre-Ready session close cannot publish Ready; committed turns that fail before their first audio frame emit a terminal speech event; stale preemptive handles cannot steal a later turn; and canonical `agent_unavailable` or exact-agent departure always releases and rotates the browser call, including while microphone activation is pending. The final unshimmed Run J also proved that the exact microphone track was published disabled and LiveKit-muted before authenticated Ready, then carried 33,842 outbound RTP bytes in 234 packets, decoded non-zero remote PCM, silenced the interrupted reply in 128.6 ms, and completed authoritative cleanup. Final local gates are 300 backend tests and 117 frontend tests plus clean Ruff lint/format, ESLint, TypeScript, lock validation, and the isolated production browser stack.
+- [x] 2026-08-12 18:55 IST: Clarified the runtime comparison scope after the local LiveKit checkpoint. The second implementation is not the old hand-built `/offer` path and not merely a written escape hatch: it will be a Pipecat plus SmallWebRTC challenger with no LiveKit component in that call. LiveKit Agents and Pipecat remain mutually exclusive realtime owners, while both consume the same Murmur profile, event, readiness, lifecycle, and evaluation contracts. Self-hosted SmallWebRTC avoids a managed RTC per-minute charge but still incurs Murmur compute, bandwidth, direct-provider, and production TURN costs. No claim is made that this challenger exists yet.
+- [x] 2026-08-12 19:10 IST: Audited the post-`cf1ddcd` Milestone 1 exit. The local LiveKit media proof is complete, but at that checkpoint the production worker still installed `UnavailableVoiceProfileProvider`, `scripts/voice_eval.py live` still refused rather than driving a browser/provider run, the browser proof did not yet record a selected ICE candidate pair, and no Pipecat/SmallWebRTC/Coturn implementation existed. Reframed Milestone 1 as executable arms 1A and 1B plus a mandatory 1C selection gate; preserved every completed LiveKit checkpoint and moved product/two-tier work behind selection. Current uncommitted provider-factory work remains in-progress rather than completed evidence.
 - [x] Milestone 0: established truthful readiness, event contracts, deterministic replay, and an explicitly failed legacy baseline.
-- [ ] Milestone 1: prove an authenticated LiveKit Voice V2 vertical slice with one self-hosted Murmur worker.
+- [ ] Milestone 1A: finish the LiveKit direct-provider factory and qualify authenticated LiveKit Cloud through direct UDP and forced TURN/TLS with explicit bounded fresh-call failure.
+- [ ] Milestone 1B: implement Pipecat plus SmallWebRTC plus Coturn and qualify both deterministic direct/forced-relay paths and a credentialed live-equivalent path.
+- [ ] Milestone 1C: compare both complete evidence bundles and select exactly one runtime arm; if neither bundle is complete or neither passes, stop before product integration.
 - [ ] Milestone 2: reconnect Voice V2 to Murmur's existing agent, session, memory, chat, and canvas product layers.
 - [ ] Milestone 3: implement the Conversation Conductor, Deep Reasoner, durable task ledger, and revisioned artifact authority.
-- [ ] Milestone 4: qualify cascaded and native-realtime provider profiles on the same corpus and select one default.
-- [ ] Milestone 5: add failure injection, browser audio tests, cost accounting, production persistence, canary controls, and rollback.
+- [ ] Milestone 4: optimize cascaded and native-realtime provider profiles inside the already-selected runtime without reopening the runtime decision casually.
+- [ ] Milestone 5: harden the selected runtime and integrated product with failure injection, full browser scenarios, cost accounting, production persistence, canary controls, and rollback.
 - [ ] Milestone 6: cut over only after the gates pass, then remove the legacy realtime path and obsolete dependencies.
 
 ## Surprises & Discoveries
@@ -85,13 +94,21 @@ Playwright launches Chromium with `--mute-audio` by default. That made a correct
 
 SQLite plus `SQLModel.metadata.create_all()` is acceptable for today's local prototype but not for evolving durable task state across multiple processes or hosts. A versioned migration mechanism is required before adding Voice V2 tables. SQLite and an in-process async Reasoner may remain for the first single-host prototype; Postgres and a durable queue become mandatory before more than one production worker host or automatic task recovery is claimed.
 
+The `cf1ddcd` checkpoint does not contain LiveKit direct-provider plugin pins or a usable production profile. The current shared worktree contains an in-progress attempt to add those pins and a `provider_profiles/livekit_cascade.py` factory, but that work is not completed evidence until it is reviewed, committed, and passes its gates. At the audited checkpoint, `backend/murmur/voice/worker.py` constructs only `UnavailableVoiceProfileProvider`; until the real factory instantiates explicit provider objects, performs reachable-and-ready probes, and closes partial resources on failure, a credentialed Cloud browser run cannot pass honestly.
+
+The evaluator and browser harness stop at different boundaries. `scripts/voice_eval.py live` currently rejects the request rather than orchestrating a credentialed browser session, while `scripts/voice_e2e_stack.py` proves real local media with fake providers but does not capture the selected ICE candidate pair. The qualification work therefore needs one evidence schema and runtime-specific stack drivers; neither the replay evaluator nor an RTP byte counter alone proves direct UDP, relay, or TLS.
+
+Pipecat's default development runner cannot accept a custom TURN server. The challenger must own a small authenticated signaling route that constructs `SmallWebRTCConnection` with explicit ICE servers. Coturn is not optional production polish: direct peer-to-peer reachability is topology-dependent, so both direct and forced `turns:` relay cases are Milestone 1B gates. This also means “open source” and “no managed RTC line item” are not synonyms for zero infrastructure cost or production equivalence.
+
+The two runtime SDKs cannot share constructed media/provider objects. LiveKit `AgentSession` expects LiveKit plugin objects; a Pipecat pipeline expects Pipecat services and frame processors. The reusable boundary is the authoritative call claims, provider/model manifest, Murmur event semantics, readiness result, lifecycle result, browser control surface, corpus, and evidence format. Factories and media lifecycles stay runtime-specific.
+
 ## Decision Log
 
 2026-08-12, Codex: Preserve the Murmur product and domain layers; replace the realtime voice boundary. The user's failed test does not justify deleting authentication, memory, agent configuration, chat, resources, or canvas code.
 
-2026-08-12, Codex: Keep WebRTC but stop owning raw production media. Begin with open-source LiveKit Agents in a self-hosted Murmur worker and LiveKit Cloud for RTC only. Use direct provider accounts. Do not buy LiveKit managed-agent hosting or inference as a hidden dependency.
+2026-08-12, Codex: At plan creation, begin the first implementation with open-source LiveKit Agents in a self-hosted Murmur worker and LiveKit Cloud for RTC only. Use direct provider accounts. Do not buy LiveKit managed-agent hosting or inference as a hidden dependency. The later two-arm decision below supersedes “first implementation” as an implicit production selection while preserving the completed LiveKit work as Milestone 1A evidence.
 
-2026-08-12, Codex: Use one realtime owner. LiveKit `AgentSession` owns media, STT turn input, TTS output, and interruption for the initial implementation. Do not combine it with a Pipecat pipeline in the same call. Pipecat remains the primary runtime exit if LiveKit Agents fails Murmur's gates.
+2026-08-12, Codex: Use one realtime owner per call. LiveKit `AgentSession` owns media, STT turn input, TTS output, and interruption in `livekit_v2`; the Pipecat pipeline and `SmallWebRTCTransport` own them in `pipecat_smallwebrtc_v1`. Do not combine both runtimes in one call or let one runtime's provider objects enter the other.
 
 2026-08-12, Codex: Implement two latency tiers, not two independent personalities. Only the Conductor speaks. The Reasoner returns typed task results and artifact proposals; it never publishes audio or canvas commands directly.
 
@@ -135,6 +152,16 @@ SQLite plus `SQLModel.metadata.create_all()` is acceptable for today's local pro
 
 2026-08-12, Codex: Qualify the local RTC slice with one guarded, provider-free stack command that owns dedicated loopback ports, a digest-pinned SFU, a seeded file-backed database, a production-spawn worker, an isolated Next build, and Chromium. Acceptance requires real inbound frames, outbound RTP, decoded browser PCM, canonical turn and speech events, interruption-to-silence at or below 250 ms, no stale first-reply audio before the second canonical reply, and authoritative teardown. CI uploads the evidence on success or failure. This proof does not substitute for credentialed provider, Cloud/TURN, impaired-network, or cost qualification.
 
+2026-08-12, Codex: Promote Pipecat plus SmallWebRTC from an emergency exit sentence to the explicit non-LiveKit challenger. Do not use the legacy raw-WebRTC runtime as the comparison arm and do not stack Pipecat underneath LiveKit Agents in one call. Extract only the transport/runtime-neutral Murmur contracts needed by both owners, then run both against the same provider profile, browser corpus, readiness rules, failure injection, and cost accounting. SmallWebRTC may be self-hosted, but production NAT coverage still requires an explicitly costed TURN service and must not be described as free infrastructure.
+
+2026-08-12, Codex: Split the open runtime work into Milestone 1A (`livekit_v2`), Milestone 1B (`pipecat_smallwebrtc_v1`), and Milestone 1C (selection). Both arms must pass provider-free deterministic media and credentialed live-equivalent qualification before a like-for-like winner can be declared. If external credentials or reachable infrastructure prevent one arm's live run, mark that arm `unmeasured`; do not award the other arm a comparative win merely because it was easier to provision. A production default may still be selected only from complete passing evidence, otherwise stop at the gate.
+
+2026-08-12, Codex: Runtime selection precedes agent/memory/canvas integration and precedes the Conductor/Reasoner split. Shared product logic may depend on `VoiceRuntimeKind`, authoritative call claims, a discriminated browser assignment, canonical Murmur events, and a narrow `VoiceTransport` interface. It may not depend on LiveKit rooms/dispatches or Pipecat peers/pipelines. Once Milestone 1C chooses an arm, the rejected arm receives only security/cleanup fixes needed to keep its evaluation branch safe; it does not receive duplicated product features.
+
+2026-08-12, Codex: Milestone 1 proves only bounded disconnect behavior: stop audio, close the exact runtime resources, release the assignment, rotate `voice_call_id`, and offer an authenticated fresh call or text mode. Durable reconnect convergence, replay, authoritative snapshots, and task survival are Milestone 3 work and must not be claimed by the Milestone 1 browser test.
+
+2026-08-12, Codex: Compare total cost per successful audio minute, not one vendor invoice line. The LiveKit arm includes Cloud RTC/TURN, Murmur worker compute and warm idle, direct providers, traffic, observability, retries, cancelled work, and failed turns. The Pipecat arm includes Murmur signaling/pipeline compute and warm capacity, Coturn compute and relay bandwidth/egress, certificates/load balancing, the same direct providers, observability, retries, cancelled work, and failed turns. Provider and shared product costs may be common, but they remain measured. Fake/local runs produce no production cost claim.
+
 ## Outcomes & Retrospective
 
 Milestone 0 completed on 2026-08-12. Voice V2 now has strict Python and TypeScript event/task/artifact contracts, a fail-closed frontend state model, named clock-domain-safe metric spans, a provider-free replay harness, and a shared production/evaluation transcript accumulator. Seven replay scenarios passed twice with identical combined trace hash `8a1cdfbf49acedeb4ef1f6cb516ff15f670ed6009ad303dc13f6530e275edff9`. Offline evidence was 124 backend tests, 52 frontend tests, Ruff, ESLint, TypeScript, Next production build, app import, and a fresh wheel containing the new contract/evaluation packages.
@@ -145,9 +172,13 @@ The partial Milestone 1 implementation now crosses the provider-free local media
 
 The same run completed the lifecycle proof: the browser released its exact microphone track and assignment; fake-provider evidence contained 859 input frames, exactly two speech onsets and ends, two final transcripts, two TTS starts, one cancellation, one completion, and one matching `profile_closed`; the exact LiveKit room and room-scoped dispatch were absent; and worker health reported zero active jobs. The repeat followed earlier browser-media passes at `146 ms` and `128.4 ms`, so the result is not a one-off successful sample. The repository-wide checkpoint evidence is 300 backend tests and 117 frontend tests plus clean Ruff lint/format, ESLint, TypeScript, lock validation, and an isolated production Next/browser build.
 
-Milestone 1 remains unchecked because the plan's full exit also requires a credentialed Cloud/direct-provider slice, TURN/TLS, and explicit reconnect-or-bounded-failure qualification. No provider quality, provider latency, Cloud transport, or production cost result is claimed by this local deterministic proof.
+Milestone 1A is still open. Its completed sub-gates are the LiveKit control plane and provider-free local RTC proof above. Its remaining deliverables are the real direct-provider factory, an executable credentialed browser evaluator, measured LiveKit Cloud direct-UDP and forced-TURN/TLS runs, selected-candidate evidence, budgeted cost evidence, and the bounded fresh-call failure scenario. No provider quality, provider latency, Cloud transport, or production cost result is claimed by the local deterministic proof.
 
-If LiveKit Agents does not pass the same functional, latency, interruption, browser, and cost gates as the alternatives, record that result here and exercise the Pipecat/LiveKit transport exit. If the two-tier design improves acknowledgement latency but worsens task correctness, cancellation, or user trust, remove the split rather than defending the architecture.
+Milestone 1B has no implementation evidence yet. The existing legacy `/offer` code is explicitly not the challenger. The required arm is a new Pipecat pipeline with SmallWebRTC, Murmur-owned authenticated signaling, explicit Coturn ICE configuration, the same Murmur readiness/events/corpus, deterministic fake providers, real direct providers, direct and forced relay browser paths, authoritative peer/pipeline cleanup, and its own complete cost record.
+
+Milestone 1C is therefore also open, and there is currently no selected Voice V2 production runtime. Record the final runtime decision here only after both evidence bundles are comparable. The decision must name any failed hard gate, sample size, latency and interruption distributions, recognition/task correctness, selected candidate types, cleanup, operational limits, and total cost per successful audio minute. If neither arm passes, preserve text mode and stop rather than integrating product logic into an unqualified runtime.
+
+After a runtime is selected, if the two-tier design improves acknowledgement latency but worsens task correctness, cancellation, or user trust, remove the split rather than defending the architecture.
 
 ## Context and Orientation
 
@@ -165,9 +196,9 @@ If LiveKit Agents does not pass the same functional, latency, interruption, brow
 
 ### Terms used in this plan
 
-**Transport-connected** means the browser has joined the room and has a viable media path. It does not mean the agent can understand or answer.
+**Transport-connected** means the browser has established the selected arm's RTC path: joined the exact LiveKit room or completed the exact SmallWebRTC peer negotiation. It does not mean the agent can understand or answer.
 
-**Voice-ready** means the room, worker, microphone path, required model/provider connections, and event channel have all passed readiness checks for the selected profile. Only this state may trigger the Ready UI and sound.
+**Voice-ready** means the assignment, worker/pipeline, microphone path, required model/provider connections, and event channel have all passed readiness checks for the selected profile. Only this state may trigger the Ready UI and sound.
 
 **Turn** is one semantically committed user contribution. A provider may emit several final transcript segments inside one turn.
 
@@ -177,46 +208,69 @@ If LiveKit Agents does not pass the same functional, latency, interruption, brow
 
 **Canonical answer** is the verified assistant result stored for memory and replay. Acknowledgements and progress speech are delivery events, not separate canonical answers.
 
-**Profile** is a versioned combination of runtime, STT, turn detection, LLM, TTS, prompts, and configuration. Examples are `legacy`, `livekit-agents-cascade`, and `livekit-agents-realtime`.
+**Runtime arm** is one complete and exclusive media/orchestration owner. The only Milestone 1 candidates are `livekit_v2` and `pipecat_smallwebrtc_v1`. The legacy `/offer` path is a rollback baseline, not a candidate.
+
+**Provider manifest** is the runtime-neutral, versioned declaration of STT, turn policy, LLM, TTS, model IDs, prompt revision, and readiness requirements. Each runtime has its own factory that turns the manifest into SDK-specific objects. Constructed SDK objects are never shared across arms.
+
+**Profile** is a provider manifest bound to one runtime and one configuration revision. Milestone 1 compares `livekit-agents-cascade-v1` with `pipecat-direct-cascade-v1` using the same direct provider accounts, models, prompt, and turn policy. Later examples include a native-realtime profile inside the selected runtime.
+
+**Deterministic qualification** uses the production browser adapter and real RTC media path with checked-in audio and deterministic fake STT/LLM/TTS components. It requires no external provider credentials. It proves lifecycle and media contracts, not recognition quality, global network behavior, or production cost.
+
+**Live-equivalent qualification** uses the production adapter, direct provider accounts, HTTPS/WSS, the intended worker process/container shape, and a real cross-network transport path. LiveKit runs through Cloud; Pipecat runs through a reachable Murmur host and production-shaped Coturn. “Equivalent” means the same corpus, provider manifest, browser, region, network shaping, evidence schema, and gates, not that the two infrastructures offer identical global operations.
+
+**Coturn** is the explicit STUN/TURN service for the Pipecat arm. The forced-relay case uses authenticated `turns:` over TLS and must prove the selected relay candidate, not merely that a TURN URL was configured.
 
 ### Target architecture and ownership
 
-The initial deployed shape is:
+The pre-selection shape is:
 
     Browser
-      |  authenticated HTTP: create/resume session, receive short-lived room token
+      | authenticated `/api/voice/session` bootstrap
       v
-    FastAPI control plane ---------------------> SQL database
-      |                                           sessions, messages, tasks,
-      | signed room/session metadata              events, artifacts, usage
-      v
-    LiveKit Cloud RTC <---------------------- self-hosted Murmur voice worker
-      ^       audio + typed data                    |
-      |                                             | owns Conductor and one audio floor
-      +---------------------------------------------+
-                                                    |
-                                                    v
-                                             async Deep Reasoner
-                                             existing tools/resources
-                                             artifact proposals only
+    FastAPI control plane --------------------------> existing ownership/session data
+      | returns one discriminated, sticky assignment
+      +-------------------------------+-------------------------------+
+      | `livekit_v2`                  | `pipecat_smallwebrtc_v1`       |
+      v                               v                               |
+    LiveKit Cloud RTC              Murmur Pipecat RTC service         |
+      ^                               ^                               |
+      | room media + events           | SmallWebRTC + events           |
+      |                               | direct ICE or Coturn relay     |
+      v                               v                               |
+    LiveKit Agents worker           Pipecat pipeline worker           |
+      +-------------------------------+-------------------------------+
+                                      |
+                                      v
+                         selected Voice Runtime Port
+                         (M2 product context; M3 Conductor/Reasoner)
 
-FastAPI remains the authority for Firebase identity, agent ownership, and persistent-session creation. It returns a short-lived participant token from a new authenticated `/api/voice/session` endpoint. The request carries an existing `session_id` and a client-generated `voice_call_id` reused for retries/reconnects. FastAPI derives a non-guessable room name by HMACing environment, authoritative `user_id`, `session_id`, and `voice_call_id`; a client-controlled call ID alone never defines a room. It creates or reads the room, fixes the server-selected runtime profile in room metadata, and dispatches the named `murmur-voice-v2` worker.
+FastAPI remains the authority for Firebase identity, agent ownership, persistent-session lookup, runtime selection, and the stable `session_id` plus client-generated `voice_call_id`. `VOICE_RUNTIME=legacy|livekit_v2|pipecat_smallwebrtc_v1` is a deployment-owned server setting; the bootstrap request never contains a runtime. `NEXT_PUBLIC_VOICE_RUNTIME=legacy|voice_v2` only decides whether the page uses the old route or asks for a V2 assignment. When it asks for V2, the response discriminant, not a second public flag, selects the browser adapter. A mismatch fails unavailable rather than starting a different runtime.
 
-During the single-process Milestone 1 prototype, a per-call async lock surrounds dispatch lookup/create. If the room already exists, FastAPI queries/reuses the existing dispatch rather than relying on token-embedded dispatch, which is ignored for an existing room. This proves retry idempotency only for the explicitly single-process control plane; it does not claim cross-process exactly-once dispatch. After the Voice V2 call-assignment table lands in Milestone 3, a unique database record plus reconciled dispatch ID makes the contract restart- and replica-safe. Any ambiguous dispatch state fails closed and is reconciled rather than starting a second agent. LiveKit API secrets never reach the browser.
+The common bootstrap response contains `runtime`, `profile_id`, `trace_id`, `session_id`, `agent_id`, `voice_call_id`, `event_protocol`, and `expires_at`. Its `livekit_v2` variant additionally contains `server_url`, `room_name`, `participant_token`, `participant_identity`, `agent_participant_identity`, `dispatch_id`, `worker_name`, and `event_topic`. Its `pipecat_smallwebrtc_v1` variant additionally contains one short-lived, single-use, opaque `webrtc_url`, `peer_reservation_id`, and `event_protocol="rtvi-murmur-v2"`. The URL contains no identity or provider secret, expires within the same 30-900 second policy, is redacted from access logs and referrers, and can create only its exact reserved call. Reuse, expiry, owner mismatch, runtime mismatch, or a second active peer fails closed.
 
-The participant token has the minimum grants required to join that room, publish microphone audio, and subscribe to the agent. It cannot publish data, create arbitrary rooms, or act as the worker. Signed job metadata carries `user_id`, `session_id`, `agent_id`, `voice_call_id`, runtime/profile version, and trace ID. The worker treats those values as locators, reloads authoritative ownership/configuration, validates the fixed server-to-browser event topic, and refuses a mismatch.
+The existing LiveKit implementation keeps its HMAC-derived room, per-call lock, exact named dispatch, restricted participant token, signed job metadata, and process-local one-call cap. Its participant cannot publish data or create arbitrary rooms. With LiveKit Agents 1.6.9, run `backend/murmur/voice/worker.py` through the pinned CLI path. The LiveKit worker connects outbound; the FastAPI control plane does not own its media peer.
 
-The LiveKit worker is a separate entrypoint, `backend/murmur/voice/worker.py`. With the pinned LiveKit Agents 1.6.9 CLI, the positional entrypoint is a filesystem path rather than a Python module string: execute `uv run python -m livekit.agents start backend/murmur/voice/worker.py --dev` locally and omit `--dev` in deployment. It connects outbound to LiveKit. FastAPI must not own media peers. The source-tree path is valid for Milestone 1; the packaged container entrypoint remains unresolved until Milestone 6 and must be proven against the built wheel/image rather than copied as an assumed module command.
+The Pipecat arm runs a separate ASGI/media entrypoint, `backend/murmur/voice/pipecat_app.py`, rather than adding a peer to the main control-plane lifespan. Its authenticated bootstrap creates only a bounded process-local reservation. The single-use signaling URL reaches `backend/murmur/voice/pipecat_signaling.py`, which validates the reservation and authoritative call claims, constructs one `SmallWebRTCConnection` with explicit ICE servers, starts one Pipecat pipeline, and owns peer/pipeline teardown. The default Pipecat development runner is not used for qualification because it cannot inject Murmur's custom TURN configuration.
+
+### Shared and runtime-specific contracts
+
+Create `backend/murmur/voice/runtime_contracts.py` and matching discriminated unions in `web/src/features/voice/session-api.ts`. `VoiceRuntimeKind`, `VoiceCallClaims`, the common assignment fields, `VoiceRuntimeTerminalResult`, and lifecycle reason codes are shared. Preserve `backend/murmur/voice/contracts.py` and `web/src/features/voice/events.ts` as the only Murmur event vocabulary. LiveKit reliable data and Pipecat RTVI app messages are transport encodings of that vocabulary, not separate product event models.
+
+Keep the shared parts of `backend/murmur/voice/profile.py` runtime-neutral: `VoiceProfileScope`, provider/model manifest, session/media policy, and `ProfilePreflight`. Runtime-specific prepared objects and factories live under `backend/murmur/voice/provider_profiles/`: `livekit_cascade.py` produces LiveKit plugin objects and `pipecat_cascade.py` produces Pipecat services/frame processors. Preserve compatibility exports from `profile.py` while Milestone 1A work is in flight, then make imports explicit before 1B. Both factories consume the same manifest and readiness requirements, but produce different SDK objects and close them independently. The common preflight result names configured, reachable, and ready components without leaking credentials.
+
+Add a deliberately small `VoiceTransport` interface in `web/src/features/voice/voice-transport.ts`: prime browser audio, connect the matching assignment, activate the already-created microphone only after canonical Ready, enable/disable microphone, enable/disable output, resume blocked playback, expose runtime-neutral callbacks, and close idempotently. `livekit-transport.ts` and `pipecat-transport.ts` implement it. Session state and event reduction remain shared; room, participant, dispatch, peer, ICE, RTVI, and pipeline objects never cross the adapter boundary.
+
+Runtime-specific ownership remains explicit. LiveKit owns Cloud room/dispatch/job lifecycle, grants, data topic, and `AgentSession`. Pipecat owns one-time signaling, `SmallWebRTCConnection`, `SmallWebRTCTransport`, frame processors, RTVI mapping, Coturn credentials, and peer/pipeline cleanup. Shared code owns identity, selection, provider manifest, readiness semantics, event semantics, user-visible state, the corpus, measurements, and evidence comparison. This is a narrow port, not a universal transport framework.
 
 The Conductor owns all assistant speech. For a small conversational request it may answer directly. For deep work it may clarify or say that it is working, then enqueue a typed task. While the Reasoner runs, the Conductor remains interruptible and can answer status questions, accept corrections, or cancel/supersede the task. When a verified result arrives, the Conductor presents it only when it owns the audio floor and the result still belongs to the current session/task generation.
 
-The Reasoner receives an immutable request snapshot: user identity, session, agent configuration revision, committed turn text, relevant memory/resource references, tool policy, task generation, and current canvas revision. It emits progress facts, a final typed result, optional artifact proposals, usage records, and errors. It cannot call TTS or publish LiveKit data.
+The Reasoner receives an immutable request snapshot: user identity, session, agent configuration revision, committed turn text, relevant memory/resource references, tool policy, task generation, and current canvas revision. It emits progress facts, a final typed result, optional artifact proposals, usage records, and errors. It cannot call TTS or publish runtime transport data directly.
 
 The canvas authority accepts a proposal only when its `base_revision` matches the current authoritative revision and its task is not cancelled or superseded. Accepted patches receive a new revision and are sent to the browser. Because `SVGCanvas.render()` schedules GSAP work and returns before animation completes, the browser emits distinct acknowledgements: `canvas_apply_ack` after validation and insertion/scheduling into the scene, `canvas_first_visible` after the first meaningful rendered frame, and optional `canvas_animation_complete` when a teaching timeline ends. Spoken language such as "I have drawn it" waits for `canvas_first_visible`, not the entire animation. State convergence may rely on `canvas_apply_ack`; the 700 ms visible-render gate uses `canvas_first_visible`.
 
 ### Event contracts
 
-Create `backend/murmur/voice/contracts.py` and the matching `web/src/features/voice/events.ts`. Every event envelope contains:
+The completed Milestone 0 files `backend/murmur/voice/contracts.py` and `web/src/features/voice/events.ts` define the shared envelope. Every event contains:
 
     schema_version
     event_id
@@ -237,7 +291,7 @@ Create `backend/murmur/voice/contracts.py` and the matching `web/src/features/vo
     emitted_at              wall-clock timestamp for audit only
     payload
 
-Ordering and idempotency use event IDs, producer-local sequence, causation/correlation IDs, task generation, and canvas revision, never wall-clock ordering. The browser tracks each producer independently; it does not invent one total order across browser, FastAPI, LiveKit worker, and Reasoner. The authoritative ledger assigns a canonical `ledger_sequence` after ingestion for the durable subset. The initial vocabulary includes transport/agent readiness, transcript segment, turn committed/resumed, assistant speech started/stopped, task queued/working/needs-input/verified/failed/cancelled/superseded, artifact proposed/accepted/rejected, canvas patch/apply-ack/first-visible/animation-complete/render-failed, usage recorded, and session ending/ended.
+Ordering and idempotency use event IDs, producer-local sequence, causation/correlation IDs, task generation, and canvas revision, never wall-clock ordering. The browser tracks each producer independently; it does not invent one total order across browser, FastAPI, the selected realtime worker, and Reasoner. The authoritative ledger assigns a canonical `ledger_sequence` after ingestion for the durable subset. The vocabulary includes transport/agent readiness, transcript segment, turn committed/resumed, assistant speech started/stopped, task queued/working/needs-input/verified/failed/cancelled/superseded, artifact proposed/accepted/rejected, canvas patch/apply-ack/first-visible/animation-complete/render-failed, usage recorded, and session ending/ended.
 
 One `EventAppender` repository method is the only way to append durable events. It allocates the next session ledger sequence and enforces unique `event_id`, unique `(session_id, ledger_sequence)`, and unique `(session_id, producer_id, producer_sequence)` constraints. A task transition and its corresponding event append occur in the same database transaction. On SQLite, the appender uses one short serialized write transaction; on Postgres, it uses row locking or a database sequence. Audio frames, interim text, and telemetry never wait on this appender.
 
@@ -251,15 +305,15 @@ Use Alembic before adding Voice V2 tables. The baseline migration represents the
 
 Add minimal first-version tables for:
 
-* a voice-call assignment with unique client bootstrap key/call ID, user/session/agent, non-guessable room name, LiveKit dispatch ID, sticky runtime/profile version, status, and lifecycle timestamps;
+* a voice-call assignment with unique client bootstrap key/call ID, user/session/agent, sticky runtime/profile version, runtime-specific locator payload (LiveKit room/dispatch or Pipecat peer reservation), status, and lifecycle timestamps;
 * a durable task ledger with task ID, idempotency key, user/session/turn, task generation, status, request/result/error payloads, canvas revisions, provider/profile provenance, and lifecycle timestamps;
 * an append-only session event ledger with event ID, ledger sequence, producer identity/sequence, causation/correlation IDs, type, identifiers, schema version, payload, and timestamp;
 * accepted canvas revisions/artifact provenance;
-* usage records with provider, model, pricing version, billable unit/quantity, estimated USD, environment, build SHA, room/job identifiers, and success/cancel/failure attribution.
+* usage records with provider, model, pricing version, billable unit/quantity, estimated USD, environment, build SHA, runtime plus room/job or peer/pipeline/TURN identifiers, and success/cancel/failure attribution.
 
 Persist committed turns and task/artifact/control transitions in the durable ledger. Interim transcript segments, audio frames, WebRTC samples, and high-frequency telemetry belong in trace/eval storage; writing them synchronously to SQLite would put storage in the hot audio path.
 
-The local single-call prototype can keep SQLite and a Reasoner loop in the LiveKit job process. Because LiveKit jobs are separate processes, cap this mode to one concurrent V2 call and do not call it production durable execution. From their first use, Voice V2 repository operations invoked by async realtime code must use bounded thread offloading or async database access. This does not require converting every existing repository. Task rows include `owner_job_id`, `worker_id`, `attempt`, `heartbeat_at`, and `lease_expires_at`. In the SQLite prototype, an expired lease marks work failed/recoverable; it is never silently resumed.
+The local single-call prototype can keep SQLite and a Reasoner loop in the selected realtime process. Cap this mode to one concurrent V2 call and do not call it production durable execution. From their first use, Voice V2 repository operations invoked by async realtime code must use bounded thread offloading or async database access. This does not require converting every existing repository. Task rows include `owner_job_id`, `worker_id`, `attempt`, `heartbeat_at`, and `lease_expires_at`. In the SQLite prototype, an expired lease marks work failed/recoverable; it is never silently resumed.
 
 Before any multi-session production canary, switch the same repositories to Postgres and use a durable delivery mechanism with leases, heartbeats, retries, idempotency, and a dead-letter state. The voice job then owns only ephemeral realtime state; the Reasoner execution survives a voice-job reconnect or drain according to explicit policy. Redis is not required by the product contract; select a queue only when that milestone is reached and record the operational reason in this plan.
 
@@ -269,22 +323,29 @@ Preserve the public entrypoint, Firebase auth and ownership dependencies, agent 
 
 Adapt:
 
-* `backend/murmur/api/application.py` for explicit Voice V2 control-plane dependencies, not media ownership;
-* `backend/murmur/api/routers/voice.py`, `backend/murmur/api/schemas.py`, and `backend/murmur/api/dependencies.py` for authenticated Voice V2 session bootstrap and ownership;
+* `backend/murmur/api/application.py` for runtime selection and explicit Voice V2 control-plane dependencies, never Pipecat peer or LiveKit job ownership;
+* `backend/murmur/api/routers/voice.py`, `backend/murmur/api/schemas.py`, and `backend/murmur/api/dependencies.py` for the runtime-neutral authenticated bootstrap and ownership check;
+* `backend/murmur/voice/bootstrap.py`, `bootstrap_contracts.py`, and `livekit_control.py` so the existing LiveKit assignment becomes one implementation of a discriminated runtime assignment rather than the universal response;
+* `backend/murmur/voice/profile.py` so its manifest, policy, scope, and readiness result are truly runtime-neutral while constructed LiveKit and Pipecat objects move to their arm-specific factories;
 * `backend/murmur/agents/` with a shared immutable context builder and separate role-specific pipeline factories for chat, Conductor, and Reasoner;
 * `backend/murmur/memory/manager.py` for acknowledgement/progress versus canonical-result semantics;
 * `backend/murmur/canvas/state.py` through a new revisioned `backend/murmur/canvas/authority.py`;
 * persistence models/repositories and the observability API/UI for task, event, stage latency, WebRTC, and usage truth;
-* both app pages through one shared `web/src/hooks/use-voice-session.ts` and one reducer in `web/src/features/voice/`.
+* `web/src/features/voice/session-api.ts`, `session-runtime-controller.tsx`, `session-view.ts`, and `web/src/hooks/use-voice-session.ts` so the server response selects one adapter while state/event reduction stays shared;
+* both app pages through that shared hook and reducer only after Milestone 1C.
 
-Add for Milestones 0-2:
+Already added and preserved from Milestones 0 and the LiveKit local checkpoint:
 
     backend/murmur/voice/contracts.py
-    backend/murmur/voice/livekit_runtime.py
+    backend/murmur/voice/bootstrap.py
+    backend/murmur/voice/livekit_control.py
+    backend/murmur/voice/profile.py
     backend/murmur/voice/worker.py
+    backend/murmur/voice/worker_runtime.py
     backend/murmur/reasoning/__init__.py
     backend/murmur/reasoning/contracts.py
     scripts/voice_eval.py
+    scripts/voice_e2e_stack.py
     evals/voice/smoke.jsonl
     evals/voice/qualification.jsonl
     evals/voice/gates.json
@@ -292,13 +353,38 @@ Add for Milestones 0-2:
     web/src/features/voice/events.ts
     web/src/features/voice/event-reducer.ts
     web/src/features/voice/session-machine.ts
+    web/src/features/voice/livekit-transport.ts
     web/src/hooks/use-voice-session.ts
-    web/e2e/voice-session.spec.ts
-    web/e2e/interruption.spec.ts
-    web/e2e/provider-failure.spec.ts
+    web/e2e/voice-rtc.spec.ts
     web/playwright.config.ts
 
-Add at Milestone 3, only after the transport/product slice passes:
+Add or complete before Milestone 1C selection:
+
+    backend/murmur/voice/runtime_contracts.py
+    backend/murmur/voice/provider_profiles/livekit_cascade.py
+    backend/murmur/voice/provider_profiles/pipecat_cascade.py
+    backend/murmur/voice/pipecat_runtime.py
+    backend/murmur/voice/pipecat_signaling.py
+    backend/murmur/voice/pipecat_app.py
+    scripts/voice_live_stack.py
+    scripts/voice_pipecat_e2e_stack.py
+    scripts/voice_runtime_compare.py
+    tests/fixtures/voice/coturn/turnserver.conf
+    tests/test_voice_runtime_contracts.py
+    tests/test_voice_livekit_profile.py
+    tests/test_voice_pipecat_profile.py
+    tests/test_voice_pipecat_signaling.py
+    tests/test_voice_pipecat_runtime.py
+    web/src/features/voice/voice-transport.ts
+    web/src/features/voice/pipecat-transport.ts
+    web/e2e/voice-livekit-live.spec.ts
+    web/e2e/voice-pipecat-rtc.spec.ts
+    deploy/voice-livekit.Dockerfile
+    deploy/voice-pipecat.Dockerfile
+    deploy/coturn/turnserver.conf
+    deploy/coturn/README.md
+
+Add at Milestone 3, only after one runtime is selected and the product slice passes:
 
     backend/murmur/voice/conductor.py
     backend/murmur/reasoning/service.py
@@ -307,16 +393,15 @@ Add at Milestone 3, only after the transport/product slice passes:
     backend/murmur/persistence/migrations/
     scripts/migrate.py
 
-Add during production hardening:
+During production hardening, delete the rejected arm's deployment image/config rather than shipping dormant operational surface. Rename the selected qualification Dockerfile to `deploy/voice-worker.Dockerfile`, add `deploy/README.md`, and retain `deploy/coturn/` only when Pipecat wins.
 
-    deploy/voice-worker.Dockerfile
-    deploy/README.md
-
-Remove only after cutover: the raw `aiortc` service and models, direct Deepgram socket orchestration, Smart Turn/Kokoro fallback code if no selected profile uses it, base64 TTS/data-channel playback, the legacy WebRTC/audio/VAD hooks, `/offer`, and now-unused dependencies such as `aiortc`, direct `websockets`, `onnxruntime`, and `@ricky0123/vad-react`.
+Remove only after cutover: the legacy raw-`aiortc` service and models, direct Deepgram socket orchestration, Smart Turn/Kokoro fallback code if no selected profile uses it, base64 TTS/data-channel playback, the legacy WebRTC/audio/VAD hooks, `/offer`, and genuinely unused dependencies such as direct `websockets`, `onnxruntime`, and `@ricky0123/vad-react`. Do not list `aiortc` as removable if the selected Pipecat SmallWebRTC extra still requires it.
 
 ### External assumptions to reverify during execution
 
 Use only official documentation for version-sensitive implementation choices. Recheck [LiveKit explicit agent dispatch](https://docs.livekit.io/agents/server/agent-dispatch/), [job lifecycle](https://docs.livekit.io/agents/server/job/), [self-hosted agent deployment](https://docs.livekit.io/deploy/custom/deployments/), [observability](https://docs.livekit.io/deploy/observability/data/), [tracing](https://docs.livekit.io/deploy/observability/tracing/), [pricing](https://livekit.com/pricing), and [billing units](https://docs.livekit.io/deploy/admin/billing/) before locking versions or estimating production cost. LiveKit's text-mode agent tests do not exercise a room or audio pipeline, so follow the official [agent testing documentation](https://docs.livekit.io/agents/start/testing/) but retain Murmur's browser and live-audio suites.
+
+For the challenger, recheck the official [Pipecat SmallWebRTC server transport](https://docs.pipecat.ai/api-reference/server/services/transport/small-webrtc), [JavaScript SmallWebRTC client](https://docs.pipecat.ai/api-reference/client/js/transports/small-webrtc), and [transport-selection guidance](https://docs.pipecat.ai/client/concepts/choosing-a-transport), plus Coturn's official [server documentation](https://github.com/coturn/coturn/wiki/turnserver) and [example configuration](https://github.com/coturn/coturn/blob/master/examples/etc/turnserver.conf). As of this plan update, Pipecat documents that its development runner cannot inject custom TURN and that a production custom-TURN deployment needs a manually owned signaling server. Its client guidance also presents SmallWebRTC as a lightweight/self-hosted option with geographic and scale limits. Treat those limits as hypotheses to measure and possible rejection reasons, not as proof that the arm is production-equivalent.
 
 ## Plan of Work
 
@@ -330,21 +415,43 @@ Instrument the current browser and legacy runtime just enough to establish a cre
 
 Exit when offline replay is deterministic, a bad credential can never produce Ready, the legacy result is explicitly classified as passing or failed, and the corpus/gates are checked into the repository.
 
-### Milestone 1: minimum LiveKit vertical slice
+### Milestone 1A: qualify LiveKit Agents plus direct providers plus Cloud
 
-Add LiveKit Python packages under a temporary `voice-v2` optional dependency group and `livekit-client` to the web app. Pin versions in `uv.lock` and `web/package-lock.json`. Do not add managed-inference packages not used by the chosen direct providers.
+Preserve the completed `cf1ddcd` foundation as evidence, not work to repeat: pinned LiveKit packages, authenticated ownership-checked bootstrap, HMAC room, exact named dispatch, restricted token, signed job metadata, one-active-call lifecycle, production browser adapter, deterministic profile, real local SFU media, interruption, terminal ordering, and cleanup. The local Run J metrics recorded above satisfy the provider-free deterministic media sub-gate. They do not satisfy the direct-provider or Cloud/network sub-gates.
 
-Add an authenticated `/api/voice/session` bootstrap route. In this milestone it requires an existing owned `session_id` plus a client-generated `voice_call_id` reused on retries; it does not create another persistent session. It verifies that the session and agent belong to the Firebase user, HMAC-derives the room from trusted ownership plus the call ID, reads or fixes the server-controlled runtime profile in room metadata, and creates/reuses explicit named-agent dispatch under a per-call lock in the single FastAPI process. The same call ID must return the same active room, profile, and dispatch in that bounded prototype. Never return API key/secret material or accept a user-selected runtime profile. Keep `/offer` available behind `VOICE_RUNTIME=legacy|livekit_v2`; assignment is sticky for the voice call. Cross-process/restart-safe dispatch idempotency is an explicit Milestone 3 acceptance item.
+Finish the runtime-specific provider boundary in the in-progress `backend/murmur/voice/provider_profiles/livekit_cascade.py` and `backend/murmur/voice/provider_probe.py`. Compatibility-test and lock the direct provider plugins before calling them pinned. Implement the server-selected `livekit-agents-cascade-v1` factory against the common provider manifest. Preflight must distinguish configuration from a successful bounded provider readiness probe, build only explicit SDK objects rather than managed-inference strings, and close every partial resource on failure. Replace the production `UnavailableVoiceProfileProvider` only when this factory passes its focused invalid-key, timeout, partial-construction, cancellation, and close-once tests; an uncommitted worktree is not an exit result.
 
-Add the standalone worker entrypoint and the smallest Conductor path: join, publish readiness only after required components are usable, receive one committed utterance, produce one simple response through an audio track, handle interruption, and close cleanly. Do not integrate tools, memory, or canvas yet. Use a direct STT/LLM/TTS profile and a test-profile factory so providers can be faked deterministically.
+Turn the live evaluator into an executable protected browser stack. `scripts/voice_live_stack.py --runtime livekit_v2` starts the built FastAPI and worker processes, points the production frontend at the credentialed LiveKit Cloud project, drives `web/e2e/voice-livekit-live.spec.ts`, collects provider usage and WebRTC stats, and tears down the exact room/dispatch/job. It refuses unless the selected runtime, all required provider/Cloud variables, an explicitly positive budget, an output directory, and a non-production test identity are present. It never prints tokens or keys.
 
-Add the initial Playwright offline RTC project in this milestone, not later. It starts a pinned local LiveKit server, fake providers/worker, test-auth FastAPI, and Next.js through one stack runner and verifies real browser media frames without external provider credentials.
+Run two separate Cloud network cases with the same fixture and profile. `--network direct` accepts only a selected host/srflx UDP path; `--network relay-tls` configures the browser to require relay and accepts only a selected relay candidate through the Cloud TURN/TLS path. In both cases evidence must contain the selected local/remote candidate types and protocols, bytes/packets, non-zero decoded remote PCM, one canonical turn, one completed reply, one interrupted reply, provider readiness/usage, and exact cleanup. A configured TURN URL or successful room join is insufficient. The disconnect case deliberately severs the RTC path and must stop audio, end/release the exact call, rotate `voice_call_id`, and expose fresh-call/text choices within the bounded UI deadline; it does not claim replay.
 
-Replace raw WebRTC usage on one internal route with `use-voice-session.ts` and the session state machine. The browser must render room/transport state, agent readiness, listening, thinking, speaking, reconnecting, unavailable, and ended from events rather than ad hoc callbacks. Do not run a second semantic VAD in the browser. If server interruption cannot meet the silence gate, add local audio ducking only as a non-authoritative UX optimization; semantic cancellation still comes from the worker.
+Milestone 1A exits only when the deterministic checkpoint remains green and the credentialed direct, relay/TLS, and bounded-failure cases all pass under one declared provider manifest and budget. If Cloud credentials are unavailable, record the remaining cases as `unmeasured` and keep 1A open.
 
-Exit when a credentialed Chromium session proves token ownership, real RTC connection through both direct UDP and TURN/TLS, genuine readiness, one audible reply, interruption, reconnect or bounded failure, and complete cleanup. No canvas or Deep Reasoner work may begin merely because a data channel opened.
+### Milestone 1B: qualify Pipecat plus SmallWebRTC plus Coturn
+
+Add a separate locked `voice-pipecat` Python extra containing a compatibility-tested pin of `pipecat-ai[webrtc]` and only the direct service integrations used by the manifest. Add pinned `@pipecat-ai/client-js` and `@pipecat-ai/small-webrtc-transport` packages to the web app. Do not replace or wrap the legacy `/offer` implementation, use the Pipecat development runner as a production server, or put a Pipecat pipeline under LiveKit.
+
+Implement `backend/murmur/voice/pipecat_app.py`, `pipecat_signaling.py`, `pipecat_runtime.py`, and `provider_profiles/pipecat_cascade.py`. The control plane returns a single-use opaque signaling URL for the already-owned call; the separate Pipecat ASGI process validates it, creates one `SmallWebRTCConnection` with explicit ICE configuration, creates one runtime-specific direct-provider pipeline, maps canonical Murmur events onto RTVI app messages, and owns cancellation and exact peer/pipeline/provider cleanup. It remains process-local and one-call for this milestone. Ready is impossible before transport input/output, the event path, VAD/turn policy, and every required direct provider are ready.
+
+Implement `web/src/features/voice/pipecat-transport.ts` against the same narrow `VoiceTransport` interface and reuse the existing state machine and event reducer. Microphone media is prepared but semantically gated until canonical Ready just as in the LiveKit arm. The adapter must expose selected ICE candidate statistics, decoded remote PCM, output muting, microphone control, and idempotent close. Any Pipecat/RTVI event that cannot be converted to the existing strict Murmur envelope fails unavailable; it does not create a second product event model.
+
+Create a deterministic stack runner, not a unit-only pipeline test. `scripts/voice_pipecat_e2e_stack.py` owns loopback ports, the separate control-plane and Pipecat ASGI processes, production Next.js, a digest-pinned Coturn container/config, generated test-only TLS material, and Chromium. It runs the same two-turn synthetic fixture and fake STT/LLM/TTS behavior as the LiveKit checkpoint in both `direct` and forced `relay-tls` modes. Relay acceptance requires the selected pair to be relay/TLS and Coturn allocation/byte evidence to match the call. It proves no LiveKit process/package is active in the call topology, canonical events are identical in meaning, the interruption silence gate passes, no stale first reply leaks into the second, and the exact peer, pipeline, provider, TURN allocation, reservation, microphone, and browser audio objects close.
+
+Then run `scripts/voice_live_stack.py --runtime pipecat_smallwebrtc_v1` on a reachable HTTPS Murmur host with valid public TLS, the same direct provider accounts/models/prompt, and production-shaped Coturn. Use the same browser, corpus, region, network shaping, evidence schema, direct and forced-relay cases, disconnect case, and budget policy as 1A. Include Pipecat process/peer IDs, Coturn allocation/traffic, selected candidate pair, worker compute/warm time, and provider usage. Passing local loopback is not live-equivalent proof, and a live direct path does not waive the forced relay path.
+
+Milestone 1B exits only when focused security/lifecycle tests, deterministic direct and forced-relay browser runs, credentialed live-equivalent direct and forced-relay runs, and bounded fresh-call failure all pass. If provider credentials, public HTTPS, DNS/certificates, or reachable Coturn are absent, identify the missing external prerequisite and keep the corresponding result `unmeasured`; do not call the arm production-equivalent.
+
+### Milestone 1C: select exactly one realtime runtime
+
+Normalize both arms with `scripts/voice_runtime_compare.py`. It refuses to compare different commit SHAs, manifest/gate/corpus hashes, browser versions, regions, network profiles, sample definitions, or incomplete hard-gate evidence. It produces a matrix for readiness truth, audible-turn success, turn/entity accuracy, p50/p95 latency, interruption, direct/relay behavior, disconnect cleanup, residual resources, process limits, and total cost per successful audio minute. Architecture preference, already-written code, and a lower isolated vendor fee are not scoring criteria.
+
+Reject any arm that fails ownership isolation, false-ready/silent-success, canonical event validity, non-zero audio, interruption, bounded failure, relay/TLS, or cleanup. Among passing arms, select the lower operational risk and total cost when latency/quality are materially equivalent; select the better latency/quality arm only with the measured tradeoff written here. Explicitly record SmallWebRTC's observed geographic/concurrency limitations and LiveKit Cloud dependence/allowance limits. If evidence is tied, prefer the smaller operational surface only after both are passing; do not keep both active “just in case.”
+
+Write the winning `runtime`, profile, evidence run IDs, reasons, rejected-arm limitations, rollback boundary, and cost basis in the Decision Log and Outcomes. Set the deployment-owned default for new V2 calls to the winner while retaining `legacy` as the pre-cutover rollback. Remove the rejected runtime from frontend selection and new-call routing before Milestone 2; keep its evidence and minimal tests until the final deletion milestone. No agent, memory, tool, canvas, Conductor, Reasoner, or durable reconnect integration begins before this record exists.
 
 ### Milestone 2: reconnect the existing Murmur product
+
+Start only from the Milestone 1C winner. Delete the rejected arm from active new-call routing and do not implement the following adapters twice.
 
 Extract one shared immutable session-context builder from duplicated chat/voice pipeline construction. It loads the owned agent, prompt/persona, session history, relevant memory, resources, model policy, and canvas capability without binding to a transport. Build separate mutable pipeline instances for text chat, Conductor, and Reasoner. Never share one `LLMPipeline`: it owns memory, tool callbacks, and canvas state. Disable Reasoner-side direct memory persistence and canvas publication; the coordinator alone commits the verified canonical answer. Text chat must continue using its own role-specific factory.
 
@@ -362,7 +469,7 @@ Exit when one authenticated voice-plus-canvas scenario uses the existing agent/r
 
 Before adding task/event/artifact tables, introduce Alembic, the baseline/adoption schema guard, and explicit migration commands described above. This is intentionally deferred until the cheap transport and product slices pass.
 
-Persist voice-call assignment before any percentage canary. The unique call ID/bootstrap key, room, dispatch ID, and selected profile make bootstrap transactional and reconnectable even after FastAPI restarts. Add the single authoritative `EventAppender`; task transitions and their durable events must commit atomically.
+Persist voice-call assignment before any percentage canary. The unique call ID/bootstrap key, selected runtime/profile, and runtime-specific locator (LiveKit room/dispatch or Pipecat peer reservation) make bootstrap transactional and recoverable after FastAPI restarts. Add the single authoritative `EventAppender`; task transitions and their durable events must commit atomically.
 
 Implement the Conductor with a deliberately small policy surface. It can answer safe, short conversational turns; ask clarification; call only `start_task`, `cancel_task`, and `get_task_status`; acknowledge work without claiming completion; and present verified results. It owns exactly one generation/audio floor and cancels it idempotently on interruption.
 
@@ -376,17 +483,17 @@ Keep conversation available while the Reasoner works. Queue verified-result pres
 
 Exit when a 5-10 second deep task emits at least three observable progress/state transitions, the user can interrupt and converse during it, cancellation prevents all stale speech/canvas updates, a correction supersedes the old generation, and final narration occurs only after the durable result and any required render acknowledgement.
 
-### Milestone 4: select the media/model profile empirically
+### Milestone 4: optimize media/model profiles inside the selected runtime
 
-Run the same audio, prompt, task, region, network profiles, and acceptance gates against at least:
+The runtime decision is already closed. Run the same audio, prompt, task, region, network profiles, and acceptance gates inside that runtime against at least:
 
 * the measured legacy result;
-* `livekit-agents-cascade`, using explicit STT, LLM, and TTS providers;
-* `livekit-agents-realtime`, using one native speech-to-speech candidate only if it can emit/consume Murmur's transcript, task, cancellation, and canvas contracts.
+* the selected runtime's Milestone 1 direct-provider cascade;
+* one native speech-to-speech candidate only if the selected runtime can emit and consume Murmur's transcript, task, cancellation, usage, and canvas contracts without weakening auditability.
 
-Do not assume native speech-to-speech is better because its first audio is faster. Score recognition and critical entities, premature endpointing, interruption relevance, task success, canvas correctness, controllability, transcript/audit quality, and cost. Likewise, do not build a full RTC-only custom cascade just to justify LiveKit Agents. Self-hosted Agents is the default implementation; create a bounded `livekit-rtc-custom-cascade` spike only if Agents itself causes a measured failure or unacceptable compute/cost.
+Do not assume native speech-to-speech is better because its first audio is faster. Score recognition and critical entities, premature endpointing, interruption relevance, task success, canvas correctness, controllability, transcript/audit quality, and total cost. Do not reopen LiveKit versus Pipecat because a provider profile underperforms; first tune or replace the provider within the selected runtime. Reopen Milestone 1 only when new evidence shows that the selected runtime itself violates a hard contract and record that as a new decision, not an informal fallback.
 
-First tune profile configuration, prompts, and provider choices within the existing contract. If no profile passes, use the failure evidence to choose between a Pipecat runtime spike, provider replacement, or product-scope revision. Do not move the gates to make a preferred vendor win.
+If no profile passes, use the evidence to choose provider replacement, a bounded native-profile rejection, product-scope revision, or an explicit runtime-decision reopening. Do not move the gates to make a preferred provider win.
 
 Exit with a written decision in this plan containing sample size, p50/p95 latency, endpoint and interruption errors, critical-entity and Hinglish results, task/canvas correctness, user preference if tested, cost per successful audio minute, and known limitations.
 
@@ -394,13 +501,13 @@ Exit with a written decision in this plan containing sample size, p50/p95 latenc
 
 Add deterministic failure injection for missing dependencies, invalid credentials, provider 401/429/timeouts, empty or partial streams, duplicate/reordered STT segments, missing EOT, resumed speech, worker crash, duplicate delivery, late results, canvas conflicts, lost acknowledgements, reconnect, shutdown, and concurrent-session isolation. Every failure must end in a bounded explicit state; no retry storm or silent success is allowed.
 
-Complete two distinct Playwright environments. Offline RTC E2E runs a pinned local LiveKit server, FastAPI with a test-process Firebase dependency override and seeded owned session, a fake Murmur worker that consumes real inbound audio frames and publishes a deterministic audio fixture, and Next.js. It uses no provider credentials and runs on every PR. Credentialed live E2E uses LiveKit Cloud and real providers, is scheduled/manual, and enforces the dollar budget. Browser tests must cover genuine readiness, one RTC turn, actual non-zero remote audio frames, long pauses, interruption during playback, correction during background work, artifact acknowledgement, provider-unavailable UI, reconnect/snapshot convergence, and cleanup. Never add a production auth bypass.
+Extend, rather than redefine, the selected arm's two Milestone 1 Playwright environments. Its credential-free deterministic project runs on every PR with the selected real RTC path and fake providers. Its protected live project uses the selected Cloud or HTTPS/Coturn topology plus real providers, is scheduled/manual, and enforces the dollar budget. Add full-product cases for long pauses, correction during background work, artifact acknowledgement, provider-unavailable UI, durable reconnect/snapshot convergence, worker drain, and cleanup. Milestone 1's bounded fresh-call failure remains historical evidence; the reconnect/snapshot test here proves the Milestone 3 contract. Never add a production auth bypass.
 
 Persist stage spans and usage records. Server metrics use one monotonic clock within the process. Browser metrics use `performance.now()` and are reported as browser intervals; do not subtract browser and server clock readings. Record WebRTC RTT, jitter, packet loss, selected candidate type, and reconnect count. Replace undefined aggregate `latency_total_ms` with derived named spans.
 
 For the first one-call internal test, SQLite is allowed. Before any multi-session production canary, migrate the ledger to Postgres and introduce durable task delivery. Test upgrade from the oldest supported schema, backup/restore, lease expiry, duplicate delivery, worker drain, and dead-letter handling.
 
-Add `deploy/voice-worker.Dockerfile` and `deploy/README.md`. The image runs as a non-root user, installs only the locked production and `voice-v2` dependencies, includes the new `murmur.reasoning` and migration packages/data in the wheel, and starts through the pinned LiveKit Agents CLI using an entrypoint path proven to exist inside the built image. Do not assume `python -m murmur.voice.worker start`: LiveKit Agents 1.6.9 treats its positional entrypoint as a filesystem path. The worker registers outbound without public ingress, exposes a loopback-only liveness/readiness surface or equivalent platform check, reports successful LiveKit worker registration, and drains jobs on termination. Document required secrets, resource/concurrency limits, one warm replica, log/trace export, and the hosted deployment command. Update `.env.example`, `web/.env.example`, `.github/workflows/ci.yml`, `docs/ARCHITECTURE.md`, `docs/SETUP.md`, `docs/DEVELOPMENT.md`, `docs/DATABASE.md`, `docs/CHANGELOG.md`, and the root `README.md` as their behavior changes.
+Promote only the selected qualification image to `deploy/voice-worker.Dockerfile` and add `deploy/README.md`. The non-root image installs only the selected locked runtime extra and direct-provider adapters, includes `murmur.reasoning` plus migration packages/data, and proves its entrypoint inside the built image. When LiveKit wins, use the pinned Agents CLI filesystem entrypoint and prove outbound registration/drain. When Pipecat wins, expose only the authenticated signaling/media ingress through the documented proxy, validate HTTPS and Coturn REST credentials, and prove peer/pipeline/TURN drain. In either case document secrets, resource/concurrency limits, warm capacity, log/trace export, and hosted commands. Update `.env.example`, `web/.env.example`, `.github/workflows/ci.yml`, `docs/ARCHITECTURE.md`, `docs/SETUP.md`, `docs/DEVELOPMENT.md`, `docs/DATABASE.md`, `docs/CHANGELOG.md`, and the root `README.md` as behavior changes.
 
 Canary new sessions only. First shadow the Reasoner without exposing results, then use an internal allowlist, then 5%, 25%, 50%, and 100% gates. Disable Voice V2 for new sessions and drain active calls on rollback. Provider-specific kill switches may disable one STT/TTS/model profile without reverting the whole architecture.
 
@@ -408,28 +515,27 @@ Exit after the selected profile clears all hard gates in live staging, cost reco
 
 ### Milestone 6: cutover and deletion
 
-Make Voice V2 the default only after Milestone 5. Retain the legacy path for two stable release windows, then remove `/offer`, `aiortc`, raw peer state, direct Deepgram socket code no longer used, data-channel PCM playback, duplicated frontend VAD/audio hooks, obsolete Smart Turn/Kokoro code, unused dependencies, old tests, and stale documentation.
+Make Voice V2 the default only after Milestone 5. Retain the legacy path for two stable release windows, then remove `/offer`, legacy raw peer state, direct Deepgram socket code no longer used, data-channel PCM playback, duplicated frontend VAD/audio hooks, obsolete Smart Turn/Kokoro code, unused dependencies, old tests, and stale documentation. Remove `aiortc` only if the selected runtime does not require it; Pipecat SmallWebRTC currently does.
 
 Build a fresh wheel and a clean frontend artifact after deletion to prove no stale generated module remains. Run from a clean checkout with only documented environment variables. Perform one final credentialed browser session from connect through deep task, canvas render, interruption, end, and authoritative persistence read-back.
 
 ### Work sequencing and parallel lanes
 
-One integrator owns contracts, schema, and milestone acceptance. After the event/state contracts land, work may proceed in bounded parallel lanes:
+One integrator owns runtime-neutral contracts, the evidence schema, and milestone acceptance. Before selection, work may proceed in bounded parallel lanes only after `runtime_contracts.py`, the assignment union, provider manifest, `VoiceTransport`, and canonical event version are fixed:
 
-* backend transport lane: bootstrap route, LiveKit runtime, worker, readiness, cleanup;
-* frontend lane: token bootstrap, session machine, audio/event connection, renderer acknowledgement, Playwright;
-* orchestration lane: Conductor, Reasoner, task repository, canvas authority;
-* evidence lane: replay corpus, instrumentation, cost ledger, live qualification, dashboards.
+* Milestone 1A lane: LiveKit direct-provider factory, Cloud direct/relay qualification, and exact cleanup;
+* Milestone 1B lane: Pipecat signaling/pipeline, SmallWebRTC browser adapter, Coturn direct/relay qualification, and exact cleanup;
+* shared evidence lane: unchanged corpus/gates, selected-candidate capture, cost normalization, and the comparison refusal rules.
 
-Do not parallelize competing edits to the same session lifecycle before the contracts are merged. Each lane rebases on the integration branch, runs its focused tests, and hands off an event-contract version. A milestone is integrated only when the whole repository gates pass.
+The product/orchestration lane is deliberately closed until Milestone 1C. Do not parallelize competing edits to the shared session lifecycle, make one arm import the other's SDK, or allow an arm to change common gates unilaterally. After selection, open one product lane, one Conductor/Reasoner/persistence lane, and one evidence/operations lane against the winner only. A milestone is integrated only when whole-repository gates pass.
 
 ### Explicitly not in scope for the first passing Voice V2
 
-Do not self-host the LiveKit SFU, introduce A2A, expose user-authored tools, add a general agent marketplace, build a universal event bus, add Redis by default, rewrite the canvas renderer, migrate every repository to async, support multiple simultaneous assistant voices, or remove text chat. These may become separate plans after evidence shows they are necessary.
+Do not self-host the LiveKit SFU, combine LiveKit and Pipecat in one call, turn the narrow runtime port into a universal media framework, introduce A2A, expose user-authored tools, add a general agent marketplace, build a universal event bus, add Redis by default, rewrite the canvas renderer, migrate every repository to async, support multiple simultaneous assistant voices, or remove text chat. Operating Pipecat SmallWebRTC and Coturn for the bounded challenger is in scope; building a general-purpose SFU or global RTC network is not. These may become separate plans after evidence shows they are necessary.
 
 ## Concrete Steps
 
-The commands below assume the repository root is `/Users/swayam.gupta/Documents/GitHub/conv-ai-visual` and Python 3.11 or 3.12.
+The commands below assume the repository root is `/Users/swayam.gupta/Documents/GitHub/conv-ai-visual` and Python 3.11 or 3.12. Steps 1-6 are the preserved historical path through `cf1ddcd`; Run J is their authoritative local-media result. Steps 7 onward are the executable remaining sequence. Do not reinterpret an in-progress worktree change as completion: record the commit SHA in every new evidence bundle.
 
 1. Record the execution baseline and protect unrelated work.
 
@@ -478,9 +584,9 @@ The commands below assume the repository root is `/Users/swayam.gupta/Documents/
 
    Test unauthorized agent access, another user's session, expired token, duplicate bootstrap, duplicate dispatch, room-metadata mismatch, worker metadata mismatch, and secret non-disclosure.
 
-5. Implement the minimal worker and production browser adapter.
+5. Implement the minimal LiveKit worker and production browser adapter.
 
-   Add the standalone worker entrypoint, `livekit_runtime.py`, the fake/direct profile factory, `web/src/hooks/use-voice-session.ts`, event reducer, state machine, error UI, and audio-track handling. Integrate this production adapter in `web/src/app/(app)/session/[agentId]/page.tsx`. Keep the generic canvas page on its legacy developer/demo path until it is redirected or removed. Keep the legacy hook behind runtime assignment until cutover.
+   Add the standalone worker entrypoint, `worker_runtime.py`, deterministic profile seam, `web/src/hooks/use-voice-session.ts`, event reducer, state machine, error UI, and audio-track handling. Integrate this production adapter in `web/src/app/(app)/session/[agentId]/page.tsx`. Keep the generic canvas page on its legacy developer/demo path until it is redirected or removed. Keep the legacy hook behind runtime assignment until cutover. The real direct-provider factory remains unfinished after this historical step.
 
        uv run pytest tests/test_voice_v2_bootstrap.py tests/test_voice_v2_readiness.py -q
        (cd web && npm run lint && npm run typecheck && npm run test && npm run build)
@@ -493,102 +599,122 @@ The commands below assume the repository root is `/Users/swayam.gupta/Documents/
 
    In CI, install Chromium and run the digest-pinned local-server container through the same stack runner. The test-process auth override must be impossible unless the explicit E2E environment is active. Evidence is written under ignored `var/voice-e2e/` and `var/evals/` and uploaded even when the job fails.
 
-7. Run the minimal credentialed Cloud slice manually in three terminals.
+7. Freeze the shared runtime contracts before either remaining arm changes product state.
 
-       # Terminal 1, repository root
-       uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
+   Add `runtime_contracts.py`, the bootstrap response union, provider manifest/readiness result, `VoiceTransport`, and strict assignment decoders. Make server selection authoritative and test that one response can instantiate exactly one adapter. Preserve byte-for-byte canonical Murmur event semantics across both encodings. This step contains no provider call.
 
-       # Terminal 2, repository root
-       uv run python -m livekit.agents start backend/murmur/voice/worker.py --dev
+       uv run pytest tests/test_voice_runtime_contracts.py tests/test_voice_v2_contracts.py tests/test_voice_v2_bootstrap.py -q
+       (cd web && npm run test -- --run src/features/voice/session-api.test.ts src/features/voice/session-runtime-controller.test.tsx src/features/voice/event-reducer.test.ts)
+       (cd web && npm run typecheck)
 
-       # Terminal 3, repository root
-       npm --prefix web run dev
+   Acceptance: a request has no runtime field; `VOICE_RUNTIME` is the only new-call arm selector; LiveKit-only fields are rejected on Pipecat assignments and vice versa; the legacy/V2 frontend switch cannot pick a V2 arm; secrets are absent; and neither adapter imports the other SDK.
 
-   Use a credentialed internal account and a positive evaluation budget. Verify transport-connected and voice-ready separately, one spoken turn, actual non-zero remote audio frames, interruption, explicit dispatch, token refresh/reconnect, and cleanup. Record voice-call/room/dispatch/job/build/profile IDs in the trace.
+8. Complete Milestone 1A's direct-provider factory and retain the deterministic LiveKit proof.
 
-8. Reconnect existing agent/session/memory/canvas behavior without new Voice V2 tables.
+   Finish `provider_probe.py` and `provider_profiles/livekit_cascade.py`, lock only compatibility-tested direct plugins, wire the production registry, and extend preflight/live evaluator commands. Do not mark this step complete from the current uncommitted worktree alone.
 
-   Extract the immutable context builder and separate role-specific pipeline factories. Make persistent session creation idempotent with a client-generated session UUID primary key. Replace the unauthenticated beacon end path. Add the typed `CanvasArtifact` compatibility union and prove `operations_v1` plus `sdl_scene_v2` renderer parity. Do not add revision authority yet. Prove canonical-answer persistence and ensure Reasoner-style pipelines cannot persist or publish directly.
+       uv sync --locked --extra dev --extra voice-v2
+       uv run pytest tests/test_voice_livekit_profile.py tests/test_voice_v2_worker.py tests/test_voice_v2_worker_events.py -q
+       uv run python scripts/voice_eval.py preflight --runtime livekit_v2 --profile livekit-agents-cascade-v1 --assert-ready
+       uv run python scripts/voice_e2e_stack.py
 
-       uv run pytest tests/test_authenticated_session_continuity.py tests/test_memory_context.py tests/test_persistence_repositories.py tests/test_voice_v2_integration.py -q
-       (cd web && npm run test -- --reporter=dot)
+   Acceptance: wrong/missing credentials, invisible model/voice, timeout, partial construction, cancellation, and duplicate close fail before Ready; explicit direct provider objects reach `AgentSession`; the deterministic Run J scenario remains reproducible; and every opened provider resource closes once. Preflight may make only the documented bounded metadata/readiness calls and must label what those calls do not prove.
 
-9. Add migrations, then the call/task/event ledger, Conductor, Reasoner, and canvas authority.
+9. Run Milestone 1A's credentialed Cloud matrix with a cumulative budget ledger.
 
-   Add Alembic, a baseline revision, existing-schema fingerprint/adoption, fresh-database upgrade, backup/refusal tests, and the Voice V2 schema migration. Replace application startup `create_all()` with a schema-current assertion; allow `create_all()` only through an explicit helper used from `tests/conftest.py`. Update `pyproject.toml` so migration packages and migration data are present in the wheel; `murmur.reasoning` was already added with the contract package in Step 2.
+       uv run python scripts/voice_live_stack.py run --runtime livekit_v2 --network direct --suite evals/voice/qualification.jsonl --gates evals/voice/gates.json --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json --assert-gates
+       uv run python scripts/voice_live_stack.py run --runtime livekit_v2 --network relay-tls --suite evals/voice/qualification.jsonl --gates evals/voice/gates.json --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json --assert-gates
+       uv run python scripts/voice_live_stack.py disconnect --runtime livekit_v2 --network relay-tls --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json
 
-       uv run python scripts/migrate.py check
-       uv run alembic upgrade head
-       uv run pytest tests/test_migrations.py -q
+   Each command refuses unset/non-positive budget, missing protected credentials, a dirty or unidentified build, or a production account. Acceptance is selected direct UDP in the first run, selected relay/TLS in the second, non-zero browser audio and real providers in both, interruption at or below the hard gate, explicit fresh-call/text behavior after disconnect, exact room/dispatch/job/provider cleanup, and a cost record. This is bounded failure, not durable reconnect.
 
-   Add the durable voice-call assignment, task/lease, event, artifact-revision, and usage models/repositories. Enforce unique bootstrap/event/sequence constraints and atomic task-transition/event append. Add Conductor, Reasoner, and CanvasAuthority with an injected clock and virtual scheduler. All Voice V2 synchronous repository calls are bounded/offloaded from first use. Cap SQLite mode to one concurrent V2 call. Required focused suites are:
+10. Implement and deterministically qualify Milestone 1B.
 
-       tests/test_voice_v2_conductor.py
-       tests/test_voice_v2_task_lifecycle.py
-       tests/test_voice_v2_canvas_authority.py
-       tests/test_voice_v2_cancellation.py
-       tests/test_voice_v2_session_isolation.py
-       tests/test_voice_v2_integration.py
+    Add the locked `voice-pipecat` extra, pinned Pipecat JS packages, Pipecat ASGI/signaling/runtime/profile files, browser adapter, Coturn config, and deterministic runner/tests named above. The runner generates ephemeral test TLS assets outside source control and owns every process/container/port.
 
-       uv run alembic upgrade head
-       uv run pytest tests/test_voice_v2_conductor.py tests/test_voice_v2_task_lifecycle.py tests/test_voice_v2_canvas_authority.py tests/test_voice_v2_cancellation.py tests/test_voice_v2_session_isolation.py tests/test_voice_v2_integration.py -q
+        uv sync --locked --extra dev --extra voice-pipecat
+        (cd web && npm ci && npx playwright install chromium)
+        uv run pytest tests/test_voice_runtime_contracts.py tests/test_voice_pipecat_profile.py tests/test_voice_pipecat_signaling.py tests/test_voice_pipecat_runtime.py -q
+        (cd web && npm run test -- --run src/features/voice/pipecat-transport.test.ts src/features/voice/session-runtime-controller.test.tsx)
+        uv run python scripts/voice_pipecat_e2e_stack.py --network direct --assert-gates
+        uv run python scripts/voice_pipecat_e2e_stack.py --network relay-tls --assert-gates
 
-10. Add reconnect convergence and split Playwright/CI jobs.
+    Acceptance: the production adapter exchanges real Opus media with the Pipecat pipeline; fake components produce the same canonical two-turn/interruption semantics; forced relay proves a relay/TLS selected pair plus matching Coturn allocation/bytes; direct proves the declared non-relay path; no LiveKit process participates; and peer, pipeline, provider, reservation, TURN allocation, media tracks, and browser elements are absent after cleanup.
 
-    Implement the reconnect handshake, durable replay, authoritative snapshot, canvas revision acknowledgement, and post-snapshot delta behavior. Extend the Playwright configuration with Chromium fake-media flags and checked-in synthetic/consented audio fixtures. Define separate scripts/projects:
+11. Run Milestone 1B's credentialed live-equivalent matrix under the same campaign cap.
 
-        (cd web && npx playwright install chromium)
-        uv run python scripts/voice_e2e_stack.py
+        uv run python scripts/voice_live_stack.py run --runtime pipecat_smallwebrtc_v1 --network direct --suite evals/voice/qualification.jsonl --gates evals/voice/gates.json --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json --assert-gates
+        uv run python scripts/voice_live_stack.py run --runtime pipecat_smallwebrtc_v1 --network relay-tls --suite evals/voice/qualification.jsonl --gates evals/voice/gates.json --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json --assert-gates
+        uv run python scripts/voice_live_stack.py disconnect --runtime pipecat_smallwebrtc_v1 --network relay-tls --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --campaign-cap-usd 25 --budget-ledger var/evals/m1-runtime-budget.json
 
-    `test:e2e:offline` runs only through `scripts/voice_e2e_stack.py` with local RTC and fake providers. `test:e2e:live` refuses to run without protected credentials and a positive budget. The independent `rtc` GitHub Actions job now covers the local RTC/browser proof and always uploads its artifacts. Add the protected scheduled/workflow-dispatch live-provider job only with the later credentialed qualification. Test direct UDP and TURN/TLS in live qualification. For impaired networks, use `tc netem`, a controlled hotspot, or an equivalent transport-level tool outside ordinary PR CI.
+    Run on the declared reachable HTTPS host with public TLS and production-shaped Coturn. Acceptance mirrors Step 9 and additionally reconciles Coturn allocation/traffic, host/pipeline compute and warm time, and peer/pipeline cleanup. Missing DNS, certificate, host, Coturn, or provider credentials yields `unmeasured`; it is not a passing local substitute.
 
-11. Run profile qualification with a hard budget.
+12. Select the runtime, or stop.
 
-        uv run python scripts/voice_eval.py preflight --profile livekit-agents-cascade
-        uv run python scripts/voice_eval.py live --suite evals/voice/qualification.jsonl --profile livekit-agents-cascade --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --gates evals/voice/gates.json --assert-gates
+        uv run python scripts/voice_runtime_compare.py --livekit-evidence "$M1_LIVEKIT_EVIDENCE_DIR" --pipecat-evidence "$M1_PIPECAT_EVIDENCE_DIR" --gates evals/voice/gates.json --require-comparable --output var/evals/m1-runtime-decision.json
 
-    Repeat for the native-realtime challenger only after it passes preflight and contract compatibility. No command may run live providers when `MURMUR_EVAL_BUDGET_USD` is unset or non-positive. The first qualification campaign has a cumulative cap of USD 25; increasing it requires explicit user approval.
+    Verify the comparison refusal cases in `tests/test_voice_runtime_compare.py`. Copy the resulting run IDs and decision fields into this plan's Decision Log and Outcomes, set the V2 server default to exactly one winner, remove the rejected arm from new-call/frontend routing, and run both ownership tests plus the winner's deterministic test. Do not continue when either bundle is incomplete or neither arm passes. Any increase above the cumulative USD 25 campaign cap requires explicit user approval.
 
-        npm --prefix web run test:e2e:live
+13. Reconnect only the selected runtime to existing agent/session/memory/canvas behavior.
 
-12. Move production state and package/deploy the worker before canary.
+    Extract the immutable context builder and separate role-specific pipeline factories. Make persistent session creation idempotent, replace the unauthenticated beacon end path, add the typed `CanvasArtifact` compatibility union, and prove canonical-answer persistence. No rejected-runtime product adapter is allowed.
 
-    Migrate the Voice V2 ledger to Postgres and introduce the selected durable delivery mechanism. Prove leases, heartbeat expiry, idempotent redelivery, dead-letter handling, worker drain, and task behavior across voice-job reconnect. Add `deploy/voice-worker.Dockerfile`, `deploy/README.md`, configuration examples, registration/readiness reporting, graceful termination, resource/concurrency limits, and observability export. Build and inspect the wheel and container before deployment.
+        uv run pytest tests/test_authenticated_session_continuity.py tests/test_memory_context.py tests/test_persistence_repositories.py tests/test_voice_v2_integration.py -q
+        (cd web && npm run test -- --reporter=dot)
+
+14. Add migrations, durable call/task/event state, the two-tier brain, and real reconnect convergence.
+
+    Add Alembic and schema guards first, then the runtime-neutral assignment locator, task/lease/event/artifact/usage repositories, Conductor, Reasoner, and CanvasAuthority. Only here implement durable replay, authoritative snapshot, canvas acknowledgement, post-snapshot deltas, and task behavior across reconnect.
+
+        uv run python scripts/migrate.py check
+        uv run alembic upgrade head
+        uv run pytest tests/test_migrations.py tests/test_voice_v2_conductor.py tests/test_voice_v2_task_lifecycle.py tests/test_voice_v2_canvas_authority.py tests/test_voice_v2_cancellation.py tests/test_voice_v2_session_isolation.py tests/test_voice_v2_integration.py -q
+
+    Acceptance includes a selected-runtime browser fault test that reconnects, stops orphaned audio, applies one complete replay or snapshot before new deltas, preserves or explicitly fails leased deep work, and never repeats unheard/interim data. This Step 14 proof supersedes the bounded fresh-call behavior only for the integrated runtime.
+
+15. Optimize provider profiles inside the selected runtime.
+
+        uv run python scripts/voice_eval.py live --runtime "$M1_SELECTED_RUNTIME" --suite evals/voice/qualification.jsonl --profile "$M1_CASCADE_PROFILE" --max-cost-usd "$MURMUR_EVAL_BUDGET_USD" --gates evals/voice/gates.json --assert-gates
+
+    Repeat for one native-realtime profile only after contract preflight. Keep this campaign separately budgeted and record sample size, p50/p95, endpoint/interruption errors, critical entities, Hinglish, task/canvas correctness, auditability, and total cost. This chooses a provider profile inside the winner; it is not Steps 9-12 repeated and does not silently reopen runtime selection.
+
+16. Move selected production state and package the selected worker before canary.
+
+    Migrate the ledger to Postgres, introduce durable delivery, promote only the winning qualification image/config, and prove leases, redelivery, dead letter, drain, and task behavior across runtime reconnect.
 
         uv build
         python -m zipfile -l dist/*.whl
         docker build -f deploy/voice-worker.Dockerfile -t murmur-voice-worker:local .
 
-13. Run full local gates after every integrated milestone.
+17. Run full local gates after every integrated milestone.
 
         uv run ruff check .
         uv run ruff format --check .
         uv run pytest -m "not live_provider"
         uv run python -c "from main import app; print(app.title)"
         (cd web && npm run lint && npm run typecheck && npm run test && npm run build)
-        uv run python scripts/voice_e2e_stack.py
 
-    Live-provider, load, and impaired-network suites remain separately triggered and budgeted. A green offline suite must never be reported as proof of the real voice experience.
+    Also run the selected runtime's deterministic stack command from Step 8 or 10. Live-provider, load, and impaired-network suites remain separately triggered and budgeted. A green offline suite must never be reported as real-provider, geographic, TURN, or production-cost proof.
 
-14. Canary, roll back deliberately, then remove legacy code.
+18. Canary, roll back deliberately, then remove legacy and rejected-runtime code.
 
-    Record internal, 5%, 25%, 50%, and 100% results in this plan. Exercise rollback before full rollout. After two stable release windows, remove the legacy files/dependencies and verify from a clean checkout and fresh wheel.
+    Record internal, 5%, 25%, 50%, and 100% results in this plan. Exercise rollback before full rollout. After two stable release windows, remove legacy and rejected-arm files/dependencies and verify from a clean checkout, fresh wheel, selected deterministic stack, and selected credentialed browser journey.
 
         uv build
         python -m zipfile -l dist/*.whl
         uv run pytest
         (cd web && npm ci && npm run check)
-        uv run python scripts/voice_e2e_stack.py run -- npm --prefix web run test:e2e:offline
 
 ## Validation and Acceptance
 
-Validation has two independent layers. Offline tests prove deterministic orchestration, isolation, and failure behavior. Credentialed browser tests prove the actual RTC/provider experience. Neither substitutes for the other.
+Validation has three ordered layers. Runtime-neutral unit/replay tests prove contracts, isolation, and deterministic orchestration. Each arm's credential-free browser topology proves its real RTC/media/lifecycle path. Each arm's credentialed live-equivalent browser matrix proves direct providers, cross-network direct/relay behavior, and measurable cost. No layer substitutes for another, and product/two-tier validation begins only after the two arm bundles are compared and one runtime is selected.
 
 ### Required functional invariants
 
 * The UI never reports voice-ready until the transport, worker, required provider/model path, and event channel are usable.
 * Invalid credentials and missing required dependencies are discovered before Ready and produce an actionable unavailable state with text fallback.
-* Repeating bootstrap with the same owned session/call ID returns the same active room, named-worker dispatch, and server-selected profile; a conflicting identity fails closed.
+* The bootstrap request cannot select a runtime. Repeating it with the same owned session/call ID returns the same active runtime assignment and server-selected profile: exact room/dispatch for LiveKit or exact unconsumed/active peer reservation for Pipecat. A conflicting identity or runtime fails closed.
+* One call constructs exactly one runtime adapter. No LiveKit object enters a Pipecat call, no Pipecat object enters a LiveKit call, and product code sees neither SDK.
 * Final transcript segments accumulate; only committed EOT dispatches a turn. Resumed speech cancels speculation before side effects.
 * A turn commits at most once despite retries, reconnects, and duplicate events.
 * Exactly one Conductor owns assistant speech. Interruption and cancellation are idempotent, and audio already heard is never replayed after a TTS retry.
@@ -596,7 +722,7 @@ Validation has two independent layers. Offline tests prove deterministic orchest
 * Canvas application requires the expected base revision, is idempotent by event ID, rejects stale patches, records `canvas_apply_ack` after scene insertion/scheduling, and records `canvas_first_visible` after the first meaningful rendered frame. Full animation completion is a separate optional event.
 * Reconnect either replays the complete durable gap or applies one authoritative snapshot before new deltas; orphaned audio and stale interim transcripts never replay.
 * No completion claim is spoken or stored before authoritative task verification. A claim that an artifact is visible additionally requires `canvas_first_visible`; it does not wait for the entire teaching animation.
-* Session finalization leaves no active provider stream, worker task, room reference, or process-local registry state.
+* Session finalization leaves no active provider stream, worker/pipeline task, room/dispatch or peer/reservation reference, TURN allocation, media track, or process-local registry state.
 * No event, audio, task, memory, or canvas state crosses users or sessions.
 * Application and worker startup refuse a stale schema; production code never calls `create_all()` or mutates schema outside the explicit migration step.
 
@@ -608,6 +734,9 @@ Functional hard gates:
 
 * zero false-ready sessions;
 * zero silent successful turns in 100 qualification turns;
+* one real selected ICE path per required network case: declared direct UDP for `direct` and relay/TLS plus matching relay evidence for `relay-tls`;
+* non-zero decoded browser PCM, canonical speech terminal state, and exact runtime/provider cleanup in every Milestone 1 smoke run;
+* bounded disconnect always stops audio and offers an authenticated fresh call or text fallback; durable replay/snapshot is not a Milestone 1 requirement;
 * zero cross-session events, duplicate side effects, stale spoken results, or stale canvas patches;
 * 100% task/artifact schema validity and completion claims backed by authoritative state;
 * premature turn split rate at or below 2% and incorrect turn merge rate at or below 2%;
@@ -629,8 +758,8 @@ Reliability and load gates:
 * connection success at or above 99.5% and unexpected session disconnects below 0.5% for canary windows;
 * provider-failed turns below 1%; no unbounded retries or queue growth;
 * at the declared initial concurrency, p95 response latency degrades by less than 20% from a single-session baseline;
-* zero residual tasks or room/session references after cleanup;
-* direct UDP, TURN/TLS, 150 ms RTT plus 2% packet loss, reconnect, and worker drain are explicitly exercised before production qualification.
+* zero residual tasks, providers, workers/pipelines, room/dispatches, peer/reservations, TURN allocations, media tracks, or session references after cleanup;
+* both Milestone 1 arms explicitly exercise their direct and forced TURN/TLS paths plus bounded fresh-call failure before selection; 150 ms RTT plus 2% packet loss, durable reconnect/snapshot, and worker drain are explicitly exercised for the selected integrated runtime before production canary.
 
 Task-quality gates:
 
@@ -641,16 +770,18 @@ Task-quality gates:
 
 Cost gates:
 
-* no live evaluation runs without a positive explicit budget; the initial campaign cap is USD 25;
+* no live evaluation runs without a positive explicit per-run budget; Steps 9 and 11 share one append-only budget ledger and one cumulative initial runtime-selection campaign cap of USD 25;
 * define `MAX_COST_PER_SUCCESSFUL_AUDIO_MINUTE_USD` from the intended price/usage model before canary;
-* include RTC, downstream traffic, STT connection time, LLM tokens/cache, TTS characters/audio, worker compute and warm idle, Reasoner/tools, observability, retries, failures, and cancelled speculation;
+* include direct-provider STT connection time, LLM tokens/cache, TTS characters/audio, worker/pipeline compute and warm idle, downstream traffic, observability, retries, failures, and cancelled speculation for both arms;
+* for LiveKit, also include Cloud RTC/TURN usage and allowances; for Pipecat, include signaling/host compute, Coturn compute, relay bandwidth/egress, certificates and load-balancer/proxy cost. No-managed-RTC fee and open-source licensing are not a zero-cost claim;
+* deterministic fake/local runs report production cost as `unmeasured`, never zero;
 * during profile selection, reject a profile more than 10% costlier than an equally good passing profile;
 * during canary, roll back or pause expansion if cost per successful minute rises more than 20% after at least 100 completed sessions;
-* alert at 70%, 85%, and 95% of any LiveKit/provider allowance; never auto-upgrade a plan.
+* alert at 70%, 85%, and 95% of any LiveKit, hosting, TURN, or provider allowance; never auto-upgrade a plan.
 
 ### Failure-injection acceptance
 
-The deterministic suite must inject readiness failure, transport timeout/reconnect/duplicate events, STT 401/429/disconnect/reordering/missing EOT/resumed speech, slow or partial LLM output, TTS 401/429/zero-byte/partial stream, worker queue delay/crash/duplicate delivery/late result, canvas revision conflict/lost acknowledgement/render exception, concurrent users, and shutdown during work.
+Before selection, both deterministic arm suites must inject readiness failure, invalid/reused/expired assignment, transport timeout/disconnect/duplicate events, selected-path mismatch, STT 401/429/disconnect/reordering/missing EOT/resumed speech, slow or partial LLM output, TTS 401/429/zero-byte/partial stream, worker/pipeline crash, concurrent users, and shutdown during work. The Pipecat suite additionally injects signaling reservation races and Coturn failure; the LiveKit suite retains dispatch/job failure cases. After selection, add durable reconnect/replay, queue duplicate delivery/late result, canvas revision conflict/lost acknowledgement/render exception, and Reasoner shutdown cases.
 
 Every case must end in a documented terminal or recoverable state. There must be no false Ready, silent success, stuck speaking/processing indicator, retry storm, repeated heard audio, stale result, canvas corruption, cross-session leak, or false completion statement.
 
@@ -665,8 +796,11 @@ Each eval writes only ignored artifacts under `var/evals/<run-id>/`:
     artifact-diff.json
     cost.json
     failures.json
+    webrtc-stats.json
+    lifecycle.json
+    topology.json
 
-Every report names the commit SHA, runtime/profile version, provider/model versions, region, browser, network profile, session/turn counts, gate file hash, and whether providers were fake or real. Only synthetic or explicitly consented audio may be checked into the repository.
+Every report names the commit SHA and dirty-state refusal, runtime/profile/manifest version, provider/model versions, region, browser, network profile, session/turn counts, corpus and gate hashes, whether providers were fake or real, selected candidate types/protocols, runtime-specific resource IDs, and cleanup result. `cost.json` states the price date/source, shared and runtime-specific categories, billable quantities, failed/cancelled attribution, and whether production cost is measured or unmeasured. Only synthetic or explicitly consented audio may be checked into the repository.
 
 ### Canary and rollback acceptance
 
@@ -674,4 +808,4 @@ Begin with a shadow Reasoner, then require at least 30 completed internal sessio
 
 Immediately stop new Voice V2 assignment for an ownership/security violation, cross-session leak, stale canvas corruption, false verified-completion claim, or persistence corruption. Automatically roll back new sessions after two consecutive monitoring windows with voice-ready failure above 2%, silent-turn or fatal-turn rate above 1%, p95 speech-end-to-playback above two seconds, metrics completeness below 99%, or the cost regression gate above. Active sessions drain on their existing sticky profile.
 
-The plan is complete only when Voice V2 passes the offline and live gates, a provider/runtime profile is selected with measured cost, the two-tier task/canvas invariants hold, rollback is exercised, the selected runtime is the default, legacy code is removed after two stable release windows, documentation matches the shipped commands, and a fresh-checkout credentialed browser run proves the complete user journey.
+The plan is complete only when both Milestone 1 runtime arms have comparable deterministic and live-equivalent evidence, Milestone 1C selects exactly one passing runtime with measured total cost, product and two-tier work exists only against that winner, the task/canvas invariants hold, rollback is exercised, the selected runtime is the default, legacy and rejected-runtime code are removed after the declared stable windows, documentation matches the shipped commands, and a fresh-checkout credentialed browser run proves the selected complete user journey. If an arm remains unmeasured because credentials or reachable infrastructure are unavailable, Milestone 1C and this plan remain open rather than silently treating the other arm as a comparative winner.
