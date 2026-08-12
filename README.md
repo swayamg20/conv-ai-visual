@@ -69,7 +69,7 @@ git clone https://github.com/swayamg20/conv-ai-visual.git
 cd conv-ai-visual
 
 cp .env.example .env
-uv sync --locked --extra dev --extra voice-v2
+uv sync --locked --extra dev --extra voice-v2 --extra voice-pipecat
 
 cd web
 cp .env.example .env.local
@@ -77,7 +77,7 @@ npm ci
 cd ..
 ```
 
-In `.env`, select `LLM_PROVIDER` and set its matching key. Set `FIREBASE_PROJECT_ID` for authenticated API requests. Voice additionally needs `DEEPGRAM_KEY` and either ElevenLabs credentials or the optional local Kokoro installation. Deepgram endpointing is the default turn detector; Smart Turn is opt-in via `uv sync --locked --extra dev --extra smart-turn` and `SMART_TURN_ENABLED=true`.
+In `.env`, select `LLM_PROVIDER` and set its matching key. Set `FIREBASE_PROJECT_ID` for authenticated API requests. Voice additionally needs `DEEPGRAM_KEY` and either ElevenLabs credentials or the optional local Kokoro installation. The two optional Voice V2 extras install the mutually exclusive LiveKit Agents/RTC and Pipecat/SmallWebRTC challenger runtimes; one call never mixes them. Deepgram endpointing is the default turn detector; Smart Turn is opt-in via `uv sync --locked --extra dev --extra smart-turn` and `SMART_TURN_ENABLED=true`.
 
 In `web/.env.local`, set the Firebase web configuration and leave `NEXT_PUBLIC_API_URL=http://localhost:8000` for local development.
 

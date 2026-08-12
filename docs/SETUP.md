@@ -17,14 +17,14 @@ These steps reproduce the development environment used by CI.
 git clone https://github.com/swayamg20/conv-ai-visual.git
 cd conv-ai-visual
 
-uv sync --locked --extra dev --extra voice-v2
+uv sync --locked --extra dev --extra voice-v2 --extra voice-pipecat
 
 cd web
 npm ci
 cd ..
 ```
 
-`requirements.txt` is an exported compatibility file. Use `uv.lock` for development and CI.
+`requirements.txt` is an exported base compatibility file. Use `uv.lock` with the explicit Voice V2 extras for development and CI. `voice-v2` installs the LiveKit Agents/RTC arm; `voice-pipecat` installs the independent Pipecat/SmallWebRTC arm.
 
 ## Configure the backend
 

@@ -24,7 +24,7 @@ Use `uv.lock` and `web/package-lock.json` as the reproducibility contracts. Rege
 ## Backend checks
 
 ```bash
-uv sync --locked --extra dev --extra voice-v2
+uv sync --locked --extra dev --extra voice-v2 --extra voice-pipecat
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
