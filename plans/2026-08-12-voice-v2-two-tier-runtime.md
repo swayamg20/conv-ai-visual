@@ -587,7 +587,7 @@ The commands below assume the repository root is `/Users/swayam.gupta/Documents/
 
 5. Implement the minimal LiveKit worker and production browser adapter.
 
-   Add the standalone worker entrypoint, `worker_runtime.py`, deterministic profile seam, `web/src/hooks/use-voice-session.ts`, event reducer, state machine, error UI, and audio-track handling. Integrate this production adapter in `web/src/app/(app)/session/[agentId]/page.tsx`. Keep the generic canvas page on its legacy developer/demo path until it is redirected or removed. Keep the legacy hook behind runtime assignment until cutover. The real direct-provider factory remains unfinished after this historical step.
+   Add the standalone worker entrypoint, `worker_runtime.py`, deterministic profile seam, `web/src/hooks/use-voice-session.ts`, event reducer, state machine, error UI, and audio-track handling. Integrate this production adapter in `web/src/app/(app)/session/[agentId]/page.tsx`. Keep the generic canvas page on its legacy developer/demo path until it is redirected or removed. Keep the legacy hook behind runtime assignment until cutover. At this historical step the direct-provider factory was still unfinished; step 8 and commit `c15b6e8` later completed it.
 
        uv run pytest tests/test_voice_v2_bootstrap.py tests/test_voice_v2_readiness.py -q
        (cd web && npm run lint && npm run typecheck && npm run test && npm run build)
@@ -612,7 +612,7 @@ The commands below assume the repository root is `/Users/swayam.gupta/Documents/
 
 8. Complete Milestone 1A's direct-provider factory and retain the deterministic LiveKit proof.
 
-   Finish `provider_probe.py` and `provider_profiles/livekit_cascade.py`, lock only compatibility-tested direct plugins, wire the production registry, and extend preflight/live evaluator commands. Do not mark this step complete from the current uncommitted worktree alone.
+   `provider_probe.py` and `provider_profiles/livekit_cascade.py`, the compatibility-tested direct plugin pins, production registry, and static evaluator preflight are complete in `c15b6e8`. The executable credentialed browser evaluator remains part of step 9 rather than construction evidence.
 
        uv sync --locked --extra dev --extra voice-v2
        uv run pytest tests/test_voice_livekit_profile.py tests/test_voice_v2_worker.py tests/test_voice_v2_worker_events.py -q
