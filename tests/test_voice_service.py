@@ -83,12 +83,19 @@ async def test_voice_finalization_cancels_and_cleans_once() -> None:
     smart_turn = _FakeSmartTurn()
     pipeline = _FakePipeline()
     turn_cancelled = asyncio.Event()
+    audio_cancelled = asyncio.Event()
 
     async def active_turn() -> None:
         try:
             await asyncio.Event().wait()
         finally:
             turn_cancelled.set()
+
+    async def active_audio() -> None:
+        try:
+            await asyncio.Event().wait()
+        finally:
+            audio_cancelled.set()
 
     voice_session = runtime.register_voice(
         "peer",
@@ -100,6 +107,7 @@ async def test_voice_finalization_cancels_and_cleans_once() -> None:
     )
     voice_session.pipeline = pipeline
     voice_session.smart_turn = smart_turn
+    voice_session.audio_task = asyncio.create_task(active_audio())
     voice_session.turn_task = asyncio.create_task(active_turn())
     await asyncio.sleep(0)
 
@@ -107,6 +115,7 @@ async def test_voice_finalization_cancels_and_cleans_once() -> None:
     await service.finalize("peer", min_messages=1, background=False)
 
     assert turn_cancelled.is_set()
+    assert audio_cancelled.is_set()
     assert smart_turn.cleanup_count == 1
     assert peer.close_count == 1
     assert pipeline.ended_with == [None]

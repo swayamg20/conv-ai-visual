@@ -53,6 +53,7 @@ async def test_runtime_shutdown_is_complete_and_idempotent() -> None:
         canvas_mode=True,
     )
     voice_session.smart_turn = smart_turn
+    voice_session.audio_task = asyncio.create_task(wait_forever())
     voice_session.turn_task = asyncio.create_task(wait_forever())
     registry.register_chat("chat", object(), user_id="user", agent_id="agent")
 
@@ -60,7 +61,7 @@ async def test_runtime_shutdown_is_complete_and_idempotent() -> None:
     await registry.shutdown()
     await registry.shutdown()
 
-    assert cancelled == 3
+    assert cancelled == 4
     assert peer.closed is True
     assert smart_turn.cleaned is True
     assert registry.sweeper_task is None

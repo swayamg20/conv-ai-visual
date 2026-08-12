@@ -54,6 +54,8 @@ The first machine-readable legacy preflight on 2026-08-12 found Deepgram, the co
 
 The first adversarial pass caught three failures hidden behind superficially green assertions: duplicate `speech_final` events could dispatch twice, transcript teardown could retain an active `recv()` task, and terminal readiness delivery could wait forever for a data channel. The final implementation coalesces duplicate segments/boundaries, awaits every owned task under asyncio debug checks, keeps pending Ready discoverable until peer/channel teardown, and bounds best-effort delivery of a terminal failure. The browser now treats any explicit `recoverable=false` backend error as terminal instead of matching one error code.
 
+The post-push shutdown audit found that the legacy audio consumer itself was only captured by a track callback, not by `VoiceRuntimeSession`. Peer finalization could therefore remove the registry entry before the provider/audio task ended. The session now owns `audio_task`; finalize and process shutdown cancel and await it with a self-task guard, and task exceptions are retrieved and logged.
+
 The deterministic evaluator initially duplicated the runtime's transcript state machine and only checked that WAV paths existed. It now imports the same `TranscriptAccumulator` used in production, advances it with fixture `at_ms` as a virtual clock, and validates non-empty mono 16 kHz 16-bit PCM WAV metadata. This still does not exercise media transport or provider recognition; those remain Milestone 1 browser/RTC obligations.
 
 The event reducer currently assumes its input has already been ordered by transport or durable replay. A producer-sequence gap is not buffered inside the reducer. Milestone 3 reconnect work must introduce gap detection plus complete ledger replay or an authoritative snapshot before subsequent deltas are reduced.
@@ -173,6 +175,7 @@ Create `backend/murmur/voice/contracts.py` and the matching `web/src/features/vo
     event_id
     event_type
     trace_id
+    voice_call_id
     session_id
     turn_id                 optional before a turn exists
     task_id                 optional before a task exists

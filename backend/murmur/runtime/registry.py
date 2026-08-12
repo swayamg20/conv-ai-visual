@@ -44,6 +44,7 @@ class VoiceRuntimeSession:
     tts_active: bool = False
     pending_sdl: dict[str, Any] | None = None
     smart_turn: SmartTurnSession | None = None
+    audio_task: asyncio.Task[Any] | None = None
     turn_task: asyncio.Task[Any] | None = None
     turn_timing: dict[str, Any] = field(default_factory=dict)
     last_activity: float = field(default_factory=time.monotonic)
@@ -132,10 +133,13 @@ class RuntimeRegistry:
         self.sweeper_task = None
         await self._cancel_tasks({sweeper_task} if sweeper_task else set())
 
-        turn_tasks = {
-            session.turn_task for session in self.voice_sessions.values() if session.turn_task
+        voice_tasks = {
+            task
+            for session in self.voice_sessions.values()
+            for task in (session.audio_task, session.turn_task)
+            if task
         }
-        owned_tasks = turn_tasks | set(self.background_tasks)
+        owned_tasks = voice_tasks | set(self.background_tasks)
         await self._cancel_tasks(owned_tasks)
 
         for session in list(self.voice_sessions.values()):

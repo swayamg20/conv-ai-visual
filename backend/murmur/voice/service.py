@@ -413,6 +413,12 @@ async def _finalize_voice_session(
 
     voice_session.finalizing = True
     try:
+        audio_task = voice_session.audio_task
+        voice_session.audio_task = None
+        if audio_task and audio_task is not asyncio.current_task() and not audio_task.done():
+            audio_task.cancel()
+            await asyncio.gather(audio_task, return_exceptions=True)
+
         await cancel_turn(service, pc_id)
 
         service.runtime.pop_voice(pc_id)
@@ -570,7 +576,26 @@ async def _negotiate_offer(
             "[%s] Track received: kind=%s id=%s", pc_id, track.kind, getattr(track, "id", "?")
         )
         if track.kind == "audio":
+            previous_audio_task = voice_session.audio_task
+            if previous_audio_task and not previous_audio_task.done():
+                previous_audio_task.cancel()
             task = asyncio.create_task(service.transcriber.consume(track, pc_id))
+            voice_session.audio_task = task
+
+            def log_audio_task_failure(completed_task: asyncio.Task[Any]) -> None:
+                if completed_task.cancelled():
+                    return
+                try:
+                    completed_task.result()
+                except Exception:
+                    logger.exception("[%s] Audio transcriber task failed", pc_id)
+
+            def clear_owned_audio_task(completed_task: asyncio.Task[Any]) -> None:
+                if voice_session.audio_task is completed_task:
+                    voice_session.audio_task = None
+
+            task.add_done_callback(log_audio_task_failure)
+            task.add_done_callback(clear_owned_audio_task)
 
             @track.on("ended")
             def on_ended():
