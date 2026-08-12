@@ -1,0 +1,7 @@
+{"event_id":"pause-1","at_ms":0,"type":"speech_started"}
+{"event_id":"pause-2","at_ms":160,"type":"transcript","text":"explain","is_final":false}
+{"event_id":"pause-3","at_ms":420,"type":"transcript","text":"explain the","is_final":true}
+{"event_id":"pause-4","at_ms":1220,"type":"speech_resumed"}
+{"event_id":"pause-5","at_ms":1500,"type":"transcript","text":"Pythagorean","is_final":false}
+{"event_id":"pause-6","at_ms":1840,"type":"transcript","text":"Pythagorean theorem","is_final":true}
+{"event_id":"pause-7","at_ms":2200,"type":"utterance_end"}

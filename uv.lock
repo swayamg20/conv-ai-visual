@@ -1262,6 +1262,10 @@ experiments = [
 local-tts = [
     { name = "kokoro-onnx" },
 ]
+smart-turn = [
+    { name = "huggingface-hub" },
+    { name = "transformers" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -1274,6 +1278,7 @@ requires-dist = [
     { name = "firebase-admin", specifier = ">=6,<8" },
     { name = "google-generativeai", specifier = ">=0.8,<0.9" },
     { name = "httpx", specifier = ">=0.27.2,<1" },
+    { name = "huggingface-hub", marker = "extra == 'smart-turn'", specifier = ">=0.34,<1" },
     { name = "kokoro-onnx", marker = "extra == 'local-tts'", specifier = ">=0.4,<1" },
     { name = "mem0ai", specifier = ">=0.1,<1" },
     { name = "numpy", specifier = ">=1.26.4,<2.3" },
@@ -1295,10 +1300,11 @@ requires-dist = [
     { name = "ten-vad", marker = "extra == 'experiments'", git = "https://github.com/TEN-framework/ten-vad.git?rev=81fc1791e1a198b4028559504ebf6da6061a4b26" },
     { name = "torch", marker = "extra == 'experiments'", specifier = ">=2.8,<3" },
     { name = "transformers", marker = "extra == 'experiments'", specifier = ">=4.57,<5" },
+    { name = "transformers", marker = "extra == 'smart-turn'", specifier = ">=4.57,<5" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.38,<1" },
     { name = "websockets", specifier = ">=15,<16" },
 ]
-provides-extras = ["dev", "local-tts", "experiments"]
+provides-extras = ["dev", "local-tts", "smart-turn", "experiments"]
 
 [[package]]
 name = "networkx"

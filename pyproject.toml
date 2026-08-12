@@ -39,6 +39,10 @@ dev = [
   "ruff>=0.12,<1",
 ]
 local-tts = ["kokoro-onnx>=0.4,<1"]
+smart-turn = [
+  "huggingface-hub>=0.34,<1",
+  "transformers>=4.57,<5",
+]
 experiments = [
   "accelerate>=1.10,<2",
   "bitsandbytes>=0.42,<1",
@@ -62,6 +66,7 @@ packages = [
   "murmur.memory",
   "murmur.persistence",
   "murmur.persistence.repositories",
+  "murmur.reasoning",
   "murmur.resources",
   "murmur.runtime",
   "murmur.tools",
@@ -75,6 +80,7 @@ addopts = "-ra --strict-markers"
 testpaths = ["tests"]
 markers = [
   "integration: exercises multiple application layers with local fakes",
+  "live_provider: requires real provider credentials and an explicit cost budget",
 ]
 
 [tool.ruff]

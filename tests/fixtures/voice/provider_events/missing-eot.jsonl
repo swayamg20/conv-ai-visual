@@ -1,0 +1,2 @@
+{"event_id":"missing-1","at_ms":0,"type":"speech_started"}
+{"event_id":"missing-2","at_ms":350,"type":"transcript","text":"I am still thinking","is_final":true}

@@ -221,11 +221,12 @@ export default function AgentSessionPage() {
 
   const handlePipelineMetrics = useCallback((metrics: Record<string, unknown>) => {
     const parts = [];
-    if (metrics.latency_stt_ms) parts.push(`STT:${metrics.latency_stt_ms}ms`);
+    if (metrics.segment_finalization_ms) parts.push(`Segments:${metrics.segment_finalization_ms}ms`);
+    if (metrics.turn_detection_ms) parts.push(`Turn:${metrics.turn_detection_ms}ms`);
     if (metrics.latency_llm_ms) parts.push(`LLM:${metrics.latency_llm_ms}ms`);
     if (metrics.latency_tool_ms) parts.push(`Tool:${metrics.latency_tool_ms}ms`);
-    if (metrics.latency_tts_ms) parts.push(`TTS:${metrics.latency_tts_ms}ms`);
-    if (metrics.latency_total_ms) parts.push(`Total:${metrics.latency_total_ms}ms`);
+    if (metrics.backend_tts_generation_ms) parts.push(`Backend TTS:${metrics.backend_tts_generation_ms}ms`);
+    if (metrics.legacy_backend_interval_ms) parts.push(`Legacy interval:${metrics.legacy_backend_interval_ms}ms`);
     if (metrics.tts_interrupted) parts.push("(interrupted)");
     handleLog(`Pipeline: ${parts.join(" | ")}`);
   }, [handleLog]);
@@ -339,10 +340,10 @@ export default function AgentSessionPage() {
   }, [transcripts]);
 
   const statusLabel = useMemo(() => {
-    if (status === "idle") return "Ready";
-    if (status === "connecting") return "Connecting...";
-    if (status === "connected") return "Connected";
-    if (status === "error") return "Error";
+    if (status === "idle") return "Start voice";
+    if (status === "connecting") return "Checking voice...";
+    if (status === "connected") return "Voice ready";
+    if (status === "error") return "Voice unavailable";
     return "Disconnected";
   }, [status]);
 

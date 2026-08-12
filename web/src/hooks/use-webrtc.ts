@@ -1,11 +1,18 @@
 "use client";
 
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
 import { getAuthHeaders } from "@/lib/firebase";
 import type { CanvasOperation } from "@/features/canvas/types";
+import {
+  lifecycleSignalForBackendError,
+  reduceVoiceLifecycle,
+  type VoiceConnectionStatus,
+  type VoiceLifecycleSignal,
+  type VoicePipelineState,
+} from "./webrtc-lifecycle";
 
 const debugLog = (...args: unknown[]) => {
   if (process.env.NODE_ENV !== "production") {
@@ -13,8 +20,10 @@ const debugLog = (...args: unknown[]) => {
   }
 };
 
-export type ConnectionStatus = "idle" | "connecting" | "connected" | "disconnected" | "error";
-export type PipelineState = "idle" | "listening" | "processing" | "speaking";
+export type ConnectionStatus = VoiceConnectionStatus;
+export type PipelineState = VoicePipelineState;
+
+const VOICE_READY_TIMEOUT_MS = 15_000;
 
 interface ConnectOverrides {
   agentId?: string;
@@ -24,6 +33,7 @@ interface ConnectOverrides {
 export interface TranscriptEvent {
   text: string;
   isFinal: boolean;
+  speechFinal: boolean;
 }
 
 export interface LatencyMetrics {
@@ -80,6 +90,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const [isMicMuted, setIsMicMuted] = useState(false);
   const [isTTSEnabled, setIsTTSEnabled] = useState(true);
 
+  const statusRef = useRef<ConnectionStatus>("idle");
   const pipelineStateRef = useRef<PipelineState>("idle");  // Ref for latest state in callbacks
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const channelRef = useRef<RTCDataChannel | null>(null);
@@ -87,11 +98,59 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const isFirstTTSChunkRef = useRef(true);  // Track if this is first chunk of TTS session
   const isTTSEnabledRef = useRef(true);  // Ref for TTS enabled state
   const sdlStepChunkTrackerRef = useRef<{ sequenceId: string; stepIndex: number; firstChunkSent: boolean } | null>(null);
+  const readinessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const terminalErrorRef = useRef(false);
+  const connectionAttemptRef = useRef(0);
+  const offerAbortControllerRef = useRef<AbortController | null>(null);
+  const cancelIceWaitRef = useRef<(() => void) | null>(null);
+
+  const clearReadinessTimer = useCallback(() => {
+    if (readinessTimerRef.current !== null) {
+      clearTimeout(readinessTimerRef.current);
+      readinessTimerRef.current = null;
+    }
+  }, []);
+
+  const cleanupTransport = useCallback(() => {
+    connectionAttemptRef.current += 1;
+    clearReadinessTimer();
+    cancelIceWaitRef.current?.();
+    cancelIceWaitRef.current = null;
+    offerAbortControllerRef.current?.abort();
+    offerAbortControllerRef.current = null;
+
+    const channel = channelRef.current;
+    const stream = localStreamRef.current;
+    const peerConnection = pcRef.current;
+    channelRef.current = null;
+    localStreamRef.current = null;
+    pcRef.current = null;
+
+    try {
+      if (channel && channel.readyState !== "closed") {
+        channel.close();
+      }
+    } catch {
+      // Ignore teardown races.
+    }
+    stream?.getTracks().forEach((track) => track.stop());
+    if (peerConnection) {
+      peerConnection.getSenders().forEach((sender) => sender.track?.stop());
+      peerConnection.close();
+    }
+    isFirstTTSChunkRef.current = true;
+    sdlStepChunkTrackerRef.current = null;
+  }, [clearReadinessTimer]);
 
   const log = useCallback((msg: string) => {
     onLog?.(msg);
     debugLog(`[WebRTC] ${msg}`);
   }, [onLog]);
+
+  const updateConnectionStatus = useCallback((nextStatus: ConnectionStatus) => {
+    statusRef.current = nextStatus;
+    setStatus(nextStatus);
+  }, []);
 
   const updatePipelineState = useCallback((state: PipelineState) => {
     const prevState = pipelineStateRef.current;
@@ -102,8 +161,31 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     log(`State: ${state}`);
   }, [onStateChange, log]);
 
+  const applyLifecycleSignal = useCallback(
+    (signal: VoiceLifecycleSignal) => {
+      const previous = {
+        status: statusRef.current,
+        pipeline: pipelineStateRef.current,
+        terminal: terminalErrorRef.current,
+      } as const;
+      const next = reduceVoiceLifecycle(previous, signal);
+      terminalErrorRef.current = next.terminal;
+      if (next.status !== previous.status) {
+        updateConnectionStatus(next.status);
+      }
+      if (next.pipeline !== previous.pipeline) {
+        updatePipelineState(next.pipeline);
+      }
+      return { previous, next };
+    },
+    [updateConnectionStatus, updatePipelineState]
+  );
+
   // Callback when audio playback completes
   const handlePlaybackComplete = useCallback(() => {
+    if (terminalErrorRef.current || statusRef.current !== "connected") {
+      return;
+    }
     debugLog("[Playback] All audio chunks finished playing");
     // Only transition to listening if we're currently in speaking state
     if (pipelineStateRef.current === "speaking") {
@@ -116,9 +198,28 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onPlaybackComplete: handlePlaybackComplete
   });
 
+  const terminateVoice = useCallback(() => {
+    applyLifecycleSignal({ type: "terminal_failure" });
+    stopAudio();
+    cleanupTransport();
+  }, [applyLifecycleSignal, cleanupTransport, stopAudio]);
+
+  useEffect(() => {
+    return () => {
+      // Unmount is terminal for this hook instance. Do not emit React state
+      // updates, but invalidate pending media/offer work and stop playback.
+      terminalErrorRef.current = true;
+      stopAudio();
+      cleanupTransport();
+    };
+  }, [cleanupTransport, stopAudio]);
+
   // VAD for instant interruption detection
   // Only active when TTS is playing (speaking state)
   const handleVADSpeechDetected = useCallback(() => {
+    if (terminalErrorRef.current || statusRef.current !== "connected") {
+      return;
+    }
     debugLog("[VAD] Speech detected during TTS - interrupting immediately");
 
     // 1. Stop audio playback instantly
@@ -186,17 +287,20 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
       debugLog("[Connection] Already connected, ignoring");
       return;
     }
-
     const effectiveAgentId = overrides.agentId ?? agentId;
     const effectiveSessionId = overrides.sessionId ?? sessionId;
 
-    setStatus("connecting");
+    applyLifecycleSignal({ type: "connect_requested" });
     log("Connecting...");
 
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
+    const attemptId = connectionAttemptRef.current + 1;
+    connectionAttemptRef.current = attemptId;
     pcRef.current = pc;
+    const isActiveConnection = () =>
+      connectionAttemptRef.current === attemptId && pcRef.current === pc;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -207,13 +311,22 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           noiseSuppression: true,
         },
       });
+      if (!isActiveConnection()) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       localStreamRef.current = stream;
       stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
       log("Microphone ready");
     } catch (e) {
       const error = e as Error;
+      if (!isActiveConnection()) {
+        return;
+      }
       log(`Mic error: ${error.name}`);
       onError?.(`Microphone error: ${error.name}`);
+      terminateVoice();
+      return;
     }
 
     pc.addEventListener("iceconnectionstatechange", () => {
@@ -225,45 +338,88 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     debugLog("[Connection] DataChannel created, readyState:", channel.readyState);
 
     channel.addEventListener("open", () => {
+      if (!isActiveConnection() || channelRef.current !== channel) {
+        return;
+      }
       debugLog("[Connection] DataChannel opened");
-      log("Connected");
-      setStatus("connected");
-      updatePipelineState("listening");
-      debugLog("[Connection] State set to listening");
+      log("Transport connected; checking voice providers...");
+      applyLifecycleSignal({ type: "transport_open" });
+      clearReadinessTimer();
+      readinessTimerRef.current = setTimeout(() => {
+        readinessTimerRef.current = null;
+        if (!isActiveConnection() || channelRef.current !== channel) {
+          return;
+        }
+        log("Voice readiness timed out; text mode remains available");
+        onError?.("Voice providers did not become ready in time. Continue in text mode.");
+        terminateVoice();
+      }, VOICE_READY_TIMEOUT_MS);
     });
 
     channel.addEventListener("close", () => {
+      if (!isActiveConnection() || channelRef.current !== channel) {
+        return;
+      }
       debugLog("[Connection] DataChannel closed");
       log("Disconnected");
-      isFirstTTSChunkRef.current = true;  // Reset
-      setStatus("disconnected");
-      updatePipelineState("idle");
+      applyLifecycleSignal({ type: "channel_closed" });
+      stopAudio();
+      cleanupTransport();
       playDisconnectSound();
     });
 
     channel.addEventListener("message", (e) => {
+      if (
+        !isActiveConnection() ||
+        channelRef.current !== channel ||
+        terminalErrorRef.current
+      ) {
+        return;
+      }
       try {
         const data = JSON.parse(e.data);
         // Skip verbose logging for tts_chunk (already logged in case handler)
         if (data.type !== "tts_chunk") {
           debugLog(`[Event] ${data.type}`, data);
         }
+        if (
+          data.type !== "ready" &&
+          data.type !== "error" &&
+          statusRef.current !== "connected"
+        ) {
+          debugLog(`[Event] Ignoring ${String(data.type)} before backend readiness`);
+          return;
+        }
 
         switch (data.type) {
-          case "ready":
+          case "ready": {
+            clearReadinessTimer();
+            const transition = applyLifecycleSignal({ type: "backend_ready" });
+            if (transition.next.status !== "connected") {
+              break;
+            }
+            if (transition.previous.status === "connected") {
+              break;
+            }
             log("Ready - you can start speaking");
             playReadySound();
             break;
+          }
 
           case "transcript":
-            onTranscript?.({ text: data.text, isFinal: data.is_final });
+            applyLifecycleSignal({ type: "transcript_segment" });
+            onTranscript?.({
+              text: typeof data.text === "string" ? data.text : "",
+              isFinal: data.is_final === true,
+              speechFinal: data.speech_final === true,
+            });
 
             const currentState = pipelineStateRef.current;
             debugLog(`[Transcript] Received: "${data.text}" (final=${data.is_final}, state=${currentState})`);
 
             // IMMEDIATE INTERRUPTION: If we're speaking (AI talking) and user talks, stop TTS immediately
             // Note: "speaking" state means AI is talking AND we're listening for interruptions
-            if (data.text.trim() && currentState === "speaking") {
+            if (typeof data.text === "string" && data.text.trim() && currentState === "speaking") {
               debugLog("[Interrupt] User spoke during TTS playback");
               debugLog(`[Interrupt] Transcript: "${data.text}" (final=${data.is_final})`);
               log("🛑 Interrupting TTS immediately");
@@ -278,18 +434,21 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
                 channelRef.current.send(JSON.stringify({ type: "stop_tts" }));
                 debugLog("[Interrupt] Sent stop_tts to server");
               }
-            } else if (data.text.trim() && currentState !== "speaking") {
+            } else if (
+              typeof data.text === "string" &&
+              data.text.trim() &&
+              currentState !== "speaking"
+            ) {
               debugLog(`[Transcript] Not interrupting - state is ${currentState}, not speaking`);
             }
 
-            // Process final transcripts (even after interruption)
-            if (data.is_final && data.text.trim()) {
-              // Only move to processing if we're listening (not already processing)
-              if (pipelineStateRef.current === "listening") {
-                debugLog("[Transcript] Processing final transcript through LLM");
-                updatePipelineState("processing");
-              }
-            }
+            // Segment finality is not end-of-turn finality. The backend emits
+            // turn_committed only after the selected turn detector confirms it.
+            break;
+
+          case "turn_committed":
+            log("Turn committed; generating a response");
+            applyLifecycleSignal({ type: "turn_committed" });
             break;
 
           case "canvas_update":
@@ -412,64 +571,118 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             onPipelineMetrics?.(data);
             break;
 
-          case "error":
-            log(`Error: ${data.message}`);
+          case "error": {
+            const message =
+              typeof data.message === "string" && data.message.trim()
+                ? data.message
+                : "Voice pipeline error";
+            log(`Error: ${message}`);
             playErrorSound();
-            onError?.(data.message);
-            updatePipelineState("listening");
+            onError?.(message);
+            const errorSignal = lifecycleSignalForBackendError(data);
+            if (errorSignal.type === "terminal_failure") {
+              clearReadinessTimer();
+              terminateVoice();
+            } else {
+              applyLifecycleSignal(errorSignal);
+            }
             break;
+          }
         }
       } catch (err) {
         console.error("Failed to parse message:", err);
       }
     });
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
+    let offerAbortController: AbortController | null = null;
+    try {
+      const offer = await pc.createOffer();
+      if (!isActiveConnection()) return;
+      await pc.setLocalDescription(offer);
+      if (!isActiveConnection()) return;
 
-    // Wait for ICE gathering
-    await new Promise<void>((resolve) => {
-      if (pc.iceGatheringState === "complete") return resolve();
-      const check = () => {
+      // Wait for ICE gathering without leaving the fallback timer or listener alive.
+      await new Promise<void>((resolve) => {
         if (pc.iceGatheringState === "complete") {
-          pc.removeEventListener("icegatheringstatechange", check);
           resolve();
+          return;
         }
-      };
-      pc.addEventListener("icegatheringstatechange", check);
-      setTimeout(resolve, 2000);
-    });
 
-    const authHeaders = await getAuthHeaders();
-    const response = await fetch(`${apiUrl}/offer`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders },
-      body: JSON.stringify({
-        sdp: pc.localDescription?.sdp,
-        type: pc.localDescription?.type,
-        canvas_mode: canvasMode,
-        agent_id: effectiveAgentId,
-        session_id: effectiveSessionId,
-      }),
-    });
+        let settled = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          pc.removeEventListener("icegatheringstatechange", check);
+          if (timeout !== null) {
+            clearTimeout(timeout);
+          }
+          if (cancelIceWaitRef.current === finish) {
+            cancelIceWaitRef.current = null;
+          }
+          resolve();
+        };
+        const check = () => {
+          if (pc.iceGatheringState === "complete") {
+            finish();
+          }
+        };
+        cancelIceWaitRef.current = finish;
+        pc.addEventListener("icegatheringstatechange", check);
+        timeout = setTimeout(finish, 2_000);
+      });
+      if (!isActiveConnection()) return;
 
-    if (!response.ok) {
-      log(`Error: ${response.status}`);
-      setStatus("error");
-      return;
+      offerAbortController = new AbortController();
+      offerAbortControllerRef.current = offerAbortController;
+      const authHeaders = await getAuthHeaders();
+      if (!isActiveConnection()) return;
+      const response = await fetch(`${apiUrl}/offer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        signal: offerAbortController.signal,
+        body: JSON.stringify({
+          sdp: pc.localDescription?.sdp,
+          type: pc.localDescription?.type,
+          canvas_mode: canvasMode,
+          agent_id: effectiveAgentId,
+          session_id: effectiveSessionId,
+        }),
+      });
+      if (!isActiveConnection()) return;
+      if (!response.ok) {
+        throw new Error(`offer returned HTTP ${response.status}`);
+      }
+
+      const answer = await response.json();
+      if (!isActiveConnection()) return;
+      await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
+      if (!isActiveConnection()) return;
+      if (answer.session_id) {
+        onSessionReady?.(answer.session_id);
+      }
+
+      debugLog("[Connection] Connection setup complete, waiting for data channel to open");
+    } catch (error) {
+      if (!isActiveConnection() || (error instanceof Error && error.name === "AbortError")) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "network error";
+      log(`Voice connection failed: ${message}`);
+      onError?.("Voice connection failed. Continue in text mode and retry later.");
+      terminateVoice();
+    } finally {
+      if (offerAbortControllerRef.current === offerAbortController) {
+        offerAbortControllerRef.current = null;
+      }
     }
-
-    const answer = await response.json();
-    if (answer.session_id) {
-      onSessionReady?.(answer.session_id);
-    }
-    await pc.setRemoteDescription({ sdp: answer.sdp, type: answer.type });
-
-    debugLog("[Connection] Connection setup complete, waiting for data channel to open");
   }, [
     apiUrl,
     agentId,
+    applyLifecycleSignal,
     canvasMode,
+    clearReadinessTimer,
+    cleanupTransport,
     log,
     onSessionReady,
     onTranscript,
@@ -485,33 +698,18 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     playChunkStreaming,
     sessionId,
     stopAudio,
+    terminateVoice,
     updatePipelineState,
   ]);
 
   const disconnect = useCallback(() => {
-    try {
-      channelRef.current?.close();
-    } catch {
-      // Ignore
-    }
+    applyLifecycleSignal({ type: "disconnect_requested" });
+    stopAudio();
+    cleanupTransport();
 
-    localStreamRef.current?.getTracks().forEach((track) => track.stop());
-
-    if (pcRef.current) {
-      pcRef.current.getSenders().forEach((sender) => sender.track?.stop());
-      pcRef.current.close();
-    }
-
-    pcRef.current = null;
-    channelRef.current = null;
-    localStreamRef.current = null;
-    isFirstTTSChunkRef.current = true;  // Reset
-
-    setStatus("disconnected");
-    updatePipelineState("idle");
     playDisconnectSound();
     log("Disconnected");
-  }, [log, updatePipelineState]);
+  }, [applyLifecycleSignal, cleanupTransport, log, stopAudio]);
 
   return {
     status,

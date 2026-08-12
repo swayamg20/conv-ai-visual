@@ -77,7 +77,7 @@ npm ci
 cd ..
 ```
 
-In `.env`, select `LLM_PROVIDER` and set its matching key. Set `FIREBASE_PROJECT_ID` for authenticated API requests. Voice additionally needs `DEEPGRAM_KEY` and either ElevenLabs credentials or the optional local Kokoro installation.
+In `.env`, select `LLM_PROVIDER` and set its matching key. Set `FIREBASE_PROJECT_ID` for authenticated API requests. Voice additionally needs `DEEPGRAM_KEY` and either ElevenLabs credentials or the optional local Kokoro installation. Deepgram endpointing is the default turn detector; Smart Turn is opt-in via `uv sync --locked --extra dev --extra smart-turn` and `SMART_TURN_ENABLED=true`.
 
 In `web/.env.local`, set the Firebase web configuration and leave `NEXT_PUBLIC_API_URL=http://localhost:8000` for local development.
 

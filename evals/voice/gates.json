@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "replay": {
+    "scenario_pass_rate_min": 1.0,
+    "critical_entity_retention_min": 0.95,
+    "premature_split_count_max": 0,
+    "incorrect_merge_count_max": 0,
+    "trace_repeat_mismatches_max": 0
+  },
+  "live_functional": {
+    "status": "unmeasured",
+    "false_ready_max": 0,
+    "silent_successful_turns_max": 0,
+    "premature_split_rate_max": 0.02,
+    "incorrect_merge_rate_max": 0.02,
+    "critical_entity_retention_min": 0.95,
+    "hinglish_semantic_slot_accuracy_min": 0.9,
+    "metrics_completeness_min": 0.99
+  },
+  "live_latency_ms": {
+    "status": "unmeasured",
+    "connect_to_ready_p50_max": 1200,
+    "connect_to_ready_p95_max": 2000,
+    "speech_end_to_commit_p50_max": 350,
+    "speech_end_to_commit_p95_max": 700,
+    "speech_end_to_audio_p50_max": 800,
+    "speech_end_to_audio_p95_target": 1200,
+    "speech_end_to_audio_p95_hard_max": 1500,
+    "interruption_to_silence_p95_max": 250,
+    "canvas_receive_to_first_visible_p95_max": 700
+  },
+  "live_reliability": {
+    "status": "unmeasured",
+    "connection_success_min": 0.995,
+    "unexpected_disconnect_rate_max": 0.005,
+    "provider_failed_turn_rate_max": 0.01,
+    "interruption_recall_min": 0.95,
+    "false_interruption_rate_max": 0.02
+  },
+  "live_cost": {
+    "status": "unmeasured",
+    "initial_campaign_budget_usd_max": 25,
+    "relative_cost_regression_max": 0.1
+  }
+}

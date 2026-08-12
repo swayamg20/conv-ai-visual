@@ -60,7 +60,13 @@ uv sync --locked --extra dev --extra local-tts
 TTS_PROVIDER=kokoro
 ```
 
-Smart Turn is enabled by default and initializes lazily. Set `SMART_TURN_ENABLED=false` to use Deepgram endpointing alone.
+Deepgram endpointing is the default turn detector. To select Smart Turn, install its focused extra and enable it explicitly:
+
+```bash
+uv sync --locked --extra dev --extra smart-turn
+```
+
+Then set `SMART_TURN_ENABLED=true`. The model initializes lazily. If the selected Smart Turn dependency or model cannot initialize, voice fails closed before Ready; set `SMART_TURN_ENABLED=false` to explicitly select Deepgram endpointing.
 
 Optional services:
 
@@ -147,11 +153,11 @@ Check that `LLM_PROVIDER` matches the populated key. Placeholder strings copied 
 
 ### Voice is unavailable
 
-Voice startup degrades without stopping the HTTP app. Check the startup log for the missing Deepgram or TTS configuration. For Kokoro, install the `local-tts` extra.
+The HTTP app remains available, but the voice path fails closed and offers text fallback when a required component is missing. Check the startup log and readiness error for the missing Deepgram, LLM, TTS, or selected turn-detector configuration. For Kokoro, install the `local-tts` extra.
 
 ### Smart Turn cannot initialize
 
-The voice path falls back to Deepgram endpointing. Set `SMART_TURN_ENABLED=false` if the ONNX runtime or model is intentionally unavailable.
+Install the `smart-turn` extra and verify its model path/download access. An enabled Smart Turn configuration is required, not silently replaced. Set `SMART_TURN_ENABLED=false` to explicitly use Deepgram endpointing instead.
 
 ### Database path is unexpected
 

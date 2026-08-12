@@ -136,7 +136,7 @@ function PipelineBar({ log }: { log: VoiceLogEntry }) {
   if (!total) return <span className="text-muted-foreground text-xs">-</span>;
 
   const stages = [
-    { key: "stt", value: log.latency_stt_ms, label: "STT" },
+    { key: "stt", value: log.latency_stt_ms, label: "Transcript segment interval" },
     { key: "turn", value: log.latency_turn_detection_ms, label: "Turn" },
     { key: "llm", value: log.latency_llm_ms, label: "LLM" },
     { key: "tool", value: log.latency_tool_ms, label: "Tools" },
@@ -485,15 +485,15 @@ export default function Dashboard() {
                         </p>
                         <div className="grid grid-cols-[1fr_auto] gap-x-4 gap-y-1.5 text-xs">
                           {[
-                            { label: "STT (speech→transcript)", value: log.latency_stt_ms, color: "text-sage" },
+                            { label: "First transcript → last final segment", value: log.latency_stt_ms, color: "text-sage" },
                             { label: "Turn Detection", value: log.latency_turn_detection_ms, color: "text-sage/80" },
-                            { label: "STT → LLM gap", value: log.latency_stt_to_llm_ms, color: "text-chalk-soft" },
+                            { label: "Turn commit → LLM start", value: log.latency_stt_to_llm_ms, color: "text-chalk-soft" },
                             { label: "LLM (inference+tools)", value: log.latency_llm_ms, color: "text-lavender" },
                             { label: "  └ Tool execution", value: log.latency_tool_ms, color: "text-amber" },
                             { label: "  └ LLM first token", value: log.latency_llm_first_token_ms, color: "text-lavender/80" },
                             { label: "TTS (generation)", value: log.latency_tts_ms, color: "text-lavender" },
-                            { label: "  └ TTS first chunk", value: log.latency_tts_first_chunk_ms, color: "text-lavender/70" },
-                            { label: "Total end-to-end", value: log.latency_total_ms, color: "text-foreground font-semibold" },
+                            { label: "  └ Backend start → first chunk", value: log.latency_tts_first_chunk_ms, color: "text-lavender/70" },
+                            { label: "Legacy backend interval (not E2E)", value: log.latency_total_ms, color: "text-foreground font-semibold" },
                           ].map(({ label, value, color }) => (
                             <div key={label} className="contents">
                               <span className={color}>{label}</span>

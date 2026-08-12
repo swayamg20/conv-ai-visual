@@ -242,8 +242,8 @@ async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> No
     # Grab timing context from STT/turn detection phase
     timing = dict(voice_session.turn_timing)
     voice_session.turn_timing.clear()
-    t_speech_start = timing.get("speech_start_ts")
-    t_stt_final = timing.get("stt_final_ts")
+    t_first_transcript = timing.get("first_transcript_ts") or timing.get("speech_start_ts")
+    t_last_final_segment = timing.get("last_final_segment_ts") or timing.get("stt_final_ts")
     t_turn_confirmed = timing.get("turn_confirmed_ts", time.perf_counter())
     smart_turn_result = timing.get("smart_turn_result")
     t_turn_detection = timing.get("turn_detection_ms")
@@ -427,30 +427,40 @@ async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> No
         llm_metrics = pipeline.get_last_call_metrics() or {}
 
         latency_vad_ms = None
-        latency_stt_ms = (
-            _ms(t_speech_start, t_stt_final) if t_speech_start and t_stt_final else None
+        segment_finalization_ms = (
+            _ms(t_first_transcript, t_last_final_segment)
+            if t_first_transcript and t_last_final_segment
+            else None
         )
-        latency_stt_to_llm_ms = _ms(t_turn_confirmed, t_llm_start)
+        turn_commit_to_llm_start_ms = _ms(t_turn_confirmed, t_llm_start)
         latency_llm_ms = llm_metrics.get("latency_llm_ms") or _ms(t_llm_start, t_llm_end)
         latency_llm_first_token_ms = llm_metrics.get("latency_llm_first_token_ms")
         latency_tool_ms = llm_metrics.get("latency_tool_ms")
         latency_tts_ms = _ms(t_tts_start, t_tts_end)
-        latency_tts_first_chunk_ms = _ms(t_tts_start, t_tts_first_chunk)
-        latency_total_ms = _ms(t_speech_start or t_turn_confirmed, t_end)
+        backend_tts_start_to_first_chunk_ms = _ms(t_tts_start, t_tts_first_chunk)
+        legacy_backend_interval_ms = _ms(t_first_transcript or t_turn_confirmed, t_end)
         turn_detection_ms = t_turn_detection
 
         metrics_payload = {
-            "latency_stt_ms": latency_stt_ms,
-            "latency_turn_detection_ms": turn_detection_ms,
-            "latency_stt_to_llm_ms": latency_stt_to_llm_ms,
+            "segment_finalization_ms": segment_finalization_ms,
+            "turn_detection_ms": turn_detection_ms,
+            "turn_commit_to_llm_start_ms": turn_commit_to_llm_start_ms,
             "latency_llm_ms": latency_llm_ms,
             "latency_llm_first_token_ms": latency_llm_first_token_ms,
             "latency_context_ms": llm_metrics.get("latency_context_ms"),
             "latency_tools_schema_ms": llm_metrics.get("latency_tools_schema_ms"),
             "latency_tool_ms": latency_tool_ms,
-            "latency_tts_ms": latency_tts_ms,
-            "latency_tts_first_chunk_ms": latency_tts_first_chunk_ms,
-            "latency_total_ms": latency_total_ms,
+            "backend_tts_generation_ms": latency_tts_ms,
+            "backend_tts_start_to_first_chunk_ms": backend_tts_start_to_first_chunk_ms,
+            "legacy_backend_interval_ms": legacy_backend_interval_ms,
+            "acoustic_speech_end_to_commit_ms": None,
+            "acoustic_speech_end_to_first_audible_ms": None,
+            "interruption_to_local_silence_ms": None,
+            "measurement_limitations": [
+                "No acoustic speech-boundary timestamp is available in the legacy path",
+                "Backend TTS chunks do not prove browser playout",
+                "The legacy backend interval is not end-to-end latency",
+            ],
             "tts_chunks_sent": tts_chunks_sent,
             "tts_interrupted": tts_interrupted,
             "tts_provider_used": ",".join(tts_providers_used) if tts_providers_used else None,
@@ -470,15 +480,15 @@ async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> No
 
         # Log to console
         logger.info(
-            "[%s] METRICS: stt=%s turn=%s llm=%s tool=%s tts=%s tts_ttfb=%s total=%s interrupted=%s provider=%s retries=%s fallback=%s",
+            "[%s] METRICS: segment_finalization=%s turn=%s llm=%s tool=%s backend_tts=%s backend_tts_ttfb=%s legacy_interval=%s interrupted=%s provider=%s retries=%s fallback=%s",
             pc_id,
-            latency_stt_ms,
+            segment_finalization_ms,
             turn_detection_ms,
             latency_llm_ms,
             latency_tool_ms,
             latency_tts_ms,
-            latency_tts_first_chunk_ms,
-            latency_total_ms,
+            backend_tts_start_to_first_chunk_ms,
+            legacy_backend_interval_ms,
             tts_interrupted,
             metrics_payload["tts_provider_used"],
             tts_retry_count,
@@ -497,15 +507,18 @@ async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> No
                 llm_provider=pipeline.provider,
                 llm_model=getattr(pipeline.client, "model", pipeline.provider),
                 latency_vad_ms=latency_vad_ms,
-                latency_stt_ms=latency_stt_ms,
+                # These legacy database columns predate named Voice V2 spans.
+                # Preserve their historical calculations, but the UI labels
+                # them explicitly and never presents them as acoustic/E2E.
+                latency_stt_ms=segment_finalization_ms,
                 latency_turn_detection_ms=turn_detection_ms,
-                latency_stt_to_llm_ms=latency_stt_to_llm_ms,
+                latency_stt_to_llm_ms=turn_commit_to_llm_start_ms,
                 latency_llm_ms=latency_llm_ms,
                 latency_llm_first_token_ms=latency_llm_first_token_ms,
                 latency_tool_ms=latency_tool_ms,
                 latency_tts_ms=latency_tts_ms,
-                latency_tts_first_chunk_ms=latency_tts_first_chunk_ms,
-                latency_total_ms=latency_total_ms,
+                latency_tts_first_chunk_ms=backend_tts_start_to_first_chunk_ms,
+                latency_total_ms=legacy_backend_interval_ms,
                 tool_calls_json=json.dumps(llm_metrics.get("tool_calls", []))
                 if llm_metrics.get("tool_calls")
                 else None,

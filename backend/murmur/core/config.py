@@ -169,7 +169,7 @@ EXAMPLE — "Explain the Pythagorean theorem":
     )
 
     # Smart Turn detection config
-    SMART_TURN_ENABLED: bool = os.getenv("SMART_TURN_ENABLED", "true").lower() == "true"
+    SMART_TURN_ENABLED: bool = os.getenv("SMART_TURN_ENABLED", "false").lower() == "true"
     SMART_TURN_THRESHOLD: float = float(os.getenv("SMART_TURN_THRESHOLD", "0.5"))
     SMART_TURN_STOP_SECS: float = float(os.getenv("SMART_TURN_STOP_SECS", "2.0"))
     SMART_TURN_MODEL_PATH: Optional[str] = os.getenv("SMART_TURN_MODEL_PATH")

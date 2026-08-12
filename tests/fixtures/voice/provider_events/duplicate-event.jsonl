@@ -1,0 +1,4 @@
+{"event_id":"duplicate-1","at_ms":0,"type":"speech_started"}
+{"event_id":"duplicate-2","at_ms":200,"type":"transcript","text":"one turn only","is_final":true}
+{"event_id":"duplicate-2","at_ms":200,"type":"transcript","text":"one turn only","is_final":true}
+{"event_id":"duplicate-3","at_ms":500,"type":"utterance_end"}

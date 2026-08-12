@@ -88,3 +88,4 @@ async def stream_deepgram(
                 await audio_queue.put(None)
     except Exception as exc:
         logger.exception("Failed to connect or stream to Deepgram: %s", exc)
+        raise

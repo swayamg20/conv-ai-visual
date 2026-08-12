@@ -24,7 +24,9 @@ This plan supersedes the runtime and fallback assumptions in `plans/2026-03-23-v
 - [x] 2026-08-12 04:30 IST: Mapped the current backend, frontend, persistence, canvas, session, and provider boundaries at commit `cdedc5d`.
 - [x] 2026-08-12 04:30 IST: Reviewed current LiveKit, Pipecat, MCP, A2A, deployment, cost, and validation options and selected the initial technical direction recorded below.
 - [x] 2026-08-12 04:30 IST: Wrote this ExecPlan without changing the runtime. The pre-existing `web/next-env.d.ts` modification remains outside this plan.
-- [ ] Milestone 0: establish truthful readiness, event contracts, a deterministic replay harness, and a credentialed legacy baseline.
+- [x] 2026-08-12 04:53 IST: Pushed the reviewed execution baseline as `1cc2edc`; GitHub Actions run `31545742737` passed both backend and frontend jobs.
+- [x] 2026-08-12 12:32 IST: Completed Milestone 0 contracts, deterministic replay, truthful legacy readiness, correct final-segment/EOT assembly, and offline acceptance. The credentialed legacy baseline failed closed at preflight before any provider call because the selected TTS and Smart Turn paths were unavailable.
+- [x] Milestone 0: established truthful readiness, event contracts, deterministic replay, and an explicitly failed legacy baseline.
 - [ ] Milestone 1: prove an authenticated LiveKit Voice V2 vertical slice with one self-hosted Murmur worker.
 - [ ] Milestone 2: reconnect Voice V2 to Murmur's existing agent, session, memory, chat, and canvas product layers.
 - [ ] Milestone 3: implement the Conversation Conductor, Deep Reasoner, durable task ledger, and revisioned artifact authority.
@@ -47,6 +49,14 @@ The session page already contains an idempotency warning. It creates a persisten
 The product layers are substantially more reusable than the realtime path. Firebase ownership, agent prompts, resources, memory, tools, provider-neutral LLM clients, session history, text chat, scene compilation, and the SVG canvas all have useful boundaries. Starting the entire repository again would throw away the cleanest parts.
 
 The existing test baseline is green but narrow: 46 backend tests and 12 frontend tests passed at `cdedc5d`; there is no browser/RTC test; default voice tests use fakes; and CI explicitly avoids credentialed providers. Those tests prove local contracts, not a working voice product.
+
+The first machine-readable legacy preflight on 2026-08-12 found Deepgram, the configured Groq LLM, and Firebase locally configured, but the ElevenLabs credential was missing or a placeholder. Kokoro fallback and Smart Turn download dependencies were also absent. Because the user's local configuration explicitly selected Smart Turn, that profile was blocked rather than silently changed to Deepgram endpointing. No provider call was made. This is now an explicit failed baseline rather than a UI that claims Ready.
+
+The first adversarial pass caught three failures hidden behind superficially green assertions: duplicate `speech_final` events could dispatch twice, transcript teardown could retain an active `recv()` task, and terminal readiness delivery could wait forever for a data channel. The final implementation coalesces duplicate segments/boundaries, awaits every owned task under asyncio debug checks, keeps pending Ready discoverable until peer/channel teardown, and bounds best-effort delivery of a terminal failure. The browser now treats any explicit `recoverable=false` backend error as terminal instead of matching one error code.
+
+The deterministic evaluator initially duplicated the runtime's transcript state machine and only checked that WAV paths existed. It now imports the same `TranscriptAccumulator` used in production, advances it with fixture `at_ms` as a virtual clock, and validates non-empty mono 16 kHz 16-bit PCM WAV metadata. This still does not exercise media transport or provider recognition; those remain Milestone 1 browser/RTC obligations.
+
+The event reducer currently assumes its input has already been ordered by transport or durable replay. A producer-sequence gap is not buffered inside the reducer. Milestone 3 reconnect work must introduce gap detection plus complete ledger replay or an authoritative snapshot before subsequent deltas are reduced.
 
 LiveKit Agents and LiveKit RTC are not competing per-minute products in the chosen deployment. LiveKit Agents is the open-source worker framework that Murmur self-hosts; LiveKit Cloud supplies media transport, signaling, NAT traversal, and TURN. This avoids the separate managed-agent minute charge. The main costs remain RTC usage, Murmur worker compute, and direct STT/LLM/TTS usage. Current pricing must be rechecked before any paid rollout because plan allowances can change.
 
@@ -78,9 +88,15 @@ SQLite plus `SQLModel.metadata.create_all()` is acceptable for today's local pro
 
 2026-08-12, Codex: No paid plan upgrade, managed-agent deployment, or unbounded provider evaluation is allowed. Live evaluation is opt-in with a hard dollar cap. Cost is measured per successful audio minute and includes retries, cancelled speculation, warm idle, and failed turns.
 
+2026-08-12, Codex: Deepgram endpointing is the default legacy turn detector. Smart Turn is an explicit optional profile installed through the `smart-turn` extra; if selected but unavailable it fails closed rather than silently changing the turn detector.
+
+2026-08-12, Codex: Milestone 0 classifies a required-provider preflight failure as a failed legacy baseline. It does not bypass unavailable TTS/turn detection, make paid calls without a budget, or invent live latency telemetry to satisfy the word “credentialed.”
+
 ## Outcomes & Retrospective
 
-At plan creation, no Voice V2 implementation exists. The intended outcome is a measured cutover decision, not merely a new dependency or a successful unit suite. Update this section after every milestone with the behavior actually proven, the exact runtime/provider profile, the sample size, p50/p95 results, cost per successful audio minute, remaining limitations, and the decision to continue, revise, or stop.
+Milestone 0 completed on 2026-08-12. Voice V2 now has strict Python and TypeScript event/task/artifact contracts, a fail-closed frontend state model, named clock-domain-safe metric spans, a provider-free replay harness, and a shared production/evaluation transcript accumulator. Seven replay scenarios passed twice with identical combined trace hash `8a1cdfbf49acedeb4ef1f6cb516ff15f670ed6009ad303dc13f6530e275edff9`. Offline evidence was 124 backend tests, 52 frontend tests, Ruff, ESLint, TypeScript, Next production build, app import, and a fresh wheel containing the new contract/evaluation packages.
+
+The exact live result is **failed before session start**, not measured: legacy preflight found Deepgram, Groq, and Firebase configured; ElevenLabs missing/placeholder; Kokoro fallback absent; and Smart Turn selected locally without its model/download dependencies. Exit status was 1, network verification was false, no provider call was made, and all live latency/reliability/cost gates remain `unmeasured`. `StageRecorder` is deliberately a contract in this milestone, not yet production wiring; the legacy client has no acoustic-end, first-audible, or interruption-to-silence timestamp and reports those spans as unavailable. Therefore there are no honest p50/p95, metrics-completeness, or cost-per-minute numbers for Milestone 0. The decision is to continue to the fake-provider local-RTC slice in Milestone 1, where the browser and worker timestamp chain becomes executable, while retaining this failed legacy result as the comparison baseline.
 
 If LiveKit Agents does not pass the same functional, latency, interruption, browser, and cost gates as the alternatives, record that result here and exercise the Pipecat/LiveKit transport exit. If the two-tier design improves acknowledgement latency but worsens task correctness, cancellation, or user trust, remove the split rather than defending the architecture.
 

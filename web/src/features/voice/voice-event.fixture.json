@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "event_id": "event-canvas-1",
+  "event_type": "canvas_patch",
+  "trace_id": "trace-1",
+  "voice_call_id": "call-1",
+  "session_id": "session-1",
+  "turn_id": "turn-1",
+  "task_id": "task-1",
+  "producer_id": "canvas-authority-1",
+  "producer_sequence": 7,
+  "causation_id": "event-artifact-accepted-1",
+  "correlation_id": "reasoning-flow-1",
+  "ledger_sequence": 12,
+  "task_generation": 1,
+  "canvas_base_revision": 3,
+  "canvas_result_revision": 4,
+  "emitted_at": "2026-08-12T00:00:00Z",
+  "payload": {
+    "artifact_id": "artifact-1",
+    "artifact": {
+      "artifact_type": "operations_v1",
+      "operations": [
+        {
+          "action": "clear"
+        }
+      ]
+    }
+  }
+}

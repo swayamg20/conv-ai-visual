@@ -14,6 +14,7 @@ Speed: <60ms on most CPUs
 
 import asyncio
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Callable, Coroutine, Optional, Tuple
@@ -48,6 +49,7 @@ class SmartTurnAnalyzer:
     """
 
     _instance: Optional["SmartTurnAnalyzer"] = None
+    _instance_lock = threading.Lock()
 
     def __init__(
         self,
@@ -75,13 +77,17 @@ class SmartTurnAnalyzer:
     @classmethod
     def get_instance(cls, **kwargs) -> "SmartTurnAnalyzer":
         """Get or create the global Smart Turn analyzer."""
-        if cls._instance is None:
-            cls._instance = cls(**kwargs)
+        if cls._instance is not None:
+            return cls._instance
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls(**kwargs)
         return cls._instance
 
     @classmethod
     def reset_instance(cls):
-        cls._instance = None
+        with cls._instance_lock:
+            cls._instance = None
 
     # ------------------------------------------------------------------
     # Model loading

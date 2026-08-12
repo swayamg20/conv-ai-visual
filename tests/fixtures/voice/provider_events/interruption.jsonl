@@ -1,0 +1,2 @@
+{"event_id":"interrupt-1","at_ms":0,"type":"speech_started"}
+{"event_id":"interrupt-2","at_ms":180,"type":"transcript","text":"Actually stop","is_final":true,"speech_final":true}
