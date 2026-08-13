@@ -30,6 +30,7 @@ from murmur.voice.blocking import (
     BoundedSyncRunnerUnavailable,
     default_repository_runner,
 )
+from murmur.voice.pipecat_ice import PipecatIceLease, PipecatIceLeaseUnavailable
 from murmur.voice.runtime_contracts import (
     MAX_ASSIGNMENT_TTL_SECONDS,
     MIN_ASSIGNMENT_TTL_SECONDS,
@@ -453,6 +454,7 @@ class _CallbackSideChannel:
 class _Reservation:
     peer_reservation_id: str
     claims: VoiceCallClaims
+    ice_lease: PipecatIceLease = field(repr=False)
     token_hash: bytes = field(repr=False)
     handler: PipecatPeerHandler = field(repr=False)
     state: PipecatReservationState = PipecatReservationState.RESERVED
@@ -481,7 +483,7 @@ class PipecatSignalingService:
         self,
         settings: PipecatSignalingSettings,
         *,
-        handler_factory: Callable[[], PipecatPeerHandler],
+        handler_factory: Callable[[PipecatIceLease], PipecatPeerHandler],
         runtime_starter: PipecatRuntimeStarter,
         session_repo: SessionRepository = SessionRepo,
         agent_repo: AgentRepository = AgentRepo,
@@ -511,10 +513,15 @@ class PipecatSignalingService:
         self._close_lock = asyncio.Lock()
         self._close_task: asyncio.Task[None] | None = None
 
-    async def reserve(self, claims: VoiceCallClaims) -> PipecatVoiceRuntimeAssignment:
-        """Create one server-selected, repository-authorized opaque reservation."""
+    async def reserve(
+        self,
+        claims: VoiceCallClaims,
+        ice_lease: PipecatIceLease,
+    ) -> PipecatVoiceRuntimeAssignment:
+        """Create one claim-bound reservation with its exact immutable ICE lease."""
         now = self._aware_now()
         self._validate_claims_policy(claims, now=now)
+        self._validate_ice_lease(claims, ice_lease, now=now)
         await self._authorize_claims(claims)
 
         raw_token = self._validated_new_token()
@@ -543,7 +550,7 @@ class PipecatSignalingService:
                         "Pipecat token generator returned a collision"
                     )
                 try:
-                    handler = self._handler_factory()
+                    handler = self._handler_factory(ice_lease)
                 except Exception as exc:
                     raise PipecatSignalingUnavailable(
                         "Pipecat peer handler is unavailable"
@@ -551,6 +558,7 @@ class PipecatSignalingService:
                 record = _Reservation(
                     peer_reservation_id=reservation_id,
                     claims=claims,
+                    ice_lease=ice_lease,
                     token_hash=token_hash,
                     handler=handler,
                 )
@@ -1587,6 +1595,27 @@ class PipecatSignalingService:
         )
         if claims.expires_at > configured_expiry:
             raise PipecatSignalingConflict("Pipecat reservation exceeds server TTL policy")
+
+    def _validate_ice_lease(
+        self,
+        claims: VoiceCallClaims,
+        ice_lease: object,
+        *,
+        now: datetime,
+    ) -> None:
+        if (
+            not isinstance(ice_lease, PipecatIceLease)
+            or ice_lease.claims != claims
+            or ice_lease.expires_at != claims.expires_at
+            or now >= ice_lease.expires_at
+        ):
+            raise PipecatSignalingUnavailable("Pipecat ICE lease scope or expiry is invalid")
+        try:
+            ice_lease.require_compatible_signaling_base_url(self.settings.signaling_base_url)
+        except PipecatIceLeaseUnavailable as exc:
+            raise PipecatSignalingUnavailable(
+                "Pipecat ICE lease is incompatible with the signaling origin"
+            ) from exc
 
     def _validated_new_token(self) -> str:
         token = _validate_bearer(self._token_factory())

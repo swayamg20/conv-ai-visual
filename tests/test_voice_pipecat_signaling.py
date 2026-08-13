@@ -9,6 +9,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
+from murmur.voice.pipecat_ice import PipecatIceLease, PipecatIceServer
 from murmur.voice.pipecat_signaling import (
     PipecatCorsContract,
     PipecatHandlerRequestTypes,
@@ -25,6 +26,7 @@ from murmur.voice.pipecat_signaling import (
     PipecatSignalingUnavailable,
 )
 from murmur.voice.runtime_contracts import VoiceCallClaims, VoiceRuntimeKind
+from pydantic import SecretStr
 
 FIXED_NOW = datetime(2026, 8, 12, 12, tzinfo=UTC)
 SESSION_ID = "11111111-1111-4111-8111-111111111111"
@@ -170,12 +172,14 @@ class _Handler:
         enter: asyncio.Event | None = None,
         release: asyncio.Event | None = None,
         fail_close_count: int = 0,
+        ice_lease: PipecatIceLease | None = None,
     ) -> None:
         self.connection = _Connection(pc_id)
         self.swallow_callback_failure = swallow_callback_failure
         self.enter = enter
         self.release = release
         self.fail_close_count = fail_close_count
+        self.ice_lease = ice_lease
         self.initial_count = 0
         self.renegotiate_count = 0
         self.patch_requests: list[PipecatPatchRequest] = []
@@ -282,6 +286,29 @@ def _settings(**overrides: Any) -> PipecatSignalingSettings:
     return PipecatSignalingSettings(**values)
 
 
+def _ice_lease(claims: VoiceCallClaims) -> PipecatIceLease:
+    return PipecatIceLease(
+        claims=claims,
+        provider_id="test-turn",
+        expires_at=claims.expires_at,
+        ice_servers=(
+            PipecatIceServer(
+                urls=("turns:turn.example.test:5349?transport=tcp",),
+                username=SecretStr("test-user"),
+                credential=SecretStr("test-secret-never-log"),
+            ),
+        ),
+    )
+
+
+async def _reserve(
+    service: PipecatSignalingService,
+    claims: VoiceCallClaims | None = None,
+) -> Any:
+    exact_claims = claims or _claims()
+    return await service.reserve(exact_claims, _ice_lease(exact_claims))
+
+
 def _service(
     *,
     handlers: list[_Handler] | None = None,
@@ -300,8 +327,11 @@ def _service(
     agents = agents or {AGENT_ID: _Agent(AGENT_ID, "firebase-user-1")}
     token_values = iter(tokens or [TOKEN, "B" * 64, "C" * 64])
 
-    def handler_factory() -> _Handler:
-        handler = _Handler(pc_id=f"SmallWebRTCConnection#{len(handlers) + 1}-peer")
+    def handler_factory(ice_lease: PipecatIceLease) -> _Handler:
+        handler = _Handler(
+            pc_id=f"SmallWebRTCConnection#{len(handlers) + 1}-peer",
+            ice_lease=ice_lease,
+        )
         handlers.append(handler)
         return handler
 
@@ -342,8 +372,10 @@ def _patch(pc_id: str) -> PipecatPatchRequest:
 @pytest.mark.asyncio
 async def test_reserve_returns_opaque_secret_url_and_stores_only_its_digest() -> None:
     service, handlers, _ = _service()
+    claims = _claims()
+    ice_lease = _ice_lease(claims)
 
-    assignment = await service.reserve(_claims())
+    assignment = await service.reserve(claims, ice_lease)
     raw_url = assignment.webrtc_url.get_secret_value()
     token = _token(assignment)
 
@@ -368,14 +400,56 @@ async def test_reserve_returns_opaque_secret_url_and_stores_only_its_digest() ->
     assert not hasattr(snapshot, "handler")
     assert not hasattr(snapshot, "token")
     assert len(handlers) == 1
+    assert handlers[0].ice_lease is ice_lease
+    assert service._reservations[assignment.peer_reservation_id].ice_lease is ice_lease
+    assert "test-secret-never-log" not in repr(service.__dict__)
     await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_reserve_rejects_a_different_or_malformed_ice_lease_before_handler_creation() -> None:
+    service, handlers, _ = _service()
+    claims = _claims()
+    different_claims = _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+
+    with pytest.raises(PipecatSignalingUnavailable, match="scope or expiry"):
+        await service.reserve(claims, _ice_lease(different_claims))
+
+    malformed_expiry = PipecatIceLease.model_construct(
+        claims=claims,
+        provider_id="forged-test-lease",
+        expires_at=claims.expires_at - timedelta(seconds=1),
+        ice_servers=(),
+    )
+    with pytest.raises(PipecatSignalingUnavailable, match="scope or expiry"):
+        await service.reserve(claims, malformed_expiry)
+
+    assert handlers == []
+    assert service.reservation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_reserve_rejects_non_turn_ice_for_a_non_loopback_signaling_origin() -> None:
+    service, handlers, _ = _service()
+    claims = _claims()
+    direct_only_lease = PipecatIceLease(
+        claims=claims,
+        provider_id="direct-only",
+        expires_at=claims.expires_at,
+    )
+
+    with pytest.raises(PipecatSignalingUnavailable, match="signaling origin"):
+        await service.reserve(claims, direct_only_lease)
+
+    assert handlers == []
+    assert service.reservation_count == 0
 
 
 @pytest.mark.asyncio
 async def test_initial_renegotiation_patch_and_delete_are_exact_and_idempotent() -> None:
     service, handlers, starter = _service()
     claims = _claims()
-    assignment = await service.reserve(claims)
+    assignment = await _reserve(service, claims)
     token = _token(assignment)
 
     answer = await service.offer(
@@ -413,7 +487,7 @@ async def test_initial_renegotiation_patch_and_delete_are_exact_and_idempotent()
 @pytest.mark.asyncio
 async def test_one_time_creation_rejects_reuse_and_every_wrong_peer_operation() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -456,8 +530,8 @@ async def test_concurrent_initial_offers_create_exactly_one_peer_runtime() -> No
     handler = _Handler(enter=entered, release=release)
     starter = _RuntimeStarter()
     service, _, _ = _service(handlers=[handler], starter=starter)
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
 
     first = asyncio.create_task(
@@ -488,8 +562,8 @@ async def test_delete_during_initial_negotiation_wins_and_cannot_resurrect() -> 
     release = asyncio.Event()
     handler = _Handler(enter=entered, release=release)
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
     offer_task = asyncio.create_task(
         service.offer(token=token, user_id="firebase-user-1", request=_initial_offer())
@@ -515,8 +589,8 @@ async def test_trusted_release_cancels_initial_negotiation_without_browser_crede
     release = asyncio.Event()
     handler = _Handler(enter=entered, release=release)
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     offer_task = asyncio.create_task(
         service.offer(
             token=_token(assignment),
@@ -547,9 +621,10 @@ async def test_trusted_release_cancels_initial_negotiation_without_browser_crede
 @pytest.mark.asyncio
 async def test_process_local_one_call_cap_releases_only_after_terminal_cleanup() -> None:
     service, handlers, _ = _service()
-    first_assignment = await service.reserve(_claims())
-    second_assignment = await service.reserve(
-        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    first_assignment = await _reserve(service)
+    second_assignment = await _reserve(
+        service,
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID),
     )
     first_token = _token(first_assignment)
     second_token = _token(second_assignment)
@@ -591,7 +666,7 @@ async def test_cross_user_and_changed_authoritative_ownership_fail_closed() -> N
     sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
     agents = {AGENT_ID: _Agent(AGENT_ID, "firebase-user-1")}
     service, _, _ = _service(sessions=sessions, agents=agents)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
 
     with pytest.raises(PipecatSignalingForbidden):
@@ -614,7 +689,7 @@ async def test_active_owner_change_revokes_exact_call_and_cleans_before_forbidde
     sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
     agents = {AGENT_ID: _Agent(AGENT_ID, "firebase-user-1")}
     service, handlers, starter = _service(sessions=sessions, agents=agents)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -651,7 +726,7 @@ async def test_active_session_deletion_revokes_and_cleans_even_when_delete_retur
 ):
     sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
     service, handlers, starter = _service(sessions=sessions)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -689,8 +764,8 @@ async def test_repeated_owner_mismatch_retries_terminal_cleanup_until_capacity_r
         starter=starter,
         sessions=sessions,
     )
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
     await service.offer(
         token=token,
@@ -722,7 +797,7 @@ async def test_repeated_owner_mismatch_retries_terminal_cleanup_until_capacity_r
 @pytest.mark.asyncio
 async def test_wrong_immutable_claimant_cannot_revoke_or_cleanup_an_active_call() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -751,7 +826,7 @@ async def test_wrong_immutable_claimant_cannot_revoke_or_cleanup_an_active_call(
 async def test_repository_unavailability_does_not_tombstone_or_cleanup_active_call() -> None:
     sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
     service, handlers, starter = _service(sessions=sessions)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -787,7 +862,7 @@ async def test_repository_unavailability_does_not_tombstone_or_cleanup_active_ca
 @pytest.mark.asyncio
 async def test_trusted_release_active_and_terminal_calls_are_exact_and_idempotent() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -822,7 +897,7 @@ async def test_trusted_release_active_and_terminal_calls_are_exact_and_idempoten
 @pytest.mark.asyncio
 async def test_trusted_release_rejects_wrong_scope_without_mutating_exact_call() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -869,7 +944,7 @@ async def test_trusted_release_repository_drift_revokes_but_unavailability_does_
 ):
     sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
     service, handlers, starter = _service(sessions=sessions)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -914,8 +989,8 @@ async def test_trusted_release_repository_drift_cancels_negotiation_nonretryably
     release = asyncio.Event()
     handler = _Handler(enter=entered, release=release)
     service, _, _ = _service(handlers=[handler], sessions=sessions)
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     offer_task = asyncio.create_task(
         service.offer(
             token=_token(assignment),
@@ -948,7 +1023,7 @@ async def test_trusted_release_repository_drift_cancels_negotiation_nonretryably
 async def test_swallowed_runtime_callback_failure_is_a_terminal_side_channel_error() -> None:
     starter = _RuntimeStarter(failure=RuntimeError("pipeline failed"))
     service, handlers, _ = _service(starter=starter)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
 
     with pytest.raises(PipecatSignalingUnavailable, match="runtime failed to start"):
@@ -973,8 +1048,8 @@ async def test_signaling_timeout_and_caller_cancellation_both_tombstone_and_clea
         handlers=[timeout_handler],
         settings=_settings(signaling_timeout_seconds=0.01),
     )
-    timeout_service._handler_factory = lambda: timeout_handler
-    timeout_assignment = await timeout_service.reserve(_claims())
+    timeout_service._handler_factory = lambda _ice_lease: timeout_handler
+    timeout_assignment = await _reserve(timeout_service)
     timeout_token = _token(timeout_assignment)
     with pytest.raises(PipecatSignalingUnavailable, match="negotiation failed"):
         await timeout_service.offer(
@@ -994,8 +1069,8 @@ async def test_signaling_timeout_and_caller_cancellation_both_tombstone_and_clea
         handlers=[cancel_handler],
         tokens=["D" * 64],
     )
-    cancel_service._handler_factory = lambda: cancel_handler
-    cancel_assignment = await cancel_service.reserve(_claims())
+    cancel_service._handler_factory = lambda _ice_lease: cancel_handler
+    cancel_assignment = await _reserve(cancel_service)
     cancel_token = _token(cancel_assignment)
     task = asyncio.create_task(
         cancel_service.offer(
@@ -1019,7 +1094,7 @@ async def test_expired_reservation_is_tombstoned_and_cannot_resurrect_same_call(
     now = [FIXED_NOW]
     service, handlers, _ = _service(clock=lambda: now[0])
     claims = _claims()
-    assignment = await service.reserve(claims)
+    assignment = await _reserve(service, claims)
     token = _token(assignment)
     now[0] = claims.expires_at
 
@@ -1036,7 +1111,7 @@ async def test_expired_reservation_is_tombstoned_and_cannot_resurrect_same_call(
     assert handlers[0].initial_count == 0
     assert handlers[0].close_count == 1
     with pytest.raises(PipecatSignalingConflict):
-        await service.reserve(claims)
+        await _reserve(service, claims)
 
 
 @pytest.mark.asyncio
@@ -1044,8 +1119,8 @@ async def test_offer_that_finishes_after_expiry_never_publishes_active() -> None
     now = [FIXED_NOW]
     handler = _AdvanceClockHandler(lambda: now.__setitem__(0, FIXED_NOW + timedelta(seconds=60)))
     service, _, starter = _service(handlers=[handler], clock=lambda: now[0])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
 
     with pytest.raises(PipecatSignalingConflict, match="expired"):
@@ -1067,7 +1142,7 @@ async def test_offer_that_finishes_after_expiry_never_publishes_active() -> None
 @pytest.mark.asyncio
 async def test_peer_close_is_terminal_and_cannot_release_a_different_peer() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -1091,7 +1166,7 @@ async def test_peer_close_is_terminal_and_cannot_release_a_different_peer() -> N
 async def test_peer_close_before_pc_id_publication_cannot_resurrect_active_state() -> None:
     starter = _RuntimeStarter(close_during_start=True)
     service, handlers, _ = _service(starter=starter)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
 
     with pytest.raises(PipecatSignalingUnavailable, match="closed before negotiation"):
@@ -1125,7 +1200,7 @@ async def test_runtime_completion_tombstones_even_while_peer_remains_connected(
 ) -> None:
     starter = _RuntimeStarter(completion_failure=completion_failure)
     service, handlers, _ = _service(starter=starter)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     await service.offer(
         token=token,
@@ -1163,8 +1238,8 @@ async def test_runtime_completion_retries_cleanup_and_admits_the_next_call() -> 
             terminal_cleanup_retry_max_attempts=3,
         ),
     )
-    service._handler_factory = lambda: next(handler_values)
-    first_assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: next(handler_values)
+    first_assignment = await _reserve(service)
     await service.offer(
         token=_token(first_assignment),
         user_id="firebase-user-1",
@@ -1183,8 +1258,9 @@ async def test_runtime_completion_retries_cleanup_and_admits_the_next_call() -> 
     first_record = service._reservations[first_assignment.peer_reservation_id]
     assert first_record.cleanup_retry_task is None
 
-    second_assignment = await service.reserve(
-        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    second_assignment = await _reserve(
+        service,
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID),
     )
     second_answer = await service.offer(
         token=_token(second_assignment),
@@ -1215,8 +1291,8 @@ async def test_persistent_cleanup_failure_has_bounded_retries_and_retains_capaci
             terminal_cleanup_retry_max_attempts=3,
         ),
     )
-    service._handler_factory = lambda: next(handler_values)
-    first_assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: next(handler_values)
+    first_assignment = await _reserve(service)
     first_token = _token(first_assignment)
     await service.offer(
         token=first_token,
@@ -1244,8 +1320,9 @@ async def test_persistent_cleanup_failure_has_bounded_retries_and_retains_capaci
     assert starter.handles[0].close_count == 4
     assert first_handler.close_count == 4
 
-    second_assignment = await service.reserve(
-        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    second_assignment = await _reserve(
+        service,
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID),
     )
     with pytest.raises(PipecatSignalingUnavailable, match="active-call capacity"):
         await service.offer(
@@ -1273,8 +1350,8 @@ async def test_cleanup_retry_horizon_bounds_a_hung_attempt_and_retains_capacity(
             terminal_cleanup_retry_max_attempts=10,
         ),
     )
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1319,8 +1396,8 @@ async def test_service_close_cancels_and_awaits_terminal_cleanup_retry_task() ->
             terminal_cleanup_retry_max_attempts=3,
         ),
     )
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1355,8 +1432,8 @@ async def test_service_close_cancels_and_awaits_terminal_cleanup_retry_task() ->
 async def test_cancelled_service_close_caller_cannot_abandon_owned_cleanup() -> None:
     handler = _HangingCloseHandler()
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
 
     close_caller = asyncio.create_task(service.aclose())
     await handler.close_entered.wait()
@@ -1378,7 +1455,7 @@ async def test_cancelled_service_close_caller_cannot_abandon_owned_cleanup() -> 
 async def test_delete_racing_runtime_completion_keeps_one_terminal_result_and_cleanup() -> None:
     starter = _RuntimeStarter()
     service, handlers, _ = _service(starter=starter)
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -1405,8 +1482,8 @@ async def test_terminal_delete_retries_failed_cleanup_before_releasing_call_capa
     handler = _Handler(fail_close_count=1)
     starter = _RuntimeStarter(fail_close_count=1)
     service, _, _ = _service(handlers=[handler], starter=starter)
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -1440,8 +1517,8 @@ async def test_terminal_trusted_release_retries_cleanup_before_releasing_call_ca
     handler = _Handler(fail_close_count=1)
     starter = _RuntimeStarter(fail_close_count=1)
     service, _, _ = _service(handlers=[handler], starter=starter)
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1496,8 +1573,8 @@ async def test_terminal_trusted_release_does_not_require_repository_reauthorizat
         starter=starter,
         sessions=sessions,
     )
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1532,7 +1609,7 @@ async def test_trusted_status_call_returns_safe_active_and_terminal_snapshots_wi
     None
 ):
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     answer = await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1594,7 +1671,7 @@ async def test_trusted_status_call_rejects_wrong_scope_without_mutating_active_o
     None
 ):
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1660,7 +1737,7 @@ async def test_trusted_status_call_linearizes_before_or_after_reservation_insert
     service, _, _ = _service()
     gated_runner = _GatedRepositoryRunner()
     service._repository_runner = gated_runner  # type: ignore[assignment]
-    reserve_task = asyncio.create_task(service.reserve(_claims()))
+    reserve_task = asyncio.create_task(_reserve(service))
     await gated_runner.entered.wait()
 
     with pytest.raises(PipecatSignalingNotFound, match="reservation not found"):
@@ -1685,7 +1762,7 @@ async def test_trusted_status_call_linearizes_before_or_after_reservation_insert
 async def test_trusted_status_call_unknown_after_tombstone_prune_is_not_found() -> None:
     now = [FIXED_NOW]
     service, _, _ = _service(clock=lambda: now[0])
-    await service.reserve(_claims())
+    await _reserve(service)
     await service.release_call(
         user_id="firebase-user-1",
         session_id=SESSION_ID,
@@ -1693,13 +1770,14 @@ async def test_trusted_status_call_unknown_after_tombstone_prune_is_not_found() 
     )
 
     now[0] += timedelta(seconds=service.settings.tombstone_ttl_seconds + 1)
-    await service.reserve(
+    await _reserve(
+        service,
         _claims(
             call_id=OTHER_CALL_ID,
             trace_id=OTHER_TRACE_ID,
             issued_at=now[0],
             expires_at=now[0] + timedelta(seconds=60),
-        )
+        ),
     )
 
     with pytest.raises(PipecatSignalingNotFound, match="reservation not found"):
@@ -1715,7 +1793,7 @@ async def test_trusted_status_call_unknown_after_tombstone_prune_is_not_found() 
 async def test_trusted_status_call_revalidates_retention_when_pruned_during_resolution() -> None:
     now = [FIXED_NOW]
     service, _, _ = _service(clock=lambda: now[0])
-    await service.reserve(_claims())
+    await _reserve(service)
     await service.release_call(
         user_id="firebase-user-1",
         session_id=SESSION_ID,
@@ -1751,13 +1829,14 @@ async def test_trusted_status_call_revalidates_retention_when_pruned_during_reso
     await resolved.wait()
 
     now[0] += timedelta(seconds=service.settings.tombstone_ttl_seconds + 1)
-    await service.reserve(
+    await _reserve(
+        service,
         _claims(
             call_id=OTHER_CALL_ID,
             trace_id=OTHER_TRACE_ID,
             issued_at=now[0],
             expires_at=now[0] + timedelta(seconds=60),
-        )
+        ),
     )
     service._resolve_trusted_call = original_resolve  # type: ignore[method-assign]
     resume_status.set()
@@ -1770,8 +1849,8 @@ async def test_trusted_status_call_revalidates_retention_when_pruned_during_reso
 async def test_trusted_status_call_linearizes_after_inflight_release_cleanup() -> None:
     handler = _HangingCloseHandler()
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1806,7 +1885,7 @@ async def test_trusted_status_call_linearizes_after_inflight_release_cleanup() -
 @pytest.mark.asyncio
 async def test_trusted_status_call_fails_unavailable_once_service_close_linearizes() -> None:
     service, _, _ = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     record = service._reservations[assignment.peer_reservation_id]
     await record.lock.acquire()
     status_task = asyncio.create_task(
@@ -1834,8 +1913,8 @@ async def test_trusted_status_call_fails_unavailable_once_service_close_lineariz
 async def test_caller_cancellation_during_cleanup_is_propagated_and_delete_can_retry() -> None:
     handler = _HangingCloseHandler()
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     token = _token(assignment)
     answer = await service.offer(
         token=token,
@@ -1867,8 +1946,8 @@ async def test_caller_cancellation_during_cleanup_is_propagated_and_delete_can_r
 async def test_trusted_release_caller_cancellation_cannot_abandon_terminal_cleanup() -> None:
     handler = _HangingCloseHandler()
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1909,8 +1988,8 @@ async def test_trusted_release_caller_cancellation_cannot_abandon_terminal_clean
 async def test_service_close_joins_a_shielded_trusted_release_task() -> None:
     handler = _HangingCloseHandler()
     service, _, starter = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -1953,7 +2032,7 @@ async def test_service_close_joins_a_shielded_trusted_release_task() -> None:
 @pytest.mark.asyncio
 async def test_service_close_linearizes_before_trusted_release_task_creation() -> None:
     service, handlers, starter = _service()
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     await service.offer(
         token=_token(assignment),
         user_id="firebase-user-1",
@@ -2002,7 +2081,7 @@ async def test_reservation_expiry_task_tombstones_without_a_followup_request() -
 
     service, handlers, _ = _service(clock=lambda: now[0])
     service._sleep = advance_clock
-    assignment = await service.reserve(_claims())
+    assignment = await _reserve(service)
     token = _token(assignment)
     for _ in range(10):
         snapshot = await service.status(token=token, user_id="firebase-user-1")
@@ -2019,15 +2098,16 @@ async def test_reservation_expiry_task_tombstones_without_a_followup_request() -
 @pytest.mark.asyncio
 async def test_reserved_delete_and_service_close_are_bounded_idempotent_cleanup() -> None:
     service, handlers, _ = _service()
-    first_assignment = await service.reserve(_claims())
+    first_assignment = await _reserve(service)
     first_token = _token(first_assignment)
     first = await service.delete(token=first_token, user_id="firebase-user-1", pc_id=None)
     second = await service.delete(token=first_token, user_id="firebase-user-1", pc_id=None)
     assert first == second
     assert handlers[0].close_count == 1
 
-    second_assignment = await service.reserve(
-        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    second_assignment = await _reserve(
+        service,
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID),
     )
     second_token = _token(second_assignment)
     await service.aclose()
@@ -2044,8 +2124,8 @@ async def test_service_close_cancels_a_hung_initial_offer_before_waiting_for_its
     release = asyncio.Event()
     handler = _Handler(enter=entered, release=release)
     service, _, _ = _service(handlers=[handler])
-    service._handler_factory = lambda: handler
-    assignment = await service.reserve(_claims())
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
     offer_task = asyncio.create_task(
         service.offer(
             token=_token(assignment),

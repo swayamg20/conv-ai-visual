@@ -91,6 +91,7 @@ class _BlockingLookup(_Lookup):
 class _FakeSignaling:
     def __init__(self) -> None:
         self.reserve_calls: list[VoiceCallClaims] = []
+        self.reserve_leases: list[PipecatIceLease] = []
         self.release_calls: list[tuple[str, str, str]] = []
         self.reserve_entered = asyncio.Event()
         self.reserve_gate: asyncio.Event | None = None
@@ -109,8 +110,10 @@ class _FakeSignaling:
     async def reserve(
         self,
         claims: VoiceCallClaims,
+        ice_lease: PipecatIceLease,
     ) -> PipecatVoiceRuntimeAssignment:
         self.reserve_calls.append(claims)
+        self.reserve_leases.append(ice_lease)
         self.reserve_entered.set()
         if self.reserve_gate is not None:
             await self.reserve_gate.wait()
@@ -201,8 +204,8 @@ class _FakeSignaling:
 
 
 class _MalformedAssignmentSignaling(_FakeSignaling):
-    async def reserve(self, claims: VoiceCallClaims) -> Any:
-        await super().reserve(claims)
+    async def reserve(self, claims: VoiceCallClaims, ice_lease: PipecatIceLease) -> Any:
+        await super().reserve(claims, ice_lease)
         return object()
 
 
@@ -234,6 +237,12 @@ class _FakeIceIssuer:
                 ),
             ),
         )
+
+
+class _MalformedIceIssuer(_FakeIceIssuer):
+    async def issue(self, claims: VoiceCallClaims) -> Any:
+        self.calls.append(claims)
+        return object()
 
 
 def _settings(**overrides: Any) -> PipecatBootstrapSettings:
@@ -331,6 +340,8 @@ async def test_duplicate_bootstrap_returns_same_secret_assignment_and_lease() ->
     assert second.ice_lease is first.ice_lease
     assert len(signaling.reserve_calls) == 1
     assert len(ice.calls) == 1
+    assert signaling.reserve_leases == [first.ice_lease]
+    assert signaling.reserve_leases[0] is first.ice_lease
     rendered = repr(first)
     assert first.assignment.webrtc_url.get_secret_value() not in rendered
     assert ice.secret not in rendered
@@ -655,19 +666,18 @@ async def test_cancellation_during_repository_read_never_calls_remote_reserve() 
 
 
 @pytest.mark.asyncio
-async def test_cancellation_after_reserve_hands_off_exact_trusted_release() -> None:
+async def test_cancellation_during_ice_issue_never_creates_a_reservation() -> None:
     ice = _FakeIceIssuer()
     ice.gate = asyncio.Event()
     service, signaling, _ = _service(ice=ice)
     task = asyncio.create_task(_bootstrap(service))
     await ice.entered.wait()
-    assert len(signaling.reserve_calls) == 1
+    assert signaling.reserve_calls == []
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    await asyncio.wait_for(signaling.release_entered.wait(), timeout=1.0)
-    assert signaling.release_calls == [("user-1", SESSION_1, CALL_1)]
+    assert signaling.release_calls == []
 
     ice.gate.set()
     for _ in range(100):
@@ -720,7 +730,7 @@ async def test_cancelled_queued_provision_never_calls_remote_reserve() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ice_failure_releases_reservation_and_never_caches_assignment() -> None:
+async def test_ice_failure_never_creates_or_caches_a_reservation() -> None:
     ice = _FakeIceIssuer()
     ice.error = PipecatIceLeaseUnavailable("turn unavailable")
     service, signaling, _ = _service(ice=ice)
@@ -728,10 +738,24 @@ async def test_ice_failure_releases_reservation_and_never_caches_assignment() ->
     with pytest.raises(PipecatBootstrapUnavailable, match="ICE lease"):
         await _bootstrap(service)
 
-    assert len(signaling.reserve_calls) == 1
-    assert len(signaling.release_calls) == 1
+    assert signaling.reserve_calls == []
+    assert signaling.release_calls == []
     assert service.active_assignment_count == 0
-    assert service.release_tombstone_count == 1
+    assert service.release_tombstone_count == 0
+
+
+@pytest.mark.asyncio
+async def test_invalid_ice_lease_is_rejected_before_signaling_reservation() -> None:
+    ice = _MalformedIceIssuer()
+    service, signaling, _ = _service(ice=ice)
+
+    with pytest.raises(PipecatBootstrapUnavailable, match="scope or expiry"):
+        await _bootstrap(service)
+
+    assert len(ice.calls) == 1
+    assert signaling.reserve_calls == []
+    assert signaling.release_calls == []
+    assert service.active_assignment_count == 0
 
 
 @pytest.mark.asyncio
@@ -744,7 +768,8 @@ async def test_malformed_assignment_is_still_trusted_released() -> None:
 
     assert len(signaling.reserve_calls) == 1
     assert len(signaling.release_calls) == 1
-    assert not ice.calls
+    assert len(ice.calls) == 1
+    assert signaling.reserve_leases[0].claims == signaling.reserve_calls[0]
     assert service.active_assignment_count == 0
     assert service.release_tombstone_count == 1
 

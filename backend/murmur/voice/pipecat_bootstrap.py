@@ -147,6 +147,7 @@ class PipecatSignalingControl(Protocol):
     async def reserve(
         self,
         claims: VoiceCallClaims,
+        ice_lease: PipecatIceLease,
     ) -> PipecatVoiceRuntimeAssignment: ...
 
     async def release_call(
@@ -595,7 +596,10 @@ class PipecatBootstrapService:
             ):
                 if await self._has_release_intent(record.scope):
                     raise PipecatBootstrapConflict("voice_call_id was released; start a fresh call")
-                assignment = await self._reserve(record.claims)
+                lease = await self._issue_ice_lease(record.claims)
+                if await self._has_release_intent(record.scope):
+                    raise PipecatBootstrapConflict("voice_call_id was released; start a fresh call")
+                assignment = await self._reserve(record.claims, lease)
                 # A successful reserve call owns remote capacity even if its
                 # returned value is malformed. Keep that ownership fact before
                 # validation so every later failure routes through trusted
@@ -607,10 +611,6 @@ class PipecatBootstrapService:
                     await self._release_record(record)
                     raise PipecatBootstrapConflict("voice_call_id was released; start a fresh call")
 
-                lease = await self._issue_ice_lease(record.claims)
-                lease.require_compatible_signaling_base_url(
-                    assignment.webrtc_url.get_secret_value()
-                )
                 result = PipecatBootstrapResult(assignment=assignment, ice_lease=lease)
                 if self._claims_expired(record.claims):
                     await self._record_release_intent(record.scope)
@@ -658,10 +658,11 @@ class PipecatBootstrapService:
     async def _reserve(
         self,
         claims: VoiceCallClaims,
+        ice_lease: PipecatIceLease,
     ) -> PipecatVoiceRuntimeAssignment:
         try:
             return await asyncio.wait_for(
-                self._signaling.reserve(claims),
+                self._signaling.reserve(claims, ice_lease),
                 timeout=self.settings.operation_timeout_seconds,
             )
         except asyncio.CancelledError:
