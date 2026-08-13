@@ -1300,7 +1300,8 @@ async def test_cleanup_retry_horizon_bounds_a_hung_attempt_and_retains_capacity(
     assert record.cleanup_retry_task is None
     assert 2 <= handler.close_count <= 4
     assert service.active_call_count == 1
-    await service.aclose()
+    with pytest.raises(PipecatSignalingUnavailable, match="cleanup is incomplete"):
+        await service.aclose()
     assert record.cleanup_retry_task is None
 
 
@@ -1336,7 +1337,8 @@ async def test_service_close_cancels_and_awaits_terminal_cleanup_retry_task() ->
     assert retry_task is not None
     assert not retry_task.done()
 
-    await service.aclose()
+    with pytest.raises(PipecatSignalingUnavailable, match="cleanup is incomplete"):
+        await service.aclose()
     counts_after_close = (starter.handles[0].close_count, handler.close_count)
     assert record.cleanup_retry_task is None
     assert retry_task.done()
@@ -1347,6 +1349,29 @@ async def test_service_close_cancels_and_awaits_terminal_cleanup_retry_task() ->
     handler.fail_close_count = handler.close_count
     await service.aclose()
     assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_service_close_caller_cannot_abandon_owned_cleanup() -> None:
+    handler = _HangingCloseHandler()
+    service, _, _ = _service(handlers=[handler])
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+
+    close_caller = asyncio.create_task(service.aclose())
+    await handler.close_entered.wait()
+    close_caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_caller
+    handler.allow_close.set()
+    await service.aclose()
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.TERMINAL
+    assert record.cleanup_retry_task is None
+    assert service.active_call_count == 0
+    assert record.runtime_handle is None
+    assert record.handler_cleanup_complete is True
 
 
 @pytest.mark.asyncio
@@ -1428,7 +1453,15 @@ async def test_terminal_trusted_release_retries_cleanup_before_releasing_call_ca
         session_id=SESSION_ID,
         voice_call_id=CALL_ID,
     )
+    incomplete = await service.status_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
     assert terminal.reason.value == "user_ended"
+    assert incomplete.state is PipecatReservationState.TERMINAL
+    assert incomplete.terminal_result == terminal
+    assert incomplete.cleanup_complete is False
     assert service.active_call_count == 1
     assert starter.handles[0].close_count == 1
     assert handler.close_count == 1
@@ -1438,7 +1471,13 @@ async def test_terminal_trusted_release_retries_cleanup_before_releasing_call_ca
         session_id=SESSION_ID,
         voice_call_id=CALL_ID,
     )
+    complete = await service.status_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
     assert retry == terminal
+    assert complete.cleanup_complete is True
     assert service.active_call_count == 0
     assert starter.handles[0].close_count == 2
     assert handler.close_count == 2
@@ -1519,6 +1558,7 @@ async def test_trusted_status_call_returns_safe_active_and_terminal_snapshots_wi
         "state",
         "pc_id",
         "terminal_result",
+        "cleanup_complete",
     }
     assert TOKEN not in repr(active)
     assert not hasattr(active, "handler")

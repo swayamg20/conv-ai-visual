@@ -305,6 +305,7 @@ class PipecatReservationSnapshot:
     state: PipecatReservationState
     pc_id: str | None
     terminal_result: VoiceRuntimeTerminalResult | None
+    cleanup_complete: bool
 
 
 class SessionRepository(Protocol):
@@ -507,6 +508,8 @@ class PipecatSignalingService:
         self._call_index: dict[str, str] = {}
         self._active_reservation_id: str | None = None
         self._closed = False
+        self._close_lock = asyncio.Lock()
+        self._close_task: asyncio.Task[None] | None = None
 
     async def reserve(self, claims: VoiceCallClaims) -> PipecatVoiceRuntimeAssignment:
         """Create one server-selected, repository-authorized opaque reservation."""
@@ -780,6 +783,7 @@ class PipecatSignalingService:
                 state=record.state,
                 pc_id=record.pc_id,
                 terminal_result=record.terminal_result,
+                cleanup_complete=self._cleanup_complete(record),
             )
 
     async def status_call(
@@ -819,10 +823,26 @@ class PipecatSignalingService:
                     state=record.state,
                     pc_id=record.pc_id,
                     terminal_result=record.terminal_result,
+                    cleanup_complete=self._cleanup_complete(record),
                 )
 
     async def aclose(self) -> None:
-        """Bound and idempotently close every retained reservation owner."""
+        """Run one cancellation-safe close attempt and expose incomplete cleanup."""
+
+        async with self._close_lock:
+            task = self._close_task
+            if task is None or task.cancelled() or (task.done() and task.exception() is not None):
+                task = asyncio.create_task(
+                    self._close_owned(),
+                    name="pipecat-signaling-close",
+                )
+                task.add_done_callback(_consume_task_result)
+                self._close_task = task
+        await asyncio.shield(task)
+
+    async def _close_owned(self) -> None:
+        """Stop admission and retry each retained resource exactly once per call."""
+
         async with self._guard:
             self._closed = True
             records = tuple(self._reservations.values())
@@ -845,6 +865,8 @@ class PipecatSignalingService:
                 and trusted_release_task is not asyncio.current_task()
             ):
                 await asyncio.gather(trusted_release_task, return_exceptions=True)
+        if any(not self._cleanup_complete(record) for record in records):
+            raise PipecatSignalingUnavailable("Pipecat signaling close cleanup is incomplete")
 
     @property
     def reservation_count(self) -> int:
@@ -853,6 +875,10 @@ class PipecatSignalingService:
     @property
     def active_call_count(self) -> int:
         return int(self._active_reservation_id is not None)
+
+    @staticmethod
+    def _cleanup_complete(record: _Reservation) -> bool:
+        return record.runtime_handle is None and record.handler_cleanup_complete
 
     async def _initial_offer_locked(
         self,
