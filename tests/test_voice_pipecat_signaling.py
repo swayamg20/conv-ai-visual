@@ -63,6 +63,23 @@ class _UnavailableRepo:
         raise RuntimeError("repository unavailable")
 
 
+class _GatedRepositoryRunner:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def run(
+        self,
+        function: Any,
+        *args: object,
+        timeout_seconds: float,
+    ) -> Any:
+        del timeout_seconds
+        self.entered.set()
+        await self.release.wait()
+        return function(*args)
+
+
 class _Connection:
     def __init__(self, pc_id: str) -> None:
         self.pc_id = pc_id
@@ -493,6 +510,41 @@ async def test_delete_during_initial_negotiation_wins_and_cannot_resurrect() -> 
 
 
 @pytest.mark.asyncio
+async def test_trusted_release_cancels_initial_negotiation_without_browser_credentials() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    handler = _Handler(enter=entered, release=release)
+    service, _, _ = _service(handlers=[handler])
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    offer_task = asyncio.create_task(
+        service.offer(
+            token=_token(assignment),
+            user_id="firebase-user-1",
+            request=_initial_offer(),
+        )
+    )
+    await entered.wait()
+
+    terminal = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+    with pytest.raises(PipecatSignalingConflict, match="cancelled"):
+        await offer_task
+
+    assert terminal.reason.value == "user_ended"
+    assert terminal.retryable is False
+    snapshot = await service.status(token=_token(assignment), user_id="firebase-user-1")
+    assert snapshot.state is PipecatReservationState.TERMINAL
+    assert snapshot.pc_id is None
+    assert snapshot.terminal_result == terminal
+    assert handler.close_count == 1
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_process_local_one_call_cap_releases_only_after_terminal_cleanup() -> None:
     service, handlers, _ = _service()
     first_assignment = await service.reserve(_claims())
@@ -730,6 +782,166 @@ async def test_repository_unavailability_does_not_tombstone_or_cleanup_active_ca
         user_id="firebase-user-1",
         pc_id=answer.pc_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_trusted_release_active_and_terminal_calls_are_exact_and_idempotent() -> None:
+    service, handlers, starter = _service()
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    first, second = await asyncio.gather(
+        service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        ),
+        service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        ),
+    )
+    third = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+
+    assert first == second == third
+    assert first.reason.value == "user_ended"
+    assert starter.handles[0].close_count == 1
+    assert handlers[0].close_count == 1
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_trusted_release_rejects_wrong_scope_without_mutating_exact_call() -> None:
+    service, handlers, starter = _service()
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    for request in (
+        {
+            "user_id": "attacker",
+            "session_id": SESSION_ID,
+            "voice_call_id": CALL_ID,
+        },
+        {
+            "user_id": "firebase-user-1",
+            "session_id": "77777777-7777-4777-8777-777777777777",
+            "voice_call_id": CALL_ID,
+        },
+    ):
+        with pytest.raises(PipecatSignalingForbidden, match="Forbidden"):
+            await service.release_call(**request)
+    with pytest.raises(PipecatSignalingNotFound, match="reservation not found"):
+        await service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=OTHER_CALL_ID,
+        )
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.ACTIVE
+    assert record.cancel_requested.is_set() is False
+    assert record.terminal_result is None
+    assert starter.handles[0].close_count == 0
+    assert handlers[0].close_count == 0
+    await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+
+
+@pytest.mark.asyncio
+async def test_trusted_release_repository_drift_revokes_but_unavailability_does_not_mutate() -> (
+    None
+):
+    sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
+    service, handlers, starter = _service(sessions=sessions)
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+    healthy_repo = service._session_repo
+    service._session_repo = _UnavailableRepo()  # type: ignore[assignment]
+
+    with pytest.raises(PipecatSignalingUnavailable, match="repository lookup failed"):
+        await service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.ACTIVE
+    assert record.cancel_requested.is_set() is False
+    assert record.terminal_result is None
+    assert starter.handles[0].close_count == 0
+    assert handlers[0].close_count == 0
+
+    service._session_repo = healthy_repo
+    sessions[SESSION_ID] = _Session(SESSION_ID, "different-owner", AGENT_ID)
+    with pytest.raises(PipecatSignalingForbidden, match="Authoritative"):
+        await service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    assert record.state is PipecatReservationState.TERMINAL
+    assert record.terminal_result is not None
+    assert record.terminal_result.reason.value == "owner_mismatch"
+    assert starter.handles[0].close_count == 1
+    assert handlers[0].close_count == 1
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_trusted_release_repository_drift_cancels_negotiation_nonretryably() -> None:
+    sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    handler = _Handler(enter=entered, release=release)
+    service, _, _ = _service(handlers=[handler], sessions=sessions)
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    offer_task = asyncio.create_task(
+        service.offer(
+            token=_token(assignment),
+            user_id="firebase-user-1",
+            request=_initial_offer(),
+        )
+    )
+    await entered.wait()
+    sessions[SESSION_ID] = _Session(SESSION_ID, "different-owner", AGENT_ID)
+
+    with pytest.raises(PipecatSignalingForbidden, match="Authoritative"):
+        await service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    with pytest.raises(PipecatSignalingConflict, match="cancelled"):
+        await offer_task
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.TERMINAL
+    assert record.terminal_result is not None
+    assert record.terminal_result.reason.value == "owner_mismatch"
+    assert record.terminal_result.retryable is False
+    assert handler.close_count == 1
+    assert service.active_call_count == 0
 
 
 @pytest.mark.asyncio
@@ -1199,6 +1411,84 @@ async def test_terminal_delete_retries_failed_cleanup_before_releasing_call_capa
 
 
 @pytest.mark.asyncio
+async def test_terminal_trusted_release_retries_cleanup_before_releasing_call_capacity() -> None:
+    handler = _Handler(fail_close_count=1)
+    starter = _RuntimeStarter(fail_close_count=1)
+    service, _, _ = _service(handlers=[handler], starter=starter)
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    terminal = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+    assert terminal.reason.value == "user_ended"
+    assert service.active_call_count == 1
+    assert starter.handles[0].close_count == 1
+    assert handler.close_count == 1
+
+    retry = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+    assert retry == terminal
+    assert service.active_call_count == 0
+    assert starter.handles[0].close_count == 2
+    assert handler.close_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repository_state", ["unavailable", "drifted"])
+async def test_terminal_trusted_release_does_not_require_repository_reauthorization(
+    repository_state: str,
+) -> None:
+    sessions = {SESSION_ID: _Session(SESSION_ID, "firebase-user-1", AGENT_ID)}
+    handler = _Handler(fail_close_count=1)
+    starter = _RuntimeStarter(fail_close_count=1)
+    service, _, _ = _service(
+        handlers=[handler],
+        starter=starter,
+        sessions=sessions,
+    )
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+    terminal = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+    assert service.active_call_count == 1
+
+    if repository_state == "unavailable":
+        service._session_repo = _UnavailableRepo()  # type: ignore[assignment]
+    else:
+        sessions[SESSION_ID] = _Session(SESSION_ID, "different-owner", AGENT_ID)
+    retry = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+
+    assert retry == terminal
+    assert retry.reason.value == "user_ended"
+    assert starter.handles[0].close_count == 2
+    assert handler.close_count == 2
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_caller_cancellation_during_cleanup_is_propagated_and_delete_can_retry() -> None:
     handler = _HangingCloseHandler()
     service, _, _ = _service(handlers=[handler])
@@ -1229,6 +1519,135 @@ async def test_caller_cancellation_during_cleanup_is_propagated_and_delete_can_r
     assert terminal.reason.value == "user_ended"
     assert handler.close_count == 2
     assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_trusted_release_caller_cancellation_cannot_abandon_terminal_cleanup() -> None:
+    handler = _HangingCloseHandler()
+    service, _, _ = _service(handlers=[handler])
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    release_task = asyncio.create_task(
+        service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    )
+    await handler.close_entered.wait()
+    release_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.TERMINAL
+    assert service.active_call_count == 1
+    handler.allow_close.set()
+    assert record.trusted_release_task is not None
+    await record.trusted_release_task
+    assert service.active_call_count == 0
+    assert handler.close_count == 1
+
+    terminal = await service.release_call(
+        user_id="firebase-user-1",
+        session_id=SESSION_ID,
+        voice_call_id=CALL_ID,
+    )
+    assert terminal == record.terminal_result
+    assert handler.close_count == 1
+
+
+@pytest.mark.asyncio
+async def test_service_close_joins_a_shielded_trusted_release_task() -> None:
+    handler = _HangingCloseHandler()
+    service, _, starter = _service(handlers=[handler])
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    release_task = asyncio.create_task(
+        service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    )
+    await handler.close_entered.wait()
+    release_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await release_task
+
+    close_task = asyncio.create_task(service.aclose())
+    await asyncio.sleep(0)
+    assert close_task.done() is False
+    handler.allow_close.set()
+    await asyncio.wait_for(close_task, timeout=0.5)
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.trusted_release_task is not None
+    assert record.trusted_release_task.done()
+    assert starter.handles[0].close_count == 1
+    assert handler.close_count == 1
+    pending_release_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        and task.get_name().startswith("pipecat-trusted-release-")
+    ]
+    assert pending_release_tasks == []
+
+
+@pytest.mark.asyncio
+async def test_service_close_linearizes_before_trusted_release_task_creation() -> None:
+    service, handlers, starter = _service()
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+    gated_runner = _GatedRepositoryRunner()
+    service._repository_runner = gated_runner  # type: ignore[assignment]
+    release_task = asyncio.create_task(
+        service.release_call(
+            user_id="firebase-user-1",
+            session_id=SESSION_ID,
+            voice_call_id=CALL_ID,
+        )
+    )
+    await gated_runner.entered.wait()
+
+    await asyncio.wait_for(service.aclose(), timeout=0.5)
+    gated_runner.release.set()
+    with pytest.raises(PipecatSignalingUnavailable, match="service is closed"):
+        await release_task
+
+    record = service._reservations[assignment.peer_reservation_id]
+    assert record.state is PipecatReservationState.TERMINAL
+    assert record.terminal_result is not None
+    assert record.terminal_result.reason.value == "runtime_stopped"
+    assert record.trusted_release_task is None
+    assert starter.handles[0].close_count == 1
+    assert handlers[0].close_count == 1
+    pending_release_tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and not task.done()
+        and task.get_name().startswith("pipecat-trusted-release-")
+    ]
+    assert pending_release_tasks == []
 
 
 @pytest.mark.asyncio

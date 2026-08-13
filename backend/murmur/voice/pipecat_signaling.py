@@ -461,9 +461,15 @@ class _Reservation:
     tombstone_expires_at: datetime | None = None
     handler_cleanup_complete: bool = False
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    cancel_reason: VoiceRuntimeTerminalReason | None = None
     runtime_observer_task: asyncio.Task[None] | None = field(default=None, repr=False)
     expiry_task: asyncio.Task[None] | None = field(default=None, repr=False)
     cleanup_retry_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    trusted_release_task: asyncio.Task[VoiceRuntimeTerminalResult] | None = field(
+        default=None,
+        repr=False,
+    )
+    trusted_release_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
@@ -647,7 +653,7 @@ class PipecatSignalingService:
             PipecatReservationState.NEGOTIATING,
         }
         if pre_peer_cancel:
-            record.cancel_requested.set()
+            self._publish_cancel_intent(record, VoiceRuntimeTerminalReason.USER_ENDED)
         async with record.lock:
             await self._authorize_record_ownership_locked(record, user_id=user_id)
             if record.state is PipecatReservationState.TERMINAL:
@@ -673,6 +679,91 @@ class PipecatSignalingService:
                 retryable=False,
             )
 
+    async def release_call(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        voice_call_id: str,
+    ) -> VoiceRuntimeTerminalResult:
+        """Release one exact call from its authenticated bootstrap owner.
+
+        This process-internal path deliberately needs neither the browser bearer
+        nor its peer ID.  It first proves the immutable call scope and current
+        repository authority, then publishes negative intent before waiting for
+        an in-flight negotiation lock.  Once intent is published, an owned task
+        completes terminalization even if the initiating request is cancelled.
+        """
+
+        record = await self._resolve_trusted_call(
+            user_id=user_id,
+            session_id=session_id,
+            voice_call_id=voice_call_id,
+        )
+        authority_error: PipecatSignalingNotFound | PipecatSignalingForbidden | None = None
+        release_task: asyncio.Task[VoiceRuntimeTerminalResult] | None
+        async with record.trusted_release_lock:
+            # The call index may have been pruned while this caller waited for a
+            # concurrent release. Recheck the exact object and immutable scope
+            # before either consulting authority or publishing cancellation.
+            async with self._guard:
+                self._ensure_open_locked()
+                self._require_retained_trusted_call_locked(
+                    record,
+                    user_id=user_id,
+                    session_id=session_id,
+                    voice_call_id=voice_call_id,
+                )
+                if record.state is PipecatReservationState.TERMINAL:
+                    assert record.terminal_result is not None
+                    release_task = self._ensure_trusted_release_task_locked(
+                        record,
+                        reason=record.terminal_result.reason,
+                    )
+                else:
+                    release_task = None
+
+            if release_task is None:
+                try:
+                    await self._authorize_claims(record.claims)
+                except (PipecatSignalingNotFound, PipecatSignalingForbidden) as exc:
+                    # An exact immutable caller may revoke a call whose persistent
+                    # authority disappeared or drifted. Availability failures are
+                    # intentionally not caught and therefore cannot mutate state.
+                    authority_error = exc
+
+                # Linearize final authority/cancellation/task ownership with
+                # service close. Either close snapshots this owned task, or it
+                # closes first and this release fails before publishing intent.
+                async with self._guard:
+                    self._ensure_open_locked()
+                    self._require_retained_trusted_call_locked(
+                        record,
+                        user_id=user_id,
+                        session_id=session_id,
+                        voice_call_id=voice_call_id,
+                    )
+                    if record.state is PipecatReservationState.TERMINAL:
+                        assert record.terminal_result is not None
+                        reason = record.terminal_result.reason
+                    else:
+                        reason = (
+                            VoiceRuntimeTerminalReason.OWNER_MISMATCH
+                            if authority_error is not None
+                            else VoiceRuntimeTerminalReason.USER_ENDED
+                        )
+                        self._publish_cancel_intent(record, reason)
+                    release_task = self._ensure_trusted_release_task_locked(
+                        record,
+                        reason=reason,
+                    )
+
+        assert release_task is not None
+        result = await asyncio.shield(release_task)
+        if authority_error is not None:
+            raise authority_error
+        return result
+
     async def status(
         self,
         *,
@@ -697,8 +788,12 @@ class PipecatSignalingService:
             self._closed = True
             records = tuple(self._reservations.values())
             for record in records:
-                record.cancel_requested.set()
+                self._publish_cancel_intent(
+                    record,
+                    VoiceRuntimeTerminalReason.RUNTIME_STOPPED,
+                )
         for record in records:
+            trusted_release_task = record.trusted_release_task
             async with record.lock:
                 await self._terminate_locked(
                     record,
@@ -706,6 +801,11 @@ class PipecatSignalingService:
                     retryable=True,
                 )
                 await self._cancel_cleanup_retry_task_locked(record)
+            if (
+                trusted_release_task is not None
+                and trusted_release_task is not asyncio.current_task()
+            ):
+                await asyncio.gather(trusted_release_task, return_exceptions=True)
 
     @property
     def reservation_count(self) -> int:
@@ -788,11 +888,16 @@ class PipecatSignalingService:
                 ),
             )
         except _ReservationCancelled:
+            reason = record.cancel_reason or VoiceRuntimeTerminalReason.USER_ENDED
             await self._terminate_after_initial_failure(
                 record,
                 side_channel,
-                reason=VoiceRuntimeTerminalReason.USER_ENDED,
-                retryable=False,
+                reason=reason,
+                retryable=reason
+                not in {
+                    VoiceRuntimeTerminalReason.USER_ENDED,
+                    VoiceRuntimeTerminalReason.OWNER_MISMATCH,
+                },
             )
             raise PipecatSignalingConflict("SmallWebRTC reservation was cancelled") from None
         except asyncio.CancelledError:
@@ -997,6 +1102,22 @@ class PipecatSignalingService:
         finally:
             cancel_task.cancel()
             await asyncio.gather(cancel_task, return_exceptions=True)
+
+    async def _finish_trusted_release(
+        self,
+        *,
+        record: _Reservation,
+        reason: VoiceRuntimeTerminalReason,
+    ) -> VoiceRuntimeTerminalResult:
+        async with record.lock:
+            # The first published terminal fact wins. This also makes repeated
+            # trusted release calls retry incomplete cleanup without rewriting
+            # an already-authoritative terminal reason.
+            return await self._terminate_locked(
+                record,
+                reason=reason,
+                retryable=False,
+            )
 
     async def _terminate_locked(
         self,
@@ -1227,6 +1348,91 @@ class PipecatSignalingService:
             raise PipecatSignalingForbidden("Forbidden")
         return record
 
+    async def _resolve_trusted_call(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        voice_call_id: str,
+    ) -> _Reservation:
+        if not isinstance(voice_call_id, str):
+            raise PipecatSignalingNotFound("SmallWebRTC reservation not found")
+        async with self._guard:
+            self._ensure_open_locked()
+            reservation_id = self._call_index.get(voice_call_id)
+            record = self._reservations.get(reservation_id) if reservation_id else None
+        if record is None:
+            raise PipecatSignalingNotFound("SmallWebRTC reservation not found")
+        self._require_trusted_scope(
+            record,
+            user_id=user_id,
+            session_id=session_id,
+            voice_call_id=voice_call_id,
+        )
+        return record
+
+    def _require_retained_trusted_call_locked(
+        self,
+        record: _Reservation,
+        *,
+        user_id: str,
+        session_id: str,
+        voice_call_id: str,
+    ) -> None:
+        retained_id = self._call_index.get(voice_call_id)
+        retained = self._reservations.get(retained_id) if retained_id else None
+        if retained is not record:
+            raise PipecatSignalingNotFound("SmallWebRTC reservation not found")
+        self._require_trusted_scope(
+            record,
+            user_id=user_id,
+            session_id=session_id,
+            voice_call_id=voice_call_id,
+        )
+
+    def _ensure_trusted_release_task_locked(
+        self,
+        record: _Reservation,
+        *,
+        reason: VoiceRuntimeTerminalReason,
+    ) -> asyncio.Task[VoiceRuntimeTerminalResult]:
+        existing = record.trusted_release_task
+        if existing is not None and not existing.done():
+            return existing
+        release_task = asyncio.create_task(
+            self._finish_trusted_release(record=record, reason=reason),
+            name=f"pipecat-trusted-release-{record.peer_reservation_id}",
+        )
+        release_task.add_done_callback(_consume_task_result)
+        record.trusted_release_task = release_task
+        return release_task
+
+    @staticmethod
+    def _require_trusted_scope(
+        record: _Reservation,
+        *,
+        user_id: str,
+        session_id: str,
+        voice_call_id: str,
+    ) -> None:
+        if not all(isinstance(value, str) for value in (user_id, session_id, voice_call_id)):
+            raise PipecatSignalingForbidden("Forbidden")
+        if not (
+            _constant_time_text_equal(record.claims.user_id, user_id)
+            and _constant_time_text_equal(record.claims.session_id, session_id)
+            and _constant_time_text_equal(record.claims.voice_call_id, voice_call_id)
+        ):
+            raise PipecatSignalingForbidden("Forbidden")
+
+    @staticmethod
+    def _publish_cancel_intent(
+        record: _Reservation,
+        reason: VoiceRuntimeTerminalReason,
+    ) -> None:
+        if record.cancel_reason is None:
+            record.cancel_reason = reason
+        record.cancel_requested.set()
+
     async def _authorize_live_record(self, record: _Reservation, *, user_id: str) -> None:
         await self._authorize_record_ownership_locked(record, user_id=user_id)
         if record.state is PipecatReservationState.TERMINAL:
@@ -1397,6 +1603,16 @@ def _validate_bearer(token: object) -> str:
 
 def _hash_token(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
+
+
+def _constant_time_text_equal(left: str, right: str) -> bool:
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _consume_task_result(task: asyncio.Task[object]) -> None:
+    if task.cancelled():
+        return
+    task.exception()
 
 
 def _normalize_signaling_base_url(base_url: str) -> str:
