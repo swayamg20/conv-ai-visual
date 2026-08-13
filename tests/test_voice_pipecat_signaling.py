@@ -209,6 +209,17 @@ class _HangingCloseHandler(_Handler):
         await self.allow_close.wait()
 
 
+class _CountingHangingCloseHandler(_Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_entered = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_count += 1
+        self.close_entered.set()
+        await asyncio.Event().wait()
+
+
 class _AdvanceClockHandler(_Handler):
     def __init__(self, advance: Any) -> None:
         super().__init__()
@@ -926,6 +937,207 @@ async def test_runtime_completion_tombstones_even_while_peer_remains_connected(
 
 
 @pytest.mark.asyncio
+async def test_runtime_completion_retries_cleanup_and_admits_the_next_call() -> None:
+    first_handler = _Handler(fail_close_count=1)
+    second_handler = _Handler(pc_id="SmallWebRTCConnection#2-peer")
+    handler_values = iter((first_handler, second_handler))
+    starter = _RuntimeStarter(fail_close_count=1)
+    service, _, _ = _service(
+        starter=starter,
+        settings=_settings(
+            terminal_cleanup_retry_initial_seconds=0.001,
+            terminal_cleanup_retry_max_seconds=0.002,
+            terminal_cleanup_retry_horizon_seconds=0.05,
+            terminal_cleanup_retry_max_attempts=3,
+        ),
+    )
+    service._handler_factory = lambda: next(handler_values)
+    first_assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(first_assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    starter.handles[0].complete()
+    for _ in range(100):
+        if service.active_call_count == 0:
+            break
+        await asyncio.sleep(0.001)
+
+    assert service.active_call_count == 0
+    assert starter.handles[0].close_count == 2
+    assert first_handler.close_count == 2
+    first_record = service._reservations[first_assignment.peer_reservation_id]
+    assert first_record.cleanup_retry_task is None
+
+    second_assignment = await service.reserve(
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    )
+    second_answer = await service.offer(
+        token=_token(second_assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+    assert second_answer.pc_id == second_handler.connection.pc_id
+    await service.delete(
+        token=_token(second_assignment),
+        user_id="firebase-user-1",
+        pc_id=second_answer.pc_id,
+    )
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_persistent_cleanup_failure_has_bounded_retries_and_retains_capacity() -> None:
+    first_handler = _Handler(fail_close_count=100)
+    second_handler = _Handler(pc_id="SmallWebRTCConnection#2-peer")
+    handler_values = iter((first_handler, second_handler))
+    starter = _RuntimeStarter(fail_close_count=100)
+    service, _, _ = _service(
+        starter=starter,
+        settings=_settings(
+            terminal_cleanup_retry_initial_seconds=0.001,
+            terminal_cleanup_retry_max_seconds=0.002,
+            terminal_cleanup_retry_horizon_seconds=0.05,
+            terminal_cleanup_retry_max_attempts=3,
+        ),
+    )
+    service._handler_factory = lambda: next(handler_values)
+    first_assignment = await service.reserve(_claims())
+    first_token = _token(first_assignment)
+    await service.offer(
+        token=first_token,
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    starter.handles[0].complete()
+    first_record = service._reservations[first_assignment.peer_reservation_id]
+    for _ in range(100):
+        if (
+            first_record.state is PipecatReservationState.TERMINAL
+            and first_record.cleanup_retry_task is None
+        ):
+            break
+        await service.status(token=first_token, user_id="firebase-user-1")
+        await asyncio.sleep(0.001)
+
+    assert first_record.state is PipecatReservationState.TERMINAL
+    assert first_record.cleanup_retry_task is None
+    assert starter.handles[0].close_count == 4
+    assert first_handler.close_count == 4
+    assert service.active_call_count == 1
+    await asyncio.sleep(0.01)
+    assert starter.handles[0].close_count == 4
+    assert first_handler.close_count == 4
+
+    second_assignment = await service.reserve(
+        _claims(call_id=OTHER_CALL_ID, trace_id=OTHER_TRACE_ID)
+    )
+    with pytest.raises(PipecatSignalingUnavailable, match="active-call capacity"):
+        await service.offer(
+            token=_token(second_assignment),
+            user_id="firebase-user-1",
+            request=_initial_offer(),
+        )
+
+    starter.handles[0].fail_close_count = starter.handles[0].close_count
+    first_handler.fail_close_count = first_handler.close_count
+    await service.aclose()
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cleanup_retry_horizon_bounds_a_hung_attempt_and_retains_capacity() -> None:
+    handler = _CountingHangingCloseHandler()
+    service, _, starter = _service(
+        handlers=[handler],
+        settings=_settings(
+            cleanup_timeout_seconds=0.01,
+            terminal_cleanup_retry_initial_seconds=0.001,
+            terminal_cleanup_retry_max_seconds=0.002,
+            terminal_cleanup_retry_horizon_seconds=0.03,
+            terminal_cleanup_retry_max_attempts=10,
+        ),
+    )
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    starter.handles[0].complete()
+    record = service._reservations[assignment.peer_reservation_id]
+    saw_retry_task = False
+    for _ in range(100):
+        retry_task = record.cleanup_retry_task
+        saw_retry_task = saw_retry_task or retry_task is not None
+        if (
+            record.state is PipecatReservationState.TERMINAL
+            and handler.close_count >= 1
+            and saw_retry_task
+            and retry_task is None
+        ):
+            break
+        await asyncio.sleep(0.001)
+
+    assert saw_retry_task is True
+    assert record.cleanup_retry_task is None
+    assert 2 <= handler.close_count <= 4
+    assert service.active_call_count == 1
+    await service.aclose()
+    assert record.cleanup_retry_task is None
+
+
+@pytest.mark.asyncio
+async def test_service_close_cancels_and_awaits_terminal_cleanup_retry_task() -> None:
+    handler = _Handler(fail_close_count=100)
+    starter = _RuntimeStarter(fail_close_count=100)
+    service, _, _ = _service(
+        handlers=[handler],
+        starter=starter,
+        settings=_settings(
+            terminal_cleanup_retry_initial_seconds=1.0,
+            terminal_cleanup_retry_max_seconds=1.0,
+            terminal_cleanup_retry_horizon_seconds=5.0,
+            terminal_cleanup_retry_max_attempts=3,
+        ),
+    )
+    service._handler_factory = lambda: handler
+    assignment = await service.reserve(_claims())
+    await service.offer(
+        token=_token(assignment),
+        user_id="firebase-user-1",
+        request=_initial_offer(),
+    )
+
+    starter.handles[0].complete()
+    record = service._reservations[assignment.peer_reservation_id]
+    for _ in range(100):
+        if record.cleanup_retry_task is not None:
+            break
+        await asyncio.sleep(0)
+    retry_task = record.cleanup_retry_task
+    assert retry_task is not None
+    assert not retry_task.done()
+
+    await service.aclose()
+    counts_after_close = (starter.handles[0].close_count, handler.close_count)
+    assert record.cleanup_retry_task is None
+    assert retry_task.done()
+    await asyncio.sleep(0.01)
+    assert (starter.handles[0].close_count, handler.close_count) == counts_after_close
+
+    starter.handles[0].fail_close_count = starter.handles[0].close_count
+    handler.fail_close_count = handler.close_count
+    await service.aclose()
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
 async def test_delete_racing_runtime_completion_keeps_one_terminal_result_and_cleanup() -> None:
     starter = _RuntimeStarter()
     service, handlers, _ = _service(starter=starter)
@@ -1098,6 +1310,24 @@ def test_request_contracts_reject_restart_mutable_candidates_and_malformed_peer_
         PipecatOfferRequest(sdp="offer", pc_id=" bad-peer ")
     with pytest.raises(ValueError, match="candidate count"):
         PipecatPatchRequest(pc_id="peer", candidates=())
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"terminal_cleanup_retry_initial_seconds": 0},
+        {
+            "terminal_cleanup_retry_initial_seconds": 2,
+            "terminal_cleanup_retry_max_seconds": 1,
+        },
+        {"terminal_cleanup_retry_horizon_seconds": 301},
+        {"terminal_cleanup_retry_max_attempts": 0},
+        {"terminal_cleanup_retry_max_attempts": 21},
+    ],
+)
+def test_terminal_cleanup_retry_settings_are_strictly_bounded(overrides: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="terminal cleanup retry"):
+        _settings(**overrides)
 
 
 def test_cors_contract_is_explicit_bearer_only_and_has_no_wildcards() -> None:

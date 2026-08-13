@@ -92,6 +92,10 @@ class PipecatSignalingSettings:
     repository_timeout_seconds: float = 2.0
     signaling_timeout_seconds: float = 10.0
     cleanup_timeout_seconds: float = 5.0
+    terminal_cleanup_retry_initial_seconds: float = 0.25
+    terminal_cleanup_retry_max_seconds: float = 5.0
+    terminal_cleanup_retry_horizon_seconds: float = 30.0
+    terminal_cleanup_retry_max_attempts: int = 8
     clock_skew_seconds: int = 30
     max_reservations: int = 1_000
     max_active_calls: Literal[1] = 1
@@ -114,6 +118,36 @@ class PipecatSignalingSettings:
         ):
             if isinstance(value, bool) or not math.isfinite(value) or not 0 < value <= 30:
                 raise ValueError(f"Pipecat {name} timeout must be between 0 and 30 seconds")
+        retry_delays = (
+            self.terminal_cleanup_retry_initial_seconds,
+            self.terminal_cleanup_retry_max_seconds,
+            self.terminal_cleanup_retry_horizon_seconds,
+        )
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, int | float)
+            or not math.isfinite(value)
+            or value <= 0
+            for value in retry_delays
+        ):
+            raise ValueError("Pipecat terminal cleanup retry delays must be finite and positive")
+        if not (
+            self.terminal_cleanup_retry_initial_seconds
+            <= self.terminal_cleanup_retry_max_seconds
+            <= self.terminal_cleanup_retry_horizon_seconds
+            <= 300
+        ):
+            raise ValueError(
+                "Pipecat terminal cleanup retry delays must be ordered within 300 seconds"
+            )
+        if (
+            isinstance(self.terminal_cleanup_retry_max_attempts, bool)
+            or not isinstance(self.terminal_cleanup_retry_max_attempts, int)
+            or not 1 <= self.terminal_cleanup_retry_max_attempts <= 20
+        ):
+            raise ValueError(
+                "Pipecat terminal cleanup retry attempts must be between one and twenty"
+            )
         if (
             isinstance(self.clock_skew_seconds, bool)
             or not isinstance(self.clock_skew_seconds, int)
@@ -429,6 +463,7 @@ class _Reservation:
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     runtime_observer_task: asyncio.Task[None] | None = field(default=None, repr=False)
     expiry_task: asyncio.Task[None] | None = field(default=None, repr=False)
+    cleanup_retry_task: asyncio.Task[None] | None = field(default=None, repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
@@ -483,38 +518,48 @@ class PipecatSignalingService:
             peer_reservation_id=reservation_id,
             expires_at=claims.expires_at,
         )
-        async with self._guard:
-            self._ensure_open_locked()
-            self._prune_tombstones_locked(now)
-            if claims.voice_call_id in self._call_index:
-                raise PipecatSignalingConflict(
-                    "voice_call_id already has a reservation; start a fresh call"
+        pruned_cleanup_tasks: tuple[asyncio.Task[None], ...] = ()
+        try:
+            async with self._guard:
+                self._ensure_open_locked()
+                pruned_cleanup_tasks = self._prune_tombstones_locked(now)
+                if claims.voice_call_id in self._call_index:
+                    raise PipecatSignalingConflict(
+                        "voice_call_id already has a reservation; start a fresh call"
+                    )
+                if len(self._reservations) >= self.settings.max_reservations:
+                    raise PipecatSignalingUnavailable("Pipecat reservation capacity is exhausted")
+                if token_hash in self._token_index:
+                    raise PipecatSignalingUnavailable(
+                        "Pipecat token generator returned a collision"
+                    )
+                try:
+                    handler = self._handler_factory()
+                except Exception as exc:
+                    raise PipecatSignalingUnavailable(
+                        "Pipecat peer handler is unavailable"
+                    ) from exc
+                record = _Reservation(
+                    peer_reservation_id=reservation_id,
+                    claims=claims,
+                    token_hash=token_hash,
+                    handler=handler,
                 )
-            if len(self._reservations) >= self.settings.max_reservations:
-                raise PipecatSignalingUnavailable("Pipecat reservation capacity is exhausted")
-            if token_hash in self._token_index:
-                raise PipecatSignalingUnavailable("Pipecat token generator returned a collision")
-            try:
-                handler = self._handler_factory()
-            except Exception as exc:
-                raise PipecatSignalingUnavailable("Pipecat peer handler is unavailable") from exc
-            record = _Reservation(
-                peer_reservation_id=reservation_id,
-                claims=claims,
-                token_hash=token_hash,
-                handler=handler,
-            )
-            self._reservations[reservation_id] = record
-            self._token_index[token_hash] = reservation_id
-            self._call_index[claims.voice_call_id] = reservation_id
-
-        record.expiry_task = asyncio.create_task(
-            self._expire_unused_reservation(
-                reservation_id=reservation_id,
-                immutable_claims=claims,
-            ),
-            name=f"pipecat-reservation-expiry-{reservation_id}",
-        )
+                self._reservations[reservation_id] = record
+                self._token_index[token_hash] = reservation_id
+                self._call_index[claims.voice_call_id] = reservation_id
+                # Start ownership before the first post-insertion await below so
+                # caller cancellation cannot strand a reservation without TTL.
+                record.expiry_task = asyncio.create_task(
+                    self._expire_unused_reservation(
+                        reservation_id=reservation_id,
+                        immutable_claims=claims,
+                    ),
+                    name=f"pipecat-reservation-expiry-{reservation_id}",
+                )
+        finally:
+            if pruned_cleanup_tasks:
+                await asyncio.gather(*pruned_cleanup_tasks, return_exceptions=True)
         return assignment
 
     async def offer(
@@ -660,6 +705,7 @@ class PipecatSignalingService:
                     reason=VoiceRuntimeTerminalReason.RUNTIME_STOPPED,
                     retryable=True,
                 )
+                await self._cancel_cleanup_retry_task_locked(record)
 
     @property
     def reservation_count(self) -> int:
@@ -981,19 +1027,91 @@ class PipecatSignalingService:
         return result
 
     async def _cleanup_owned_resources_locked(self, record: _Reservation) -> None:
-        observer_task, record.runtime_observer_task = record.runtime_observer_task, None
-        if observer_task is not None and observer_task is not asyncio.current_task():
-            observer_task.cancel()
-            await asyncio.gather(observer_task, return_exceptions=True)
-        if record.runtime_handle is not None:
-            if await self._bounded_cleanup(record.runtime_handle.aclose):
-                record.runtime_handle = None
-        if not record.handler_cleanup_complete:
-            record.handler_cleanup_complete = await self._bounded_cleanup(record.handler.close)
+        try:
+            observer_task, record.runtime_observer_task = record.runtime_observer_task, None
+            if observer_task is not None and observer_task is not asyncio.current_task():
+                observer_task.cancel()
+                await asyncio.gather(observer_task, return_exceptions=True)
+            if record.runtime_handle is not None:
+                if await self._bounded_cleanup(record.runtime_handle.aclose):
+                    record.runtime_handle = None
+            if not record.handler_cleanup_complete:
+                record.handler_cleanup_complete = await self._bounded_cleanup(record.handler.close)
+            if record.runtime_handle is None and record.handler_cleanup_complete:
+                await self._cancel_cleanup_retry_task_locked(record)
+                async with self._guard:
+                    if self._active_reservation_id == record.peer_reservation_id:
+                        self._active_reservation_id = None
+        finally:
+            if record.state is PipecatReservationState.TERMINAL and (
+                record.runtime_handle is not None or not record.handler_cleanup_complete
+            ):
+                self._ensure_cleanup_retry_task_locked(record)
+
+    def _ensure_cleanup_retry_task_locked(self, record: _Reservation) -> None:
+        if record.state is not PipecatReservationState.TERMINAL:
+            return
         if record.runtime_handle is None and record.handler_cleanup_complete:
+            return
+        existing = record.cleanup_retry_task
+        if existing is not None and not existing.done():
+            return
+        record.cleanup_retry_task = asyncio.create_task(
+            self._retry_terminal_cleanup(
+                record=record,
+                immutable_terminal_result=record.terminal_result,
+            ),
+            name=f"pipecat-terminal-cleanup-{record.peer_reservation_id}",
+        )
+
+    async def _cancel_cleanup_retry_task_locked(self, record: _Reservation) -> None:
+        retry_task = record.cleanup_retry_task
+        if retry_task is None or retry_task is asyncio.current_task():
+            return
+        record.cleanup_retry_task = None
+        retry_task.cancel()
+        await asyncio.gather(retry_task, return_exceptions=True)
+
+    async def _retry_terminal_cleanup(
+        self,
+        *,
+        record: _Reservation,
+        immutable_terminal_result: VoiceRuntimeTerminalResult | None,
+    ) -> None:
+        current_task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.settings.terminal_cleanup_retry_horizon_seconds
+        delay = self.settings.terminal_cleanup_retry_initial_seconds
+        try:
+            async with asyncio.timeout_at(deadline):
+                for _ in range(self.settings.terminal_cleanup_retry_max_attempts):
+                    await self._sleep(delay)
+                    async with self._guard:
+                        if (
+                            self._closed
+                            or self._reservations.get(record.peer_reservation_id) is not record
+                        ):
+                            return
+                    async with record.lock:
+                        if (
+                            record.state is not PipecatReservationState.TERMINAL
+                            or record.terminal_result is not immutable_terminal_result
+                            or record.cleanup_retry_task is not current_task
+                        ):
+                            return
+                        await self._cleanup_owned_resources_locked(record)
+                        if record.runtime_handle is None and record.handler_cleanup_complete:
+                            return
+                    delay = min(delay * 2, self.settings.terminal_cleanup_retry_max_seconds)
+        except TimeoutError:
+            return
+        except asyncio.CancelledError:
+            raise
+        finally:
             async with self._guard:
-                if self._active_reservation_id == record.peer_reservation_id:
-                    self._active_reservation_id = None
+                retained = self._reservations.get(record.peer_reservation_id)
+                if retained is record and record.cleanup_retry_task is current_task:
+                    record.cleanup_retry_task = None
 
     async def _bounded_cleanup(self, cleanup: Callable[[], Awaitable[None]]) -> bool:
         try:
@@ -1218,7 +1336,7 @@ class PipecatSignalingService:
         if self._closed:
             raise PipecatSignalingUnavailable("Pipecat signaling service is closed")
 
-    def _prune_tombstones_locked(self, now: datetime) -> None:
+    def _prune_tombstones_locked(self, now: datetime) -> tuple[asyncio.Task[None], ...]:
         expired = [
             reservation_id
             for reservation_id, record in self._reservations.items()
@@ -1228,11 +1346,17 @@ class PipecatSignalingService:
             and record.runtime_handle is None
             and record.handler_cleanup_complete
         ]
+        cleanup_tasks: list[asyncio.Task[None]] = []
         for reservation_id in expired:
             record = self._reservations.pop(reservation_id)
+            cleanup_task, record.cleanup_retry_task = record.cleanup_retry_task, None
+            if cleanup_task is not None and cleanup_task is not asyncio.current_task():
+                cleanup_task.cancel()
+                cleanup_tasks.append(cleanup_task)
             self._token_index.pop(record.token_hash, None)
             if self._call_index.get(record.claims.voice_call_id) == reservation_id:
                 self._call_index.pop(record.claims.voice_call_id, None)
+        return tuple(cleanup_tasks)
 
     @staticmethod
     def _require_exact_pc_id(record: _Reservation, supplied_pc_id: str | None) -> None:
