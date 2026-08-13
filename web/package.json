@@ -14,6 +14,7 @@
     "check": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
+    "@daily-co/daily-js": "0.90.0",
     "@pipecat-ai/client-js": "1.13.0",
     "@pipecat-ai/small-webrtc-transport": "1.10.6",
     "@ricky0123/vad-react": "^0.0.36",
