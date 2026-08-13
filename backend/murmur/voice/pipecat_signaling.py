@@ -782,6 +782,45 @@ class PipecatSignalingService:
                 terminal_result=record.terminal_result,
             )
 
+    async def status_call(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        voice_call_id: str,
+    ) -> PipecatReservationSnapshot:
+        """Return the retained lifecycle fact for one exact internal call scope.
+
+        The authenticated bootstrap owner already established this immutable
+        scope when it created the reservation, so this process-internal read
+        deliberately performs no repository lookup.  Revalidating the call
+        index while holding the reservation lock makes the snapshot linearize
+        with terminalization, tombstone pruning, and service close without
+        exposing the browser bearer or any owned runtime object.
+        """
+
+        record = await self._resolve_trusted_call(
+            user_id=user_id,
+            session_id=session_id,
+            voice_call_id=voice_call_id,
+        )
+        async with record.lock:
+            async with self._guard:
+                self._ensure_open_locked()
+                self._require_retained_trusted_call_locked(
+                    record,
+                    user_id=user_id,
+                    session_id=session_id,
+                    voice_call_id=voice_call_id,
+                )
+                return PipecatReservationSnapshot(
+                    peer_reservation_id=record.peer_reservation_id,
+                    claims=record.claims,
+                    state=record.state,
+                    pc_id=record.pc_id,
+                    terminal_result=record.terminal_result,
+                )
+
     async def aclose(self) -> None:
         """Bound and idempotently close every retained reservation owner."""
         async with self._guard:
