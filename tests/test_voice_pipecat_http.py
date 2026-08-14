@@ -7,7 +7,9 @@ import json
 import logging
 import traceback
 from collections.abc import AsyncIterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from threading import Barrier
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import Mock
@@ -53,7 +55,6 @@ from murmur.voice.runtime_projection import (
     PipecatBrowserIceServer,
     PipecatBrowserVoiceAssignment,
 )
-from sqlalchemy.exc import IntegrityError
 from starlette.requests import Request
 
 USER_ID = "firebase-user-http-1"
@@ -835,14 +836,23 @@ def test_default_authenticator_checks_revocation_with_the_exact_app_and_token(
             "email_verified": False,
         }
     )
-    exact_user = SimpleNamespace(id=USER_ID)
+    exact_user = SimpleNamespace(
+        id=USER_ID,
+        email="stored@example.test",
+        name="Stored user",
+    )
     monkeypatch.setattr(
         pipecat_application,
         "_get_pipecat_firebase_app",
         lambda: firebase_app,
     )
     monkeypatch.setattr(firebase_auth, "verify_id_token", verifier)
-    monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", Mock(return_value=exact_user))
+    monkeypatch.setattr(UserRepo, "get_by_id", Mock(return_value=exact_user))
+    monkeypatch.setattr(
+        UserRepo,
+        "get_or_create_exact_uid",
+        Mock(side_effect=AssertionError("placeholder creation must not run")),
+    )
     composition = _FakeComposition()
     app = create_pipecat_application(
         composition,  # type: ignore[arg-type]
@@ -1072,20 +1082,17 @@ def test_default_authenticator_classifies_firebase_app_initialization_failure_as
         (None, True),
     ],
 )
-def test_unverified_or_malformed_email_uses_only_exact_uid_provisioning(
+def test_unknown_unverified_or_malformed_email_is_denied_without_provisioning(
     email: object,
     email_verified: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     uid = "firebase-unverified-http"
-    exact_user = SimpleNamespace(
-        id=uid,
-        email="repository-owned-placeholder@murmur.invalid",
-        name="Unverified caller",
-    )
-    exact = Mock(return_value=exact_user)
+    lookup = Mock(return_value=None)
+    exact = Mock(side_effect=AssertionError("placeholder creation must not run"))
     legacy = Mock(side_effect=AssertionError("email linking must not run"))
     email_lookup = Mock(side_effect=AssertionError("email lookup must not run"))
+    monkeypatch.setattr(UserRepo, "get_by_id", lookup)
     monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact)
     monkeypatch.setattr(UserRepo, "get_or_create", legacy)
     monkeypatch.setattr(UserRepo, "get_by_email", email_lookup)
@@ -1104,18 +1111,30 @@ def test_unverified_or_malformed_email_uses_only_exact_uid_provisioning(
         json=_session_payload(),
     )
 
-    assert response.status_code == 200
-    exact.assert_called_once_with(uid=uid, name="Unverified caller")
+    assert response.status_code == 401
+    lookup.assert_called_once_with(uid)
+    exact.assert_not_called()
     legacy.assert_not_called()
     email_lookup.assert_not_called()
-    assert composition.calls[0][1]["user_id"] == uid
+    assert composition.calls == []
 
 
-def test_existing_uid_with_unverified_victim_email_never_enters_email_update_path(
+@pytest.mark.parametrize(
+    ("email", "email_verified"),
+    [
+        ("victim@example.test", False),
+        ("victim@example.test", "true"),
+        ("victim@example.test", None),
+        ("malformed-email", True),
+    ],
+)
+def test_existing_uid_with_unverified_or_malformed_email_never_enters_update_path(
+    email: object,
+    email_verified: object,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     uid = "firebase-existing-http"
-    exact = Mock(
+    lookup = Mock(
         return_value=SimpleNamespace(
             id=uid,
             email="original-verified@example.test",
@@ -1123,17 +1142,18 @@ def test_existing_uid_with_unverified_victim_email_never_enters_email_update_pat
         )
     )
     legacy = Mock(side_effect=AssertionError("existing email must not be updated"))
-    monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact)
+    exact_create = Mock(side_effect=AssertionError("placeholder creation must not run"))
+    monkeypatch.setattr(UserRepo, "get_by_id", lookup)
+    monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact_create)
     monkeypatch.setattr(UserRepo, "get_or_create", legacy)
-    app, composition = _default_auth_application(
-        monkeypatch,
-        {
-            "uid": uid,
-            "email": "victim@example.test",
-            "email_verified": False,
-            "name": "Attacker-selected name",
-        },
-    )
+    claims: dict[str, object] = {
+        "uid": uid,
+        "email": email,
+        "name": "Attacker-selected name",
+    }
+    if email_verified is not None:
+        claims["email_verified"] = email_verified
+    app, composition = _default_auth_application(monkeypatch, claims)
 
     response = TestClient(app).post(
         "/api/voice/session",
@@ -1142,7 +1162,8 @@ def test_existing_uid_with_unverified_victim_email_never_enters_email_update_pat
     )
 
     assert response.status_code == 200
-    exact.assert_called_once_with(uid=uid, name="Attacker-selected name")
+    lookup.assert_called_once_with(uid)
+    exact_create.assert_not_called()
     legacy.assert_not_called()
     assert composition.calls[0][1]["user_id"] == uid
 
@@ -1152,7 +1173,7 @@ def test_exactly_verified_email_uses_intended_legacy_link_and_local_row_identity
 ) -> None:
     uid = "firebase-verified-http"
     legacy_id = "legacy-local-row"
-    exact = Mock(side_effect=AssertionError("exact-only branch must not run"))
+    exact = Mock(side_effect=AssertionError("placeholder creation must not run"))
     get_by_id = Mock(return_value=None)
     legacy = Mock(
         return_value=SimpleNamespace(
@@ -1191,17 +1212,106 @@ def test_exactly_verified_email_uses_intended_legacy_link_and_local_row_identity
     assert composition.calls[0][1]["user_id"] == legacy_id
 
 
-def test_exact_uid_repository_collision_maps_to_fixed_503_without_request_admission(
+def test_denied_uid_can_later_verify_and_link_without_placeholder_collision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = UserRepo.get_or_create(
+        uid="legacy-pipecat-user",
+        email="later-verified-pipecat@example.test",
+        name="Legacy Pipecat profile",
+    )
+    uid = "firebase-pipecat-later-verified"
+    claims: dict[str, object] = {
+        "uid": uid,
+        "email": "later-verified-pipecat@example.test",
+        "email_verified": False,
+        "name": "Firebase Pipecat profile",
+    }
+    exact_create = Mock(side_effect=AssertionError("placeholder creation must not run"))
+    monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact_create)
+    app, composition = _default_auth_application(monkeypatch, claims)
+    client = TestClient(app)
+
+    denied = client.post(
+        "/api/voice/session",
+        headers={"Authorization": AUTHORIZATION},
+        json=_session_payload(),
+    )
+
+    assert denied.status_code == 401
+    assert composition.calls == []
+    assert UserRepo.get_by_id(uid) is None
+    assert UserRepo.get_by_email("later-verified-pipecat@example.test") == legacy
+    exact_create.assert_not_called()
+
+    claims["email_verified"] = True
+    admitted = client.post(
+        "/api/voice/session",
+        headers={"Authorization": AUTHORIZATION},
+        json=_session_payload(),
+    )
+
+    assert admitted.status_code == 200
+    assert composition.calls[0][1]["user_id"] == legacy.id
+    assert UserRepo.get_by_id(uid) is None
+    assert UserRepo.get_by_email("later-verified-pipecat@example.test") is not None
+    exact_create.assert_not_called()
+
+
+def test_concurrent_unknown_unverified_authentication_never_creates_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workers = 8
+    barrier = Barrier(workers)
+    uid = "firebase-pipecat-concurrent-denied"
+    original_get_by_id = UserRepo.get_by_id
+    exact_create = Mock(side_effect=AssertionError("placeholder creation must not run"))
+    email_link = Mock(side_effect=AssertionError("email linking must not run"))
+
+    def verify_token(
+        _token: str,
+        *,
+        app: object,
+        check_revoked: bool,
+    ) -> Mapping[str, object]:
+        assert app is not None
+        assert check_revoked is True
+        barrier.wait(timeout=5)
+        return {
+            "uid": uid,
+            "email": "victim@example.test",
+            "email_verified": False,
+        }
+
+    monkeypatch.setattr(pipecat_application, "_get_pipecat_firebase_app", lambda: object())
+    monkeypatch.setattr(firebase_auth, "verify_id_token", verify_token)
+    monkeypatch.setattr(UserRepo, "get_by_id", lambda _uid: None)
+    monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact_create)
+    monkeypatch.setattr(UserRepo, "get_or_create", email_link)
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(
+            executor.map(
+                lambda _index: pipecat_application._verify_and_provision_firebase_user(
+                    "browser-id-token"
+                ),
+                range(workers),
+            )
+        )
+
+    assert results == [None] * workers
+    exact_create.assert_not_called()
+    email_link.assert_not_called()
+    assert original_get_by_id(uid) is None
+
+
+def test_unverified_uid_lookup_failure_maps_to_fixed_503_without_request_admission(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    exact = Mock(
-        side_effect=IntegrityError(
-            "insert exact uid",
-            {},
-            RuntimeError(SECRET_INPUT),
-        )
-    )
+    lookup = Mock(side_effect=RuntimeError(SECRET_INPUT))
+    exact = Mock(side_effect=AssertionError("placeholder creation must not run"))
+    monkeypatch.setattr(UserRepo, "get_by_id", lookup)
     monkeypatch.setattr(UserRepo, "get_or_create_exact_uid", exact)
     app, composition = _default_auth_application(
         monkeypatch,
@@ -1233,6 +1343,8 @@ def test_exact_uid_repository_collision_maps_to_fixed_503_without_request_admiss
     assert SECRET_INPUT not in rendered
     assert "victim@example.test" not in rendered
     assert set(response.json()) == {"error"}
+    lookup.assert_called_once_with("firebase-collision-http")
+    exact.assert_not_called()
     _assert_security_headers(response)
 
 

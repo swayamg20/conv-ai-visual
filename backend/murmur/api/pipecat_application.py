@@ -423,7 +423,9 @@ def _verify_and_provision_firebase_user(token: str) -> Mapping[str, object] | No
     try:
         with _user_provision_lock:
             if verified_email is None:
-                user = UserRepo.get_or_create_exact_uid(uid=uid, name=name)
+                user = UserRepo.get_by_id(uid)
+                if user is None:
+                    return None
                 if user.id != uid:
                     raise PipecatAuthenticationUnavailable("Pipecat authentication is unavailable")
             else:
