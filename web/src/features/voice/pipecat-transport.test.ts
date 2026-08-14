@@ -1,12 +1,24 @@
 /** @vitest-environment happy-dom */
 
-import type {
-  Participant,
-  RTVIEventCallbacks,
-  Tracks,
+import {
+  LogLevel,
+  PipecatClient,
+  logger,
+  type Participant,
+  type RTVIEventCallbacks,
+  type RTVIMessage,
+  type Tracks,
 } from "@pipecat-ai/client-js";
 import { SmallWebRTCTransport } from "@pipecat-ai/small-webrtc-transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const firebaseSdk = vi.hoisted(() => ({
+  getAuthHeaders: vi.fn<() => Promise<Record<string, string>>>(),
+}));
+
+vi.mock("@/lib/firebase", () => ({
+  getAuthHeaders: firebaseSdk.getAuthHeaders,
+}));
 
 const dailySdk = vi.hoisted(() => {
   type Listener = (...arguments_: unknown[]) => void;
@@ -140,6 +152,11 @@ import {
   type PipecatVoiceEventScope,
   type PipecatVoiceTransportConnection,
 } from "./pipecat-transport";
+import {
+  createPipecatSignalingPort,
+  type PipecatSignalingFetch,
+  type PipecatSignalingPort,
+} from "./pipecat-signaling-api";
 
 class FakeMediaStream {
   constructor(readonly tracks: readonly MediaStreamTrack[]) {}
@@ -171,18 +188,24 @@ class FakeClient {
   readonly connect = vi.fn(
     async (_params?: unknown): Promise<void> => undefined,
   );
-  readonly disconnect = vi.fn(async (): Promise<void> => undefined);
+  readonly disconnect = vi.fn(async (): Promise<void> => {
+    this.peerId = null;
+  });
+  readonly setLogLevel = vi.fn((_level: LogLevel): void => undefined);
   readonly stopReconnectAttempts = vi.fn();
   readonly enableMic = vi.fn((enabled: boolean) => {
     this.localTrack.enabled = enabled;
   });
   localTrack = createTrack("local-microphone");
+  peerId: string | null = null;
 
   constructor(readonly callbacks: RTVIEventCallbacks) {}
 
   tracks(): Tracks {
     return { local: { audio: this.localTrack } };
   }
+
+  readonly snapshotPeerId = vi.fn((): string | null => this.peerId);
 
   emitConnected(): void {
     this.callbacks.onTrackStarted?.(this.localTrack, {
@@ -277,6 +300,7 @@ function createCallbacks() {
       onConnected: vi.fn(),
       onDisconnected: vi.fn(),
       onAgentDisconnected: vi.fn(),
+      onFreshCallRequired: vi.fn(),
       onTransportStateChanged: vi.fn(),
       onEvent: vi.fn<(event: VoiceEvent) => void>(),
       onInvalidEvent: vi.fn(),
@@ -302,10 +326,30 @@ function createAudioElement() {
   return element;
 }
 
-function createHarness(options: { disconnectTimeoutMs?: number } = {}) {
+function createSignalingPort(): PipecatSignalingPort {
+  return {
+    offer: vi.fn(async () => ({
+      sdp: "v=0\r\n",
+      type: "answer" as const,
+      pc_id: "peer-id-1",
+    })),
+    patchCandidates: vi.fn(async () => undefined),
+    deletePeer: vi.fn(async () => undefined),
+  };
+}
+
+function createHarness(
+  options: {
+    readonly connectTimeoutMs?: number;
+    readonly disconnectTimeoutMs?: number;
+    readonly signalingPort?: PipecatSignalingPort;
+  } = {},
+) {
   const owner = createCallbacks();
   let client!: FakeClient;
   const audioElement = createAudioElement();
+  const signalingPort = options.signalingPort ?? createSignalingPort();
+  const signalingPortFactory = vi.fn(() => signalingPort);
   const transport = new PipecatVoiceTransport({
     callbacks: owner.callbacks,
     clientFactory: (callbacks) => {
@@ -314,13 +358,141 @@ function createHarness(options: { disconnectTimeoutMs?: number } = {}) {
     },
     audioElementFactory: () => audioElement,
     now: () => 42,
+    connectTimeoutMs: options.connectTimeoutMs,
     disconnectTimeoutMs: options.disconnectTimeoutMs,
+    signalingPortFactory,
   });
-  return { ...owner, transport, client, audioElement };
+  return {
+    ...owner,
+    transport,
+    client,
+    audioElement,
+    signalingPort,
+    signalingPortFactory,
+  };
+}
+
+function defaultInternals(transport: PipecatVoiceTransport): {
+  readonly client: object;
+  readonly sdkTransport: object;
+} {
+  const client: unknown = Reflect.get(transport, "client");
+  if (typeof client !== "object" || client === null) {
+    throw new Error("Expected the default Pipecat client");
+  }
+  const sdkTransport: unknown = Reflect.get(client, "_transport");
+  if (typeof sdkTransport !== "object" || sdkTransport === null) {
+    throw new Error("Expected the pinned SmallWebRTC transport");
+  }
+  return { client, sdkTransport };
+}
+
+function callPinned(
+  owner: object,
+  methodName: string,
+  arguments_: readonly unknown[] = [],
+): Promise<unknown> {
+  const method: unknown = Reflect.get(owner, methodName);
+  if (typeof method !== "function") {
+    throw new Error(`Expected pinned ${methodName}`);
+  }
+  return Promise.resolve(Reflect.apply(method, owner, arguments_));
+}
+
+function installPeer(
+  owner: object,
+  offerSdp = "v=0\r\na=ice-pwd:offer-secret\r\n",
+): {
+  readonly peer: object;
+  readonly setRemoteDescription: ReturnType<typeof vi.fn>;
+} {
+  let localDescription: RTCSessionDescriptionInit | null = null;
+  const setRemoteDescription = vi.fn(
+    async (_description: RTCSessionDescriptionInit): Promise<void> => undefined,
+  );
+  const peer = {
+    createOffer: vi.fn(
+      async (): Promise<RTCSessionDescriptionInit> => ({
+        sdp: offerSdp,
+        type: "offer",
+      }),
+    ),
+    setLocalDescription: vi.fn(
+      async (description: RTCSessionDescriptionInit): Promise<void> => {
+        localDescription = { ...description };
+      },
+    ),
+    setRemoteDescription,
+    get localDescription() {
+      return localDescription;
+    },
+    getTransceivers: vi.fn(() => []),
+    getSenders: vi.fn(() => []),
+    close: vi.fn(),
+  };
+  if (!Reflect.set(owner, "pc", peer)) {
+    throw new Error("Could not install the synthetic peer");
+  }
+  return { peer, setRemoteDescription };
+}
+
+function installSyntheticDefaultConnect(
+  transport: PipecatVoiceTransport,
+  operation: (sdkTransport: object) => Promise<void>,
+): ReturnType<typeof defaultInternals> & {
+  readonly connect: ReturnType<typeof vi.fn>;
+  readonly localTrack: MediaStreamTrack;
+} {
+  const internals = defaultInternals(transport);
+  const localTrack = createTrack("default-local");
+  const connect = vi.fn(async (): Promise<void> => {
+    await operation(internals.sdkTransport);
+  });
+  if (
+    !Reflect.set(internals.client, "connect", connect) ||
+    !Reflect.set(
+      internals.client,
+      "tracks",
+      vi.fn(() => ({ local: { audio: localTrack } })),
+    ) ||
+    !Reflect.set(
+      internals.client,
+      "enableMic",
+      vi.fn((enabled: boolean) => {
+        localTrack.enabled = enabled;
+      }),
+    )
+  ) {
+    throw new Error("Could not install the synthetic default client seams");
+  }
+  return { ...internals, connect, localTrack };
+}
+
+function requestBody(
+  fetcher: ReturnType<typeof vi.fn>,
+  callIndex: number,
+): unknown {
+  const body = fetcher.mock.calls[callIndex]?.[1]?.body;
+  if (typeof body !== "string") throw new Error("Expected a JSON request body");
+  return JSON.parse(body) as unknown;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 describe("PipecatVoiceTransport", () => {
   beforeEach(() => {
+    firebaseSdk.getAuthHeaders
+      .mockReset()
+      .mockResolvedValue({ Authorization: "Bearer firebase-token" });
     dailySdk.reset();
     vi.stubGlobal("MediaStream", FakeMediaStream);
     document.body.replaceChildren();
@@ -328,7 +500,559 @@ describe("PipecatVoiceTransport", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("reasserts package-global and client log suppression at connect", async () => {
+    const globalLogLevel = vi.spyOn(logger, "setLevel");
+    const clientLogLevel = vi.spyOn(PipecatClient.prototype, "setLogLevel");
+    const owner = createCallbacks();
+    const signalingPort = createSignalingPort();
+
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: () => signalingPort,
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async () => undefined,
+    );
+
+    expect(globalLogLevel).toHaveBeenCalledWith(LogLevel.NONE);
+    expect(clientLogLevel).toHaveBeenCalledWith(LogLevel.NONE);
+    expect(globalLogLevel.mock.invocationCallOrder[0]).toBeLessThan(
+      dailySdk.createCallObject.mock.invocationCallOrder[0] ?? 0,
+    );
+
+    globalLogLevel.mockClear();
+    clientLogLevel.mockClear();
+    logger.setLevel(LogLevel.DEBUG);
+    const setClientLogLevel: unknown = Reflect.get(
+      synthetic.client,
+      "setLogLevel",
+    );
+    if (typeof setClientLogLevel !== "function") {
+      throw new Error("Expected the pinned client logger control");
+    }
+    Reflect.apply(setClientLogLevel, synthetic.client, [LogLevel.DEBUG]);
+
+    await transport.connect(connection);
+
+    expect(globalLogLevel.mock.calls).toEqual([
+      [LogLevel.DEBUG],
+      [LogLevel.DEBUG],
+      [LogLevel.NONE],
+      [LogLevel.NONE],
+    ]);
+    expect(clientLogLevel.mock.calls).toEqual([
+      [LogLevel.DEBUG],
+      [LogLevel.NONE],
+    ]);
+    expect(globalLogLevel.mock.invocationCallOrder[2]).toBeLessThan(
+      synthetic.connect.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(clientLogLevel.mock.invocationCallOrder[1]).toBeLessThan(
+      synthetic.connect.mock.invocationCallOrder[0] ?? 0,
+    );
+    await transport.disconnect();
+  });
+
+  it("routes authenticated offer, candidates, and peer delete only through the app port", async () => {
+    const offerSdp = "v=0\r\na=ice-pwd:offer-secret\r\n";
+    const answerSdp = "v=0\r\na=ice-pwd:answer-secret\r\n";
+    const peerId = "authoritative-peer-id";
+    const candidate =
+      "candidate:1 1 UDP 1 192.0.2.10 5000 typ host";
+    const authHeaderProvider = vi
+      .fn<() => Promise<Record<string, string>>>()
+      .mockResolvedValueOnce({ Authorization: "Bearer offer-token" })
+      .mockResolvedValueOnce({ Authorization: "Bearer patch-token" })
+      .mockResolvedValueOnce({ Authorization: "Bearer delete-token" });
+    const fetcher = vi
+      .fn<PipecatSignalingFetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sdp: answerSdp, type: "answer", pc_id: peerId }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const owner = createCallbacks();
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: (url) =>
+        createPipecatSignalingPort(url, { authHeaderProvider, fetcher }),
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async (sdkTransport) => {
+        installPeer(sdkTransport);
+        expect(
+          Reflect.set(sdkTransport, "_candidateQueue", [
+            { candidate, sdpMid: "0", sdpMLineIndex: 0 },
+          ]),
+        ).toBe(true);
+        expect(Reflect.set(sdkTransport, "_canSendIceCandidates", true)).toBe(
+          true,
+        );
+        await callPinned(sdkTransport, "flushIceCandidates");
+        expect(fetcher).not.toHaveBeenCalled();
+        expect(Reflect.get(sdkTransport, "_candidateQueue")).toHaveLength(1);
+        await callPinned(sdkTransport, "negotiate");
+        await callPinned(sdkTransport, "flushIceCandidates");
+      },
+    );
+
+    await transport.connect(connection);
+    await transport.disconnect();
+
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "POST",
+      "PATCH",
+      "DELETE",
+    ]);
+    expect(requestBody(fetcher, 0)).toEqual({
+      sdp: offerSdp,
+      type: "offer",
+      pc_id: null,
+      restart_pc: false,
+    });
+    expect(requestBody(fetcher, 1)).toEqual({
+      pc_id: peerId,
+      candidates: [
+        { candidate, sdp_mid: "0", sdp_mline_index: 0 },
+      ],
+    });
+    expect(requestBody(fetcher, 2)).toEqual({ pc_id: peerId });
+    expect(fetcher.mock.calls[2]?.[1]?.signal?.aborted).toBe(false);
+    expect(
+      fetcher.mock.calls.map(([, init]) => init?.headers),
+    ).toEqual([
+      {
+        "Content-Type": "application/json",
+        Authorization: "Bearer offer-token",
+      },
+      {
+        "Content-Type": "application/json",
+        Authorization: "Bearer patch-token",
+      },
+      {
+        "Content-Type": "application/json",
+        Authorization: "Bearer delete-token",
+      },
+    ]);
+    expect(synthetic.connect).toHaveBeenCalledTimes(1);
+    expect(Reflect.get(synthetic.sdkTransport, "pc_id")).toBeNull();
+    expect(synthetic.localTrack.readyState).toBe("ended");
+  });
+
+  it("aborts an in-flight abort-ignoring PATCH before independent peer deletion", async () => {
+    const peerId = "peer-with-inflight-candidates";
+    const candidate =
+      "candidate:7 1 UDP 1 203.0.113.4 5002 typ host";
+    const ignoredPatch = deferred<Response>();
+    const authHeaderProvider = vi
+      .fn<() => Promise<Record<string, string>>>()
+      .mockResolvedValue({ Authorization: "Bearer fresh-operation-token" });
+    const fetcher = vi
+      .fn<PipecatSignalingFetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sdp: "v=0\r\n", type: "answer", pc_id: peerId }),
+          { status: 200 },
+        ),
+      )
+      .mockImplementationOnce(() => ignoredPatch.promise)
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const owner = createCallbacks();
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: (url) =>
+        createPipecatSignalingPort(url, { authHeaderProvider, fetcher }),
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async (sdkTransport) => {
+        installPeer(sdkTransport);
+        await callPinned(sdkTransport, "negotiate");
+      },
+    );
+    await transport.connect(connection);
+    expect(
+      Reflect.set(synthetic.sdkTransport, "_candidateQueue", [
+        { candidate, sdpMid: "0", sdpMLineIndex: 0 },
+      ]),
+    ).toBe(true);
+    expect(
+      Reflect.set(synthetic.sdkTransport, "_canSendIceCandidates", true),
+    ).toBe(true);
+
+    const flushing = callPinned(
+      synthetic.sdkTransport,
+      "flushIceCandidates",
+    );
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    const patchSignal = fetcher.mock.calls[1]?.[1]?.signal;
+    const closing = transport.disconnect();
+    await closing;
+    await flushing;
+
+    expect(patchSignal?.aborted).toBe(true);
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "POST",
+      "PATCH",
+      "DELETE",
+    ]);
+    expect(fetcher.mock.calls[2]?.[1]?.signal).not.toBe(patchSignal);
+    expect(fetcher.mock.calls[2]?.[1]?.signal?.aborted).toBe(false);
+    expect(requestBody(fetcher, 2)).toEqual({ pc_id: peerId });
+    expect(authHeaderProvider).toHaveBeenCalledTimes(3);
+    expect(owner.callbacks.onFreshCallRequired).not.toHaveBeenCalled();
+    expect(owner.callbacks.onTransportError).not.toHaveBeenCalled();
+
+    ignoredPatch.resolve(new Response(null, { status: 204 }));
+    await Promise.resolve();
+  });
+
+  it("bounds an abort-ignoring connect and completes null-peer cleanup", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({
+      connectTimeoutMs: 25,
+      disconnectTimeoutMs: 10,
+    });
+    harness.client.connect.mockImplementationOnce(
+      () => new Promise<void>(() => undefined),
+    );
+    harness.client.disconnect.mockImplementationOnce(
+      () => new Promise<void>(() => undefined),
+    );
+
+    const connecting = harness.transport.connect(connection);
+    const failure = connecting.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(25);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const error = await failure;
+    expect(error).toMatchObject({
+      name: "Error",
+      message: "Pipecat voice connection timed out",
+    });
+    expect(harness.client.disconnect).toHaveBeenCalledTimes(1);
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(harness.client.localTrack.readyState).toBe("ended");
+    expect(harness.audioElement.isConnected).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("contains a caller abort when the injected SDK ignores its signal", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({
+      connectTimeoutMs: 5,
+      disconnectTimeoutMs: 10,
+    });
+    const ignoredConnect = deferred<void>();
+    const controller = new AbortController();
+    harness.client.connect.mockImplementationOnce(() => ignoredConnect.promise);
+    harness.client.disconnect.mockImplementationOnce(
+      () => new Promise<void>(() => undefined),
+    );
+
+    const connecting = harness.transport.connect(connection, {
+      signal: controller.signal,
+    });
+    controller.abort();
+    const failure = connecting.catch((reason: unknown) => reason);
+    await vi.advanceTimersByTimeAsync(10);
+    const error = await failure;
+
+    expect(error).toMatchObject({
+      name: "AbortError",
+      message: "Pipecat voice connection was aborted",
+    });
+    expect(harness.client.disconnect).toHaveBeenCalledTimes(1);
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(harness.client.localTrack.readyState).toBe("ended");
+    expect(harness.audioElement.isConnected).toBe(false);
+
+    ignoredConnect.resolve(undefined);
+    await Promise.resolve();
+    expect(harness.callbacks.onConnected).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("snapshots the authoritative peer before coalesced SDK teardown", async () => {
+    const harness = createHarness();
+    harness.client.peerId = "peer-before-sdk-stop";
+    await harness.transport.connect(connection);
+
+    const first = harness.transport.disconnect();
+    const second = harness.transport.disconnect();
+
+    expect(second).toBe(first);
+    await first;
+    expect(harness.client.peerId).toBeNull();
+    expect(harness.client.snapshotPeerId).toHaveBeenCalledOnce();
+    expect(harness.client.disconnect).toHaveBeenCalledOnce();
+    expect(
+      harness.client.snapshotPeerId.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.client.disconnect.mock.invocationCallOrder[0] ?? 0);
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(
+      "peer-before-sdk-stop",
+    );
+  });
+
+  it("rethrows an initial non-2xx offer without SDK retry or secret leakage", async () => {
+    vi.useFakeTimers();
+    const secretSdp = "v=0\r\na=ice-pwd:initial-secret\r\n";
+    const bearer = "Bearer initial-secret-token";
+    const authHeaderProvider = vi
+      .fn<() => Promise<Record<string, string>>>()
+      .mockResolvedValue({ Authorization: bearer });
+    const fetcher = vi
+      .fn<PipecatSignalingFetch>()
+      .mockResolvedValueOnce(new Response("sensitive failure body", { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const consoleLog = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const owner = createCallbacks();
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: (url) =>
+        createPipecatSignalingPort(url, { authHeaderProvider, fetcher }),
+    });
+    installSyntheticDefaultConnect(transport, async (sdkTransport) => {
+      installPeer(sdkTransport, secretSdp);
+      await callPinned(sdkTransport, "negotiate");
+    });
+
+    const error = await transport.connect(connection).catch(
+      (reason: unknown) => reason,
+    );
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(error).toMatchObject({
+      message: "Pipecat peer negotiation failed",
+    });
+    expect(String(error)).not.toContain(connection.webrtcUrl);
+    expect(String(error)).not.toContain(bearer);
+    expect(String(error)).not.toContain(secretSdp);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
+      "POST",
+      "DELETE",
+    ]);
+    expect(requestBody(fetcher, 1)).toEqual({ pc_id: null });
+    expect(owner.callbacks.onFreshCallRequired).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleLog).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("redacts projected ICE secrets from connect and RTVI errors", async () => {
+    const turnUrl = "turns:relay.example.test:5349?transport=tcp";
+    const stunUrl = "stun:relay.example.test:3478";
+    const username = "turn-user-secret";
+    const credential = "turn-credential-secret";
+    const sensitiveConnection: PipecatVoiceTransportConnection = {
+      ...connection,
+      iceServers: [{ urls: [stunUrl, turnUrl], username, credential }],
+    };
+    const connectHarness = createHarness();
+    connectHarness.client.connect.mockRejectedValueOnce(
+      new Error(`relay rejected ${username} with ${credential}`),
+    );
+
+    const connectError = await connectHarness.transport
+      .connect(sensitiveConnection)
+      .catch((reason: unknown) => reason);
+
+    expect(connectError).toMatchObject({
+      message: "Pipecat voice connection failed",
+    });
+    for (const secret of [turnUrl, stunUrl, username, credential]) {
+      expect(String(connectError)).not.toContain(secret);
+    }
+
+    const callbackHarness = createHarness();
+    await callbackHarness.transport.connect(sensitiveConnection);
+    callbackHarness.client.callbacks.onError?.({
+      data: { message: `TURN failure ${turnUrl} ${username}` },
+    } as RTVIMessage);
+    callbackHarness.client.callbacks.onMessageError?.({
+      data: { message: `ICE credential rejected: ${credential}` },
+    } as RTVIMessage);
+
+    expect(callbackHarness.callbacks.onTransportError).toHaveBeenCalledTimes(2);
+    expect(
+      callbackHarness.callbacks.onTransportError.mock.calls.map(
+        ([error]) => error.message,
+      ),
+    ).toEqual([
+      "Pipecat transport reported an error",
+      "Pipecat event channel reported an error",
+    ]);
+    const callbackErrors = callbackHarness.callbacks.onTransportError.mock.calls
+      .map(([error]) => error.message)
+      .join(" ");
+    for (const secret of [turnUrl, stunUrl, username, credential]) {
+      expect(callbackErrors).not.toContain(secret);
+    }
+    await callbackHarness.transport.disconnect();
+  });
+
+  it("turns pinned automatic reconnect into one fresh-call close", async () => {
+    const peerId = "peer-needing-a-fresh-call";
+    const signalingPort = createSignalingPort();
+    vi.mocked(signalingPort.offer).mockResolvedValueOnce({
+      sdp: "v=0\r\n",
+      type: "answer",
+      pc_id: peerId,
+    });
+    const owner = createCallbacks();
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: () => signalingPort,
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async (sdkTransport) => {
+        installPeer(sdkTransport);
+        await callPinned(sdkTransport, "negotiate");
+      },
+    );
+    const baseReconnect = vi.spyOn(
+      SmallWebRTCTransport.prototype as unknown as {
+        attemptReconnection(recreatePeerConnection?: boolean): Promise<void>;
+      },
+      "attemptReconnection",
+    );
+    await transport.connect(connection);
+
+    await callPinned(synthetic.sdkTransport, "attemptReconnection", [true]);
+    await callPinned(synthetic.sdkTransport, "attemptReconnection", [false]);
+    await transport.disconnect();
+
+    expect(baseReconnect).not.toHaveBeenCalled();
+    expect(signalingPort.offer).toHaveBeenCalledOnce();
+    expect(owner.callbacks.onFreshCallRequired).toHaveBeenCalledOnce();
+    expect(owner.callbacks.onTransportError).toHaveBeenCalledOnce();
+    const transportError = owner.callbacks.onTransportError.mock.calls[0]?.[0];
+    expect(transportError?.message).toBe(
+      "Pipecat peer requires a fresh voice call",
+    );
+    expect(transportError?.message).not.toContain(peerId);
+    expect(signalingPort.deletePeer).toHaveBeenCalledOnce();
+    expect(signalingPort.deletePeer).toHaveBeenCalledWith(peerId);
+  });
+
+  it("contains timer-driven non-2xx PATCH failure and starts no PATCH after delete", async () => {
+    vi.useFakeTimers();
+    const peerId = "peer-with-failed-candidates";
+    const candidate =
+      "candidate:9 1 UDP 1 198.51.100.5 5001 typ host";
+    const bearer = "Bearer candidate-secret-token";
+    const authHeaderProvider = vi
+      .fn<() => Promise<Record<string, string>>>()
+      .mockResolvedValue({ Authorization: bearer });
+    const fetcher = vi
+      .fn<PipecatSignalingFetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ sdp: "v=0\r\n", type: "answer", pc_id: peerId }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(`${candidate} ${peerId}`, { status: 503 }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const consoleLog = vi
+      .spyOn(console, "log")
+      .mockImplementation(() => undefined);
+    const unhandledRejection = vi.fn();
+    window.addEventListener("unhandledrejection", unhandledRejection);
+    const owner = createCallbacks();
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: (url) =>
+        createPipecatSignalingPort(url, { authHeaderProvider, fetcher }),
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async (sdkTransport) => {
+        installPeer(sdkTransport);
+        await callPinned(sdkTransport, "negotiate");
+        expect(
+          Reflect.set(sdkTransport, "_webrtcRequest", {
+            endpoint: connection.webrtcUrl,
+          }),
+        ).toBe(true);
+        expect(Reflect.set(sdkTransport, "_canSendIceCandidates", true)).toBe(
+          true,
+        );
+      },
+    );
+
+    try {
+      await transport.connect(connection);
+      await callPinned(synthetic.sdkTransport, "sendIceCandidate", [
+        { candidate, sdpMid: "0", sdpMLineIndex: 0 },
+      ]);
+      const flushDelay = Reflect.get(synthetic.sdkTransport, "_flushDelay");
+      if (typeof flushDelay !== "number") {
+        throw new Error("Expected the pinned candidate flush delay");
+      }
+      await vi.advanceTimersByTimeAsync(flushDelay);
+      await transport.disconnect();
+
+      expect(fetcher.mock.calls.map(([, init]) => init?.method)).toEqual([
+        "POST",
+        "PATCH",
+        "DELETE",
+      ]);
+      expect(owner.callbacks.onTransportError).toHaveBeenCalledOnce();
+      expect(owner.callbacks.onFreshCallRequired).toHaveBeenCalledOnce();
+      const transportError = owner.callbacks.onTransportError.mock.calls[0]?.[0];
+      expect(transportError?.message).toBe(
+        "Pipecat peer requires a fresh voice call",
+      );
+      expect(transportError?.message).not.toContain(candidate);
+      expect(transportError?.message).not.toContain(peerId);
+      expect(transportError?.message).not.toContain(bearer);
+      expect(requestBody(fetcher, 2)).toEqual({ pc_id: peerId });
+
+      expect(
+        Reflect.set(synthetic.sdkTransport, "_candidateQueue", [
+          { candidate: "late-candidate", sdpMid: "0", sdpMLineIndex: 0 },
+        ]),
+      ).toBe(true);
+      await callPinned(synthetic.sdkTransport, "flushIceCandidates");
+      expect(fetcher).toHaveBeenCalledTimes(3);
+      await Promise.resolve();
+      expect(unhandledRejection).not.toHaveBeenCalled();
+      expect(consoleError).not.toHaveBeenCalled();
+      expect(consoleLog).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      window.removeEventListener("unhandledrejection", unhandledRejection);
+    }
   });
 
   it("connects only the opaque assignment and keeps the local track disabled", async () => {
@@ -967,9 +1691,11 @@ describe("PipecatVoiceTransport", () => {
       );
     try {
       const owner = createCallbacks();
+      const signalingPort = createSignalingPort();
       const transport = new PipecatVoiceTransport({
         callbacks: owner.callbacks,
         audioElementFactory: createAudioElement,
+        signalingPortFactory: () => signalingPort,
       });
       const dailyCall = dailySdk.createdCalls[0];
       if (!dailyCall) throw new Error("Expected an owned Daily call");

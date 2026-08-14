@@ -1,5 +1,7 @@
 import {
+  LogLevel,
   PipecatClient,
+  logger,
   type Participant,
   type RTVIEventCallbacks,
   type RTVIMessage,
@@ -18,6 +20,11 @@ import {
   type VoiceEvent,
   type VoiceEventDecodeError,
 } from "./events";
+import {
+  createPipecatSignalingPort,
+  type PipecatIceCandidate,
+  type PipecatSignalingPort,
+} from "./pipecat-signaling-api";
 
 export const PIPECAT_VOICE_RUNTIME = "pipecat_smallwebrtc_v1" as const;
 export const PIPECAT_EVENT_PROTOCOL = "rtvi-murmur-v2" as const;
@@ -69,6 +76,8 @@ export interface PipecatVoiceTransportCallbacks {
   readonly onConnected: () => void;
   readonly onDisconnected: () => void;
   readonly onAgentDisconnected: () => void;
+  /** Milestone 1 never reconnects an existing peer; start a fresh call. */
+  readonly onFreshCallRequired?: () => void;
   readonly onTransportStateChanged?: (state: TransportState) => void;
   /** Called only with an immutable envelope accepted by the strict decoder. */
   readonly onEvent: (event: VoiceEvent) => void;
@@ -89,8 +98,10 @@ export interface PipecatVoiceTransportCallbacks {
 interface PipecatClientPort {
   connect(connectParams?: unknown): Promise<unknown>;
   disconnect(): Promise<void>;
+  setLogLevel(level: LogLevel): void;
   enableMic(enabled: boolean): void;
   tracks(): Tracks;
+  snapshotPeerId(): string | null;
   /** Latch transport-owned delayed reconnect work before adapter callbacks run. */
   stopReconnectAttempts?(): void;
 }
@@ -99,17 +110,31 @@ export type PipecatClientFactory = (
   callbacks: RTVIEventCallbacks,
 ) => PipecatClientPort;
 
+export type PipecatSignalingPortFactory = (
+  signalingUrl: string,
+) => PipecatSignalingPort;
+
+export interface PipecatVoiceConnectOptions {
+  readonly signal?: AbortSignal;
+}
+
 export interface PipecatVoiceTransportOptions {
   readonly callbacks: PipecatVoiceTransportCallbacks;
   readonly outputEnabled?: boolean;
+  readonly connectTimeoutMs?: number;
   readonly disconnectTimeoutMs?: number;
+  /** Test seam; production binds the assignment URL to fresh Firebase auth. */
+  readonly signalingPortFactory?: PipecatSignalingPortFactory;
   /** Test seam; production uses the exact package-pinned SDK pair below. */
   readonly clientFactory?: PipecatClientFactory;
   readonly audioElementFactory?: () => HTMLAudioElement;
   readonly now?: () => number;
 }
 
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_DISCONNECT_TIMEOUT_MS = 2_000;
+const MAX_CONNECT_TIMEOUT_MS = 60_000;
+const MAX_PEER_ID_LENGTH = 256;
 const contractIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const DAILY_MEDIA_MANAGER_EVENT_NAMES = Object.freeze([
   "track-started",
@@ -260,31 +285,174 @@ function detachDailyListeners(
   }
 }
 
-type SmallWebRTCReconnectAttempt = (
-  this: SmallWebRTCTransport,
-  recreatePeerConnection?: boolean,
-) => Promise<void>;
+type PinnedSmallWebRTCMethodName =
+  | "attemptReconnection"
+  | "flushIceCandidates"
+  | "negotiate";
 
-function isSmallWebRTCReconnectAttempt(
-  value: unknown,
-): value is SmallWebRTCReconnectAttempt {
-  return typeof value === "function";
+interface PinnedSignalingBridge {
+  readonly port: () => PipecatSignalingPort;
+  readonly operationSignal: () => AbortSignal | undefined;
+  readonly deleteIntentLatched: () => boolean;
+  readonly requireFreshCall: () => void;
 }
 
-function pinnedSmallWebRTCReconnectAttempt(): SmallWebRTCReconnectAttempt {
-  const candidate: unknown = Reflect.get(
-    SmallWebRTCTransport.prototype,
-    "attemptReconnection",
-  );
-  if (!isSmallWebRTCReconnectAttempt(candidate)) {
-    throw new Error(
-      "Pinned SmallWebRTC reconnect containment is incompatible with this package",
-    );
+function pinnedCompatibilityError(): Error {
+  return new Error("Pinned SmallWebRTC signaling shape is incompatible");
+}
+
+function requirePinnedPrototypeMethod(name: PinnedSmallWebRTCMethodName): void {
+  if (typeof Reflect.get(SmallWebRTCTransport.prototype, name) !== "function") {
+    throw pinnedCompatibilityError();
   }
-  return candidate;
 }
 
-const sdkAttemptReconnection = pinnedSmallWebRTCReconnectAttempt();
+for (const methodName of [
+  "attemptReconnection",
+  "flushIceCandidates",
+  "negotiate",
+] as const) {
+  requirePinnedPrototypeMethod(methodName);
+}
+
+function readPinnedField(owner: SmallWebRTCTransport, name: string): unknown {
+  if (!Reflect.has(owner, name)) throw pinnedCompatibilityError();
+  return Reflect.get(owner, name);
+}
+
+function writePinnedField(
+  owner: SmallWebRTCTransport,
+  name: string,
+  value: unknown,
+): void {
+  if (!Reflect.has(owner, name) || !Reflect.set(owner, name, value)) {
+    throw pinnedCompatibilityError();
+  }
+}
+
+function isStrictPeerId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_PEER_ID_LENGTH &&
+    value === value.trim() &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function readPinnedPeerId(owner: SmallWebRTCTransport): string | null {
+  const value = readPinnedField(owner, "pc_id");
+  if (value === null || isStrictPeerId(value)) return value;
+  throw pinnedCompatibilityError();
+}
+
+function writePinnedPeerId(
+  owner: SmallWebRTCTransport,
+  peerId: string,
+): void {
+  if (!isStrictPeerId(peerId)) throw pinnedCompatibilityError();
+  writePinnedField(owner, "pc_id", peerId);
+  if (readPinnedPeerId(owner) !== peerId) throw pinnedCompatibilityError();
+}
+
+interface PinnedPeerConnection {
+  readonly createOffer: () => Promise<RTCSessionDescriptionInit>;
+  readonly setLocalDescription: (
+    description?: RTCLocalSessionDescriptionInit,
+  ) => Promise<void>;
+  readonly setRemoteDescription: (
+    description: RTCSessionDescriptionInit,
+  ) => Promise<void>;
+  readonly localDescription: RTCSessionDescription | null;
+}
+
+function readPinnedPeerConnection(
+  owner: SmallWebRTCTransport,
+): PinnedPeerConnection {
+  const value = readPinnedField(owner, "pc");
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof Reflect.get(value, "createOffer") !== "function" ||
+    typeof Reflect.get(value, "setLocalDescription") !== "function" ||
+    typeof Reflect.get(value, "setRemoteDescription") !== "function" ||
+    !Reflect.has(value, "localDescription")
+  ) {
+    throw pinnedCompatibilityError();
+  }
+  return value as PinnedPeerConnection;
+}
+
+function readPinnedCandidateState(owner: SmallWebRTCTransport): {
+  readonly canSend: boolean;
+  readonly queue: unknown[];
+} {
+  const canSend = readPinnedField(owner, "_canSendIceCandidates");
+  const queue = readPinnedField(owner, "_candidateQueue");
+  if (typeof canSend !== "boolean" || !Array.isArray(queue)) {
+    throw pinnedCompatibilityError();
+  }
+  return { canSend, queue };
+}
+
+function clearPinnedCandidateFlushTimer(
+  owner: SmallWebRTCTransport,
+): void {
+  const timer = readPinnedField(owner, "__flushTimeout");
+  if (
+    timer !== null &&
+    typeof timer !== "number" &&
+    (typeof timer !== "object" || timer === null)
+  ) {
+    throw pinnedCompatibilityError();
+  }
+  writePinnedField(owner, "__flushTimeout", null);
+  if (timer !== null) {
+    clearTimeout(timer as ReturnType<typeof setTimeout>);
+  }
+}
+
+function snapshotPinnedCandidate(value: unknown): PipecatIceCandidate {
+  if (typeof value !== "object" || value === null) {
+    throw pinnedCompatibilityError();
+  }
+  const candidate = Reflect.get(value, "candidate");
+  const sdpMid = Reflect.get(value, "sdpMid");
+  const sdpMLineIndex = Reflect.get(value, "sdpMLineIndex");
+  if (
+    typeof candidate !== "string" ||
+    typeof sdpMid !== "string" ||
+    !Number.isInteger(sdpMLineIndex) ||
+    (sdpMLineIndex as number) < 0
+  ) {
+    throw pinnedCompatibilityError();
+  }
+  return Object.freeze({
+    candidate,
+    sdpMid,
+    sdpMLineIndex: sdpMLineIndex as number,
+  });
+}
+
+function assertPinnedInstanceShape(owner: SmallWebRTCTransport): void {
+  if (readPinnedField(owner, "pc") !== null || readPinnedPeerId(owner) !== null) {
+    throw pinnedCompatibilityError();
+  }
+  if (readPinnedField(owner, "__flushTimeout") !== null) {
+    throw pinnedCompatibilityError();
+  }
+  const candidateState = readPinnedCandidateState(owner);
+  if (candidateState.canSend || candidateState.queue.length !== 0) {
+    throw pinnedCompatibilityError();
+  }
+  if (
+    readPinnedField(owner, "_waitForICEGathering") !== false ||
+    readPinnedField(owner, "audioCodec") !== null ||
+    readPinnedField(owner, "videoCodec") !== null
+  ) {
+    throw pinnedCompatibilityError();
+  }
+}
 
 /**
  * SmallWebRTC 1.10.6 schedules anonymous reconnect callbacks which `stop()`
@@ -295,10 +463,12 @@ const sdkAttemptReconnection = pinnedSmallWebRTCReconnectAttempt();
 class DisconnectContainedSmallWebRTCTransport extends SmallWebRTCTransport {
   private reconnectAttemptsStopped: boolean;
   private disconnectPromise: Promise<void> | null;
+  private peerIdSnapshot: string | null;
+  private readonly signaling: PinnedSignalingBridge;
   private readonly ownedDailyCall: DailyCall;
   private readonly ownedDailyListeners: readonly DailyListenerRegistration[];
 
-  constructor() {
+  constructor(signaling: PinnedSignalingBridge) {
     if (DailyIframe.getCallInstance()) {
       throw new Error(
         "Pinned SmallWebRTC media cannot share an existing Daily call instance",
@@ -310,8 +480,11 @@ class DisconnectContainedSmallWebRTCTransport extends SmallWebRTCTransport {
     // peer-sender replacement callbacks while capturing its listener graph.
     try {
       super();
+      assertPinnedInstanceShape(this);
       this.reconnectAttemptsStopped = false;
       this.disconnectPromise = null;
+      this.peerIdSnapshot = null;
+      this.signaling = signaling;
       this.ownedDailyCall = listenerCapture.call;
       this.ownedDailyListeners = listenerCapture.complete();
     } catch (error) {
@@ -322,16 +495,127 @@ class DisconnectContainedSmallWebRTCTransport extends SmallWebRTCTransport {
 
   stopReconnectAttempts(): void {
     this.reconnectAttemptsStopped = true;
+    clearPinnedCandidateFlushTimer(this);
   }
 
-  attemptReconnection(recreatePeerConnection: boolean = false): Promise<void> {
+  snapshotPeerId(): string | null {
+    const current = readPinnedPeerId(this);
+    if (current !== null) this.peerIdSnapshot = current;
+    return this.peerIdSnapshot;
+  }
+
+  attemptReconnection(_recreatePeerConnection: boolean = false): Promise<void> {
     if (this.reconnectAttemptsStopped) return Promise.resolve();
-    return sdkAttemptReconnection.call(this, recreatePeerConnection);
+    try {
+      this.stopReconnectAttempts();
+    } catch {
+      this.reconnectAttemptsStopped = true;
+    }
+    this.signaling.requireFreshCall();
+    return Promise.resolve();
+  }
+
+  async negotiate(recreatePeerConnection: boolean = false): Promise<void> {
+    if (recreatePeerConnection || this.signaling.deleteIntentLatched()) {
+      if (recreatePeerConnection) this.signaling.requireFreshCall();
+      throw new Error("Pipecat peer negotiation is unavailable");
+    }
+    try {
+      if (
+        readPinnedPeerId(this) !== null ||
+        readPinnedField(this, "_waitForICEGathering") !== false ||
+        readPinnedField(this, "audioCodec") !== null ||
+        readPinnedField(this, "videoCodec") !== null
+      ) {
+        this.signaling.requireFreshCall();
+        throw pinnedCompatibilityError();
+      }
+      const peer = readPinnedPeerConnection(this);
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      const localDescription = peer.localDescription;
+      if (
+        !localDescription ||
+        localDescription.type !== "offer" ||
+        typeof localDescription.sdp !== "string" ||
+        localDescription.sdp.length === 0
+      ) {
+        throw pinnedCompatibilityError();
+      }
+      const answer = await this.signaling.port().offer(
+        { sdp: localDescription.sdp, type: "offer", pcId: null },
+        { signal: this.signaling.operationSignal() },
+      );
+      writePinnedPeerId(this, answer.pc_id);
+      this.peerIdSnapshot = answer.pc_id;
+      if (this.signaling.deleteIntentLatched()) {
+        throw new Error("Pipecat peer negotiation was closed");
+      }
+      await peer.setRemoteDescription({ type: "answer", sdp: answer.sdp });
+    } catch {
+      throw new Error("Pipecat peer negotiation failed");
+    }
+  }
+
+  async flushIceCandidates(): Promise<void> {
+    try {
+      clearPinnedCandidateFlushTimer(this);
+    } catch {
+      this.signaling.requireFreshCall();
+      return;
+    }
+    if (this.signaling.deleteIntentLatched()) return;
+    let candidateState: ReturnType<typeof readPinnedCandidateState>;
+    let peerId: string | null;
+    try {
+      candidateState = readPinnedCandidateState(this);
+      peerId = readPinnedPeerId(this);
+    } catch {
+      this.signaling.requireFreshCall();
+      return;
+    }
+    if (
+      !candidateState.canSend ||
+      candidateState.queue.length === 0 ||
+      peerId === null
+    ) {
+      return;
+    }
+
+    let candidates: readonly PipecatIceCandidate[];
+    try {
+      candidates = Object.freeze(
+        candidateState.queue.map(snapshotPinnedCandidate),
+      );
+    } catch {
+      this.signaling.requireFreshCall();
+      return;
+    }
+    candidateState.queue.splice(0, candidateState.queue.length);
+    try {
+      await this.signaling.port().patchCandidates(
+        { pcId: peerId, candidates },
+        { signal: this.signaling.operationSignal() },
+      );
+    } catch {
+      if (!this.signaling.deleteIntentLatched()) {
+        this.signaling.requireFreshCall();
+      }
+    }
   }
 
   override disconnect(): Promise<void> {
     if (this.disconnectPromise) return this.disconnectPromise;
-    this.stopReconnectAttempts();
+    try {
+      this.stopReconnectAttempts();
+    } catch {
+      // A shifted timer seam cannot be allowed to prevent owned SDK cleanup.
+    }
+    try {
+      this.snapshotPeerId();
+    } catch {
+      // The outer owner already records an invalid snapshot and still cleans up.
+    }
     const disconnect = (async () => {
       try {
         await super.disconnect();
@@ -363,8 +647,12 @@ class DisconnectContainedSmallWebRTCTransport extends SmallWebRTCTransport {
   }
 }
 
-function createDefaultClient(callbacks: RTVIEventCallbacks): PipecatClientPort {
-  const transport = new DisconnectContainedSmallWebRTCTransport();
+function createDefaultClient(
+  callbacks: RTVIEventCallbacks,
+  signaling: PinnedSignalingBridge,
+): PipecatClientPort {
+  logger.setLevel(LogLevel.NONE);
+  const transport = new DisconnectContainedSmallWebRTCTransport(signaling);
   const client = new PipecatClient({
     transport,
     callbacks,
@@ -372,7 +660,9 @@ function createDefaultClient(callbacks: RTVIEventCallbacks): PipecatClientPort {
     enableCam: false,
     disconnectOnBotDisconnect: false,
   });
+  client.setLogLevel(LogLevel.NONE);
   return Object.assign(client, {
+    snapshotPeerId: () => transport.snapshotPeerId(),
     stopReconnectAttempts: () => transport.stopReconnectAttempts(),
   });
 }
@@ -388,8 +678,60 @@ function notifySafely<TArguments extends unknown[]>(
   }
 }
 
-function asError(value: unknown, fallback: string): Error {
-  if (value instanceof Error) return value;
+function containsSignalingSecret(
+  message: string,
+  secretValues: readonly string[],
+): boolean {
+  return (
+    secretValues.some(
+      (secret) => secret.length > 0 && message.includes(secret),
+    ) ||
+    /(?:https?|wss?|stun|turns?):\/\/|Bearer\s|candidate:|ice-(?:ufrag|pwd):|\bpc[_ -]?id\b|(?:^|\r?\n)(?:v=0|o=|s=|t=|m=|a=)/i.test(
+      message,
+    )
+  );
+}
+
+function iceServerSecretValues(server: RTCIceServer): readonly string[] {
+  const values: string[] = [];
+  if (typeof server.urls === "string") {
+    values.push(server.urls);
+  } else {
+    values.push(...server.urls);
+  }
+  if (typeof server.username === "string") values.push(server.username);
+  if (typeof server.credential === "string") {
+    values.push(server.credential);
+  } else if (
+    typeof server.credential === "object" &&
+    server.credential !== null
+  ) {
+    for (const field of ["accessToken", "macKey"] as const) {
+      const value: unknown = Reflect.get(server.credential, field);
+      if (typeof value === "string") values.push(value);
+    }
+  }
+  return values;
+}
+
+function signalingSecretValues(
+  connection: PipecatVoiceTransportConnection | null,
+  peerId: string | null,
+): readonly string[] {
+  if (!connection) return peerId ? [peerId] : [];
+  return [
+    connection.webrtcUrl,
+    peerId ?? "",
+    ...(connection.iceServers?.flatMap(iceServerSecretValues) ?? []),
+  ];
+}
+
+function asError(
+  value: unknown,
+  fallback: string,
+  secretValues: readonly string[] = [],
+): Error {
+  let message: string | null = value instanceof Error ? value.message : null;
   if (typeof value === "object" && value !== null && "data" in value) {
     const data = value.data;
     if (
@@ -399,10 +741,16 @@ function asError(value: unknown, fallback: string): Error {
       typeof data.message === "string" &&
       data.message.trim()
     ) {
-      return new Error(data.message);
+      message = data.message;
     }
   }
-  return new Error(fallback);
+  if (
+    !message ||
+    containsSignalingSecret(message, secretValues)
+  ) {
+    return new Error(fallback);
+  }
+  return new Error(message);
 }
 
 function isContractId(value: string): boolean {
@@ -522,6 +870,79 @@ function bounded(
   });
 }
 
+class ConnectOperationAborted extends Error {}
+
+function settleOnSignal<T>(
+  operation: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ConnectOperationAborted());
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(new ConnectOperationAborted());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function isSignalingPort(value: unknown): value is PipecatSignalingPort {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof Reflect.get(value, "offer") === "function" &&
+    typeof Reflect.get(value, "patchCandidates") === "function" &&
+    typeof Reflect.get(value, "deletePeer") === "function"
+  );
+}
+
+function requireClientShape(value: unknown): PipecatClientPort {
+  if (typeof value !== "object" || value === null) {
+    throw new Error("Pipecat client adapter shape is incompatible");
+  }
+  for (const method of [
+    "connect",
+    "disconnect",
+    "setLogLevel",
+    "enableMic",
+    "tracks",
+    "snapshotPeerId",
+  ] as const) {
+    if (typeof Reflect.get(value, method) !== "function") {
+      throw new Error("Pipecat client adapter shape is incompatible");
+    }
+  }
+  return value as PipecatClientPort;
+}
+
+function safeConnectError(
+  value: unknown,
+  connection: PipecatVoiceTransportConnection,
+  peerId: string | null,
+): Error {
+  if (!(value instanceof Error) || !value.message.trim()) {
+    return new Error("Pipecat voice connection failed");
+  }
+  const message = value.message;
+  const containsSecret = containsSignalingSecret(
+    message,
+    signalingSecretValues(connection, peerId),
+  );
+  return containsSecret
+    ? new Error("Pipecat voice connection failed")
+    : new Error(message);
+}
+
 /**
  * Owns one PipecatClient, one SmallWebRTC peer, and its browser media objects.
  * It does not bootstrap, release, reconnect, or reduce product session state.
@@ -529,15 +950,26 @@ function bounded(
 export class PipecatVoiceTransport {
   private readonly callbacks: PipecatVoiceTransportCallbacks;
   private readonly client: PipecatClientPort;
+  private readonly connectTimeoutMs: number;
   private readonly disconnectTimeoutMs: number;
+  private readonly signalingPortFactory: PipecatSignalingPortFactory;
   private readonly audioElementFactory: () => HTMLAudioElement;
   private readonly now: () => number;
   private readonly localTracks = new Set<MediaStreamTrack>();
   private readonly remoteTracks = new Set<MediaStreamTrack>();
   private remotePlaybackTrack: MediaStreamTrack | null = null;
   private connection: PipecatVoiceTransportConnection | null = null;
+  private signalingPort: PipecatSignalingPort | null = null;
   private connectPromise: Promise<void> | null = null;
   private disconnectPromise: Promise<void> | null = null;
+  private activeConnectController: AbortController | null = null;
+  private sdkSignalingController: AbortController | null = null;
+  private readonly closedSdkSignaling = new AbortController();
+  private deleteIntentLatched = false;
+  private freshCallSignaled = false;
+  private freshCallError: Error | null = null;
+  private peerIdSnapshot: string | null = null;
+  private peerIdSnapshotInvalid = false;
   private audioElement: HTMLAudioElement | null = null;
   private outputEnabled: boolean;
   private closed = false;
@@ -548,20 +980,36 @@ export class PipecatVoiceTransport {
   private microphoneEnabledRequested = false;
 
   constructor(options: PipecatVoiceTransportOptions) {
-    const timeout =
+    logger.setLevel(LogLevel.NONE);
+    const connectTimeout = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    const disconnectTimeout =
       options.disconnectTimeoutMs ?? DEFAULT_DISCONNECT_TIMEOUT_MS;
     if (
-      isinstanceBoolean(timeout) ||
-      !Number.isFinite(timeout) ||
-      timeout <= 0 ||
-      timeout > 10_000
+      isinstanceBoolean(connectTimeout) ||
+      !Number.isFinite(connectTimeout) ||
+      connectTimeout <= 0 ||
+      connectTimeout > MAX_CONNECT_TIMEOUT_MS
+    ) {
+      throw new Error(
+        "Pipecat connect timeout must be between 0 and 60000 ms",
+      );
+    }
+    if (
+      isinstanceBoolean(disconnectTimeout) ||
+      !Number.isFinite(disconnectTimeout) ||
+      disconnectTimeout <= 0 ||
+      disconnectTimeout > 10_000
     ) {
       throw new Error(
         "Pipecat disconnect timeout must be between 0 and 10000 ms",
       );
     }
     this.callbacks = options.callbacks;
-    this.disconnectTimeoutMs = timeout;
+    this.connectTimeoutMs = connectTimeout;
+    this.disconnectTimeoutMs = disconnectTimeout;
+    this.signalingPortFactory =
+      options.signalingPortFactory ??
+      ((signalingUrl) => createPipecatSignalingPort(signalingUrl));
     this.outputEnabled = options.outputEnabled ?? true;
     this.audioElementFactory =
       options.audioElementFactory ?? (() => document.createElement("audio"));
@@ -569,12 +1017,15 @@ export class PipecatVoiceTransport {
       options.now ??
       (() =>
         typeof performance === "undefined" ? Date.now() : performance.now());
-    this.client = (options.clientFactory ?? createDefaultClient)(
-      this.createSdkCallbacks(),
-    );
+    const sdkCallbacks = this.createSdkCallbacks();
+    const client = options.clientFactory
+      ? options.clientFactory(sdkCallbacks)
+      : createDefaultClient(sdkCallbacks, this.createPinnedSignalingBridge());
+    this.client = requireClientShape(client);
 
-    // Defense in depth for injected clients and SDK behavior changes. The
-    // production client also receives enableMic:false at construction.
+    // The package logger is global and was disabled before construction. Keep
+    // the public client setter as a second guard before any connect call.
+    this.client.setLogLevel(LogLevel.NONE);
     this.client.enableMic(false);
   }
 
@@ -585,7 +1036,10 @@ export class PipecatVoiceTransport {
     void this.playAudioElement(element);
   }
 
-  connect(connection: PipecatVoiceTransportConnection): Promise<void> {
+  connect(
+    connection: PipecatVoiceTransportConnection,
+    options: PipecatVoiceConnectOptions = {},
+  ): Promise<void> {
     if (this.closed) {
       return Promise.reject(
         new Error("Pipecat voice transport is already closed"),
@@ -596,6 +1050,11 @@ export class PipecatVoiceTransport {
     try {
       ownedConnection = snapshotConnection(connection);
       validateConnection(ownedConnection);
+      const port = this.signalingPortFactory(ownedConnection.webrtcUrl);
+      if (!isSignalingPort(port)) {
+        throw new Error("Pipecat signaling adapter shape is incompatible");
+      }
+      this.signalingPort = port;
     } catch (error) {
       return Promise.reject(error);
     }
@@ -614,8 +1073,34 @@ export class PipecatVoiceTransport {
         : {}),
     };
     const operation = (async () => {
+      const controller = new AbortController();
+      this.activeConnectController = controller;
+      this.sdkSignalingController = controller;
+      let timedOut = false;
+      const onCallerAbort = () => controller.abort();
+      options.signal?.addEventListener("abort", onCallerAbort, { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.connectTimeoutMs);
       try {
-        await this.client.connect(connectParams);
+        if (options.signal?.aborted) controller.abort();
+        if (controller.signal.aborted) throw new ConnectOperationAborted();
+        let clientConnect: Promise<unknown>;
+        try {
+          // Pipecat's logger is package-global and mutable. Reassert the privacy
+          // floor at the operation boundary in case another consumer changed it
+          // after this adapter was constructed.
+          logger.setLevel(LogLevel.NONE);
+          this.client.setLogLevel(LogLevel.NONE);
+          clientConnect = this.client.connect(connectParams);
+        } catch (error) {
+          clientConnect = Promise.reject(error);
+        }
+        await settleOnSignal(
+          clientConnect,
+          controller.signal,
+        );
         this.captureLocalTrack();
         this.forceMicrophoneDisabled();
         if (!this.isCurrent()) {
@@ -624,8 +1109,27 @@ export class PipecatVoiceTransport {
           );
         }
       } catch (error) {
-        await this.disconnect();
-        throw error;
+        const failureTimedOut = timedOut;
+        const failureCallerAborted = options.signal?.aborted === true;
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onCallerAbort);
+        await this.disconnect().catch(() => undefined);
+        if (this.freshCallError) throw this.freshCallError;
+        if (failureTimedOut) {
+          throw new Error("Pipecat voice connection timed out");
+        }
+        if (failureCallerAborted || error instanceof ConnectOperationAborted) {
+          const aborted = new Error("Pipecat voice connection was aborted");
+          aborted.name = "AbortError";
+          throw aborted;
+        }
+        throw safeConnectError(error, ownedConnection, this.peerIdSnapshot);
+      } finally {
+        clearTimeout(timer);
+        options.signal?.removeEventListener("abort", onCallerAbort);
+        if (this.activeConnectController === controller) {
+          this.activeConnectController = null;
+        }
       }
     })();
     this.connectPromise = operation;
@@ -750,6 +1254,19 @@ export class PipecatVoiceTransport {
   disconnect(): Promise<void> {
     if (this.disconnectPromise) return this.disconnectPromise;
     const ownedGenerationAtStart = this.isCurrent();
+    this.deleteIntentLatched = true;
+    this.closedSdkSignaling.abort();
+    this.sdkSignalingController?.abort();
+    this.activeConnectController?.abort();
+    try {
+      const peerId = this.client.snapshotPeerId();
+      if (peerId !== null && !isStrictPeerId(peerId)) {
+        throw new Error("Invalid peer ID snapshot");
+      }
+      if (peerId !== null) this.peerIdSnapshot = peerId;
+    } catch {
+      this.peerIdSnapshotInvalid = true;
+    }
     this.closed = true;
     this.microphoneAuthorized = false;
     this.microphoneEnabledRequested = false;
@@ -762,7 +1279,21 @@ export class PipecatVoiceTransport {
     const sdkDisconnect = Promise.resolve().then(() =>
       this.client.disconnect(),
     );
-    this.disconnectPromise = bounded(sdkDisconnect, this.disconnectTimeoutMs);
+    const signalingPort = this.signalingPort;
+    const peerIdSnapshot = this.peerIdSnapshot;
+    const peerIdSnapshotInvalid = this.peerIdSnapshotInvalid;
+    this.disconnectPromise = (async () => {
+      await bounded(sdkDisconnect, this.disconnectTimeoutMs);
+      if (!signalingPort) return;
+      if (peerIdSnapshotInvalid) {
+        throw new Error("Pipecat peer cleanup could not identify its peer");
+      }
+      try {
+        await signalingPort.deletePeer(peerIdSnapshot);
+      } catch {
+        throw new Error("Pipecat peer cleanup failed");
+      }
+    })();
     this.forceMicrophoneDisabled();
 
     for (const track of [...this.localTracks, ...this.remoteTracks]) {
@@ -785,6 +1316,36 @@ export class PipecatVoiceTransport {
     }
 
     return this.disconnectPromise;
+  }
+
+  private createPinnedSignalingBridge(): PinnedSignalingBridge {
+    return Object.freeze({
+      port: () => {
+        if (!this.signalingPort || this.deleteIntentLatched) {
+          throw new Error("Pipecat signaling is unavailable");
+        }
+        return this.signalingPort;
+      },
+      operationSignal: () =>
+        this.deleteIntentLatched
+          ? this.closedSdkSignaling.signal
+          : this.sdkSignalingController?.signal,
+      deleteIntentLatched: () => this.deleteIntentLatched,
+      requireFreshCall: () => this.requireFreshCall(),
+    });
+  }
+
+  private requireFreshCall(): void {
+    if (this.deleteIntentLatched || this.freshCallSignaled) return;
+    this.freshCallSignaled = true;
+    const error = new Error("Pipecat peer requires a fresh voice call");
+    this.freshCallError = error;
+    this.activeConnectController?.abort();
+    if (this.isCurrent()) {
+      notifySafely(this.callbacks.onTransportError, error);
+      notifySafely(this.callbacks.onFreshCallRequired);
+    }
+    void this.disconnect().catch(() => undefined);
   }
 
   private createSdkCallbacks(): RTVIEventCallbacks {
@@ -820,7 +1381,11 @@ export class PipecatVoiceTransport {
         if (this.isCurrent()) {
           notifySafely(
             this.callbacks.onTransportError,
-            asError(message, "Pipecat transport reported an error"),
+            asError(
+              message,
+              "Pipecat transport reported an error",
+              signalingSecretValues(this.connection, this.peerIdSnapshot),
+            ),
           );
         }
       },
@@ -828,7 +1393,11 @@ export class PipecatVoiceTransport {
         if (this.isCurrent()) {
           notifySafely(
             this.callbacks.onTransportError,
-            asError(message, "Pipecat event channel reported an error"),
+            asError(
+              message,
+              "Pipecat event channel reported an error",
+              signalingSecretValues(this.connection, this.peerIdSnapshot),
+            ),
           );
         }
       },
