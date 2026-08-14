@@ -150,6 +150,13 @@ export function transitionVoiceSession(
       };
 
     case "transport_connected":
+      // Transport connectivity is a prerequisite, not a command to clear
+      // provider readiness. Pipecat can deliver its buffered canonical
+      // transport fact immediately after Ready, and duplicate SDK callbacks
+      // may arrive while a turn is already active. Keep the stronger state.
+      if (state.voiceReady || state.phase === "unavailable") {
+        return state;
+      }
       return {
         phase: "transport_connected",
         transportConnected: true,

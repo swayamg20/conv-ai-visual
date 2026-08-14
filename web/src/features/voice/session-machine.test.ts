@@ -110,6 +110,58 @@ describe("Voice V2 session machine", () => {
     });
   });
 
+  it("does not let a delayed transport fact regress readiness or revive unavailability", () => {
+    const ready = readyState();
+    const listening = transitionVoiceSession(ready, {
+      type: "event",
+      event: event("transcript_segment", {
+        segment_id: "segment-delayed",
+        text: "Still listening",
+        is_final: false,
+      }),
+    });
+    const thinking = transitionVoiceSession(ready, {
+      type: "event",
+      event: event(
+        "turn_committed",
+        { text: "Thinking now" },
+        { turn_id: "turn-thinking" }
+      ),
+    });
+    const speaking = transitionVoiceSession(thinking, {
+      type: "event",
+      event: event(
+        "assistant_speech_started",
+        { speech_id: "speech-delayed" },
+        { turn_id: "turn-thinking" }
+      ),
+    });
+
+    for (const semanticState of [ready, listening, thinking, speaking]) {
+      expect(
+        transitionVoiceSession(semanticState, {
+          type: "event",
+          event: event("transport_connected", { connection_id: "rtc-delayed" }),
+        })
+      ).toBe(semanticState);
+    }
+
+    const unavailable = transitionVoiceSession(ready, {
+      type: "event",
+      event: event("agent_unavailable", {
+        code: "provider_unavailable",
+        message: "Voice is unavailable",
+        retryable: true,
+      }),
+    });
+    expect(
+      transitionVoiceSession(unavailable, {
+        type: "event",
+        event: event("transport_connected", { connection_id: "rtc-stale" }),
+      })
+    ).toBe(unavailable);
+  });
+
   it("accepts preparation only while connecting", () => {
     const initial = createInitialVoiceSessionState();
     expect(
