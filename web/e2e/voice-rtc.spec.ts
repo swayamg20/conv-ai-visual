@@ -352,7 +352,17 @@ test("real browser media crosses LiveKit and barge-in stops the first reply", as
   expect(browserCommandLine.arguments).not.toContain("--mute-audio");
   await cdp.detach();
   await expect(page.getByRole("heading", { name: "Browser media harness" })).toBeVisible();
+  const activationButton = page.getByTestId("voice-e2e-activate");
+  await expect(activationButton).toBeDisabled();
   await page.getByTestId("voice-e2e-start").click();
+  await expect
+    .poll(async () => {
+      const prepared = await readSnapshot(page);
+      return { phase: prepared.phase, status: prepared.status };
+    })
+    .toEqual({ phase: "awaiting_audio", status: "awaiting_audio" });
+  await expect(activationButton).toBeEnabled();
+  await activationButton.click();
 
   const completedProof = await waitForProof(page, 30_000);
   const proof = completedProof.snapshot;

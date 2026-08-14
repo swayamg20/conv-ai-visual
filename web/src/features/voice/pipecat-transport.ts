@@ -1029,7 +1029,7 @@ export class PipecatVoiceTransport {
     this.client.enableMic(false);
   }
 
-  /** Invoke in the user gesture before any authenticated bootstrap await. */
+  /** Invoke synchronously in the activation gesture, before connect awaits. */
   primeAudioPlayback(): void {
     if (this.closed) return;
     const element = this.ensureAudioElement();

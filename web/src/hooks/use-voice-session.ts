@@ -10,25 +10,31 @@ import {
   type VoiceEventReduction,
   type VoiceEventState,
 } from "@/features/voice/event-reducer";
-import { decodeVoiceEvent, type VoiceEvent } from "@/features/voice/events";
+import { type VoiceEvent } from "@/features/voice/events";
 import {
   transitionVoiceSession,
   type VoiceSessionPhase,
 } from "@/features/voice/session-machine";
-import {
-  LiveKitVoiceTransport,
-  type LocalMicrophonePublicationObservation,
-} from "@/features/voice/livekit-transport";
+import type { LocalMicrophonePublicationObservation } from "@/features/voice/livekit-transport";
 import {
   bootstrapVoiceSession,
-  VOICE_V2_EVENT_TOPIC,
   VoiceSessionApiError,
   type VoiceAuthHeaderProvider,
   type VoiceSessionBootstrap,
 } from "@/features/voice/session-api";
+import {
+  loadVoiceTransport,
+  type VoiceLocalMicrophoneDiagnostic,
+  type VoiceTransport,
+  type VoiceTransportEventRejection,
+  type VoiceTransportLoader,
+} from "@/features/voice/voice-transport";
 
 const BOOTSTRAP_TIMEOUT_MS = 15_000;
+const TRANSPORT_LOAD_TIMEOUT_MS = 15_000;
 const TRANSPORT_CONNECT_TIMEOUT_MS = 15_000;
+const TRANSPORT_DISCONNECT_TIMEOUT_MS = 15_000;
+const PREPARED_ASSIGNMENT_TIMEOUT_MS = 30_000;
 const AGENT_READY_TIMEOUT_MS = 15_000;
 const SESSION_END_TIMEOUT_MS = 5_000;
 const MAX_PENDING_READY_EVENTS = 128;
@@ -63,6 +69,8 @@ export interface UseVoiceSessionOptions {
   readonly onLog?: (message: string) => void;
   readonly onPhaseChange?: (phase: VoiceSessionPhase) => void;
   readonly authHeaderProvider?: VoiceAuthHeaderProvider;
+  /** Narrow injection seam for deterministic lifecycle tests. */
+  readonly transportLoader?: VoiceTransportLoader;
 }
 
 export interface VoiceSessionConnectOverrides {
@@ -120,6 +128,32 @@ function settleOnAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T
   });
 }
 
+type BoundedSettlement<T> =
+  | { readonly status: "fulfilled"; readonly value: T }
+  | { readonly status: "rejected"; readonly reason: unknown }
+  | { readonly status: "timed_out" };
+
+/** Settle by a fixed deadline while still observing any late rejection. */
+function settleBounded<T>(
+  operation: Promise<T>,
+  timeoutMs: number
+): Promise<BoundedSettlement<T>> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (result: BoundedSettlement<T>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ status: "timed_out" }), timeoutMs);
+    operation.then(
+      (value) => finish({ status: "fulfilled", value }),
+      (reason: unknown) => finish({ status: "rejected", reason })
+    );
+  });
+}
+
 interface VoiceCallIdentity {
   readonly voiceCallId: string;
   /** Used only when no server assignment exists, such as bootstrap failure. */
@@ -135,7 +169,23 @@ interface PendingReadyActivation {
   readonly generation: number;
   readonly event: VoiceEvent;
   readonly reduction: VoiceEventReduction;
-  readonly queuedInputs: unknown[];
+  readonly queuedEvents: VoiceEvent[];
+}
+
+interface VoiceTransportTeardown {
+  releaseAssignment: boolean;
+  promise: Promise<void> | null;
+}
+
+interface VoiceTransportLoad {
+  readonly promise: Promise<VoiceTransport>;
+  readonly settlement: Promise<BoundedSettlement<VoiceTransport>>;
+  lateCleanupScheduled: boolean;
+}
+
+interface VoiceConnectOperation {
+  readonly intent: number;
+  promise: Promise<void>;
 }
 
 export interface VoiceBootstrapFailurePolicy {
@@ -240,14 +290,20 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const assignmentRef = useRef<VoiceSessionBootstrap | null>(null);
   const mountedRef = useRef(true);
   const generationRef = useRef(0);
-  const transportRef = useRef<LiveKitVoiceTransport | null>(null);
+  const transportRef = useRef<VoiceTransport | null>(null);
+  const transportLoadRef = useRef<VoiceTransportLoad | null>(null);
+  const teardownRef = useRef<VoiceTransportTeardown | null>(null);
   const bootstrapAbortRef = useRef<AbortController | null>(null);
   const bootstrapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const transportConnectAbortRef = useRef<AbortController | null>(null);
   const transportConnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const preparedAssignmentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null
+  );
   const readyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sessionEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const connectPromiseRef = useRef<Promise<void> | null>(null);
+  const connectOperationRef = useRef<VoiceConnectOperation | null>(null);
+  const connectIntentRef = useRef(0);
   const localProducerSequenceRef = useRef(0);
   const localProducerIdRef = useRef<string>("browser:unassigned:0");
   const activeVoiceCallIdRef = useRef<string | null>(null);
@@ -257,8 +313,8 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     readonly track: MediaStreamTrack;
   } | null>(null);
   const pendingReadyActivationRef = useRef<PendingReadyActivation | null>(null);
-  const transportInputHandlerRef = useRef<
-    ((input: unknown, generation: number) => void) | null
+  const transportEventHandlerRef = useRef<
+    ((event: VoiceEvent, generation: number) => void) | null
   >(null);
   const ttsEnabledRef = useRef(true);
   const [releaseScheduler] = useState(
@@ -273,6 +329,32 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const log = useCallback((message: string) => {
     optionsRef.current.onLog?.(message);
   }, []);
+
+  const disconnectTransportWithinDeadline = useCallback(
+    async (transport: VoiceTransport): Promise<void> => {
+      const settlement = await settleBounded(
+        Promise.resolve().then(() => transport.disconnect()),
+        TRANSPORT_DISCONNECT_TIMEOUT_MS
+      );
+      if (settlement.status === "timed_out") {
+        log("Voice transport cleanup timed out; releasing its assignment");
+      } else if (settlement.status === "rejected") {
+        log(`Voice transport cleanup failed: ${errorMessage(settlement.reason)}`);
+      }
+    },
+    [log]
+  );
+
+  const scheduleLateTransportCleanup = useCallback(
+    (transportLoad: VoiceTransportLoad) => {
+      if (transportLoad.lateCleanupScheduled) return;
+      transportLoad.lateCleanupScheduled = true;
+      void transportLoad.promise
+        .then((transport) => disconnectTransportWithinDeadline(transport))
+        .catch(() => undefined);
+    },
+    [disconnectTransportWithinDeadline]
+  );
 
   const releaseCallIdentity = useCallback(() => {
     callIdentityRef.current = null;
@@ -300,6 +382,13 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     }
   }, []);
 
+  const clearPreparedAssignmentTimer = useCallback(() => {
+    if (preparedAssignmentTimerRef.current !== null) {
+      clearTimeout(preparedAssignmentTimerRef.current);
+      preparedAssignmentTimerRef.current = null;
+    }
+  }, []);
+
   const clearSessionEndTimer = useCallback(() => {
     if (sessionEndTimerRef.current !== null) {
       clearTimeout(sessionEndTimerRef.current);
@@ -317,45 +406,93 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     }
   }, [stateWriters]);
 
-  const cleanupTransport = useCallback((releaseAssignment = false): Promise<void> => {
-    generationRef.current += 1;
-    clearBootstrapTimer();
-    clearTransportConnectTimer();
-    clearReadyTimer();
-    clearSessionEndTimer();
-    bootstrapAbortRef.current?.abort();
-    bootstrapAbortRef.current = null;
-    transportConnectAbortRef.current?.abort();
-    transportConnectAbortRef.current = null;
-    pendingReadyActivationRef.current = null;
-    connectPromiseRef.current = null;
+  const cleanupTransport = useCallback(
+    (releaseAssignment = false): Promise<void> => {
+      const existingTeardown = teardownRef.current;
+      if (existingTeardown) {
+        if (releaseAssignment) existingTeardown.releaseAssignment = true;
+        return existingTeardown.promise ?? Promise.resolve();
+      }
 
-    const transport = transportRef.current;
-    const activeAssignment = assignmentRef.current;
-    const assignmentLocator = activeAssignment ?? (
-      eventStateRef.current.sessionId && activeVoiceCallIdRef.current
-        ? {
-            session_id: eventStateRef.current.sessionId,
-            voice_call_id: activeVoiceCallIdRef.current,
+      generationRef.current += 1;
+      clearBootstrapTimer();
+      clearPreparedAssignmentTimer();
+      clearTransportConnectTimer();
+      clearReadyTimer();
+      clearSessionEndTimer();
+      bootstrapAbortRef.current?.abort();
+      bootstrapAbortRef.current = null;
+      transportConnectAbortRef.current?.abort();
+      transportConnectAbortRef.current = null;
+      pendingReadyActivationRef.current = null;
+
+      const transport = transportRef.current;
+      const transportLoad = transportLoadRef.current;
+      const activeAssignment = assignmentRef.current;
+      const assignmentLocator =
+        activeAssignment ??
+        (eventStateRef.current.sessionId && activeVoiceCallIdRef.current
+          ? {
+              session_id: eventStateRef.current.sessionId,
+              voice_call_id: activeVoiceCallIdRef.current,
+            }
+          : null);
+      transportRef.current = null;
+      transportLoadRef.current = null;
+      assignmentRef.current = null;
+      if (mountedRef.current) {
+        stateWriters.setAssignment(null);
+        stateWriters.setIsMicMuted(true);
+      }
+
+      const teardown: VoiceTransportTeardown = {
+        releaseAssignment,
+        promise: null,
+      };
+      const teardownPromise = (async () => {
+        // Publish the coalescing owner before a resource-free teardown can
+        // settle, so a same-turn terminal caller can still upgrade release.
+        await Promise.resolve();
+        try {
+          let ownedTransport = transport;
+          if (!ownedTransport && transportLoad) {
+            const settlement = await transportLoad.settlement;
+            if (settlement.status === "fulfilled") {
+              ownedTransport = settlement.value;
+            } else if (settlement.status === "timed_out") {
+              scheduleLateTransportCleanup(transportLoad);
+            }
           }
-        : null
-    );
-    transportRef.current = null;
-    assignmentRef.current = null;
-    if (releaseAssignment) releaseScheduler.release(assignmentLocator);
-    if (mountedRef.current) {
-      stateWriters.setAssignment(null);
-      stateWriters.setIsMicMuted(true);
-    }
-    return transport?.disconnect() ?? Promise.resolve();
-  }, [
-    clearBootstrapTimer,
-    clearTransportConnectTimer,
-    clearReadyTimer,
-    clearSessionEndTimer,
-    releaseScheduler,
-    stateWriters,
-  ]);
+          if (ownedTransport) {
+            await disconnectTransportWithinDeadline(ownedTransport);
+          }
+        } catch (error) {
+          log(`Voice transport cleanup failed: ${errorMessage(error)}`);
+        } finally {
+          if (teardown.releaseAssignment) {
+            await releaseScheduler.release(assignmentLocator);
+          }
+        }
+      })().finally(() => {
+        if (teardownRef.current === teardown) teardownRef.current = null;
+      });
+      teardown.promise = teardownPromise;
+      teardownRef.current = teardown;
+      return teardownPromise;
+    },
+    [
+      clearBootstrapTimer,
+      clearPreparedAssignmentTimer,
+      clearReadyTimer,
+      clearSessionEndTimer,
+      clearTransportConnectTimer,
+      disconnectTransportWithinDeadline,
+      log,
+      releaseScheduler,
+      scheduleLateTransportCleanup,
+      stateWriters,
+    ]
+  );
 
   const applyReduction = useCallback(
     (input: unknown): VoiceEventReduction => {
@@ -446,7 +583,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       message: string,
       options: ActiveCallFailureOptions = {}
     ) => {
-      if (generationRef.current !== generation || !transportRef.current) return;
+      if (generationRef.current !== generation) return;
       const canRetry = options.canRetry ?? false;
       if (!(options.retainCallIdentity ?? false)) releaseCallIdentity();
       const reduction = applyLocalEvent("agent_unavailable", {
@@ -464,18 +601,25 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
     [applyLocalEvent, cleanupTransport, log, releaseCallIdentity]
   );
 
-  const handleTransportInput = useCallback(
-    (input: unknown, generation: number) => {
-      if (generationRef.current !== generation || !transportRef.current) return;
-      const decoded = decodeVoiceEvent(input);
-      const expectedTraceId = assignmentRef.current?.trace_id;
+  const handleTransportEvent = useCallback(
+    (event: VoiceEvent, generation: number) => {
+      const transport = transportRef.current;
+      const activeAssignment = assignmentRef.current;
       if (
-        decoded.ok &&
-        (!expectedTraceId || decoded.event.trace_id !== expectedTraceId)
+        generationRef.current !== generation ||
+        !transport ||
+        !activeAssignment
+      ) {
+        return;
+      }
+      if (
+        event.trace_id !== activeAssignment.trace_id ||
+        event.session_id !== activeAssignment.session_id ||
+        event.voice_call_id !== activeAssignment.voice_call_id
       ) {
         failActiveCall(
           generation,
-          "event_trace_mismatch",
+          "event_scope_mismatch",
           "Voice received an event outside its assigned trace"
         );
         return;
@@ -483,14 +627,14 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
 
       const pendingReady = pendingReadyActivationRef.current;
       if (pendingReady?.generation === generation) {
-        if (decoded.ok && decoded.event.event_type === "agent_unavailable") {
+        if (event.event_type === "agent_unavailable") {
           pendingReadyActivationRef.current = null;
         } else {
-          if (decoded.ok && decoded.event.event_type === "agent_ready") {
+          if (event.event_type === "agent_ready") {
             log("Ignored duplicate agent readiness during microphone activation");
             return;
           }
-          if (pendingReady.queuedInputs.length >= MAX_PENDING_READY_EVENTS) {
+          if (pendingReady.queuedEvents.length >= MAX_PENDING_READY_EVENTS) {
             pendingReadyActivationRef.current = null;
             failActiveCall(
               generation,
@@ -499,23 +643,24 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
             );
             return;
           }
-          pendingReady.queuedInputs.push(input);
+          pendingReady.queuedEvents.push(event);
           return;
         }
       }
 
-      if (decoded.ok && decoded.event.event_type === "agent_ready") {
-        const readyReduction = reduceVoiceEvent(eventStateRef.current, input);
+      if (event.event_type === "agent_ready") {
+        const readyReduction = reduceVoiceEvent(eventStateRef.current, event);
         if (readyReduction.disposition === "applied") {
-          const transport = transportRef.current;
           const pending: PendingReadyActivation = {
             generation,
-            event: decoded.event,
+            event,
             reduction: readyReduction,
-            queuedInputs: [],
+            queuedEvents: [],
           };
           pendingReadyActivationRef.current = pending;
-          void transport.activateMicrophoneAfterReady().then(
+          // The runtime loader owns canonical decoding. Passing this exact
+          // immutable object preserves the adapter's Ready identity proof.
+          void transport.activateMicrophoneAfterReady(event).then(
             () => {
               if (
                 generationRef.current !== generation ||
@@ -528,13 +673,13 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
               publishState(readyReduction.state);
               if (mountedRef.current) stateWriters.setIsMicMuted(false);
               try {
-                optionsRef.current.onEvent?.(decoded.event);
+                optionsRef.current.onEvent?.(event);
               } catch (error) {
                 log(`Voice event observer failed: ${errorMessage(error)}`);
               }
-              runAppliedEvent(decoded.event, readyReduction.effects);
-              for (const queuedInput of pending.queuedInputs) {
-                transportInputHandlerRef.current?.(queuedInput, generation);
+              runAppliedEvent(event, readyReduction.effects);
+              for (const queuedEvent of pending.queuedEvents) {
+                transportEventHandlerRef.current?.(queuedEvent, generation);
               }
             },
             (error: unknown) => {
@@ -558,7 +703,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         }
       }
 
-      const reduction = applyReduction(input);
+      const reduction = applyReduction(event);
       if (reduction.disposition !== "applied") {
         if (reduction.rejection) {
           log(
@@ -584,14 +729,12 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         return;
       }
 
-      if (decoded.ok) {
-        try {
-          optionsRef.current.onEvent?.(decoded.event);
-        } catch (error) {
-          log(`Voice event observer failed: ${errorMessage(error)}`);
-        }
-        runAppliedEvent(decoded.event, reduction.effects);
+      try {
+        optionsRef.current.onEvent?.(event);
+      } catch (error) {
+        log(`Voice event observer failed: ${errorMessage(error)}`);
       }
+      runAppliedEvent(event, reduction.effects);
 
       if (
         reduction.state.session.phase === "unavailable" ||
@@ -600,11 +743,9 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       ) {
         const mustReleaseAssignment =
           reduction.state.session.phase === "ended" ||
-          (decoded.ok && decoded.event.event_type === "agent_unavailable") ||
+          event.event_type === "agent_unavailable" ||
           !reduction.state.session.unavailableReason?.retryable;
-        if (mustReleaseAssignment) {
-          releaseCallIdentity();
-        }
+        if (mustReleaseAssignment) releaseCallIdentity();
         void cleanupTransport(mustReleaseAssignment);
       }
     },
@@ -621,24 +762,140 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   );
 
   useEffect(() => {
-    transportInputHandlerRef.current = handleTransportInput;
+    transportEventHandlerRef.current = handleTransportEvent;
     return () => {
-      if (transportInputHandlerRef.current === handleTransportInput) {
-        transportInputHandlerRef.current = null;
+      if (transportEventHandlerRef.current === handleTransportEvent) {
+        transportEventHandlerRef.current = null;
       }
     };
-  }, [handleTransportInput]);
+  }, [handleTransportEvent]);
 
   const connect = useCallback(
     (overrides: VoiceSessionConnectOverrides = {}): Promise<void> => {
-      if (connectPromiseRef.current) return connectPromiseRef.current;
+      const currentOperation = connectOperationRef.current;
+      if (
+        currentOperation &&
+        currentOperation.intent === connectIntentRef.current
+      ) {
+        return currentOperation.promise;
+      }
+
+      const preparedTransport = transportRef.current;
+      const preparedAssignment = assignmentRef.current;
+      const requestedSessionId =
+        overrides.sessionId ?? optionsRef.current.sessionId;
+      if (
+        preparedTransport &&
+        preparedAssignment &&
+        eventStateRef.current.session.phase === "awaiting_audio" &&
+        preparedAssignment.session_id === requestedSessionId
+      ) {
+        const intent = connectIntentRef.current + 1;
+        connectIntentRef.current = intent;
+        const generation = generationRef.current;
+        clearPreparedAssignmentTimer();
+
+        const transportConnectAbort = new AbortController();
+        let transportConnectTimedOut = false;
+        transportConnectAbortRef.current = transportConnectAbort;
+        transportConnectTimerRef.current = setTimeout(() => {
+          transportConnectTimedOut = true;
+          transportConnectAbort.abort();
+        }, TRANSPORT_CONNECT_TIMEOUT_MS);
+
+        let transportConnect: Promise<void>;
+        try {
+          // This is deliberately synchronous in the second user gesture. The
+          // selected adapter already exists, so no bootstrap or import precedes
+          // the browser's audio-unlock call.
+          preparedTransport.primeAudioPlayback();
+          publishState({
+            ...eventStateRef.current,
+            session: transitionVoiceSession(eventStateRef.current.session, {
+              type: "connect_requested",
+            }),
+          });
+          transportConnect = preparedTransport.connect();
+        } catch (error) {
+          transportConnect = Promise.reject(error);
+        }
+
+        const operation: VoiceConnectOperation = {
+          intent,
+          promise: Promise.resolve(),
+        };
+        const start = async () => {
+          try {
+            try {
+              await settleOnAbort(
+                transportConnect,
+                transportConnectAbort.signal
+              );
+            } catch (error) {
+              if (generationRef.current !== generation) return;
+              if (transportConnectTimedOut) {
+                failActiveCall(
+                  generation,
+                  "transport_connect_timeout",
+                  "Voice transport and microphone setup timed out. Start a fresh voice call.",
+                  { canRetry: true, retainCallIdentity: false }
+                );
+                return;
+              }
+              if (transportConnectAbort.signal.aborted) return;
+              throw error;
+            }
+            if (
+              generationRef.current !== generation ||
+              intent !== connectIntentRef.current ||
+              transportRef.current !== preparedTransport
+            ) {
+              return;
+            }
+            log(
+              `Connected assigned ${preparedAssignment.runtime} voice transport`
+            );
+          } catch (error) {
+            if (generationRef.current !== generation || isAbortError(error)) {
+              return;
+            }
+            failActiveCall(
+              generation,
+              "transport_connect_failed",
+              `Voice transport failed: ${errorMessage(error)}`,
+              { canRetry: true, retainCallIdentity: false }
+            );
+          } finally {
+            clearTransportConnectTimer();
+            if (transportConnectAbortRef.current === transportConnectAbort) {
+              transportConnectAbortRef.current = null;
+            }
+          }
+        };
+        const promise = start().finally(() => {
+          if (connectOperationRef.current === operation) {
+            connectOperationRef.current = null;
+          }
+        });
+        operation.promise = promise;
+        connectOperationRef.current = operation;
+        return promise;
+      }
+
+      const predecessor = currentOperation?.promise;
+      const intent = connectIntentRef.current + 1;
+      connectIntentRef.current = intent;
 
       const start = async () => {
+        if (predecessor) await predecessor.catch(() => undefined);
+        const pendingTeardown = teardownRef.current?.promise;
+        if (pendingTeardown) await pendingTeardown;
+        if (intent !== connectIntentRef.current || !mountedRef.current) return;
         if (!optionsRef.current.enabled) {
           log("Voice V2 is disabled for this runtime assignment");
           return;
         }
-        if (transportRef.current) return;
+        if (transportRef.current || transportLoadRef.current) return;
 
         const sessionId = overrides.sessionId ?? optionsRef.current.sessionId;
         if (!sessionId) {
@@ -673,7 +930,6 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         const activeVoiceCallId = activeCallIdentity.voiceCallId;
         activeVoiceCallIdRef.current = activeVoiceCallId;
         activeBrowserTraceIdRef.current = activeCallIdentity.browserTraceId;
-        await cleanupTransport();
         const generation = generationRef.current + 1;
         generationRef.current = generation;
         localProducerSequenceRef.current = 0;
@@ -689,121 +945,6 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         stateWriters.setIsMicMuted(true);
         stateWriters.setAudioPlaybackBlocked(false);
         log("Requesting Voice V2 assignment");
-
-        let transport: LiveKitVoiceTransport;
-        const isCurrentTransport = () =>
-          generationRef.current === generation &&
-          transportRef.current === transport;
-        transport = new LiveKitVoiceTransport({
-          voiceCallId: activeVoiceCallId,
-          ttsEnabled: ttsEnabledRef.current,
-          callbacks: {
-            isCurrent: isCurrentTransport,
-            onConnected: () => {
-              if (!isCurrentTransport()) return;
-              const reduction = applyLocalEvent("transport_connected", {});
-              if (reduction.disposition !== "applied") return;
-              log("Transport connected; waiting for genuine agent readiness");
-              clearReadyTimer();
-              readyTimerRef.current = setTimeout(() => {
-                readyTimerRef.current = null;
-                failActiveCall(
-                  generation,
-                  "agent_ready_timeout",
-                  "The voice agent did not become ready in time. Continue in text mode.",
-                  { canRetry: true, retainCallIdentity: false }
-                );
-              }, AGENT_READY_TIMEOUT_MS);
-            },
-            onReconnecting: (attempt) => {
-              if (!isCurrentTransport()) return;
-              clearReadyTimer();
-              failActiveCall(
-                generation,
-                "reconnect_not_supported",
-                `Voice transport connection was interrupted (attempt ${attempt}). Start a fresh voice call.`,
-                { canRetry: true, retainCallIdentity: false }
-              );
-            },
-            onReconnected: () => {
-              if (!isCurrentTransport()) return;
-              failActiveCall(
-                generation,
-                "reconnect_not_supported",
-                "Voice transport reconnected, but this runtime cannot safely restore the event stream yet. Start a fresh voice call.",
-                { canRetry: true, retainCallIdentity: false }
-              );
-            },
-            onDisconnected: () => {
-              if (!isCurrentTransport()) return;
-              failActiveCall(
-                generation,
-                "transport_unavailable",
-                "Voice transport disconnected",
-                { canRetry: true, retainCallIdentity: false }
-              );
-            },
-            onAgentDisconnected: () => {
-              if (!isCurrentTransport()) return;
-              failActiveCall(
-                generation,
-                "agent_disconnected",
-                "Voice agent disconnected. Start a fresh voice call.",
-                { canRetry: true, retainCallIdentity: false }
-              );
-            },
-            onTransportInput: (input) => {
-              if (!isCurrentTransport()) return;
-              handleTransportInput(input, generation);
-            },
-            onInvalidEventChannel: () => {
-              if (!isCurrentTransport()) return;
-              failActiveCall(
-                generation,
-                "invalid_event_channel",
-                "Voice received data outside its authenticated reliable event channel"
-              );
-            },
-            onMicrophoneUnavailable: (error) => {
-              if (!isCurrentTransport()) return;
-              failActiveCall(
-                generation,
-                "microphone_unavailable",
-                `Microphone unavailable: ${error.message}`,
-                { canRetry: true, retainCallIdentity: false }
-              );
-            },
-            onAudioPlaybackBlockedChange: (blocked) => {
-              if (isCurrentTransport() && mountedRef.current) {
-                stateWriters.setAudioPlaybackBlocked(blocked);
-              }
-            },
-            onLocalMicrophoneTrack: (track) => {
-              const currentTrack = localMicrophoneTrackRef.current;
-              if (track) {
-                if (!isCurrentTransport()) return;
-                localMicrophoneTrackRef.current = { generation, track };
-                optionsRef.current.onLocalMicrophoneTrack?.(track);
-                return;
-              }
-              if (currentTrack?.generation !== generation) return;
-              localMicrophoneTrackRef.current = null;
-              optionsRef.current.onLocalMicrophoneTrack?.(null);
-            },
-            onLocalMicrophonePublication: (track, observation) => {
-              if (!isCurrentTransport()) return;
-              optionsRef.current.onLocalMicrophonePublication?.(
-                track,
-                observation
-              );
-            },
-          },
-        });
-        transportRef.current = transport;
-
-        // Invoke this before the first awaited bootstrap step so the connect click
-        // can satisfy restrictive browser audio-playback policies.
-        transport.primeAudioPlayback();
 
         const abortController = new AbortController();
         bootstrapAbortRef.current = abortController;
@@ -847,7 +988,12 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           }
         }
 
-        if (!isCurrentTransport()) return;
+        if (
+          generationRef.current !== generation ||
+          intent !== connectIntentRef.current
+        ) {
+          return;
+        }
         if (
           bootstrap.agent_id !== optionsRef.current.agentId ||
           bootstrap.session_id !== sessionId ||
@@ -860,102 +1006,259 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
           );
           return;
         }
-        if (bootstrap.runtime !== "livekit_v2") {
-          // This hook still owns only the LiveKit adapter. Retain the valid
-          // server assignment just long enough for cleanup to release its exact
-          // call scope; never reinterpret Pipecat fields or connect a room.
-          assignmentRef.current = bootstrap;
-          releaseScheduler.markAssigned(bootstrap.voice_call_id);
-          failActiveCall(
-            generation,
-            "unsupported_voice_runtime",
-            "This voice client cannot start the assigned runtime. Start a fresh voice call.",
-            { canRetry: true, retainCallIdentity: false }
-          );
-          return;
-        }
-        if (bootstrap.event_topic !== VOICE_V2_EVENT_TOPIC) {
-          failActiveCall(
-            generation,
-            "assignment_identity_mismatch",
-            "Voice assignment does not match this agent, session, or call"
-          );
-          return;
-        }
 
         assignmentRef.current = bootstrap;
         releaseScheduler.markAssigned(bootstrap.voice_call_id);
         if (mountedRef.current) stateWriters.setAssignment(bootstrap);
 
-        try {
-          const transportConnectAbort = new AbortController();
-          let transportConnectTimedOut = false;
-          transportConnectAbortRef.current = transportConnectAbort;
-          transportConnectTimerRef.current = setTimeout(() => {
-            transportConnectTimedOut = true;
-            transportConnectAbort.abort();
-          }, TRANSPORT_CONNECT_TIMEOUT_MS);
-          try {
-            await settleOnAbort(
-              transport.connect(bootstrap),
-              transportConnectAbort.signal
-            );
-          } catch (error) {
-            if (generationRef.current !== generation) return;
-            if (transportConnectTimedOut) {
-              failActiveCall(
-                generation,
-                "transport_connect_timeout",
-                "Voice transport and microphone setup timed out. Start a fresh voice call.",
-                { canRetry: true, retainCallIdentity: false }
-              );
-              return;
-            }
-            if (transportConnectAbort.signal.aborted) return;
-            throw error;
-          } finally {
-            clearTransportConnectTimer();
-            if (transportConnectAbortRef.current === transportConnectAbort) {
-              transportConnectAbortRef.current = null;
-            }
-          }
+        let transport: VoiceTransport | null = null;
+        const isCurrentTransport = () =>
+          generationRef.current === generation &&
+          assignmentRef.current === bootstrap &&
+          (transportRef.current === null || transportRef.current === transport);
+        const failInvalidEvent = (rejection: VoiceTransportEventRejection) => {
           if (!isCurrentTransport()) return;
-          log(`Joined assigned room ${bootstrap.room_name}`);
-        } catch (error) {
-          if (generationRef.current !== generation || isAbortError(error)) return;
+          const message =
+            rejection.code === "invalid_event_channel"
+              ? "Voice received data outside its authenticated reliable event channel"
+              : rejection.code === "event_scope_mismatch"
+                ? "Voice received an event outside its assigned trace"
+                : rejection.message;
+          const nextState: VoiceEventState = {
+            ...eventStateRef.current,
+            session: transitionVoiceSession(eventStateRef.current.session, {
+              type: "compatibility_error",
+              code: rejection.code,
+              message,
+            }),
+            compatibilityFailure: {
+              code: rejection.code,
+              message,
+              ...(rejection.event_id ? { eventId: rejection.event_id } : {}),
+              ...(rejection.event_type
+                ? { eventType: rejection.event_type }
+                : {}),
+            },
+          };
+          publishState(nextState);
+          releaseCallIdentity();
+          optionsRef.current.onError?.(message);
+          void cleanupTransport(true);
+        };
+        const transportLoader =
+          optionsRef.current.transportLoader ?? loadVoiceTransport;
+        const transportLoadPromise = Promise.resolve().then(() =>
+          transportLoader(bootstrap, {
+            ttsEnabled: ttsEnabledRef.current,
+            authHeaderProvider: optionsRef.current.authHeaderProvider,
+            callbacks: {
+              isCurrent: isCurrentTransport,
+              onConnected: () => {
+                if (!isCurrentTransport()) return;
+                const reduction = applyLocalEvent("transport_connected", {});
+                if (reduction.disposition !== "applied") return;
+                log(
+                  "Transport connected; waiting for genuine agent readiness"
+                );
+                clearReadyTimer();
+                readyTimerRef.current = setTimeout(() => {
+                  readyTimerRef.current = null;
+                  failActiveCall(
+                    generation,
+                    "agent_ready_timeout",
+                    "The voice agent did not become ready in time. Continue in text mode.",
+                    { canRetry: true, retainCallIdentity: false }
+                  );
+                }, AGENT_READY_TIMEOUT_MS);
+              },
+              onDisconnected: () => {
+                if (!isCurrentTransport()) return;
+                failActiveCall(
+                  generation,
+                  "transport_unavailable",
+                  "Voice transport disconnected",
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              },
+              onAgentDisconnected: () => {
+                if (!isCurrentTransport()) return;
+                failActiveCall(
+                  generation,
+                  "agent_disconnected",
+                  "Voice agent disconnected. Start a fresh voice call.",
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              },
+              onFreshCallRequired: () => {
+                if (!isCurrentTransport()) return;
+                failActiveCall(
+                  generation,
+                  "fresh_call_required",
+                  "Voice transport requires a fresh call. Start voice again.",
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              },
+              onEvent: (event) => {
+                if (!isCurrentTransport()) return;
+                handleTransportEvent(event, generation);
+              },
+              onInvalidEvent: failInvalidEvent,
+              onTransportError: (error) => {
+                if (!isCurrentTransport()) return;
+                const reconnect = error.message.includes(
+                  "reconnect requires a fresh call"
+                );
+                failActiveCall(
+                  generation,
+                  reconnect
+                    ? "reconnect_not_supported"
+                    : "transport_runtime_error",
+                  reconnect
+                    ? "Voice transport connection was interrupted. Start a fresh voice call."
+                    : `Voice transport failed: ${error.message}`,
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              },
+              onMicrophoneUnavailable: (error) => {
+                if (!isCurrentTransport()) return;
+                failActiveCall(
+                  generation,
+                  "microphone_unavailable",
+                  `Microphone unavailable: ${error.message}`,
+                  { canRetry: true, retainCallIdentity: false }
+                );
+              },
+              onAudioPlaybackBlockedChange: (blocked) => {
+                if (isCurrentTransport() && mountedRef.current) {
+                  stateWriters.setAudioPlaybackBlocked(blocked);
+                }
+              },
+              onLocalMicrophoneTrack: (track) => {
+                const currentTrack = localMicrophoneTrackRef.current;
+                if (track) {
+                  if (!isCurrentTransport()) return;
+                  localMicrophoneTrackRef.current = { generation, track };
+                  optionsRef.current.onLocalMicrophoneTrack?.(track);
+                  return;
+                }
+                if (currentTrack?.generation !== generation) return;
+                localMicrophoneTrackRef.current = null;
+                optionsRef.current.onLocalMicrophoneTrack?.(null);
+              },
+              onLocalMicrophoneDiagnostic: (
+                track,
+                diagnostic: VoiceLocalMicrophoneDiagnostic
+              ) => {
+                if (
+                  !isCurrentTransport() ||
+                  diagnostic.runtime !== "livekit_v2" ||
+                  diagnostic.kind !== "publication"
+                ) {
+                  return;
+                }
+                optionsRef.current.onLocalMicrophonePublication?.(
+                  track,
+                  diagnostic.observation
+                );
+              },
+            },
+          })
+        );
+        const transportLoad: VoiceTransportLoad = {
+          promise: transportLoadPromise,
+          settlement: settleBounded(
+            transportLoadPromise,
+            TRANSPORT_LOAD_TIMEOUT_MS
+          ),
+          lateCleanupScheduled: false,
+        };
+        transportLoadRef.current = transportLoad;
+        const transportLoadSettlement = await transportLoad.settlement;
+        if (transportLoadSettlement.status !== "fulfilled") {
+          if (generationRef.current !== generation) return;
+          const timedOut = transportLoadSettlement.status === "timed_out";
           failActiveCall(
             generation,
-            "transport_connect_failed",
-            `Voice transport failed: ${errorMessage(error)}`,
+            timedOut ? "transport_load_timeout" : "transport_load_failed",
+            timedOut
+              ? "Voice transport loading timed out. Start a fresh voice call."
+              : `Voice transport could not be loaded: ${errorMessage(
+                  transportLoadSettlement.reason
+                )}`,
             { canRetry: true, retainCallIdentity: false }
           );
+          return;
         }
+        transport = transportLoadSettlement.value;
+        if (transportLoadRef.current === transportLoad) {
+          transportLoadRef.current = null;
+        }
+
+        if (!isCurrentTransport()) {
+          const teardown = teardownRef.current?.promise;
+          if (teardown) await teardown;
+          return;
+        }
+        transportRef.current = transport;
+        publishState({
+          ...eventStateRef.current,
+          session: transitionVoiceSession(eventStateRef.current.session, {
+            type: "transport_prepared",
+          }),
+        });
+        clearPreparedAssignmentTimer();
+        preparedAssignmentTimerRef.current = setTimeout(() => {
+          preparedAssignmentTimerRef.current = null;
+          if (
+            generationRef.current !== generation ||
+            transportRef.current !== transport ||
+            assignmentRef.current !== bootstrap ||
+            eventStateRef.current.session.phase !== "awaiting_audio"
+          ) {
+            return;
+          }
+          failActiveCall(
+            generation,
+            "prepared_assignment_timeout",
+            "Voice start confirmation timed out. Start a fresh voice call.",
+            { canRetry: true, retainCallIdentity: false }
+          );
+        }, PREPARED_ASSIGNMENT_TIMEOUT_MS);
+        log(`Prepared assigned ${bootstrap.runtime} voice transport`);
       };
 
+      const operation: VoiceConnectOperation = {
+        intent,
+        promise: Promise.resolve(),
+      };
       const promise = start().finally(() => {
-        if (connectPromiseRef.current === promise) {
-          connectPromiseRef.current = null;
+        if (connectOperationRef.current === operation) {
+          connectOperationRef.current = null;
         }
       });
-      connectPromiseRef.current = promise;
+      operation.promise = promise;
+      connectOperationRef.current = operation;
       return promise;
     },
     [
       applyLocalEvent,
       cleanupTransport,
       clearBootstrapTimer,
+      clearPreparedAssignmentTimer,
       clearTransportConnectTimer,
       clearReadyTimer,
       failActiveCall,
-      handleTransportInput,
+      handleTransportEvent,
       log,
       publishState,
+      releaseCallIdentity,
       releaseScheduler,
       stateWriters,
     ]
   );
 
-  const disconnect = useCallback(() => {
+  const disconnect = useCallback((): Promise<void> => {
+    connectIntentRef.current += 1;
     releaseCallIdentity();
     const nextState: VoiceEventState = {
       ...eventStateRef.current,
@@ -964,15 +1267,18 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
       }),
     };
     publishState(nextState);
-    void cleanupTransport(true);
+    const teardown = cleanupTransport(true);
     log("Voice ended");
+    return teardown;
   }, [cleanupTransport, log, publishState, releaseCallIdentity]);
 
-  const cancelConnection = useCallback(() => {
+  const cancelConnection = useCallback((): Promise<void> => {
+    connectIntentRef.current += 1;
     releaseCallIdentity();
-    void cleanupTransport(true);
+    const teardown = cleanupTransport(true);
     publishState(createInitialVoiceEventState(eventStateRef.current.sessionId));
     log("Voice connection cancelled");
+    return teardown;
   }, [cleanupTransport, log, publishState, releaseCallIdentity]);
 
   const toggleMicMute = useCallback(async () => {
@@ -1035,10 +1341,15 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   }, [options, releaseScheduler]);
 
   useEffect(() => {
-    if (!options.enabled && transportRef.current) {
+    if (
+      !options.enabled &&
+      (transportRef.current || transportLoadRef.current || assignmentRef.current)
+    ) {
+      connectIntentRef.current += 1;
+      releaseCallIdentity();
       void cleanupTransport(true);
     }
-  }, [cleanupTransport, options.enabled]);
+  }, [cleanupTransport, options.enabled, releaseCallIdentity]);
 
   return {
     voiceCallId: voiceCallId ?? "",

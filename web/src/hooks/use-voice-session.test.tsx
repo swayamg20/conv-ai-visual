@@ -175,9 +175,17 @@ vi.mock("@/features/voice/session-api", () => ({
   VoiceSessionApiError: api.VoiceSessionApiError,
 }));
 
-import { REQUIRED_VOICE_READY_COMPONENTS } from "@/features/voice/events";
+import {
+  decodeVoiceEvent,
+  REQUIRED_VOICE_READY_COMPONENTS,
+} from "@/features/voice/events";
 import type { VoiceEvent } from "@/features/voice/events";
 import type { VoiceAuthHeaderProvider } from "@/features/voice/session-api";
+import type {
+  VoiceTransport,
+  VoiceTransportCallbacks,
+  VoiceTransportLoader,
+} from "@/features/voice/voice-transport";
 import {
   classifyVoiceBootstrapFailure,
   useVoiceSession,
@@ -192,6 +200,35 @@ const sessionId = "a4f4328e-185e-4c65-b3f7-101e04a37578";
 const agentId = "90bd1253-90a6-459a-bf37-365bc3039a76";
 const assignmentTraceId = "025bcf26-dcab-4f8c-bb44-af298875f638";
 let producerSequence = 0;
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function pipecatAssignment(request: {
+  readonly session_id: string;
+  readonly voice_call_id: string;
+}) {
+  return {
+    runtime: "pipecat_smallwebrtc_v1" as const,
+    profile_id: "pipecat-cascade-v1",
+    event_protocol: "rtvi-murmur-v2" as const,
+    expires_at: "2099-01-01T00:00:00Z",
+    session_id: request.session_id,
+    agent_id: agentId,
+    voice_call_id: request.voice_call_id,
+    trace_id: assignmentTraceId,
+    webrtc_url: "https://voice.example.test/api/voice/pipecat/signal/token",
+    peer_reservation_id: "25b7aed8-4342-4def-9638-430309391c5c",
+    ice_servers: [],
+  };
+}
 
 function workerEvent(
   voiceCallId: string,
@@ -229,7 +266,9 @@ async function mountHook(callbacks: {
   onEvent?: (event: VoiceEvent) => void;
   onLocalMicrophoneTrack?: (track: MediaStreamTrack | null) => void;
   onError?: (message: string) => void;
+  onLog?: (message: string) => void;
   authHeaderProvider?: VoiceAuthHeaderProvider;
+  transportLoader?: VoiceTransportLoader;
 } = {}): Promise<MountedHook> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -245,7 +284,9 @@ async function mountHook(callbacks: {
       onEvent: callbacks.onEvent,
       onLocalMicrophoneTrack: callbacks.onLocalMicrophoneTrack,
       onError: callbacks.onError,
+      onLog: callbacks.onLog,
       authHeaderProvider: callbacks.authHeaderProvider,
+      transportLoader: callbacks.transportLoader,
     });
     return null;
   }
@@ -264,6 +305,9 @@ async function mountHook(callbacks: {
 }
 
 async function connectHook(mounted: MountedHook) {
+  await act(async () => {
+    await mounted.read().connect({ sessionId });
+  });
   await act(async () => {
     await mounted.read().connect({ sessionId });
   });
@@ -539,8 +583,15 @@ describe("useVoiceSession", () => {
     });
     expect(mounted.read().voiceCallId).toBe("");
     expect(mounted.read().assignment).toBeNull();
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -607,7 +658,14 @@ describe("useVoiceSession", () => {
         event_type: "agent_unavailable",
       })
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -686,7 +744,9 @@ describe("useVoiceSession", () => {
       })
     );
 
-    act(() => mounted.read().cancelConnection());
+    await act(async () => {
+      await mounted.read().cancelConnection();
+    });
     act(() =>
       staleDataReceived?.(
         readyPayload,
@@ -714,6 +774,9 @@ describe("useVoiceSession", () => {
     const mounted = await mountHook({ onEvent });
     let connecting: Promise<void> | undefined;
 
+    await act(async () => {
+      await mounted.read().connect({ sessionId });
+    });
     await act(async () => {
       connecting = mounted.read().connect({ sessionId });
       await Promise.resolve();
@@ -796,9 +859,13 @@ describe("useVoiceSession", () => {
     });
     expect(mounted.read().voiceCallId).toBe("");
     expect(onError).toHaveBeenCalledWith(
-      "Voice transport connection was interrupted (attempt 1). Start a fresh voice call."
+      "Voice transport connection was interrupted. Start a fresh voice call."
     );
     expect(room.disconnect).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -847,6 +914,10 @@ describe("useVoiceSession", () => {
     );
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -893,8 +964,15 @@ describe("useVoiceSession", () => {
     expect(onError).toHaveBeenCalledWith(
       "Voice agent disconnected. Start a fresh voice call."
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     expect(livekit.FakeRoom.localAudioTrack?.stop).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -958,7 +1036,14 @@ describe("useVoiceSession", () => {
     expect(onError).toHaveBeenCalledWith(
       "Voice received too many events before microphone activation completed"
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -999,6 +1084,9 @@ describe("useVoiceSession", () => {
     );
     expect(onError).toHaveBeenCalled();
     expect(mounted.read().assignment).toBeNull();
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
 
     act(() => staleConnected?.());
@@ -1065,6 +1153,10 @@ describe("useVoiceSession", () => {
     expect(onError).toHaveBeenCalledWith(
       "Microphone unavailable: permission denied"
     );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -1175,6 +1267,9 @@ describe("useVoiceSession", () => {
     let connecting: Promise<void> | undefined;
 
     await act(async () => {
+      await mounted.read().connect({ sessionId });
+    });
+    await act(async () => {
       connecting = mounted.read().connect({ sessionId });
       await Promise.resolve();
       await Promise.resolve();
@@ -1234,8 +1329,9 @@ describe("useVoiceSession", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    act(() => mounted.read().cancelConnection());
-    await act(async () => connecting);
+    await act(async () => {
+      await Promise.all([mounted.read().cancelConnection(), connecting]);
+    });
 
     expect(mounted.read().phase).toBe("idle");
     expect(onError).not.toHaveBeenCalled();
@@ -1266,6 +1362,10 @@ describe("useVoiceSession", () => {
     });
     expect(mounted.read().voiceCallId).toBe("");
     expect(onError).toHaveBeenCalledWith("Voice transport disconnected");
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: originalCallId },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })
@@ -1302,6 +1402,9 @@ describe("useVoiceSession", () => {
     expect(onError).toHaveBeenCalledWith(
       "Voice received data outside its authenticated reliable event channel"
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     await act(async () => mounted.root.unmount());
   });
@@ -1337,6 +1440,9 @@ describe("useVoiceSession", () => {
     expect(onError).toHaveBeenCalledWith(
       "Voice received an event outside its assigned trace"
     );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(room.disconnect).toHaveBeenCalledTimes(1);
     await act(async () => mounted.root.unmount());
   });
@@ -1378,7 +1484,9 @@ describe("useVoiceSession", () => {
       voice_call_id: retryStableCallId,
     });
 
-    act(() => mounted.read().disconnect());
+    await act(async () => {
+      await mounted.read().disconnect();
+    });
     await act(async () => mounted.read().connect({ sessionId }));
     expect(api.bootstrapVoiceSession.mock.calls[2]?.[0]?.voice_call_id).not.toBe(
       retryStableCallId
@@ -1386,57 +1494,673 @@ describe("useVoiceSession", () => {
     await act(async () => mounted.root.unmount());
   });
 
-  it("releases an unsupported Pipecat assignment without connecting LiveKit and rotates the call", async () => {
-    const onError = vi.fn();
+  it("prepares without connecting, then primes synchronously in the second call", async () => {
     api.bootstrapVoiceSession.mockImplementationOnce(
-      async (request: { session_id: string; voice_call_id: string }) => ({
-        runtime: "pipecat_smallwebrtc_v1",
-        profile_id: "pipecat-cascade-v1",
-        event_protocol: "rtvi-murmur-v2",
-        expires_at: "2099-01-01T00:00:00Z",
-        session_id: request.session_id,
-        agent_id: agentId,
-        voice_call_id: request.voice_call_id,
-        trace_id: assignmentTraceId,
-        webrtc_url: "https://voice.example.test/api/voice/pipecat/signal/token",
-        peer_reservation_id: "25b7aed8-4342-4def-9638-430309391c5c",
-        ice_servers: [],
-      })
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
     );
-    const mounted = await mountHook({ onError });
+    const order: string[] = [];
+    const connected = deferred<void>();
+    let callbacks: VoiceTransportCallbacks | undefined;
+    const primeAudioPlayback = vi.fn(() => order.push("prime"));
+    const transportConnect = vi.fn(() => {
+      order.push("connect");
+      callbacks?.onConnected();
+      return connected.promise;
+    });
+    const transportLoader: VoiceTransportLoader = vi.fn(
+      async (assignment, options) => {
+        order.push(`load:${assignment.runtime}`);
+        callbacks = options.callbacks;
+        return {
+          runtime: assignment.runtime,
+          primeAudioPlayback,
+          connect: transportConnect,
+          activateMicrophoneAfterReady: vi.fn(async () => undefined),
+          setMicrophoneEnabled: vi.fn(async () => undefined),
+          setTtsEnabled: vi.fn(),
+          resumeAudio: vi.fn(async () => undefined),
+          disconnect: vi.fn(async () => undefined),
+        };
+      }
+    );
+    const mounted = await mountHook({ transportLoader });
 
     await act(async () => mounted.read().connect({ sessionId }));
+    expect(order).toEqual(["load:pipecat_smallwebrtc_v1"]);
+    expect(primeAudioPlayback).not.toHaveBeenCalled();
+    expect(transportConnect).not.toHaveBeenCalled();
+    expect(mounted.read().phase).toBe("awaiting_audio");
 
-    const rejectedCallId = api.bootstrapVoiceSession.mock.calls[0]?.[0]
-      ?.voice_call_id;
-    const rejectedRoom = livekit.FakeRoom.instances.at(-1);
-    expect(rejectedRoom?.connect).not.toHaveBeenCalled();
-    expect(rejectedRoom?.disconnect).toHaveBeenCalledTimes(1);
-    expect(mounted.read().phase).toBe("unavailable");
+    let activating: Promise<void> | undefined;
+    act(() => {
+      order.push("before_second_call");
+      activating = mounted.read().connect({ sessionId });
+      order.push("after_second_call");
+    });
+    expect(order).toEqual([
+      "load:pipecat_smallwebrtc_v1",
+      "before_second_call",
+      "prime",
+      "connect",
+      "after_second_call",
+    ]);
+    expect(mounted.read().phase).toBe("transport_connected");
+
+    connected.resolve(undefined);
+    await act(async () => activating);
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("starts LiveKit audio in the second gesture before Room.connect", async () => {
+    const mounted = await mountHook();
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    const room = livekit.FakeRoom.instances.at(-1);
+    expect(room).toBeDefined();
+    expect(mounted.read().phase).toBe("awaiting_audio");
+    expect(room?.startAudio).not.toHaveBeenCalled();
+    expect(room?.connect).not.toHaveBeenCalled();
+
+    let activating: Promise<void> | undefined;
+    act(() => {
+      activating = mounted.read().connect({ sessionId });
+    });
+
+    expect(room?.startAudio).toHaveBeenCalledOnce();
+    expect(room?.connect).toHaveBeenCalledOnce();
+    expect(room?.startAudio.mock.invocationCallOrder[0]).toBeLessThan(
+      room?.connect.mock.invocationCallOrder[0] ?? Infinity
+    );
+    await act(async () => activating);
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("cancels a prepared adapter before connect and then releases its assignment", async () => {
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const order: string[] = [];
+    const primeAudioPlayback = vi.fn();
+    const transportConnect = vi.fn(async () => undefined);
+    const disconnect = vi.fn(async () => {
+      order.push("adapter_disconnect");
+    });
+    api.endVoiceSession.mockImplementation(async () => {
+      order.push("session_end");
+    });
+    const transportLoader: VoiceTransportLoader = async (assignment) => ({
+      runtime: assignment.runtime,
+      primeAudioPlayback,
+      connect: transportConnect,
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect,
+    });
+    const mounted = await mountHook({ transportLoader });
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    expect(mounted.read().phase).toBe("awaiting_audio");
+    await act(async () => mounted.read().cancelConnection());
+
+    expect(primeAudioPlayback).not.toHaveBeenCalled();
+    expect(transportConnect).not.toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(order).toEqual(["adapter_disconnect", "session_end"]);
+    expect(mounted.read().phase).toBe("idle");
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("expires a prepared assignment, releases it, and rotates the retry ID", async () => {
+    vi.useFakeTimers();
+    api.bootstrapVoiceSession.mockImplementation(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const disconnect = vi.fn(async () => undefined);
+    const transportLoader: VoiceTransportLoader = async (assignment) => ({
+      runtime: assignment.runtime,
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect,
+    });
+    const mounted = await mountHook({ transportLoader });
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    const expiredCallId = mounted.read().voiceCallId;
+    expect(mounted.read().phase).toBe("awaiting_audio");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_000);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     expect(mounted.read().session.unavailableReason).toMatchObject({
-      code: "unsupported_voice_runtime",
+      code: "prepared_assignment_timeout",
       retryable: true,
     });
-    expect(mounted.read().assignment).toBeNull();
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(api.endVoiceSession).toHaveBeenCalledOnce();
     expect(mounted.read().voiceCallId).toBe("");
-    expect(onError).toHaveBeenCalledWith(
-      "This voice client cannot start the assigned runtime. Start a fresh voice call."
-    );
-    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
-    expect(api.endVoiceSession).toHaveBeenCalledWith(
-      { session_id: sessionId, voice_call_id: rejectedCallId },
-      expect.objectContaining({
-        apiUrl: undefined,
-        signal: expect.any(AbortSignal),
-      })
-    );
 
     await act(async () => mounted.read().connect({ sessionId }));
-    expect(api.bootstrapVoiceSession.mock.calls[1]?.[0]?.voice_call_id).not.toBe(
-      rejectedCallId
+    expect(mounted.read().voiceCallId).not.toBe(expiredCallId);
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("bounds a hung selected loader and disconnects its late adapter", async () => {
+    vi.useFakeTimers();
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
     );
-    expect(livekit.FakeRoom.instances.at(-1)?.connect).toHaveBeenCalledTimes(1);
+    const loaded = deferred<VoiceTransport>();
+    const lateDisconnect = vi.fn(async () => {
+      throw new Error("late cleanup failed");
+    });
+    const transportLoader: VoiceTransportLoader = vi.fn(() => loaded.promise);
+    const onError = vi.fn();
+    const onLog = vi.fn();
+    const mounted = await mountHook({ onError, onLog, transportLoader });
+    let preparing: Promise<void> | undefined;
+
+    await act(async () => {
+      preparing = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(transportLoader).toHaveBeenCalledOnce();
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await preparing;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "transport_load_timeout",
+      retryable: true,
+    });
+    expect(onError).toHaveBeenCalledWith(
+      "Voice transport loading timed out. Start a fresh voice call."
+    );
+    expect(api.endVoiceSession).toHaveBeenCalledOnce();
+
+    loaded.resolve({
+      runtime: "pipecat_smallwebrtc_v1",
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect: lateDisconnect,
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(lateDisconnect).toHaveBeenCalledOnce();
+    expect(onLog).toHaveBeenCalledWith(
+      "Voice transport cleanup failed: late cleanup failed"
+    );
     await act(async () => mounted.root.unmount());
+  });
+
+  it("lets cancel finish at the loader deadline and closes a late adapter", async () => {
+    vi.useFakeTimers();
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const loaded = deferred<VoiceTransport>();
+    const lateDisconnect = vi.fn(async () => undefined);
+    const transportLoader: VoiceTransportLoader = vi.fn(() => loaded.promise);
+    const mounted = await mountHook({ transportLoader });
+    let preparing: Promise<void> | undefined;
+    let cancelling: Promise<void> | undefined;
+
+    await act(async () => {
+      preparing = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      cancelling = mounted.read().cancelConnection();
+    });
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+      await Promise.all([preparing, cancelling]);
+    });
+    expect(api.endVoiceSession).toHaveBeenCalledOnce();
+    expect(mounted.read().phase).toBe("idle");
+
+    loaded.resolve({
+      runtime: "pipecat_smallwebrtc_v1",
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect: lateDisconnect,
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(lateDisconnect).toHaveBeenCalledOnce();
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("bounds a hung adapter disconnect before release and a fresh retry", async () => {
+    vi.useFakeTimers();
+    api.bootstrapVoiceSession.mockImplementation(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    let loadCount = 0;
+    const firstDisconnect = vi.fn(() => new Promise<void>(() => undefined));
+    const transportLoader: VoiceTransportLoader = async (assignment) => {
+      loadCount += 1;
+      return {
+        runtime: assignment.runtime,
+        primeAudioPlayback: vi.fn(),
+        connect: vi.fn(async () => undefined),
+        activateMicrophoneAfterReady: vi.fn(async () => undefined),
+        setMicrophoneEnabled: vi.fn(async () => undefined),
+        setTtsEnabled: vi.fn(),
+        resumeAudio: vi.fn(async () => undefined),
+        disconnect:
+          loadCount === 1
+            ? firstDisconnect
+            : vi.fn(async () => undefined),
+      };
+    };
+    const mounted = await mountHook({ transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+    const firstCallId = mounted.read().voiceCallId;
+    let cancelling: Promise<void> | undefined;
+    let retrying: Promise<void> | undefined;
+
+    await act(async () => {
+      cancelling = mounted.read().cancelConnection();
+      retrying = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(firstDisconnect).toHaveBeenCalledOnce();
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(14_999);
+    });
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      await Promise.all([cancelling, retrying]);
+    });
+
+    expect(api.endVoiceSession).toHaveBeenCalledOnce();
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledTimes(2);
+    expect(mounted.read().voiceCallId).not.toBe(firstCallId);
+    expect(mounted.read().phase).toBe("awaiting_audio");
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("loads the server-selected Pipecat transport without a LiveKit fallback", async () => {
+    const onError = vi.fn();
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    let callbacks: VoiceTransportCallbacks | undefined;
+    const disconnect = vi.fn(async () => undefined);
+    const transport: VoiceTransport = {
+      runtime: "pipecat_smallwebrtc_v1",
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => callbacks?.onConnected()),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect,
+    };
+    const transportLoader: VoiceTransportLoader = vi.fn(
+      async (assignment, options) => {
+        expect(assignment.runtime).toBe("pipecat_smallwebrtc_v1");
+        callbacks = options.callbacks;
+        return transport;
+      }
+    );
+    const mounted = await mountHook({ onError, transportLoader });
+
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    expect(transportLoader).toHaveBeenCalledTimes(1);
+    expect(api.bootstrapVoiceSession.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(transportLoader).mock.invocationCallOrder[0] ?? Infinity
+    );
+    expect(transport.primeAudioPlayback).not.toHaveBeenCalled();
+    expect(transport.connect).not.toHaveBeenCalled();
+    expect(mounted.read().phase).toBe("awaiting_audio");
+
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    expect(transport.primeAudioPlayback).toHaveBeenCalledTimes(1);
+    expect(transport.connect).toHaveBeenCalledTimes(1);
+    expect(livekit.FakeRoom.instances).toHaveLength(0);
+    expect(mounted.read().phase).toBe("transport_connected");
+    expect(mounted.read().assignment?.runtime).toBe(
+      "pipecat_smallwebrtc_v1"
+    );
+    expect(onError).not.toHaveBeenCalled();
+
+    const assignedCallId = mounted.read().voiceCallId;
+    await act(async () => {
+      await mounted.read().cancelConnection();
+    });
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: assignedCallId },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("passes the exact transport-owned canonical Ready object into microphone activation", async () => {
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    let callbacks: VoiceTransportCallbacks | undefined;
+    const activateMicrophoneAfterReady = vi.fn<
+      VoiceTransport["activateMicrophoneAfterReady"]
+    >(async () => undefined);
+    const transportLoader: VoiceTransportLoader = async (
+      assignment,
+      options
+    ) => {
+      callbacks = options.callbacks;
+      return {
+        runtime: assignment.runtime,
+        primeAudioPlayback: vi.fn(),
+        connect: vi.fn(async () => options.callbacks.onConnected()),
+        activateMicrophoneAfterReady,
+        setMicrophoneEnabled: vi.fn(async () => undefined),
+        setTtsEnabled: vi.fn(),
+        resumeAudio: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+    };
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent, transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    const decoded = decodeVoiceEvent(
+      workerEvent(mounted.read().voiceCallId, "agent_ready", {
+        profile_id: "pipecat-cascade-v1",
+        required_components: REQUIRED_VOICE_READY_COMPONENTS,
+        ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+      })
+    );
+    if (!decoded.ok) throw new Error(decoded.error.message);
+    const canonicalReady = decoded.event;
+
+    await act(async () => {
+      callbacks?.onEvent(canonicalReady);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(activateMicrophoneAfterReady).toHaveBeenCalledTimes(1);
+    expect(activateMicrophoneAfterReady.mock.calls[0]?.[0]).toBe(
+      canonicalReady
+    );
+    expect(onEvent.mock.calls[0]?.[0]).toBe(canonicalReady);
+    expect(mounted.read().phase).toBe("ready");
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("keeps a pending selected loader owned until cancel disconnects it before release", async () => {
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const loaded = deferred<VoiceTransport>();
+    const order: string[] = [];
+    const disconnect = vi.fn(async () => {
+      order.push("adapter_delete");
+    });
+    const transportLoader: VoiceTransportLoader = vi.fn(() => loaded.promise);
+    api.endVoiceSession.mockImplementation(async () => {
+      order.push("session_end");
+    });
+    const mounted = await mountHook({ transportLoader });
+    let connecting: Promise<void> | undefined;
+
+    await act(async () => {
+      connecting = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(transportLoader).toHaveBeenCalledTimes(1);
+    expect(mounted.read().assignment?.runtime).toBe(
+      "pipecat_smallwebrtc_v1"
+    );
+
+    let cancelling: Promise<void> | undefined;
+    await act(async () => {
+      cancelling = mounted.read().cancelConnection();
+      await Promise.resolve();
+    });
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+
+    loaded.resolve({
+      runtime: "pipecat_smallwebrtc_v1",
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => undefined),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect,
+    });
+    await act(async () => {
+      await Promise.all([connecting, cancelling]);
+    });
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["adapter_delete", "session_end"]);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("coalesces concurrent teardown and releases assignment after adapter DELETE failure", async () => {
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const order: string[] = [];
+    const disconnect = vi.fn(async () => {
+      order.push("adapter_delete");
+      throw new Error("DELETE failed");
+    });
+    const transportLoader: VoiceTransportLoader = async (
+      assignment,
+      options
+    ) => ({
+      runtime: assignment.runtime,
+      primeAudioPlayback: vi.fn(),
+      connect: vi.fn(async () => options.callbacks.onConnected()),
+      activateMicrophoneAfterReady: vi.fn(async () => undefined),
+      setMicrophoneEnabled: vi.fn(async () => undefined),
+      setTtsEnabled: vi.fn(),
+      resumeAudio: vi.fn(async () => undefined),
+      disconnect,
+    });
+    api.endVoiceSession.mockImplementation(async () => {
+      order.push("session_end");
+    });
+    const mounted = await mountHook({ transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    let disconnecting: Promise<void> | undefined;
+    let duplicate: Promise<void> | undefined;
+    await act(async () => {
+      disconnecting = mounted.read().disconnect();
+      duplicate = mounted.read().cancelConnection();
+      expect(duplicate).toBe(disconnecting);
+      await Promise.all([disconnecting, duplicate]);
+    });
+
+    expect(disconnect).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["adapter_delete", "session_end"]);
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("waits for full teardown before retrying with a fresh call ID", async () => {
+    api.bootstrapVoiceSession.mockImplementation(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const disconnectGate = deferred<void>();
+    const releaseGate = deferred<void>();
+    let loadCount = 0;
+    const transportLoader: VoiceTransportLoader = async (
+      assignment,
+      options
+    ) => {
+      loadCount += 1;
+      const first = loadCount === 1;
+      return {
+        runtime: assignment.runtime,
+        primeAudioPlayback: vi.fn(),
+        connect: vi.fn(async () => options.callbacks.onConnected()),
+        activateMicrophoneAfterReady: vi.fn(async () => undefined),
+        setMicrophoneEnabled: vi.fn(async () => undefined),
+        setTtsEnabled: vi.fn(),
+        resumeAudio: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => {
+          if (first) await disconnectGate.promise;
+        }),
+      };
+    };
+    api.endVoiceSession
+      .mockImplementationOnce(() => releaseGate.promise)
+      .mockResolvedValue(undefined);
+    const mounted = await mountHook({ transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+    const firstCallId = mounted.read().voiceCallId;
+
+    let cancelling: Promise<void> | undefined;
+    let retrying: Promise<void> | undefined;
+    await act(async () => {
+      cancelling = mounted.read().cancelConnection();
+      retrying = mounted.read().connect({ sessionId });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).not.toHaveBeenCalled();
+
+    disconnectGate.resolve();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledTimes(1);
+
+    releaseGate.resolve();
+    await act(async () => {
+      await Promise.all([cancelling, retrying]);
+    });
+    expect(api.bootstrapVoiceSession).toHaveBeenCalledTimes(2);
+    expect(mounted.read().voiceCallId).not.toBe(firstCallId);
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
+  it("rotates identity when the selected transport requires a fresh call", async () => {
+    api.bootstrapVoiceSession.mockImplementation(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    let callbacks: VoiceTransportCallbacks | undefined;
+    const disconnect = vi.fn(async () => undefined);
+    const transportLoader: VoiceTransportLoader = async (
+      assignment,
+      options
+    ) => {
+      callbacks = options.callbacks;
+      return {
+        runtime: assignment.runtime,
+        primeAudioPlayback: vi.fn(),
+        connect: vi.fn(async () => options.callbacks.onConnected()),
+        activateMicrophoneAfterReady: vi.fn(async () => undefined),
+        setMicrophoneEnabled: vi.fn(async () => undefined),
+        setTtsEnabled: vi.fn(),
+        resumeAudio: vi.fn(async () => undefined),
+        disconnect,
+      };
+    };
+    const mounted = await mountHook({ transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+    const firstCallId = mounted.read().voiceCallId;
+
+    await act(async () => {
+      callbacks?.onFreshCallRequired();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "fresh_call_required",
+      retryable: true,
+    });
+    expect(mounted.read().voiceCallId).toBe("");
+    expect(disconnect).toHaveBeenCalledTimes(1);
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    expect(mounted.read().voiceCallId).not.toBe(firstCallId);
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
   });
 
   it("rotates the call ID when a 409 permits a fresh assignment attempt", async () => {
@@ -1496,7 +2220,9 @@ describe("useVoiceSession", () => {
       expect.objectContaining({ authHeaderProvider })
     );
 
-    act(() => mounted.read().cancelConnection());
+    await act(async () => {
+      await mounted.read().cancelConnection();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({ authHeaderProvider })
@@ -1514,7 +2240,9 @@ describe("useVoiceSession", () => {
     const retainedCallId = mounted.read().voiceCallId;
     expect(retainedCallId).not.toBe("");
 
-    act(() => mounted.read().cancelConnection());
+    await act(async () => {
+      await mounted.read().cancelConnection();
+    });
 
     expect(mounted.read().phase).toBe("idle");
     expect(mounted.read().voiceCallId).toBe("");
@@ -1603,16 +2331,21 @@ describe("useVoiceSession", () => {
     const mounted = await mountHook();
     await connectHook(mounted);
 
-    act(() => mounted.read().cancelConnection());
-    await act(async () => Promise.resolve());
+    let firstCancel: Promise<void> | undefined;
+    let duplicateCancel: Promise<void> | undefined;
+    await act(async () => {
+      firstCancel = mounted.read().cancelConnection();
+      duplicateCancel = mounted.read().cancelConnection();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(duplicateCancel).toBe(firstCancel);
     expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(1);
 
-    act(() => mounted.read().cancelConnection());
-    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
-
     await act(async () => {
       await vi.runOnlyPendingTimersAsync();
+      await firstCancel;
     });
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
@@ -1633,7 +2366,12 @@ describe("useVoiceSession", () => {
     const mounted = await mountHook();
     await connectHook(mounted);
 
-    act(() => mounted.read().cancelConnection());
+    let cancelling: Promise<void> | undefined;
+    await act(async () => {
+      cancelling = mounted.read().cancelConnection();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
     expect(releaseSignal?.aborted).toBe(false);
 
@@ -1646,6 +2384,7 @@ describe("useVoiceSession", () => {
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(100);
+      await cancelling;
     });
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
@@ -1660,8 +2399,9 @@ describe("useVoiceSession", () => {
     const mounted = await mountHook();
     await connectHook(mounted);
 
-    act(() => mounted.read().cancelConnection());
-    await act(async () => Promise.resolve());
+    await act(async () => {
+      await mounted.read().cancelConnection();
+    });
     await act(async () => {
       await vi.runAllTimersAsync();
     });
@@ -1677,12 +2417,17 @@ describe("useVoiceSession", () => {
     await connectHook(mounted);
     const activeCallId = mounted.read().voiceCallId;
 
-    act(() => mounted.read().cancelConnection());
-    await act(async () => Promise.resolve());
+    let cancelling: Promise<void> | undefined;
+    await act(async () => {
+      cancelling = mounted.read().cancelConnection();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
     expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(1);
 
     await act(async () => mounted.root.unmount());
+    await cancelling;
     expect(vi.getTimerCount()).toBe(0);
     await vi.runAllTimersAsync();
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
@@ -1720,15 +2465,15 @@ describe("useVoiceSession", () => {
     expect(mounted.read().phase).toBe("connecting");
     expect(requestSignal?.aborted).toBe(false);
 
-    act(() => mounted.read().cancelConnection());
-    await act(async () => connecting);
+    await act(async () => {
+      await Promise.all([mounted.read().cancelConnection(), connecting]);
+    });
 
     const room = livekit.FakeRoom.instances.at(-1);
     expect(requestSignal?.aborted).toBe(true);
     expect(mounted.read().phase).toBe("idle");
     expect(onError).not.toHaveBeenCalled();
-    expect(room?.disconnect).toHaveBeenCalledTimes(1);
-    expect(room?.listeners.size).toBe(0);
+    expect(room).toBeUndefined();
     expect(api.endVoiceSession).toHaveBeenCalledWith(
       { session_id: sessionId, voice_call_id: expect.any(String) },
       expect.objectContaining({ apiUrl: undefined, signal: expect.any(AbortSignal) })

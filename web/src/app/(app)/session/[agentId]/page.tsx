@@ -17,6 +17,7 @@ import { resolveVoiceRuntimeAssignment } from "@/features/voice/session-view";
 import {
   SessionVoiceRuntimeController,
   type SessionVoiceCallbacks,
+  type SessionVoiceRuntime,
 } from "@/features/voice/session-runtime-controller";
 import { VoiceFallbackPanel } from "@/features/voice/voice-fallback-panel";
 import { compileScene, type SDLScene } from "@/lib/scene-kit";
@@ -32,6 +33,11 @@ import { ChatInterface } from "@/components/chat-interface";
 import { BackgroundDoodles, WaveformToSketch } from "@/components/murmur-doodles";
 import { fetchAgent, createSession, endSession, API_BASE } from "@/lib/api";
 import type { Agent, Session, SessionEndResponse } from "@/lib/types";
+
+interface SessionShutdownResult {
+  readonly persistentResult: SessionEndResponse | null;
+  readonly voiceCleanupFailed: boolean;
+}
 
 export default function AgentSessionPage() {
   const params = useParams();
@@ -49,8 +55,72 @@ export default function AgentSessionPage() {
   const [sessionId, setSessionId] = useState<string | null>(existingSessionId);
   const sessionIdRef = useRef<string | null>(existingSessionId);
   const sessionInitPromiseRef = useRef<Promise<Session> | null>(null);
+  const voiceRuntimeRef = useRef<SessionVoiceRuntime | null>(null);
+  const sessionShutdownPromiseRef = useRef<Promise<SessionShutdownResult> | null>(
+    null
+  );
+  const lifecycleEffectMountedRef = useRef(false);
   const [sessionEndResult, setSessionEndResult] = useState<SessionEndResponse | null>(null);
   const [isEndingSession, setIsEndingSession] = useState(false);
+
+  const shutdownSession = useCallback((): Promise<SessionShutdownResult> => {
+    const pending = sessionShutdownPromiseRef.current;
+    if (pending) return pending;
+
+    const ownedSessionId = sessionIdRef.current;
+    const pendingSession = ownedSessionId ? null : sessionInitPromiseRef.current;
+    sessionIdRef.current = null;
+
+    let resolveShutdown!: (result: SessionShutdownResult) => void;
+    let rejectShutdown!: (error: unknown) => void;
+    const observable = new Promise<SessionShutdownResult>((resolve, reject) => {
+      resolveShutdown = resolve;
+      rejectShutdown = reject;
+    });
+    sessionShutdownPromiseRef.current = observable;
+
+    let voiceTeardown: Promise<void>;
+    try {
+      voiceTeardown = voiceRuntimeRef.current?.disconnect() ?? Promise.resolve();
+    } catch (error) {
+      voiceTeardown = Promise.reject(error);
+    }
+
+    void (async () => {
+      let persistentResult: SessionEndResponse | null = null;
+      let voiceCleanupFailed = false;
+      try {
+        await voiceTeardown;
+      } catch {
+        voiceCleanupFailed = true;
+      } finally {
+        let persistentSessionId = ownedSessionId;
+        if (!persistentSessionId && pendingSession) {
+          try {
+            persistentSessionId = (await pendingSession).id;
+          } catch {
+            // A failed optional session creation has nothing to finalize.
+          }
+        }
+        if (persistentSessionId) {
+          persistentResult = await endSession(persistentSessionId);
+        }
+      }
+      return { persistentResult, voiceCleanupFailed };
+    })().then(resolveShutdown, rejectShutdown);
+
+    return observable;
+  }, []);
+
+  const handleBack = useCallback(async () => {
+    try {
+      await shutdownSession();
+    } catch {
+      // Navigation must remain available when best-effort session finalization fails.
+    } finally {
+      router.push("/dashboard");
+    }
+  }, [router, shutdownSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +139,11 @@ export default function AgentSessionPage() {
     sessionInitPromiseRef.current = sessionPromise;
     sessionPromise
       .then((session) => {
-        if (!cancelled && !sessionIdRef.current) {
+        if (
+          !cancelled &&
+          !sessionIdRef.current &&
+          !sessionShutdownPromiseRef.current
+        ) {
           setSessionId(session.id);
           sessionIdRef.current = session.id;
         }
@@ -85,9 +159,16 @@ export default function AgentSessionPage() {
     return () => { cancelled = true; };
   }, [agentId, existingSessionId]);
 
-  // End session on unmount or tab close
+  // End session on unmount or tab close.
   useEffect(() => {
+    lifecycleEffectMountedRef.current = true;
     const handleBeforeUnload = () => {
+      try {
+        const cancellation = voiceRuntimeRef.current?.cancelConnection();
+        if (cancellation) void cancellation.catch(() => undefined);
+      } catch {
+        // Browser exit is best-effort and cannot await asynchronous teardown.
+      }
       if (sessionIdRef.current) {
         // Use sendBeacon for reliability on tab close
         const url = `${API_BASE}/api/sessions/${sessionIdRef.current}/end`;
@@ -98,13 +179,16 @@ export default function AgentSessionPage() {
     window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
+      lifecycleEffectMountedRef.current = false;
       window.removeEventListener("beforeunload", handleBeforeUnload);
-      // Fire end-session on component unmount (navigation away)
-      if (sessionIdRef.current) {
-        void endSession(sessionIdRef.current).catch(() => {});
-      }
+      queueMicrotask(() => {
+        // React Strict Mode immediately remounts effects after its probe cleanup.
+        if (!lifecycleEffectMountedRef.current) {
+          void shutdownSession().catch(() => undefined);
+        }
+      });
     };
-  }, []);
+  }, [shutdownSession]);
 
   const [appMode, setAppMode] = useState<AppMode>("voice");
   const [transcripts, setTranscripts] = useState<string[]>([]);
@@ -241,7 +325,7 @@ export default function AgentSessionPage() {
   }, [handleLog]);
 
   const handleVoiceSessionReady = useCallback((nextSessionId: string) => {
-    if (!nextSessionId) {
+    if (!nextSessionId || sessionShutdownPromiseRef.current) {
       return;
     }
     sessionIdRef.current = nextSessionId;
@@ -261,6 +345,7 @@ export default function AgentSessionPage() {
 
     try {
       const session = await sessionPromise;
+      if (sessionShutdownPromiseRef.current) return null;
       sessionIdRef.current = session.id;
       setSessionId((current) => (current === session.id ? current : session.id));
       return session.id;
@@ -323,7 +408,7 @@ export default function AgentSessionPage() {
         <div className="glass-card rounded-2xl p-8 text-center max-w-sm">
           <p className="text-ember mb-4">{agentError || "Agent not found"}</p>
           <button
-            onClick={() => router.push("/dashboard")}
+            onClick={() => void handleBack()}
             className="text-amber hover:underline font-medium text-sm"
           >
             Back to Dashboard
@@ -341,18 +426,31 @@ export default function AgentSessionPage() {
       callbacks={voiceCallbacks}
     >
       {(voice) => {
-        const handleConnect = async () => {
-          const ensuredSessionId = await ensureSessionId();
-          if (!ensuredSessionId) {
-            handleError("A session is required before starting voice");
-            return;
+        voiceRuntimeRef.current = voice;
+
+        const handleConnect = (): Promise<void> => {
+          const preparedSessionId = sessionIdRef.current;
+          if (preparedSessionId) {
+            return voice.connect(preparedSessionId);
           }
-          await voice.connect(ensuredSessionId);
+          return ensureSessionId().then((ensuredSessionId) => {
+            if (!ensuredSessionId) {
+              handleError("A session is required before starting voice");
+              return;
+            }
+            return voice.connect(ensuredSessionId);
+          });
+        };
+
+        const handleCancelConnection = () => {
+          void voice.cancelConnection().catch(() => {
+            handleError("Voice cleanup did not complete");
+          });
         };
 
         const handleModeChange = (nextMode: AppMode) => {
           if (appMode === "voice" && nextMode === "chat") {
-            voice.cancelConnection();
+            handleCancelConnection();
           }
           setAppMode(nextMode);
         };
@@ -360,22 +458,24 @@ export default function AgentSessionPage() {
         const handleEndSession = async () => {
           if (isEndingSession) return;
           setIsEndingSession(true);
-          voice.disconnect();
+          const endingSessionId = sessionIdRef.current ?? "";
           try {
-            if (sessionIdRef.current) {
-              const result = await endSession(sessionIdRef.current);
-              setSessionEndResult(result);
-              sessionIdRef.current = null;
-              setSessionId(null);
+            const shutdown = await shutdownSession();
+            if (shutdown.voiceCleanupFailed) {
+              handleError("Voice cleanup did not complete");
+            }
+            if (shutdown.persistentResult) {
+              setSessionEndResult(shutdown.persistentResult);
             }
           } catch {
             setSessionEndResult({
-              id: sessionIdRef.current ?? "",
+              id: endingSessionId,
               summary: null,
               mastery_count: 0,
               status: "ended",
             });
           } finally {
+            setSessionId(null);
             setIsEndingSession(false);
           }
         };
@@ -387,7 +487,7 @@ export default function AgentSessionPage() {
         <div className="container mx-auto px-6 py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
-              onClick={() => router.push("/dashboard")}
+              onClick={() => void handleBack()}
               className="p-2 -ml-2 rounded-lg hover:bg-graphite transition-colors"
               aria-label="Back to dashboard"
             >
@@ -459,7 +559,7 @@ export default function AgentSessionPage() {
               {voice.isConnecting && (
                 <button
                   type="button"
-                  onClick={voice.cancelConnection}
+                  onClick={handleCancelConnection}
                   className="rounded-full border border-chalk-faint/50 px-4 py-2 text-sm font-medium text-foreground transition-colors hover:bg-graphite"
                 >
                   Cancel connection
@@ -485,7 +585,7 @@ export default function AgentSessionPage() {
                 />
               )}
 
-              {voice.runtime === "livekit_v2" && voice.audioPlaybackBlocked && voice.isVoiceReady && (
+              {voice.runtime === "voice_v2" && voice.audioPlaybackBlocked && voice.isVoiceReady && (
                 <button
                   type="button"
                   onClick={() => void voice.resumeAudio()}
@@ -644,7 +744,7 @@ export default function AgentSessionPage() {
               )}
               <div className="flex justify-end">
                 <button
-                  onClick={() => router.push("/dashboard")}
+                  onClick={() => void handleBack()}
                   className="rounded-full bg-foreground px-4 py-2 text-sm font-medium text-background transition-opacity hover:opacity-90"
                 >
                   Back to dashboard

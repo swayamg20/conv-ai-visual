@@ -1,11 +1,12 @@
 /** @vitest-environment happy-dom */
 
-import { act, type ReactNode } from "react";
+import { act, StrictMode, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const testState = vi.hoisted(() => ({
   cancelConnection: vi.fn(),
+  connect: vi.fn(),
   disconnect: vi.fn(),
   endSession: vi.fn(),
   fetchAgent: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock("framer-motion", () => {
 vi.mock("gsap", () => ({ gsap: {} }));
 
 vi.mock("@/features/voice/session-view", () => ({
-  resolveVoiceRuntimeAssignment: () => "livekit_v2",
+  resolveVoiceRuntimeAssignment: () => "voice_v2",
 }));
 
 vi.mock("@/features/voice/session-runtime-controller", () => ({
@@ -143,7 +144,7 @@ interface MountedPage {
 
 function voiceRuntime(overrides: Record<string, unknown> = {}) {
   return {
-    runtime: "livekit_v2",
+    runtime: "voice_v2",
     isConnected: false,
     isVoiceReady: false,
     isConnecting: false,
@@ -157,7 +158,7 @@ function voiceRuntime(overrides: Record<string, unknown> = {}) {
     isMicMuted: false,
     isTTSEnabled: true,
     audioPlaybackBlocked: false,
-    connect: vi.fn(async () => undefined),
+    connect: testState.connect,
     disconnect: testState.disconnect,
     cancelConnection: testState.cancelConnection,
     toggleMicMute: vi.fn(),
@@ -167,12 +168,20 @@ function voiceRuntime(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function mountPage(): Promise<MountedPage> {
+async function mountPage(strictMode = false): Promise<MountedPage> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<AgentSessionPage />);
+    root.render(
+      strictMode ? (
+        <StrictMode>
+          <AgentSessionPage />
+        </StrictMode>
+      ) : (
+        <AgentSessionPage />
+      )
+    );
     await Promise.resolve();
   });
   return { container, root };
@@ -188,8 +197,10 @@ function buttonWithText(container: HTMLElement, text: string): HTMLButtonElement
 
 describe("AgentSessionPage voice lifecycle", () => {
   beforeEach(() => {
-    testState.cancelConnection.mockReset();
-    testState.disconnect.mockReset();
+    testState.cancelConnection.mockReset().mockResolvedValue(undefined);
+    testState.connect.mockReset().mockResolvedValue(undefined);
+    testState.disconnect.mockReset().mockResolvedValue(undefined);
+    testState.routerPush.mockReset();
     testState.endSession.mockReset().mockResolvedValue({
       id: "a4f4328e-185e-4c65-b3f7-101e04a37578",
       summary: "Gravity recap",
@@ -217,7 +228,48 @@ describe("AgentSessionPage voice lifecycle", () => {
     document.body.replaceChildren();
   });
 
+  it("does not end the session during the Strict Mode effect probe", async () => {
+    const mounted = await mountPage(true);
+
+    expect(testState.disconnect).not.toHaveBeenCalled();
+    expect(testState.endSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      mounted.root.unmount();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts a prepared voice connection in the same click turn", async () => {
+    let clickReturned = false;
+    testState.connect.mockImplementationOnce((ownedSessionId: string) => {
+      expect(clickReturned).toBe(false);
+      expect(ownedSessionId).toBe("a4f4328e-185e-4c65-b3f7-101e04a37578");
+      return Promise.resolve();
+    });
+    const mounted = await mountPage();
+
+    act(() => {
+      mounted.container.querySelector<HTMLButtonElement>("[data-testid='voice-orb']")?.click();
+      clickReturned = true;
+    });
+
+    expect(testState.connect).toHaveBeenCalledTimes(1);
+    await act(async () => mounted.root.unmount());
+  });
+
   it("disconnects voice before requesting the user-visible session summary", async () => {
+    let resolveDisconnect!: () => void;
+    testState.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDisconnect = resolve;
+        })
+    );
     testState.voice = voiceRuntime({
       isConnected: true,
       isVoiceReady: true,
@@ -233,28 +285,159 @@ describe("AgentSessionPage voice lifecycle", () => {
     });
 
     expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveDisconnect();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
     expect(testState.endSession).toHaveBeenCalledTimes(1);
-    expect(testState.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
-      testState.endSession.mock.invocationCallOrder[0]
-    );
     await act(async () => mounted.root.unmount());
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
   });
 
-  it("cancels an active call before the Voice to Text toggle switches views", async () => {
+  it("still ends the persistent session after voice teardown rejects", async () => {
+    let rejectDisconnect!: (reason: Error) => void;
+    testState.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        })
+    );
+    testState.voice = voiceRuntime({
+      isConnected: true,
+      isVoiceReady: true,
+      canStartVoice: false,
+      voiceState: "listening",
+      indicatorState: "connected",
+    });
+    const mounted = await mountPage();
+
+    await act(async () => {
+      mounted.container.querySelector<HTMLButtonElement>("[data-testid='voice-orb']")?.click();
+      await Promise.resolve();
+    });
+    expect(testState.endSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rejectDisconnect(new Error("teardown failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+    await act(async () => mounted.root.unmount());
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for voice teardown before passive unmount ends the persistent session", async () => {
+    let resolveDisconnect!: () => void;
+    testState.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDisconnect = resolve;
+        })
+    );
+    const mounted = await mountPage();
+
+    await act(async () => mounted.root.unmount());
+
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveDisconnect();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends once and navigates after a rejected Back-button voice teardown", async () => {
+    let rejectDisconnect!: (reason: Error) => void;
+    let resolvePersistentEnd!: (result: {
+      id: string;
+      summary: string;
+      mastery_count: number;
+      status: string;
+    }) => void;
+    testState.disconnect.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectDisconnect = reject;
+        })
+    );
+    testState.endSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolvePersistentEnd = resolve;
+        })
+    );
+    const mounted = await mountPage();
+
+    act(() => {
+      mounted.container
+        .querySelector<HTMLButtonElement>("button[aria-label='Back to dashboard']")
+        ?.click();
+    });
+
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).not.toHaveBeenCalled();
+    expect(testState.routerPush).not.toHaveBeenCalled();
+
+    await act(async () => {
+      rejectDisconnect(new Error("teardown failed"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+    expect(testState.routerPush).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolvePersistentEnd({
+        id: "a4f4328e-185e-4c65-b3f7-101e04a37578",
+        summary: "Gravity recap",
+        mastery_count: 1,
+        status: "ended",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(testState.routerPush).toHaveBeenCalledTimes(1);
+    expect(testState.routerPush).toHaveBeenCalledWith("/dashboard");
+    await act(async () => mounted.root.unmount());
+    expect(testState.disconnect).toHaveBeenCalledTimes(1);
+    expect(testState.endSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts cancelling an active call before immediately switching to Text", async () => {
     testState.voice = voiceRuntime({
       isConnected: true,
       isVoiceReady: true,
       canStartVoice: false,
     });
     const mounted = await mountPage();
-    testState.cancelConnection.mockImplementation(() => {
-      expect(mounted.container.querySelector("[data-testid='chat-interface']")).toBeNull();
-    });
+    let resolveCancel!: () => void;
+    testState.cancelConnection.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          expect(mounted.container.querySelector("[data-testid='chat-interface']")).toBeNull();
+          resolveCancel = resolve;
+        })
+    );
 
     act(() => buttonWithText(mounted.container, "Text").click());
 
     expect(testState.cancelConnection).toHaveBeenCalledTimes(1);
     expect(mounted.container.querySelector("[data-testid='chat-interface']")).not.toBeNull();
+    await act(async () => resolveCancel());
     await act(async () => mounted.root.unmount());
   });
 
@@ -272,6 +455,7 @@ describe("AgentSessionPage voice lifecycle", () => {
     const mounted = await mountPage();
     testState.cancelConnection.mockImplementation(() => {
       expect(mounted.container.querySelector("[data-testid='chat-interface']")).toBeNull();
+      return Promise.resolve();
     });
 
     act(() => buttonWithText(mounted.container, "Continue in text").click());

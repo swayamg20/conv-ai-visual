@@ -72,6 +72,7 @@ interface VoiceE2ESnapshot {
   readonly status:
     | "idle"
     | "connecting"
+    | "awaiting_audio"
     | "observing"
     | "disconnecting"
     | "disconnected"
@@ -422,8 +423,8 @@ export function VoiceE2EClient({
     }, SNAPSHOT_INTERVAL_MS);
   }, [buildSnapshot, sampleAudio, stopTimers]);
 
-  const start = useCallback(async () => {
-    measurementOriginRef.current = performance.now();
+  const prepare = useCallback(async () => {
+    measurementOriginRef.current = null;
     localSamplesRef.current = [];
     remoteSamplesRef.current = [];
     eventsRef.current = [];
@@ -440,17 +441,50 @@ export function VoiceE2EClient({
     await ensureAudioContext();
     startTimers();
     setSnapshot(buildSnapshot());
-    await voice.connect();
-    if (errorsRef.current.length === 0) statusRef.current = "observing";
+    try {
+      await voice.connect();
+    } catch {
+      observeError("Voice preparation did not complete");
+    }
+    if (errorsRef.current.length === 0) statusRef.current = "awaiting_audio";
     setSnapshot(buildSnapshot());
-  }, [buildSnapshot, ensureAudioContext, startTimers, voice]);
+  }, [buildSnapshot, ensureAudioContext, observeError, startTimers, voice]);
 
-  const end = useCallback(() => {
+  const activate = useCallback(() => {
+    measurementOriginRef.current = performance.now();
+    statusRef.current = "connecting";
+    let connecting: Promise<void>;
+    try {
+      // Keep the adapter-specific audio unlock in this exact user-gesture turn.
+      connecting = voice.connect();
+    } catch {
+      observeError("Voice activation did not complete");
+      setSnapshot(buildSnapshot());
+      return;
+    }
+    setSnapshot(buildSnapshot());
+    void connecting.then(
+      () => {
+        if (errorsRef.current.length === 0) statusRef.current = "observing";
+        setSnapshot(buildSnapshot());
+      },
+      () => {
+        observeError("Voice activation did not complete");
+        setSnapshot(buildSnapshot());
+      }
+    );
+  }, [buildSnapshot, observeError, voice]);
+
+  const end = useCallback(async () => {
     disconnectRequestedRef.current = true;
     statusRef.current = "disconnecting";
-    voice.disconnect();
+    try {
+      await voice.disconnect();
+    } catch {
+      observeError("Voice teardown did not complete");
+    }
     setSnapshot(buildSnapshot());
-  }, [buildSnapshot, voice]);
+  }, [buildSnapshot, observeError, voice]);
 
   useEffect(() => {
     hookStateRef.current = {
@@ -461,7 +495,9 @@ export function VoiceE2EClient({
     if (voiceAssignment && voiceAssignment.runtime !== "livekit_v2") {
       assignmentEvidenceRef.current = null;
       observeError("The isolated LiveKit RTC proof received a different runtime");
-      cancelVoiceConnection();
+      void cancelVoiceConnection().catch(() => {
+        observeError("Voice teardown did not complete");
+      });
       return;
     }
     if (voiceAssignment) {
@@ -517,10 +553,19 @@ export function VoiceE2EClient({
             type="button"
             data-testid="voice-e2e-start"
             disabled={snapshot.status !== "idle"}
-            onClick={() => void start()}
+            onClick={() => void prepare()}
             className="rounded bg-emerald-500 px-4 py-2 font-medium text-zinc-950 disabled:opacity-40"
           >
-            Start RTC proof
+            Prepare RTC proof
+          </button>
+          <button
+            type="button"
+            data-testid="voice-e2e-activate"
+            disabled={snapshot.status !== "awaiting_audio"}
+            onClick={activate}
+            className="rounded bg-emerald-500 px-4 py-2 font-medium text-zinc-950 disabled:opacity-40"
+          >
+            Activate audio and connect
           </button>
           <button
             type="button"
@@ -530,7 +575,7 @@ export function VoiceE2EClient({
               snapshot.status === "disconnecting" ||
               snapshot.status === "disconnected"
             }
-            onClick={end}
+            onClick={() => void end()}
             className="rounded border border-zinc-600 px-4 py-2 disabled:opacity-40"
           >
             Disconnect

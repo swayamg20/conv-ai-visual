@@ -5,6 +5,7 @@ import type { VoiceEvent } from "./events";
 export type VoiceSessionPhase =
   | "idle"
   | "connecting"
+  | "awaiting_audio"
   | "transport_connected"
   | "ready"
   | "listening"
@@ -31,6 +32,7 @@ export interface VoiceSessionState {
 
 export type VoiceSessionSignal =
   | { readonly type: "connect_requested" }
+  | { readonly type: "transport_prepared" }
   | { readonly type: "end_requested" }
   | {
       readonly type: "compatibility_error";
@@ -85,6 +87,16 @@ export function transitionVoiceSession(
       transportConnected: false,
       voiceReady: false,
       reconnectAttempt: 0,
+    };
+  }
+
+  if (signal.type === "transport_prepared") {
+    if (state.phase !== "connecting") return state;
+    return {
+      phase: "awaiting_audio",
+      transportConnected: false,
+      voiceReady: false,
+      reconnectAttempt: state.reconnectAttempt,
     };
   }
 

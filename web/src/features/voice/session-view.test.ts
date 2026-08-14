@@ -11,13 +11,16 @@ describe("Voice V2 session view", () => {
     expect(resolveVoiceRuntimeAssignment(undefined)).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("legacy")).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("unexpected")).toBe("legacy");
-    expect(resolveVoiceRuntimeAssignment("livekit_v2")).toBe("livekit_v2");
+    expect(resolveVoiceRuntimeAssignment("livekit_v2")).toBe("legacy");
+    expect(resolveVoiceRuntimeAssignment("pipecat_smallwebrtc_v1")).toBe("legacy");
+    expect(resolveVoiceRuntimeAssignment("voice_v2")).toBe("voice_v2");
   });
 
   it("renders every transport and semantic phase distinctly", () => {
     const phases: readonly VoiceSessionPhase[] = [
       "idle",
       "connecting",
+      "awaiting_audio",
       "transport_connected",
       "ready",
       "listening",
@@ -32,6 +35,7 @@ describe("Voice V2 session view", () => {
     expect(views.map((view) => view.label)).toEqual([
       "Start voice",
       "Connecting transport...",
+      "Tap again to start voice",
       "Transport connected · checking agent...",
       "Agent ready",
       "Listening",
@@ -45,6 +49,12 @@ describe("Voice V2 session view", () => {
       transportConnected: true,
       voiceReady: false,
       indicatorState: "connecting",
+    });
+    expect(voiceSessionView("awaiting_audio")).toMatchObject({
+      transportConnected: false,
+      voiceReady: false,
+      busy: false,
+      terminal: false,
     });
     expect(voiceSessionView("ready")).toMatchObject({
       transportConnected: true,

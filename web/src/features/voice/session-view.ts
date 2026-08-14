@@ -1,6 +1,6 @@
 import type { VoiceSessionPhase } from "./session-machine";
 
-export type VoiceRuntimeAssignment = "legacy" | "livekit_v2";
+export type VoiceRuntimeAssignment = "legacy" | "voice_v2";
 export type VoiceViewPipelineState = "idle" | "listening" | "processing" | "speaking";
 export type VoiceViewOrbState =
   | "idle"
@@ -26,7 +26,7 @@ export interface VoiceSessionView {
 export function resolveVoiceRuntimeAssignment(
   value: string | undefined
 ): VoiceRuntimeAssignment {
-  return value === "livekit_v2" ? "livekit_v2" : "legacy";
+  return value === "voice_v2" ? "voice_v2" : "legacy";
 }
 
 export function voiceSessionView(phase: VoiceSessionPhase): VoiceSessionView {
@@ -51,6 +51,17 @@ export function voiceSessionView(phase: VoiceSessionPhase): VoiceSessionView {
         transportConnected: false,
         voiceReady: false,
         busy: true,
+        terminal: false,
+      };
+    case "awaiting_audio":
+      return {
+        label: "Tap again to start voice",
+        orbState: "idle",
+        indicatorState: "idle",
+        pipelineState: "idle",
+        transportConnected: false,
+        voiceReady: false,
+        busy: false,
         terminal: false,
       };
     case "transport_connected":

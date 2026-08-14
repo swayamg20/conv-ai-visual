@@ -57,8 +57,9 @@ describe("AssignmentReleaseScheduler", () => {
       onLog: log,
     });
 
-    scheduler.release(assignment);
-    scheduler.release(assignment);
+    const release = scheduler.release(assignment);
+    const duplicateRelease = scheduler.release(assignment);
+    expect(duplicateRelease).toBe(release);
     await Promise.resolve();
     await Promise.resolve();
 
@@ -67,6 +68,7 @@ describe("AssignmentReleaseScheduler", () => {
       "Voice assignment release failed; retrying 2/3"
     );
     await vi.advanceTimersByTimeAsync(100);
+    await release;
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
     expect(api.endVoiceSession).toHaveBeenLastCalledWith(
       assignment,
@@ -128,11 +130,9 @@ describe("AssignmentReleaseScheduler", () => {
       apiUrl: undefined,
     });
 
-    scheduler.release(assignment);
-    await Promise.resolve();
+    await scheduler.release(assignment);
     scheduler.markAssigned(assignment.voice_call_id);
-    scheduler.release(assignment);
-    await Promise.resolve();
+    await scheduler.release(assignment);
 
     expect(api.endVoiceSession).toHaveBeenCalledTimes(2);
     scheduler.dispose();

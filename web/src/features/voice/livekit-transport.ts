@@ -105,7 +105,7 @@ export class LiveKitVoiceTransport {
     });
   }
 
-  /** Invoke during the click turn, before bootstrap, to satisfy autoplay policy. */
+  /** Invoke synchronously in the activation click, before connect awaits. */
   primeAudioPlayback(): void {
     void this.room.startAudio().catch(() => {
       if (this.isCurrent()) {

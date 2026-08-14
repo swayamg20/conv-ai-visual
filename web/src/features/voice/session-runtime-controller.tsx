@@ -58,8 +58,8 @@ export interface SessionVoiceRuntime {
   readonly isTTSEnabled: boolean;
   readonly audioPlaybackBlocked: boolean;
   readonly connect: (sessionId: string) => Promise<void>;
-  readonly disconnect: () => void;
-  readonly cancelConnection: () => void;
+  readonly disconnect: () => Promise<void>;
+  readonly cancelConnection: () => Promise<void>;
   readonly toggleMicMute: () => void;
   readonly toggleTTS: () => void;
   readonly resumeAudio: () => Promise<void>;
@@ -148,15 +148,15 @@ function LegacyVoiceController({
       legacy.initAudio();
       await legacy.connect({ agentId, sessionId: ownedSessionId });
     },
-    disconnect: legacy.disconnect,
-    cancelConnection: legacy.disconnect,
+    disconnect: async () => legacy.disconnect(),
+    cancelConnection: async () => legacy.disconnect(),
     toggleMicMute: legacy.toggleMicMute,
     toggleTTS: legacy.toggleTTS,
     resumeAudio: async () => undefined,
   });
 }
 
-function LiveKitVoiceController({
+function VoiceV2Controller({
   agentId,
   sessionId,
   callbacks,
@@ -178,7 +178,7 @@ function LiveKitVoiceController({
     voice.session.unavailableReason?.retryable === true;
 
   return children({
-    runtime: "livekit_v2",
+    runtime: "voice_v2",
     isConnected: view.transportConnected,
     isVoiceReady: view.voiceReady,
     isConnecting: view.busy,
@@ -211,8 +211,8 @@ function LiveKitVoiceController({
 
 /** Mounts exactly one media runtime, so Voice V2 never initializes legacy VAD. */
 export function SessionVoiceRuntimeController(props: ControllerProps) {
-  return props.runtime === "livekit_v2" ? (
-    <LiveKitVoiceController {...props} />
+  return props.runtime === "voice_v2" ? (
+    <VoiceV2Controller {...props} />
   ) : (
     <LegacyVoiceController {...props} />
   );

@@ -63,12 +63,28 @@ describe("Voice V2 session machine", () => {
   it("distinguishes a connected transport from a genuinely ready voice path", () => {
     const initial = createInitialVoiceSessionState();
     const connecting = transitionVoiceSession(initial, { type: "connect_requested" });
-    const transportConnected = transitionVoiceSession(connecting, {
+    const prepared = transitionVoiceSession(connecting, {
+      type: "transport_prepared",
+    });
+    const activating = transitionVoiceSession(prepared, {
+      type: "connect_requested",
+    });
+    const transportConnected = transitionVoiceSession(activating, {
       type: "event",
       event: event("transport_connected", { connection_id: "rtc-1" }),
     });
 
     expect(connecting).toMatchObject({
+      phase: "connecting",
+      transportConnected: false,
+      voiceReady: false,
+    });
+    expect(prepared).toMatchObject({
+      phase: "awaiting_audio",
+      transportConnected: false,
+      voiceReady: false,
+    });
+    expect(activating).toMatchObject({
       phase: "connecting",
       transportConnected: false,
       voiceReady: false,
@@ -92,6 +108,21 @@ describe("Voice V2 session machine", () => {
       transportConnected: true,
       voiceReady: true,
     });
+  });
+
+  it("accepts preparation only while connecting", () => {
+    const initial = createInitialVoiceSessionState();
+    expect(
+      transitionVoiceSession(initial, { type: "transport_prepared" })
+    ).toBe(initial);
+
+    const prepared = transitionVoiceSession(
+      transitionVoiceSession(initial, { type: "connect_requested" }),
+      { type: "transport_prepared" }
+    );
+    expect(
+      transitionVoiceSession(prepared, { type: "transport_prepared" })
+    ).toBe(prepared);
   });
 
   it("keeps session bootstrap distinct from transport connectivity", () => {

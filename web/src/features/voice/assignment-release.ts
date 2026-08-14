@@ -72,6 +72,9 @@ function isRetryableReleaseFailure(error: unknown): boolean {
 export class AssignmentReleaseScheduler {
   private mounted = true;
   private readonly releasedCallIds = new Set<string>();
+  private readonly assignments = new Map<string, VoiceAssignmentLocator>();
+  private readonly releasePromises = new Map<string, Promise<void>>();
+  private readonly releaseResolvers = new Map<string, () => void>();
   private readonly retryTimers = new Map<
     string,
     ReturnType<typeof setTimeout>
@@ -97,16 +100,20 @@ export class AssignmentReleaseScheduler {
     this.releasedCallIds.delete(voiceCallId);
   }
 
-  release(assignment: VoiceAssignmentLocator | null): void {
-    if (
-      !assignment ||
-      this.releasedCallIds.has(assignment.voice_call_id)
-    ) {
-      return;
-    }
+  release(assignment: VoiceAssignmentLocator | null): Promise<void> {
+    if (!assignment) return Promise.resolve();
 
     const callId = assignment.voice_call_id;
+    const pending = this.releasePromises.get(callId);
+    if (pending) return pending;
+    if (this.releasedCallIds.has(callId)) return Promise.resolve();
+
     this.releasedCallIds.add(callId);
+    this.assignments.set(callId, assignment);
+    const releasePromise = new Promise<void>((resolve) => {
+      this.releaseResolvers.set(callId, resolve);
+    });
+    this.releasePromises.set(callId, releasePromise);
 
     if (!this.mounted) {
       // Fetch keepalive owns page-exit delivery; no timers may outlive the hook.
@@ -116,11 +123,14 @@ export class AssignmentReleaseScheduler {
           apiUrl: this.options.apiUrl,
           authHeaderProvider: this.options.authHeaderProvider,
         }
-      ).catch(() => undefined);
-      return;
+      )
+        .catch(() => undefined)
+        .then(() => this.finishRelease(callId));
+      return releasePromise;
     }
 
     this.attemptRelease(assignment, 1);
+    return releasePromise;
   }
 
   dispose(): void {
@@ -138,7 +148,20 @@ export class AssignmentReleaseScheduler {
     // An aborted or not-yet-retried request did not prove server-side release.
     // Let the owning hook issue one final timer-free keepalive request for the
     // same assignment after disposal. Completed calls remain deduplicated.
-    for (const callId of unfinishedCallIds) this.releasedCallIds.delete(callId);
+    for (const callId of unfinishedCallIds) {
+      const assignment = this.assignments.get(callId);
+      this.releasedCallIds.delete(callId);
+      this.finishRelease(callId);
+      if (assignment) void this.release(assignment);
+    }
+  }
+
+  private finishRelease(callId: string): void {
+    const resolve = this.releaseResolvers.get(callId);
+    this.releaseResolvers.delete(callId);
+    this.releasePromises.delete(callId);
+    this.assignments.delete(callId);
+    resolve?.();
   }
 
   private attemptRelease(
@@ -171,6 +194,7 @@ export class AssignmentReleaseScheduler {
         this.options.onLog?.(
           `Voice assignment release failed: ${errorMessage(error)}`
         );
+        this.finishRelease(callId);
         return;
       }
 
@@ -198,10 +222,16 @@ export class AssignmentReleaseScheduler {
           }
         ),
         abortController.signal
-      ).then(finishAttempt, (error: unknown) => {
-        finishAttempt();
-        handleFailure(error);
-      });
+      ).then(
+        () => {
+          finishAttempt();
+          this.finishRelease(callId);
+        },
+        (error: unknown) => {
+          finishAttempt();
+          handleFailure(error);
+        }
+      );
     } catch (error) {
       finishAttempt();
       handleFailure(error);
