@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -210,6 +211,42 @@ class _Handler:
         self.close_count += 1
         if self.close_count <= self.fail_close_count:
             raise RuntimeError("handler cleanup failed")
+
+
+class _LoggingSwallowingHandler(_Handler):
+    def __init__(self) -> None:
+        super().__init__()
+        self.callback_error: Exception | None = None
+
+    async def handle_web_request(self, request: PipecatOfferRequest, callback: Any):
+        assert request.pc_id is None
+        self.initial_count += 1
+        self.callbacks.append(callback)
+        try:
+            await callback(self.connection)
+        except Exception as exc:
+            self.callback_error = exc
+            logging.getLogger("fake.pipecat.request_handler").error(
+                "SDK callback failed: %s",
+                exc,
+            )
+        return {"sdp": "answer-sdp", "type": "answer", "pc_id": self.connection.pc_id}
+
+
+class _BlockingRuntimeStarter(_RuntimeStarter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.entered = asyncio.Event()
+
+    async def start(
+        self,
+        *,
+        connection: _Connection,
+        claims: VoiceCallClaims,
+    ) -> _RuntimeHandle:
+        self.calls.append((connection, claims))
+        self.entered.set()
+        await asyncio.Event().wait()
 
 
 class _HangingHandler(_Handler):
@@ -1020,24 +1057,67 @@ async def test_trusted_release_repository_drift_cancels_negotiation_nonretryably
 
 
 @pytest.mark.asyncio
-async def test_swallowed_runtime_callback_failure_is_a_terminal_side_channel_error() -> None:
-    starter = _RuntimeStarter(failure=RuntimeError("pipeline failed"))
-    service, handlers, _ = _service(starter=starter)
+async def test_swallowed_runtime_callback_failure_is_a_terminal_side_channel_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider_secret = "provider-api-key=must-never-reach-sdk-logs"
+    starter = _RuntimeStarter(failure=RuntimeError(provider_secret))
+    handler = _LoggingSwallowingHandler()
+    service, handlers, _ = _service(handlers=[handler], starter=starter)
+    service._handler_factory = lambda _ice_lease: handler
     assignment = await _reserve(service)
     token = _token(assignment)
+    caplog.set_level(logging.DEBUG)
 
-    with pytest.raises(PipecatSignalingUnavailable, match="runtime failed to start"):
+    with pytest.raises(
+        PipecatSignalingUnavailable,
+        match="runtime failed to start",
+    ) as error:
         await service.offer(
             token=token,
             user_id="firebase-user-1",
             request=_initial_offer(),
         )
 
+    assert error.value.__cause__ is None
+    assert handler.callback_error is not None
+    assert str(handler.callback_error) == "Pipecat runtime callback failed"
+    assert handler.callback_error.__cause__ is None
+    assert handler.callback_error.__context__ is None
+    rendered_logs = "\n".join(record.getMessage() for record in caplog.records)
+    assert "Pipecat runtime callback failed" in rendered_logs
+    assert provider_secret not in rendered_logs
     snapshot = await service.status(token=token, user_id="firebase-user-1")
     assert snapshot.state is PipecatReservationState.TERMINAL
     assert snapshot.terminal_result is not None
     assert snapshot.terminal_result.reason.value == "runtime_unavailable"
     assert handlers[0].close_count == 1
+    assert service.active_call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_callback_cancellation_propagates_without_safe_error_masking() -> None:
+    starter = _BlockingRuntimeStarter()
+    handler = _LoggingSwallowingHandler()
+    service, _, _ = _service(handlers=[handler], starter=starter)
+    service._handler_factory = lambda _ice_lease: handler
+    assignment = await _reserve(service)
+
+    offer_task = asyncio.create_task(
+        service.offer(
+            token=_token(assignment),
+            user_id="firebase-user-1",
+            request=_initial_offer(),
+        )
+    )
+    await starter.entered.wait()
+    offer_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await offer_task
+
+    assert handler.callback_error is None
+    assert handler.close_count == 1
     assert service.active_call_count == 0
 
 
@@ -1738,24 +1818,29 @@ async def test_trusted_status_call_linearizes_before_or_after_reservation_insert
     gated_runner = _GatedRepositoryRunner()
     service._repository_runner = gated_runner  # type: ignore[assignment]
     reserve_task = asyncio.create_task(_reserve(service))
-    await gated_runner.entered.wait()
+    try:
+        await gated_runner.entered.wait()
 
-    with pytest.raises(PipecatSignalingNotFound, match="reservation not found"):
-        await service.status_call(
+        with pytest.raises(PipecatSignalingNotFound, match="reservation not found"):
+            await service.status_call(
+                user_id="firebase-user-1",
+                session_id=SESSION_ID,
+                voice_call_id=CALL_ID,
+            )
+
+        gated_runner.release.set()
+        assignment = await reserve_task
+        snapshot = await service.status_call(
             user_id="firebase-user-1",
             session_id=SESSION_ID,
             voice_call_id=CALL_ID,
         )
-
-    gated_runner.release.set()
-    assignment = await reserve_task
-    snapshot = await service.status_call(
-        user_id="firebase-user-1",
-        session_id=SESSION_ID,
-        voice_call_id=CALL_ID,
-    )
-    assert snapshot.peer_reservation_id == assignment.peer_reservation_id
-    assert snapshot.state is PipecatReservationState.RESERVED
+        assert snapshot.peer_reservation_id == assignment.peer_reservation_id
+        assert snapshot.state is PipecatReservationState.RESERVED
+    finally:
+        gated_runner.release.set()
+        await asyncio.gather(reserve_task, return_exceptions=True)
+        await service.aclose()
 
 
 @pytest.mark.asyncio

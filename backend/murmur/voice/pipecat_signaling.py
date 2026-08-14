@@ -74,6 +74,10 @@ class _ReservationCancelled(Exception):
     """Internal wake-up used when authenticated DELETE wins negotiation."""
 
 
+class _RuntimeCallbackUnavailable(RuntimeError):
+    """Fixed-text error allowed to cross into the pinned SDK callback boundary."""
+
+
 class PipecatReservationState(str, Enum):
     """Monotonic lifecycle for one SmallWebRTC reservation."""
 
@@ -915,11 +919,11 @@ class PipecatSignalingService:
             if not side_channel.accepting:
                 failure = RuntimeError("SmallWebRTC callback arrived after reservation closure")
                 side_channel.failure = failure
-                raise failure
+                raise _RuntimeCallbackUnavailable("Pipecat runtime callback failed") from None
             if side_channel.calls != 1:
                 failure = RuntimeError("SmallWebRTC handler invoked its callback more than once")
                 side_channel.failure = failure
-                raise failure
+                raise _RuntimeCallbackUnavailable("Pipecat runtime callback failed") from None
             try:
                 _validate_pc_id(connection.pc_id)
 
@@ -944,9 +948,18 @@ class PipecatSignalingService:
                     raise RuntimeError("Pipecat runtime starter returned no lifecycle handle")
                 side_channel.connection = connection
                 side_channel.runtime_handle = runtime_handle
+            except asyncio.CancelledError as exc:
+                side_channel.failure = exc
+                raise
+            except Exception as exc:
+                side_channel.failure = exc
             except BaseException as exc:
                 side_channel.failure = exc
                 raise
+            if side_channel.failure is not None:
+                # Raise outside the active exception handler so even this safe
+                # wrapper cannot retain the provider exception as its context.
+                raise _RuntimeCallbackUnavailable("Pipecat runtime callback failed") from None
 
         handler_failure: BaseException | None = None
         raw_answer: dict[str, str] | None = None
@@ -993,9 +1006,7 @@ class PipecatSignalingService:
                 reason=VoiceRuntimeTerminalReason.RUNTIME_UNAVAILABLE,
                 retryable=True,
             )
-            raise PipecatSignalingUnavailable("Pipecat runtime failed to start") from (
-                side_channel.failure
-            )
+            raise PipecatSignalingUnavailable("Pipecat runtime failed to start") from None
         if handler_failure is not None:
             reason = (
                 VoiceRuntimeTerminalReason.TRANSPORT_UNAVAILABLE

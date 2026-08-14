@@ -1,7 +1,9 @@
 """Repositories for users and their agents."""
 
+import hashlib
 import logging
 
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import select
 
 from murmur.persistence.clock import utc_now
@@ -10,9 +12,41 @@ from murmur.persistence.models import AgentModel, UserModel
 
 logger = logging.getLogger(__name__)
 
+_MAX_FIREBASE_UID_LENGTH = 128
+_UNVERIFIED_FIREBASE_EMAIL_DOMAIN = "murmur.invalid"
+
 
 class UserRepo:
     """Persist and retrieve Firebase-backed user accounts."""
+
+    @staticmethod
+    def get_or_create_exact_uid(uid: str, name: str | None = None) -> UserModel:
+        """Return an exact Firebase UID without consulting or mutating email identity."""
+
+        _validate_firebase_uid(uid)
+        placeholder_email = _unverified_firebase_email(uid)
+        with get_session() as session:
+            user = session.get(UserModel, uid)
+            if user is not None:
+                return user
+
+            user = UserModel(
+                id=uid,
+                email=placeholder_email,
+                name=name,
+                password_hash="__firebase_auth__",
+            )
+            session.add(user)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                concurrently_created = session.get(UserModel, uid)
+                if concurrently_created is not None:
+                    return concurrently_created
+                raise
+            session.refresh(user)
+            return user
 
     @staticmethod
     def get_or_create(uid: str, email: str, name: str | None = None) -> UserModel:
@@ -69,6 +103,22 @@ class UserRepo:
     def get_by_id(user_id: str) -> UserModel | None:
         with get_session() as session:
             return session.get(UserModel, user_id)
+
+
+def _validate_firebase_uid(uid: str) -> None:
+    if (
+        not isinstance(uid, str)
+        or not uid
+        or len(uid) > _MAX_FIREBASE_UID_LENGTH
+        or uid != uid.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in uid)
+    ):
+        raise ValueError("Firebase UID is invalid")
+
+
+def _unverified_firebase_email(uid: str) -> str:
+    digest = hashlib.sha256(uid.encode("utf-8")).hexdigest()
+    return f"firebase-unverified-{digest}@{_UNVERIFIED_FIREBASE_EMAIL_DOMAIN}"
 
 
 class AgentRepo:
