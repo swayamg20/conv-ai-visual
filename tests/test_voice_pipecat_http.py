@@ -68,6 +68,7 @@ ALLOWED_ORIGIN = "https://murmur.example.test"
 AUTHORIZATION = "Bearer browser-id-token"
 SECRET_BEARER = "bearer-that-must-never-be-reflected-or-logged"
 SECRET_INPUT = "request-secret-that-must-never-be-reflected-or-logged"
+_MISSING = object()
 
 
 def _browser_assignment() -> PipecatBrowserVoiceAssignment:
@@ -1210,6 +1211,49 @@ def test_exactly_verified_email_uses_intended_legacy_link_and_local_row_identity
     )
     exact.assert_not_called()
     assert composition.calls[0][1]["user_id"] == legacy_id
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(_MISSING, id="missing"),
+        pytest.param(None, id="null"),
+        pytest.param(123, id="non-string"),
+        pytest.param("control\nname", id="control"),
+        pytest.param("x" * 257, id="oversized"),
+    ],
+)
+def test_invalid_verified_name_preserves_pipecat_legacy_link_display_name(
+    name: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = UserRepo.get_or_create(
+        uid="legacy-pipecat-stored-name",
+        email="pipecat-stored-name@example.test",
+        name="Stored Pipecat profile",
+    )
+    claims: dict[str, object] = {
+        "uid": "firebase-pipecat-without-valid-name",
+        "email": legacy.email,
+        "email_verified": True,
+        "name": name,
+    }
+    if name is _MISSING:
+        claims.pop("name")
+    app, composition = _default_auth_application(monkeypatch, claims)
+
+    response = TestClient(app).post(
+        "/api/voice/session",
+        headers={"Authorization": AUTHORIZATION},
+        json=_session_payload(),
+    )
+
+    assert response.status_code == 200
+    assert composition.calls[0][1]["user_id"] == legacy.id
+    assert UserRepo.get_by_id("firebase-pipecat-without-valid-name") is None
+    persisted = UserRepo.get_by_id(legacy.id)
+    assert persisted is not None
+    assert persisted.name == "Stored Pipecat profile"
 
 
 def test_denied_uid_can_later_verify_and_link_without_placeholder_collision(

@@ -1,6 +1,7 @@
 """Firebase authentication and trusted user resolution."""
 
 import logging
+import threading
 from collections.abc import Mapping
 
 import firebase_admin
@@ -16,52 +17,89 @@ logger = logging.getLogger(__name__)
 _MAX_FIREBASE_UID_LENGTH = 128
 _MAX_FIREBASE_EMAIL_LENGTH = 320
 _MAX_FIREBASE_NAME_LENGTH = 256
+_MAX_FIREBASE_TOKEN_LENGTH = 16_000
+_FIREBASE_HTTP_TIMEOUT_SECONDS = 2.0
+_firebase_lock = threading.Lock()
 _firebase_app: firebase_admin.App | None = None
 _firebase_init_attempted: bool = False
 
 
-def _ensure_firebase() -> firebase_admin.App | None:
-    """Initialise the Firebase Admin SDK once.  Returns the app or None."""
+class FirebaseAuthenticationUnavailable(RuntimeError):
+    """Firebase verification or trusted identity resolution is unavailable."""
+
+
+def _ensure_firebase() -> firebase_admin.App:
+    """Initialise the bounded Firebase Admin app exactly once."""
     global _firebase_app, _firebase_init_attempted
-    if _firebase_init_attempted:
+    with _firebase_lock:
+        if _firebase_init_attempted:
+            if _firebase_app is None:
+                raise FirebaseAuthenticationUnavailable("Authentication is unavailable") from None
+            return _firebase_app
+
+        _firebase_init_attempted = True
+        options: dict[str, object] = {
+            "httpTimeout": _FIREBASE_HTTP_TIMEOUT_SECONDS,
+        }
+        if config.FIREBASE_PROJECT_ID:
+            options["projectId"] = config.FIREBASE_PROJECT_ID
+
+        try:
+            if config.FIREBASE_SERVICE_ACCOUNT_PATH:
+                cred = credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
+                _firebase_app = firebase_admin.initialize_app(cred, options=options)
+            elif config.FIREBASE_PROJECT_ID:
+                # Explicitly pin the Firebase project for local/dev token verification.
+                _firebase_app = firebase_admin.initialize_app(options=options)
+            else:
+                logger.warning(
+                    "Firebase project is not configured; set FIREBASE_PROJECT_ID for local auth verification"
+                )
+                _firebase_app = firebase_admin.initialize_app(options=options)
+        except Exception:
+            logger.warning("Firebase Admin SDK init failed; authentication is unavailable")
+            _firebase_app = None
+            raise FirebaseAuthenticationUnavailable("Authentication is unavailable") from None
+
+        logger.info("Firebase Admin SDK initialised successfully")
         return _firebase_app
-    _firebase_init_attempted = True
-    try:
-        if config.FIREBASE_SERVICE_ACCOUNT_PATH:
-            cred = credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
-            _firebase_app = firebase_admin.initialize_app(cred)
-        elif config.FIREBASE_PROJECT_ID:
-            # Explicitly pin the Firebase project for local/dev token verification.
-            _firebase_app = firebase_admin.initialize_app(
-                options={"projectId": config.FIREBASE_PROJECT_ID}
-            )
-        else:
-            logger.warning(
-                "Firebase project is not configured; set FIREBASE_PROJECT_ID for local auth verification"
-            )
-            _firebase_app = firebase_admin.initialize_app()
-        logger.info(
-            "Firebase Admin SDK initialised successfully (project_id=%s)",
-            config.FIREBASE_PROJECT_ID or "<default>",
-        )
-    except Exception:
-        logger.warning("Firebase Admin SDK init failed — auth will be unavailable")
-        _firebase_app = None
-    return _firebase_app
 
 
 def verify_firebase_token(token: str) -> dict | None:
-    """Verify a Firebase ID token.  Returns decoded claims dict or None."""
+    """Verify an ID token, returning None only for rejected credentials."""
     app = _ensure_firebase()
-    if app is None:
-        logger.warning("Firebase not initialised — cannot verify token")
-        return None
     try:
-        decoded = firebase_auth.verify_id_token(token, app=app)
+        decoded = firebase_auth.verify_id_token(
+            token,
+            app=app,
+            check_revoked=True,
+        )
         return decoded
-    except Exception:
-        logger.warning("Firebase token verification failed")
+    except (
+        firebase_auth.InvalidIdTokenError,
+        firebase_auth.UserDisabledError,
+        firebase_auth.UserNotFoundError,
+    ):
         return None
+    except Exception:
+        logger.warning("Firebase token verification is unavailable")
+        raise FirebaseAuthenticationUnavailable("Authentication is unavailable") from None
+
+
+def _firebase_bearer(request: Request) -> str | None:
+    values = request.headers.getlist("authorization")
+    if len(values) != 1 or not values[0].startswith("Bearer "):
+        return None
+    token = values[0][7:]
+    if (
+        not token
+        or len(token) > _MAX_FIREBASE_TOKEN_LENGTH
+        or token != token.strip()
+        or any(character.isspace() for character in token)
+        or any(ord(character) < 33 or ord(character) > 126 for character in token)
+    ):
+        return None
+    return token
 
 
 def _firebase_uid(claims: Mapping[str, object]) -> str | None:
@@ -112,10 +150,9 @@ def get_current_user(request: Request) -> dict | None:
     Verified email claims may provision or link a user. Unverified claims
     authenticate only an already-existing exact Firebase UID.
     """
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+    token = _firebase_bearer(request)
+    if token is None:
         return None
-    token = auth_header[7:]
     claims = verify_firebase_token(token)
     if claims is None:
         return None
@@ -145,14 +182,20 @@ def get_current_user(request: Request) -> dict | None:
                 logger.warning("Firebase UID provisioning returned a mismatched identity")
                 return None
     except Exception:
-        logger.warning("Firebase user provisioning failed")
-        return None
+        logger.warning("Firebase user resolution is unavailable")
+        raise FirebaseAuthenticationUnavailable("Authentication is unavailable") from None
     return {"id": user.id, "email": user.email, "name": user.name}
 
 
 def require_auth(request: Request) -> str:
-    """FastAPI Depends — raises 401 if not authenticated.  Returns user uid."""
-    user = get_current_user(request)
+    """FastAPI Depends returning a UID with fixed 401/503 failures."""
+    try:
+        user = get_current_user(request)
+    except FirebaseAuthenticationUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication is unavailable",
+        ) from None
     if user is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user["id"]

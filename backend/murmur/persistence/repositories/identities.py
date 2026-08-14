@@ -57,7 +57,7 @@ class UserRepo:
                 if email and user.email != email:
                     user.email = email
                     updated = True
-                if name != user.name:
+                if name is not None and name != user.name:
                     user.name = name
                     updated = True
                 if updated:
@@ -71,7 +71,7 @@ class UserRepo:
                     select(UserModel).where(UserModel.email == email)
                 ).first()
                 if existing_by_email:
-                    if name != existing_by_email.name:
+                    if name is not None and name != existing_by_email.name:
                         existing_by_email.name = name
                         session.add(existing_by_email)
                         session.commit()

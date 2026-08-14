@@ -4,7 +4,7 @@ from typing import Annotated, TypedDict, cast
 
 from fastapi import Depends, Request
 
-from murmur.api.authentication import get_current_user
+from murmur.api.authentication import FirebaseAuthenticationUnavailable, get_current_user
 from murmur.api.errors import ApiError
 from murmur.chat import ChatService
 from murmur.persistence.models import AgentModel
@@ -22,7 +22,10 @@ class CurrentUser(TypedDict):
 
 def get_authenticated_user(request: Request) -> CurrentUser:
     """Resolve the bearer token to the server-provisioned user identity."""
-    user = get_current_user(request)
+    try:
+        user = get_current_user(request)
+    except FirebaseAuthenticationUnavailable:
+        raise ApiError(503, "Authentication is unavailable") from None
     if user is None:
         raise ApiError(401, "Not authenticated")
     return cast(CurrentUser, user)

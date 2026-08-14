@@ -97,6 +97,60 @@ def test_verified_unused_email_replaces_placeholder_on_the_same_exact_uid() -> N
     assert [user.id for user in _all_users()] == [uid]
 
 
+def test_none_name_preserves_existing_exact_uid_display_name() -> None:
+    existing = UserRepo.get_or_create(
+        uid="firebase-existing-name",
+        email="old-address@example.test",
+        name="Stored exact profile",
+    )
+
+    returned = UserRepo.get_or_create(
+        uid=existing.id,
+        email="verified-address@example.test",
+        name=None,
+    )
+
+    assert returned.id == existing.id
+    assert returned.email == "verified-address@example.test"
+    assert returned.name == "Stored exact profile"
+    persisted = UserRepo.get_by_id(existing.id)
+    assert persisted is not None
+    assert persisted.email == "verified-address@example.test"
+    assert persisted.name == "Stored exact profile"
+
+
+def test_none_name_preserves_legacy_email_link_display_name() -> None:
+    legacy = UserRepo.get_or_create(
+        uid="legacy-existing-name",
+        email="legacy-name@example.test",
+        name="Stored legacy profile",
+    )
+
+    returned = UserRepo.get_or_create(
+        uid="firebase-linking-name",
+        email="legacy-name@example.test",
+        name=None,
+    )
+
+    assert returned.id == legacy.id
+    assert returned.name == "Stored legacy profile"
+    assert UserRepo.get_by_id("firebase-linking-name") is None
+    persisted = UserRepo.get_by_id(legacy.id)
+    assert persisted is not None
+    assert persisted.name == "Stored legacy profile"
+
+
+def test_none_name_is_retained_for_a_genuinely_new_user() -> None:
+    created = UserRepo.get_or_create(
+        uid="firebase-new-without-name",
+        email="new-without-name@example.test",
+        name=None,
+    )
+
+    assert created.id == "firebase-new-without-name"
+    assert created.name is None
+
+
 def test_verified_email_collision_fails_closed_without_relinking_either_row() -> None:
     uid = "firebase-verified-collision"
     placeholder = _placeholder(uid)
