@@ -314,7 +314,7 @@ def build_environment(paths: StackPaths, base: Mapping[str, str] | None = None) 
             "LIVEKIT_API_SECRET": LIVEKIT_API_SECRET,
             "ALLOWED_CORS_ORIGINS": f"http://127.0.0.1:{WEB_PORT}",
             "NEXT_PUBLIC_API_URL": f"http://127.0.0.1:{APP_PORT}",
-            "NEXT_PUBLIC_VOICE_RUNTIME": "livekit_v2",
+            "NEXT_PUBLIC_VOICE_RUNTIME": "voice_v2",
             "VOICE_E2E_API_URL": f"http://127.0.0.1:{APP_PORT}",
             "VOICE_E2E_WEB_URL": f"http://127.0.0.1:{WEB_PORT}",
             "VOICE_E2E_BROWSER_AUDIO_FIXTURE": str(BROWSER_FIXTURE.resolve()),

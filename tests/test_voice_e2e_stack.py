@@ -57,6 +57,7 @@ def test_environment_is_file_backed_guarded_and_provider_free() -> None:
     assert environment["MURMUR_E2E_MODE"] == "1"
     assert environment["MURMUR_ENVIRONMENT"] == "test"
     assert environment["VOICE_RUNTIME"] == "livekit_v2"
+    assert environment["NEXT_PUBLIC_VOICE_RUNTIME"] == "voice_v2"
     assert environment["VOICE_V2_PROFILE_ID"] == "fake-rtc-v1"
     assert environment["MURMUR_DATABASE_URL"].startswith("sqlite:////")
     assert not environment["MURMUR_DATABASE_URL"].endswith(":memory:")
