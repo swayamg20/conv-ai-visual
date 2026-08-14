@@ -15,6 +15,7 @@ vi.mock("@/lib/api", () => ({
 import {
   bootstrapVoiceSession,
   endVoiceSession,
+  PIPECAT_VOICE_EVENT_PROTOCOL,
   VOICE_V2_EVENT_TOPIC,
   VoiceSessionApiError,
 } from "./session-api";
@@ -41,6 +42,39 @@ function response(overrides: Record<string, unknown> = {}) {
     worker_name: "murmur-worker",
     event_topic: VOICE_V2_EVENT_TOPIC,
     expires_at: "2099-01-01T00:00:00Z",
+    ...overrides,
+  };
+}
+
+function pipecatResponse(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    runtime: "pipecat_smallwebrtc_v1",
+    profile_id: "pipecat-direct-cascade-v1",
+    event_protocol: PIPECAT_VOICE_EVENT_PROTOCOL,
+    expires_at: "2099-01-01T00:00:00Z",
+    session_id: request.session_id,
+    agent_id: "90bd1253-90a6-459a-bf37-365bc3039a76",
+    voice_call_id: request.voice_call_id,
+    trace_id: "025bcf26-dcab-4f8c-bb44-af298875f638",
+    webrtc_url:
+      "https://voice.example.test/api/voice/pipecat/signal/opaque-token-1",
+    peer_reservation_id: "peer-reservation-1",
+    ice_servers: [
+      {
+        urls: ["stun:stun.example.test:3478"],
+        username: null,
+        credential: null,
+        credentialType: "password",
+      },
+      {
+        urls: ["turns:turn.example.test:5349?transport=tcp"],
+        username: "turn-user",
+        credential: "turn-password",
+        credentialType: "password",
+      },
+    ],
     ...overrides,
   };
 }
@@ -76,8 +110,47 @@ describe("Voice V2 session API", () => {
           Authorization: "Bearer firebase-token",
         },
         body: JSON.stringify(request),
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
       })
     );
+  });
+
+  it("decodes and deeply freezes the strict Pipecat browser assignment", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(pipecatResponse()), { status: 200 })
+    );
+
+    const bootstrap = await bootstrapVoiceSession(request);
+
+    expect(bootstrap).toMatchObject({
+      runtime: "pipecat_smallwebrtc_v1",
+      session_id: request.session_id,
+      voice_call_id: request.voice_call_id,
+      event_protocol: PIPECAT_VOICE_EVENT_PROTOCOL,
+    });
+    if (bootstrap.runtime !== "pipecat_smallwebrtc_v1") {
+      throw new Error("Expected a Pipecat assignment");
+    }
+    expect(Object.isFrozen(bootstrap)).toBe(true);
+    expect(Object.isFrozen(bootstrap.ice_servers)).toBe(true);
+    expect(Object.isFrozen(bootstrap.ice_servers[0])).toBe(true);
+    expect(Object.isFrozen(bootstrap.ice_servers[0]?.urls)).toBe(true);
+    expect(bootstrap.ice_servers).toEqual([
+      {
+        urls: ["stun:stun.example.test:3478"],
+        username: null,
+        credential: null,
+        credentialType: "password",
+      },
+      {
+        urls: ["turns:turn.example.test:5349?transport=tcp"],
+        username: "turn-user",
+        credential: "turn-password",
+        credentialType: "password",
+      },
+    ]);
   });
 
   it("uses an injected auth provider for both bootstrap and release", async () => {
@@ -129,6 +202,58 @@ describe("Voice V2 session API", () => {
     });
   });
 
+  it.each([
+    "wss://voice.example.test",
+    "wss://voice.example.test/",
+    "ws://localhost:7880/",
+  ])("accepts a strict LiveKit ws/wss origin: %s", async (serverUrl) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(response({ server_url: serverUrl })),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).resolves.toMatchObject({
+      runtime: "livekit_v2",
+      server_url: serverUrl,
+    });
+  });
+
+  it.each([
+    "wss://voice.example.test/room",
+    "wss://voice.example.test?secret=1",
+    "wss://voice.example.test#secret",
+    "wss://user:secret@voice.example.test",
+    " wss://voice.example.test",
+    "wss://voice.example.test\\room",
+  ])("rejects a non-origin LiveKit server URL: %s", async (serverUrl) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(response({ server_url: serverUrl })),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow("invalid fields");
+  });
+
+  it.each([
+    " signed.jwt.token",
+    "signed.jwt.token ",
+    "signed.jwt.\u0000token",
+    "signed.jwt.\ntoken",
+  ])("rejects an unsafe LiveKit participant token", async (participantToken) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(response({ participant_token: participantToken })),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow("invalid fields");
+  });
+
   it("fails before the network when no authenticated user is available", async () => {
     mocks.getAuthHeaders.mockResolvedValue({});
     const fetchMock = vi.spyOn(globalThis, "fetch");
@@ -159,6 +284,218 @@ describe("Voice V2 session API", () => {
     await expect(bootstrapVoiceSession(request)).rejects.toBeInstanceOf(
       VoiceSessionApiError
     );
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow(
+      "identity does not match"
+    );
+  });
+
+  it("rejects missing, mixed-runtime, and nested unknown Pipecat keys", async () => {
+    const missingKey = pipecatResponse();
+    delete missingKey.peer_reservation_id;
+    const nestedUnknownKey = pipecatResponse({
+      ice_servers: [
+        {
+          urls: ["stun:stun.example.test:3478"],
+          username: null,
+          credential: null,
+          credentialType: "password",
+          api_secret: "must-not-pass",
+        },
+      ],
+    });
+    vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(missingKey), { status: 200 })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify(pipecatResponse({ server_url: "wss://mixed.example.test" })),
+          { status: 200 }
+        )
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(nestedUnknownKey), { status: 200 })
+      );
+
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow(
+      "incompatible schema"
+    );
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow(
+      "incompatible schema"
+    );
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow("invalid fields");
+  });
+
+  it.each([
+    "https://voice.example.test/api/voice/pipecat/signal/token",
+    "http://localhost:7860/api/voice/pipecat/signal/token",
+    "http://127.0.0.1:7860/api/voice/pipecat/signal/token",
+    "http://[::1]:7860/api/voice/pipecat/signal/token",
+  ])("accepts a safe Pipecat signaling URL: %s", async (webrtcUrl) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(pipecatResponse({ webrtc_url: webrtcUrl })),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).resolves.toMatchObject({
+      runtime: "pipecat_smallwebrtc_v1",
+      webrtc_url: webrtcUrl,
+    });
+  });
+
+  it("accepts loopback Pipecat signaling without an ICE server", async () => {
+    const webrtcUrl =
+      "http://localhost:7860/api/voice/pipecat/signal/direct-token";
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(
+          pipecatResponse({ webrtc_url: webrtcUrl, ice_servers: [] })
+        ),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).resolves.toMatchObject({
+      runtime: "pipecat_smallwebrtc_v1",
+      webrtc_url: webrtcUrl,
+      ice_servers: [],
+    });
+  });
+
+  it.each([
+    { label: "empty ICE", iceServers: [] },
+    {
+      label: "STUN only",
+      iceServers: [
+        {
+          urls: ["stun:stun.example.test:3478"],
+          username: null,
+          credential: null,
+          credentialType: "password",
+        },
+      ],
+    },
+  ])(
+    "rejects public Pipecat signaling with $label",
+    async ({ iceServers }) => {
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(
+          JSON.stringify(pipecatResponse({ ice_servers: iceServers })),
+          { status: 200 }
+        )
+      );
+
+      await expect(bootstrapVoiceSession(request)).rejects.toThrow(
+        "invalid fields"
+      );
+    }
+  );
+
+  it.each([
+    "turn:turn.example.test:3478?transport=udp",
+    "turns:turn.example.test:5349?transport=tcp",
+  ])("accepts public Pipecat signaling with TURN: %s", async (turnUrl) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(
+          pipecatResponse({
+            ice_servers: [
+              {
+                urls: [turnUrl],
+                username: "turn-user",
+                credential: "turn-password",
+                credentialType: "password",
+              },
+            ],
+          })
+        ),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).resolves.toMatchObject({
+      runtime: "pipecat_smallwebrtc_v1",
+    });
+  });
+
+  it.each([
+    "http://voice.example.test/api/voice/pipecat/signal/token",
+    "ws://voice.example.test/api/voice/pipecat/signal/token",
+    "https://user:secret@voice.example.test/api/voice/pipecat/signal/token",
+    "https://voice.example.test/api/voice/pipecat/signal/token?secret=1",
+    "https://voice.example.test/api/voice/pipecat/signal/token#secret",
+    "https://voice.example.test/",
+  ])("rejects an unsafe Pipecat signaling URL: %s", async (webrtcUrl) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(pipecatResponse({ webrtc_url: webrtcUrl })),
+        { status: 200 }
+      )
+    );
+
+    await expect(bootstrapVoiceSession(request)).rejects.toThrow("invalid fields");
+  });
+
+  it("rejects the wrong Pipecat event protocol and unsafe ICE credential shapes", async () => {
+    const unsafeIceResponses = [
+      pipecatResponse({ event_protocol: "murmur.voice.v2.events" }),
+      pipecatResponse({
+        ice_servers: [
+          {
+            urls: ["turn:turn.example.test:3478"],
+            username: "turn-user",
+            credential: "turn-password",
+            credentialType: "oauth",
+          },
+        ],
+      }),
+      pipecatResponse({
+        ice_servers: [
+          {
+            urls: ["turn:turn.example.test:3478"],
+            username: null,
+            credential: null,
+            credentialType: "password",
+          },
+        ],
+      }),
+      pipecatResponse({
+        ice_servers: [
+          {
+            urls: ["stun:stun.example.test:3478"],
+            username: "turn-user",
+            credential: "turn-password",
+            credentialType: "password",
+          },
+        ],
+      }),
+    ];
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    for (const unsafeResponse of unsafeIceResponses) {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify(unsafeResponse), { status: 200 })
+      );
+    }
+
+    for (const _unsafeResponse of unsafeIceResponses) {
+      await expect(bootstrapVoiceSession(request)).rejects.toThrow("invalid fields");
+    }
+  });
+
+  it("rejects a Pipecat assignment whose call identity differs from the request", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify(
+          pipecatResponse({
+            voice_call_id: "b041809d-b90e-45b2-b8ec-53f6fdaf1b42",
+          })
+        ),
+        { status: 200 }
+      )
+    );
+
     await expect(bootstrapVoiceSession(request)).rejects.toThrow(
       "identity does not match"
     );
@@ -217,6 +554,9 @@ describe("Voice V2 session API", () => {
         body: JSON.stringify(request),
         signal: undefined,
         keepalive: true,
+        credentials: "omit",
+        cache: "no-store",
+        referrerPolicy: "no-referrer",
       }
     );
   });

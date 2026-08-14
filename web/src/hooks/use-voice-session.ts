@@ -851,9 +851,30 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
         if (
           bootstrap.agent_id !== optionsRef.current.agentId ||
           bootstrap.session_id !== sessionId ||
-          bootstrap.voice_call_id !== activeVoiceCallId ||
-          bootstrap.event_topic !== VOICE_V2_EVENT_TOPIC
+          bootstrap.voice_call_id !== activeVoiceCallId
         ) {
+          failActiveCall(
+            generation,
+            "assignment_identity_mismatch",
+            "Voice assignment does not match this agent, session, or call"
+          );
+          return;
+        }
+        if (bootstrap.runtime !== "livekit_v2") {
+          // This hook still owns only the LiveKit adapter. Retain the valid
+          // server assignment just long enough for cleanup to release its exact
+          // call scope; never reinterpret Pipecat fields or connect a room.
+          assignmentRef.current = bootstrap;
+          releaseScheduler.markAssigned(bootstrap.voice_call_id);
+          failActiveCall(
+            generation,
+            "unsupported_voice_runtime",
+            "This voice client cannot start the assigned runtime. Start a fresh voice call.",
+            { canRetry: true, retainCallIdentity: false }
+          );
+          return;
+        }
+        if (bootstrap.event_topic !== VOICE_V2_EVENT_TOPIC) {
           failActiveCall(
             generation,
             "assignment_identity_mismatch",

@@ -121,10 +121,10 @@ vi.mock("livekit-client", () => ({
   isAudioTrack: (track: { kind?: string }) => track.kind === "audio",
 }));
 
-import type { VoiceSessionBootstrap } from "./session-api";
+import type { LiveKitVoiceSessionBootstrap } from "./session-api";
 import { LiveKitVoiceTransport } from "./livekit-transport";
 
-const assignment: VoiceSessionBootstrap = {
+const assignment: LiveKitVoiceSessionBootstrap = {
   runtime: "livekit_v2",
   trace_id: "025bcf26-dcab-4f8c-bb44-af298875f638",
   profile_id: "cascade-v1",

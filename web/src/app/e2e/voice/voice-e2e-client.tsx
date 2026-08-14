@@ -279,6 +279,10 @@ export function VoiceE2EClient({
     onLocalMicrophoneTrack: observeLocalTrack,
     onLocalMicrophonePublication: observeMicrophonePublication,
   });
+  const voiceAssignment = voice.assignment;
+  const voiceCallId = voice.voiceCallId;
+  const voicePhase = voice.phase;
+  const cancelVoiceConnection = voice.cancelConnection;
 
   const attachRemoteElement = useCallback(async () => {
     if (remoteProbeRef.current) return;
@@ -450,23 +454,35 @@ export function VoiceE2EClient({
 
   useEffect(() => {
     hookStateRef.current = {
-      assignmentPresent: voice.assignment !== null,
-      phase: voice.phase,
-      voiceCallId: voice.voiceCallId,
+      assignmentPresent: voiceAssignment !== null,
+      phase: voicePhase,
+      voiceCallId,
     };
-    if (voice.assignment) {
+    if (voiceAssignment && voiceAssignment.runtime !== "livekit_v2") {
+      assignmentEvidenceRef.current = null;
+      observeError("The isolated LiveKit RTC proof received a different runtime");
+      cancelVoiceConnection();
+      return;
+    }
+    if (voiceAssignment) {
       assignmentEvidenceRef.current = {
-        trace_id: voice.assignment.trace_id,
-        voice_call_id: voice.assignment.voice_call_id,
-        session_id: voice.assignment.session_id,
-        agent_id: voice.assignment.agent_id,
-        room_name: voice.assignment.room_name,
-        dispatch_id: voice.assignment.dispatch_id,
-        profile_id: voice.assignment.profile_id,
-        worker_name: voice.assignment.worker_name,
+        trace_id: voiceAssignment.trace_id,
+        voice_call_id: voiceAssignment.voice_call_id,
+        session_id: voiceAssignment.session_id,
+        agent_id: voiceAssignment.agent_id,
+        room_name: voiceAssignment.room_name,
+        dispatch_id: voiceAssignment.dispatch_id,
+        profile_id: voiceAssignment.profile_id,
+        worker_name: voiceAssignment.worker_name,
       };
     }
-  }, [voice.assignment, voice.phase, voice.voiceCallId]);
+  }, [
+    cancelVoiceConnection,
+    observeError,
+    voiceAssignment,
+    voiceCallId,
+    voicePhase,
+  ]);
 
   useEffect(() => {
     if (snapshot.status !== "disconnected") return;

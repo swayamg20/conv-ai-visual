@@ -13,7 +13,7 @@ import {
   type RemoteTrackPublication,
 } from "livekit-client";
 
-import type { VoiceSessionBootstrap } from "./session-api";
+import type { LiveKitVoiceSessionBootstrap } from "./session-api";
 
 /**
  * Immutable diagnostic snapshot captured after the exact microphone track is
@@ -114,7 +114,7 @@ export class LiveKitVoiceTransport {
     });
   }
 
-  async connect(assignment: VoiceSessionBootstrap): Promise<void> {
+  async connect(assignment: LiveKitVoiceSessionBootstrap): Promise<void> {
     if (this.closed) throw new Error("Voice transport is already closed");
     this.attachListeners(assignment);
     let localAudioTrack: LocalAudioTrack | null = null;
@@ -289,7 +289,7 @@ export class LiveKitVoiceTransport {
     return !this.closed && this.options.callbacks.isCurrent();
   }
 
-  private attachListeners(assignment: VoiceSessionBootstrap): void {
+  private attachListeners(assignment: LiveKitVoiceSessionBootstrap): void {
     if (this.listenerCleanups.length > 0) {
       throw new Error("Voice transport listeners are already attached");
     }

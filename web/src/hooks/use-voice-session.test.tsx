@@ -1386,6 +1386,59 @@ describe("useVoiceSession", () => {
     await act(async () => mounted.root.unmount());
   });
 
+  it("releases an unsupported Pipecat assignment without connecting LiveKit and rotates the call", async () => {
+    const onError = vi.fn();
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) => ({
+        runtime: "pipecat_smallwebrtc_v1",
+        profile_id: "pipecat-cascade-v1",
+        event_protocol: "rtvi-murmur-v2",
+        expires_at: "2099-01-01T00:00:00Z",
+        session_id: request.session_id,
+        agent_id: agentId,
+        voice_call_id: request.voice_call_id,
+        trace_id: assignmentTraceId,
+        webrtc_url: "https://voice.example.test/api/voice/pipecat/signal/token",
+        peer_reservation_id: "25b7aed8-4342-4def-9638-430309391c5c",
+        ice_servers: [],
+      })
+    );
+    const mounted = await mountHook({ onError });
+
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    const rejectedCallId = api.bootstrapVoiceSession.mock.calls[0]?.[0]
+      ?.voice_call_id;
+    const rejectedRoom = livekit.FakeRoom.instances.at(-1);
+    expect(rejectedRoom?.connect).not.toHaveBeenCalled();
+    expect(rejectedRoom?.disconnect).toHaveBeenCalledTimes(1);
+    expect(mounted.read().phase).toBe("unavailable");
+    expect(mounted.read().session.unavailableReason).toMatchObject({
+      code: "unsupported_voice_runtime",
+      retryable: true,
+    });
+    expect(mounted.read().assignment).toBeNull();
+    expect(mounted.read().voiceCallId).toBe("");
+    expect(onError).toHaveBeenCalledWith(
+      "This voice client cannot start the assigned runtime. Start a fresh voice call."
+    );
+    expect(api.endVoiceSession).toHaveBeenCalledTimes(1);
+    expect(api.endVoiceSession).toHaveBeenCalledWith(
+      { session_id: sessionId, voice_call_id: rejectedCallId },
+      expect.objectContaining({
+        apiUrl: undefined,
+        signal: expect.any(AbortSignal),
+      })
+    );
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    expect(api.bootstrapVoiceSession.mock.calls[1]?.[0]?.voice_call_id).not.toBe(
+      rejectedCallId
+    );
+    expect(livekit.FakeRoom.instances.at(-1)?.connect).toHaveBeenCalledTimes(1);
+    await act(async () => mounted.root.unmount());
+  });
+
   it("rotates the call ID when a 409 permits a fresh assignment attempt", async () => {
     api.bootstrapVoiceSession.mockRejectedValueOnce(
       new api.VoiceSessionApiError("Voice call assignment conflict", 409)
