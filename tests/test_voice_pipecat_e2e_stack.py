@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,17 +16,33 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
+    _ARTIFACT_MANIFEST_ERROR,
+    _ARTIFACT_TAMPER_ERROR,
+    _DIRTY_SOURCE_ERROR,
     _PLAYWRIGHT_PROCESS_NAME,
+    _SOURCE_CHANGED_ERROR,
+    _SOURCE_PROVENANCE_ERROR,
+    PipecatBackendCheckpoint,
     PipecatBrowserStack,
     StackError,
     StackPaths,
+    _atomic_write_json,
+    _build_artifact_sha256_manifest,
+    _default_git_command_runner,
     _ManagedProcess,
     _pipecat_app_command,
     _pipecat_browser_command,
+    _qualification_text_artifact_paths,
     _read_pipecat_browser_result,
+    _read_source_provenance,
+    _require_unchanged_source,
     _sanitize_log_file,
     _scan_qualification_artifacts,
+    _validate_artifact_sha256_manifest,
     _validate_playwright_report,
+    _validate_rtc_stack_proof,
+    _validate_source_provenance,
+    _write_validated_rtc_stack_proof,
     build_environment,
     build_web_environment,
 )
@@ -37,6 +55,18 @@ def _paths(tmp_path: Path) -> StackPaths:
         run_dir=run_dir,
         database=run_dir / "murmur.db",
         evidence=tmp_path / "evidence.jsonl",
+        server_log=run_dir / "pipecat-asgi.log",
+        proof=run_dir / "backend-checkpoint.json",
+    )
+
+
+def _repo_paths(tmp_path: Path) -> StackPaths:
+    run_dir = tmp_path / "var" / "voice-pipecat-e2e" / "rtc-test"
+    return StackPaths(
+        run_id="rtc-test",
+        run_dir=run_dir,
+        database=run_dir / "murmur.db",
+        evidence=tmp_path / "var" / "evals" / "voice-pipecat-e2e-rtc-test.jsonl",
         server_log=run_dir / "pipecat-asgi.log",
         proof=run_dir / "backend-checkpoint.json",
     )
@@ -293,6 +323,389 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
+def _source(commit_sha: str = "a" * 40) -> dict[str, object]:
+    return {
+        "commit_sha": commit_sha,
+        "repository_clean": True,
+        "dirty_state_refused": True,
+    }
+
+
+def _write_safe_qualification_artifacts(paths: StackPaths) -> None:
+    _write_json(paths.browser_result, _browser_result())
+    _write_json(paths.playwright_report, _playwright_report())
+    paths.server_log.write_text("clean Pipecat qualification log\n", encoding="utf-8")
+    for name in ("web-build.log", "web.log", "playwright.log"):
+        (paths.run_dir / name).write_text("clean local qualification log\n", encoding="utf-8")
+    paths.evidence.parent.mkdir(parents=True, exist_ok=True)
+    paths.evidence.write_text('{"event":"profile_closed"}\n', encoding="utf-8")
+
+
+def test_source_provenance_derives_exact_root_sha_and_clean_state() -> None:
+    commands: list[tuple[str, ...]] = []
+    sha = "1" * 40
+
+    def command_runner(
+        arguments: tuple[str, ...],
+        repository_root: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(arguments)
+        outputs = {
+            ("rev-parse", "--show-toplevel"): f"{repository_root}\n",
+            ("rev-parse", "--verify", "HEAD^{commit}"): f"{sha}\n",
+            (
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ): "",
+        }
+        return subprocess.CompletedProcess(arguments, 0, outputs[arguments], "")
+
+    assert _read_source_provenance(command_runner=command_runner) == _source(sha)
+    assert commands == [
+        ("rev-parse", "--show-toplevel"),
+        ("rev-parse", "--verify", "HEAD^{commit}"),
+        (
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "status_output",
+    [
+        "M  staged-secret-name.py\n",
+        " M unstaged-secret-name.py\n",
+        "?? untracked-secret-name.py\n",
+        "   ",
+    ],
+)
+def test_source_provenance_refuses_every_dirty_git_state_without_path_leakage(
+    status_output: str,
+) -> None:
+    def command_runner(
+        arguments: tuple[str, ...],
+        repository_root: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        if arguments == ("rev-parse", "--show-toplevel"):
+            output = str(repository_root)
+        elif arguments == ("rev-parse", "--verify", "HEAD^{commit}"):
+            output = "2" * 40
+        else:
+            output = status_output
+        return subprocess.CompletedProcess(arguments, 0, output, "")
+
+    with pytest.raises(StackError) as captured:
+        _read_source_provenance(command_runner=command_runner)
+
+    assert str(captured.value) == _DIRTY_SOURCE_ERROR
+    assert "secret-name" not in str(captured.value)
+
+
+@pytest.mark.parametrize("failure", ["missing_git", "bad_sha", "wrong_root", "git_error"])
+def test_source_provenance_failures_are_fixed_and_never_echo_git_output(
+    failure: str,
+) -> None:
+    def command_runner(
+        arguments: tuple[str, ...],
+        repository_root: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        if failure == "missing_git":
+            raise FileNotFoundError("raw-secret-from-path")
+        if arguments == ("rev-parse", "--show-toplevel"):
+            output = str(repository_root) if failure != "wrong_root" else "/raw-secret-wrong-root"
+            return subprocess.CompletedProcess(arguments, 0, output, "")
+        if arguments == ("rev-parse", "--verify", "HEAD^{commit}"):
+            output = "raw-secret-bad-sha" if failure == "bad_sha" else "3" * 40
+            return subprocess.CompletedProcess(arguments, 0, output, "")
+        return subprocess.CompletedProcess(
+            arguments,
+            1 if failure == "git_error" else 0,
+            "",
+            "raw-secret-git-error",
+        )
+
+    with pytest.raises(StackError) as captured:
+        _read_source_provenance(command_runner=command_runner)
+
+    assert str(captured.value) == _SOURCE_PROVENANCE_ERROR
+    assert "raw-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        None,
+        [],
+        SimpleNamespace(returncode=0, stdout=None),
+        SimpleNamespace(returncode=True, stdout=""),
+        SimpleNamespace(returncode="0", stdout=""),
+    ],
+)
+def test_source_provenance_rejects_malformed_command_results_safely(
+    malformed: object,
+) -> None:
+    def command_runner(
+        _arguments: tuple[str, ...],
+        _repository_root: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        return malformed  # type: ignore[return-value]
+
+    with pytest.raises(StackError) as captured:
+        _read_source_provenance(command_runner=command_runner)
+
+    assert str(captured.value) == _SOURCE_PROVENANCE_ERROR
+
+
+@pytest.mark.parametrize("malformed", [None, [], {"commit_sha": "a" * 40}])
+def test_source_payload_validation_is_fail_closed(malformed: object) -> None:
+    with pytest.raises(StackError) as captured:
+        _validate_source_provenance(malformed)
+
+    assert str(captured.value) == _SOURCE_PROVENANCE_ERROR
+
+
+def test_default_git_runner_uses_depoisoned_noninteractive_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("GIT_DIR", "/raw-secret-git-dir")
+    monkeypatch.setenv("GIT_INDEX_FILE", "/raw-secret-index")
+
+    def run(command: tuple[str, ...], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured.update(kwargs)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    _default_git_command_runner(("status", "--porcelain=v1"), PROJECT_ROOT)
+
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert not any(
+        name.startswith("GIT_")
+        for name in environment
+        if name not in {"GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT"}
+    )
+    assert environment["GIT_OPTIONAL_LOCKS"] == "0"
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert captured["stdin"] is subprocess.DEVNULL
+    assert captured["capture_output"] is True
+    assert captured["timeout"] == 10
+
+
+@pytest.mark.parametrize("mode", ["browser", "backend"])
+def test_source_gate_runs_before_prepare_and_creates_no_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    paths = _paths(tmp_path)
+    prepared: list[bool] = []
+
+    def refuse_dirty_source() -> dict[str, object]:
+        raise StackError(_DIRTY_SOURCE_ERROR)
+
+    stack = (
+        PipecatBrowserStack(paths, source_reader=refuse_dirty_source)
+        if mode == "browser"
+        else PipecatBackendCheckpoint(paths, source_reader=refuse_dirty_source)
+    )
+    monkeypatch.setattr(stack, "_prepare", lambda: prepared.append(True))
+
+    with pytest.raises(StackError) as captured:
+        stack.run()
+
+    assert str(captured.value) == _DIRTY_SOURCE_ERROR
+    assert prepared == []
+    assert not paths.run_dir.exists()
+    assert not paths.evidence.exists()
+
+
+def test_source_recheck_requires_the_same_clean_commit() -> None:
+    observed = iter((_source("4" * 40), _source("5" * 40)))
+    assert next(observed) == _source("4" * 40)
+
+    with pytest.raises(StackError) as captured:
+        _require_unchanged_source(lambda: next(observed), _source("4" * 40))
+
+    assert str(captured.value) == _SOURCE_CHANGED_ERROR
+
+
+def test_backend_final_source_recheck_blocks_proof_write_on_midrun_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    source_reads = iter((_source("6" * 40), _source("7" * 40)))
+    stack = PipecatBackendCheckpoint(paths, source_reader=lambda: next(source_reads))
+    monkeypatch.setattr(stack, "_prepare", lambda: None)
+    monkeypatch.setattr(stack, "_start_app", lambda: None)
+    monkeypatch.setattr(
+        stack,
+        "_wait_for_health",
+        lambda: {"livekit_imported": False},
+    )
+    monkeypatch.setattr(stack, "_bootstrap", lambda _call_id: {})
+    monkeypatch.setattr(stack, "_release", lambda _call_id: None)
+    monkeypatch.setattr(stack, "_status", lambda _call_id: {})
+    monkeypatch.setattr(stack, "_assert_backend_checkpoint", lambda *_args: None)
+    stopped: list[bool] = []
+    monkeypatch.setattr(stack, "_stop_app", lambda: stopped.append(True))
+
+    with pytest.raises(StackError) as captured:
+        stack.run()
+
+    assert str(captured.value) == _SOURCE_CHANGED_ERROR
+    assert not paths.proof.exists()
+    assert stopped == [True]
+
+
+def test_backend_clean_source_is_read_twice_and_recorded_exactly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    source_reads: list[bool] = []
+
+    def source_reader() -> dict[str, object]:
+        source_reads.append(True)
+        return _source("8" * 40)
+
+    stack = PipecatBackendCheckpoint(paths, source_reader=source_reader)
+    monkeypatch.setattr(stack, "_prepare", lambda: paths.run_dir.mkdir(parents=True))
+    monkeypatch.setattr(stack, "_start_app", lambda: None)
+    monkeypatch.setattr(
+        stack,
+        "_wait_for_health",
+        lambda: {"livekit_imported": False},
+    )
+
+    def assignment(voice_call_id: str) -> dict[str, object]:
+        return {
+            "runtime": "pipecat_smallwebrtc_v1",
+            "profile_id": "pipecat-fake-rtc-v1",
+            "event_protocol": "rtvi-murmur-v2",
+            "session_id": "session-test",
+            "agent_id": "agent-test",
+            "voice_call_id": voice_call_id,
+            "ice_servers": [],
+        }
+
+    monkeypatch.setattr(stack, "_bootstrap", assignment)
+    monkeypatch.setattr(stack, "_release", lambda _call_id: None)
+    monkeypatch.setattr(stack, "_status", lambda _call_id: {})
+    monkeypatch.setattr(stack, "_assert_backend_checkpoint", lambda *_args: None)
+    monkeypatch.setattr(stack, "_stop_app", lambda: None)
+
+    proof = stack.run()
+
+    assert source_reads == [True, True]
+    assert proof["source"] == _source("8" * 40)
+    persisted = json.loads(paths.proof.read_text(encoding="utf-8"))
+    assert persisted["source"] == _source("8" * 40)
+
+
+def test_browser_run_orders_sanitization_validation_hashing_and_proof_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    events: list[str] = []
+    browser = _browser_result()
+    terminal = browser["terminal_cleanup"]
+    assert isinstance(terminal, dict)
+
+    def source_reader() -> dict[str, object]:
+        events.append("source")
+        return _source("9" * 40)
+
+    stack = PipecatBrowserStack(paths, source_reader=source_reader)
+
+    def prepare() -> None:
+        events.append("prepare")
+        paths.run_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(stack, "_prepare", prepare)
+    monkeypatch.setattr(stack, "_prepare_web_workspace", lambda: None)
+    monkeypatch.setattr(stack, "_run_step", lambda *_args: None)
+    process = SimpleNamespace(ensure_running=lambda: None)
+    monkeypatch.setattr(stack, "_start", lambda *_args: process)
+    monkeypatch.setattr(
+        stack,
+        "_wait_for_app",
+        lambda _app: {"livekit_imported": False},
+    )
+    monkeypatch.setattr(stack, "_wait_for_web", lambda _web, _app: None)
+    monkeypatch.setattr(stack, "_authoritative_terminal_status", lambda _call_id: terminal)
+    monkeypatch.setattr(stack, "_teardown", lambda: events.append("teardown"))
+    monkeypatch.setattr(stack, "_sanitize_owned_logs", lambda: events.append("sanitize"))
+
+    def read_browser(_path: Path) -> dict[str, object]:
+        events.append("browser-read")
+        return browser
+
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._read_pipecat_browser_result",
+        read_browser,
+    )
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._validate_playwright_report",
+        lambda _path: events.append("report-validate"),
+    )
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._scan_qualification_artifacts",
+        lambda _paths, **_kwargs: events.append("artifact-scan"),
+    )
+    manifest = {
+        "algorithm": "sha256",
+        "files": {f"safe-{index}.txt": "a" * 64 for index in range(7)},
+    }
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._build_artifact_sha256_manifest",
+        lambda _paths: events.append("manifest-build") or manifest,
+    )
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._validate_artifact_sha256_manifest",
+        lambda *_args, **_kwargs: events.append("manifest-validate"),
+    )
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._validate_rtc_stack_proof",
+        lambda *_args, **_kwargs: events.append("proof-validate"),
+    )
+
+    def write_proof(path: Path, value: dict[str, object]) -> None:
+        events.append("proof-write")
+        _atomic_write_json(path, value)
+
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._atomic_write_json",
+        write_proof,
+    )
+
+    result = stack.run()
+
+    assert result["source"] == _source("9" * 40)
+    assert events.count("source") == 2
+    assert events.index("source") < events.index("prepare")
+    sanitize_index = events.index("sanitize")
+    post_sanitize_browser_index = events.index("browser-read", sanitize_index)
+    post_sanitize_report_index = events.index("report-validate", sanitize_index)
+    manifest_index = events.index("manifest-build")
+    final_source_index = len(events) - 1 - events[::-1].index("source")
+    first_rehash_index = events.index("manifest-validate")
+    proof_write_index = events.index("proof-write")
+    assert sanitize_index < post_sanitize_browser_index < manifest_index
+    assert sanitize_index < post_sanitize_report_index < manifest_index
+    assert manifest_index < final_source_index < first_rehash_index < proof_write_index
+    assert events[proof_write_index + 1] == "manifest-validate"
+    assert events[-3:] == ["proof-validate", "artifact-scan", "manifest-validate"]
+
+
 def test_backend_and_web_environments_are_separate_and_strip_ambient_secrets(
     tmp_path: Path,
 ) -> None:
@@ -395,7 +808,7 @@ def test_teardown_stops_every_process_and_sanitizes_after_stop_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paths = _paths(tmp_path)
-    stack = PipecatBrowserStack(paths)
+    stack = PipecatBrowserStack(paths, source_reader=_source)
     stopped: list[str] = []
     sanitized: list[bool] = []
 
@@ -913,3 +1326,276 @@ def test_failed_playwright_artifact_uses_browser_secret_sanitizer(tmp_path: Path
     assert playwright_log.read_text(encoding="utf-8") == (
         "[qualification artifact redacted after forbidden signaling data]\n"
     )
+
+
+def test_artifact_manifest_binds_exact_post_sanitization_text_inputs_and_proof(
+    tmp_path: Path,
+) -> None:
+    paths = _repo_paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+    paths.server_log.write_text(
+        "Discarding peer SmallWebRTCConnection#raw-peer\n",
+        encoding="utf-8",
+    )
+
+    assert _sanitize_log_file(paths.server_log) == {"raw SmallWebRTC peer ID"}
+    _scan_qualification_artifacts(paths)
+    manifest = _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+    expected_files = {
+        path.resolve().relative_to(tmp_path.resolve()).as_posix(): hashlib.sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in _qualification_text_artifact_paths(paths)
+    }
+    expected_files = dict(sorted(expected_files.items()))
+    assert list(expected_files) == [
+        "var/evals/voice-pipecat-e2e-rtc-test.jsonl",
+        "var/voice-pipecat-e2e/rtc-test/pipecat-asgi.log",
+        "var/voice-pipecat-e2e/rtc-test/playwright.log",
+        "var/voice-pipecat-e2e/rtc-test/playwright/report.json",
+        "var/voice-pipecat-e2e/rtc-test/playwright/voice-pipecat-rtc-result.json",
+        "var/voice-pipecat-e2e/rtc-test/web-build.log",
+        "var/voice-pipecat-e2e/rtc-test/web.log",
+    ]
+    assert manifest == {"algorithm": "sha256", "files": expected_files}
+    assert all(Path(label).is_absolute() is False for label in expected_files)
+    assert all(".." not in Path(label).parts for label in expected_files)
+    assert not any(
+        label.endswith(("rtc-stack-proof.json", "murmur.db", "murmur.db-wal", "murmur.db-shm"))
+        for label in expected_files
+    )
+    assert "SmallWebRTCConnection#" not in paths.server_log.read_text(encoding="utf-8")
+
+    browser = _browser_result()
+    terminal = browser["terminal_cleanup"]
+    assert isinstance(terminal, dict)
+    stack = PipecatBrowserStack(paths)
+    proof = stack._build_proof(
+        browser,
+        {"livekit_imported": False},
+        terminal,
+        _source(),
+        manifest,
+    )
+    _validate_rtc_stack_proof(
+        paths,
+        proof,
+        _source(),
+        manifest,
+        repository_root=tmp_path,
+    )
+
+    safety = proof["artifact_safety"]
+    assert isinstance(safety, dict)
+    assert proof["source"] == _source()
+    assert safety["text_files_scanned"] == list(expected_files)
+    assert safety["sha256_manifest"] == manifest
+    assert "files" not in safety
+
+
+def test_artifact_manifest_rejects_same_size_tamper_after_hashing(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+    manifest = _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+    web_log = paths.run_dir / "web.log"
+    original = web_log.read_bytes()
+    web_log.write_bytes(b"X" + original[1:])
+    assert web_log.stat().st_size == len(original)
+
+    with pytest.raises(StackError) as captured:
+        _validate_artifact_sha256_manifest(
+            paths,
+            manifest,
+            repository_root=tmp_path,
+        )
+
+    assert str(captured.value) == _ARTIFACT_TAMPER_ERROR
+
+
+@pytest.mark.parametrize("malformed", [None, [], {"algorithm": "sha256"}])
+def test_artifact_manifest_validation_is_fail_closed(
+    tmp_path: Path,
+    malformed: object,
+) -> None:
+    paths = _paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+
+    with pytest.raises(StackError) as captured:
+        _validate_artifact_sha256_manifest(
+            paths,
+            malformed,
+            repository_root=tmp_path,
+        )
+
+    assert str(captured.value) == _ARTIFACT_MANIFEST_ERROR
+
+
+def test_persisted_proof_corruption_is_rejected_and_removed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+    manifest = _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+    browser = _browser_result()
+    terminal = browser["terminal_cleanup"]
+    assert isinstance(terminal, dict)
+    proof = PipecatBrowserStack(paths)._build_proof(
+        browser,
+        {"livekit_imported": False},
+        terminal,
+        _source(),
+        manifest,
+    )
+
+    def corrupt_write(path: Path, value: dict[str, object]) -> None:
+        corrupted = dict(value)
+        corrupted["status"] = "tampered"
+        path.write_text(
+            json.dumps(corrupted, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._atomic_write_json",
+        corrupt_write,
+    )
+
+    with pytest.raises(StackError, match="persisted RTC stack proof is not canonical"):
+        _write_validated_rtc_stack_proof(
+            paths,
+            proof,
+            _source(),
+            manifest,
+            repository_root=tmp_path,
+        )
+
+    assert not paths.rtc_proof.exists()
+
+
+@pytest.mark.parametrize("missing_index", range(7))
+def test_artifact_manifest_rejects_each_missing_required_text_input(
+    tmp_path: Path,
+    missing_index: int,
+) -> None:
+    paths = _paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+    _qualification_text_artifact_paths(paths)[missing_index].unlink()
+
+    with pytest.raises(StackError) as captured:
+        _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+
+    assert str(captured.value) == _ARTIFACT_MANIFEST_ERROR
+
+
+@pytest.mark.parametrize("symlink_kind", ["file", "parent"])
+def test_artifact_manifest_rejects_symlinked_artifact_paths(
+    tmp_path: Path,
+    symlink_kind: str,
+) -> None:
+    if symlink_kind == "file":
+        paths = _paths(tmp_path)
+        _write_safe_qualification_artifacts(paths)
+        web_log = paths.run_dir / "web.log"
+        target = paths.run_dir / "web-target.log"
+        web_log.replace(target)
+        web_log.symlink_to(target)
+    else:
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        alias_parent = tmp_path / "alias-parent"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        paths = _paths(alias_parent)
+        _write_safe_qualification_artifacts(paths)
+
+    with pytest.raises(StackError) as captured:
+        _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+
+    assert str(captured.value) == _ARTIFACT_MANIFEST_ERROR
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_extra",
+        "source_short_sha",
+        "source_bool",
+        "legacy_files_key",
+        "manifest_hash",
+        "schema_bool",
+        "topology",
+        "topology_peer_bool",
+        "browser",
+        "terminal",
+        "limitations",
+    ],
+)
+def test_rtc_stack_proof_validator_rejects_schema_or_value_tampering(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    paths = _paths(tmp_path)
+    _write_safe_qualification_artifacts(paths)
+    manifest = _build_artifact_sha256_manifest(paths, repository_root=tmp_path)
+    browser = _browser_result()
+    terminal = browser["terminal_cleanup"]
+    assert isinstance(terminal, dict)
+    proof = PipecatBrowserStack(paths)._build_proof(
+        browser,
+        {"livekit_imported": False},
+        terminal,
+        _source(),
+        manifest,
+    )
+    mutated = json.loads(json.dumps(proof))
+    source = mutated["source"]
+    safety = mutated["artifact_safety"]
+    assert isinstance(source, dict)
+    assert isinstance(safety, dict)
+
+    if mutation == "source_extra":
+        source["extra"] = None
+    elif mutation == "source_short_sha":
+        source["commit_sha"] = "abc"
+    elif mutation == "source_bool":
+        source["repository_clean"] = 1
+    elif mutation == "legacy_files_key":
+        safety["files"] = safety.pop("text_files_scanned")
+    elif mutation == "manifest_hash":
+        proof_manifest = safety["sha256_manifest"]
+        assert isinstance(proof_manifest, dict)
+        files = proof_manifest["files"]
+        assert isinstance(files, dict)
+        first_label = next(iter(files))
+        files[first_label] = "0" * 64
+    elif mutation == "schema_bool":
+        mutated["schema_version"] = True
+    elif mutation == "topology":
+        topology = mutated["topology"]
+        assert isinstance(topology, dict)
+        topology["docker_used"] = True
+    elif mutation == "topology_peer_bool":
+        topology = mutated["topology"]
+        assert isinstance(topology, dict)
+        topology["smallwebrtc_peer_count"] = True
+    elif mutation == "browser":
+        proof_browser = mutated["browser"]
+        assert isinstance(proof_browser, dict)
+        proof_browser["trace_id"] = "tampered-trace"
+    elif mutation == "terminal":
+        proof_terminal = mutated["terminal_cleanup"]
+        assert isinstance(proof_terminal, dict)
+        proof_terminal["status"] = "pending"
+    elif mutation == "limitations":
+        mutated["limitations"] = []
+    else:  # pragma: no cover - exhaustive parameter list
+        raise AssertionError(mutation)
+
+    with pytest.raises(StackError):
+        _validate_rtc_stack_proof(
+            paths,
+            mutated,
+            _source(),
+            manifest,
+            repository_root=tmp_path,
+        )

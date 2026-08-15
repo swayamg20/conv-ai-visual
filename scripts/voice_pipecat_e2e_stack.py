@@ -11,6 +11,7 @@ checkpoint without making a browser-media claim.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -18,11 +19,12 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -59,6 +61,13 @@ _AUDIO_CLOCK_MAX_INTERRUPTION_MS = 250
 
 _RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _CONTRACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_GIT_SHA_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_PROVENANCE_ERROR = "source provenance is unavailable for RTC qualification"
+_DIRTY_SOURCE_ERROR = "source repository must be clean for RTC qualification"
+_SOURCE_CHANGED_ERROR = "source provenance changed during RTC qualification"
+_ARTIFACT_MANIFEST_ERROR = "qualification artifact manifest is incomplete or unsafe"
+_ARTIFACT_TAMPER_ERROR = "qualification artifact manifest no longer matches artifacts"
 _STRIPPED_ENV_PREFIXES = (
     "ANTHROPIC_",
     "AWS_",
@@ -151,6 +160,130 @@ def make_paths(run_id: str) -> StackPaths:
     )
 
 
+GitCommandRunner = Callable[
+    [tuple[str, ...], Path],
+    subprocess.CompletedProcess[str],
+]
+SourceReader = Callable[[], object]
+
+
+def _default_git_command_runner(
+    arguments: tuple[str, ...],
+    repository_root: Path,
+) -> subprocess.CompletedProcess[str]:
+    safe_environment = {
+        "PATH": os.environ.get("PATH", os.defpath),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    return subprocess.run(
+        ("git", "-C", str(repository_root), *arguments),
+        cwd=repository_root,
+        env=safe_environment,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+
+def _read_source_provenance(
+    *,
+    repository_root: Path = PROJECT_ROOT,
+    command_runner: GitCommandRunner = _default_git_command_runner,
+) -> dict[str, object]:
+    """Fail closed on unknown or dirty Git state without exposing Git output."""
+
+    try:
+        resolved_root = repository_root.resolve(strict=True)
+        root_result = command_runner(("rev-parse", "--show-toplevel"), resolved_root)
+        sha_result = command_runner(
+            ("rev-parse", "--verify", "HEAD^{commit}"),
+            resolved_root,
+        )
+        status_result = command_runner(
+            (
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ),
+            resolved_root,
+        )
+    except (OSError, subprocess.SubprocessError):
+        raise StackError(_SOURCE_PROVENANCE_ERROR) from None
+
+    if (
+        not all(
+            isinstance(result, subprocess.CompletedProcess)
+            and isinstance(result.returncode, int)
+            and not isinstance(result.returncode, bool)
+            and isinstance(result.stdout, str)
+            for result in (root_result, sha_result, status_result)
+        )
+        or root_result.returncode != 0
+        or sha_result.returncode != 0
+        or status_result.returncode != 0
+    ):
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    root_output = root_result.stdout.strip()
+    sha = sha_result.stdout.strip()
+    if (
+        not root_output
+        or "\n" in root_output
+        or "\r" in root_output
+        or not _GIT_SHA_PATTERN.fullmatch(sha)
+    ):
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    try:
+        derived_root = Path(root_output).resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
+        raise StackError(_SOURCE_PROVENANCE_ERROR) from None
+    if derived_root != resolved_root:
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    if status_result.stdout:
+        raise StackError(_DIRTY_SOURCE_ERROR)
+    return {
+        "commit_sha": sha,
+        "repository_clean": True,
+        "dirty_state_refused": True,
+    }
+
+
+def _validate_source_provenance(value: object) -> dict[str, object]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "commit_sha",
+        "repository_clean",
+        "dirty_state_refused",
+    }:
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    commit_sha = value.get("commit_sha")
+    if (
+        not isinstance(commit_sha, str)
+        or not _GIT_SHA_PATTERN.fullmatch(commit_sha)
+        or value.get("repository_clean") is not True
+        or value.get("dirty_state_refused") is not True
+    ):
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    return {
+        "commit_sha": commit_sha,
+        "repository_clean": True,
+        "dirty_state_refused": True,
+    }
+
+
+def _require_unchanged_source(
+    source_reader: SourceReader,
+    expected: Mapping[str, object],
+) -> None:
+    observed = _validate_source_provenance(source_reader())
+    if observed != expected:
+        raise StackError(_SOURCE_CHANGED_ERROR)
+
+
 def _clean_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
     source = os.environ if base is None else base
     environment = {
@@ -228,16 +361,24 @@ def build_web_environment(
 
 
 class PipecatBackendCheckpoint:
-    def __init__(self, paths: StackPaths, *, startup_timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        paths: StackPaths,
+        *,
+        startup_timeout_seconds: float = 30.0,
+        source_reader: SourceReader = _read_source_provenance,
+    ) -> None:
         if not 1 <= startup_timeout_seconds <= 120:
             raise StackError("startup timeout must be between one and 120 seconds")
         self.paths = paths
         self.startup_timeout_seconds = startup_timeout_seconds
         self.environment = build_environment(paths)
+        self._source_reader = source_reader
         self._process: subprocess.Popen[bytes] | None = None
         self._log_handle: Any | None = None
 
     def run(self) -> dict[str, object]:
+        source = _validate_source_provenance(self._source_reader())
         self._prepare()
         try:
             self._start_app()
@@ -247,6 +388,7 @@ class PipecatBackendCheckpoint:
             self._release(voice_call_id)
             status = self._status(voice_call_id)
             self._assert_backend_checkpoint(health, assignment, status, voice_call_id)
+            _require_unchanged_source(self._source_reader, source)
             proof = {
                 "schema_version": 1,
                 "status": "backend_checkpoint_passed",
@@ -256,6 +398,7 @@ class PipecatBackendCheckpoint:
                 "network": "direct-loopback",
                 "providers": "fake",
                 "cost": "unmeasured",
+                "source": source,
                 "voice_call_id": voice_call_id,
                 "health": health,
                 "assignment": {
@@ -558,6 +701,7 @@ class PipecatBrowserStack:
         startup_timeout_seconds: float = 60.0,
         browser_timeout_seconds: float = 120.0,
         web_build_timeout_seconds: float = 240.0,
+        source_reader: SourceReader = _read_source_provenance,
     ) -> None:
         for label, value, maximum in (
             ("startup", startup_timeout_seconds, 120.0),
@@ -570,6 +714,7 @@ class PipecatBrowserStack:
         self.startup_timeout_seconds = startup_timeout_seconds
         self.browser_timeout_seconds = browser_timeout_seconds
         self.web_build_timeout_seconds = web_build_timeout_seconds
+        self._source_reader = source_reader
         self.backend_environment = build_environment(paths)
         self.web_environment = build_web_environment(paths)
         self._processes: list[_ManagedProcess] = []
@@ -577,6 +722,7 @@ class PipecatBrowserStack:
         self._web_cwd = WEB_ROOT
 
     def run(self) -> dict[str, object]:
+        source = _validate_source_provenance(self._source_reader())
         self._prepare()
         browser: dict[str, object] | None = None
         health: dict[str, object] | None = None
@@ -645,12 +791,19 @@ class PipecatBrowserStack:
             raise StackError("Pipecat browser stack ended without complete proof state")
         if health.get("livekit_imported") is not False:
             raise StackError("dedicated Pipecat process loaded a LiveKit module")
+        sanitized_browser = _read_pipecat_browser_result(self.paths.browser_result)
+        _validate_playwright_report(self.paths.playwright_report)
+        if sanitized_browser != browser:
+            raise StackError("sanitized browser result changed after validation")
+        browser = sanitized_browser
         _scan_qualification_artifacts(self.paths)
-        proof = self._build_proof(browser, health, terminal)
+        manifest = _build_artifact_sha256_manifest(self.paths)
+        proof = self._build_proof(browser, health, terminal, source, manifest)
+        _validate_rtc_stack_proof(self.paths, proof, source, manifest)
         _assert_browser_artifact_safe(json.dumps(proof, sort_keys=True), "stack proof")
-        _atomic_write_json(self.paths.rtc_proof, proof)
-        _scan_qualification_artifacts(self.paths, include_proof=True)
-        return proof
+        _require_unchanged_source(self._source_reader, source)
+        _validate_artifact_sha256_manifest(self.paths, manifest)
+        return _write_validated_rtc_stack_proof(self.paths, proof, source, manifest)
 
     def _prepare(self) -> None:
         for label, fixture in (
@@ -831,7 +984,16 @@ class PipecatBrowserStack:
         browser: dict[str, object],
         health: dict[str, object],
         terminal: dict[str, object],
+        source: dict[str, object],
+        artifact_manifest: dict[str, object],
     ) -> dict[str, object]:
+        manifest_files = artifact_manifest.get("files")
+        if not isinstance(manifest_files, dict):
+            raise StackError(_ARTIFACT_MANIFEST_ERROR)
+        manifest_copy: dict[str, object] = {
+            "algorithm": artifact_manifest.get("algorithm"),
+            "files": dict(manifest_files),
+        }
         return {
             "schema_version": 1,
             "status": "passed",
@@ -841,6 +1003,7 @@ class PipecatBrowserStack:
             "network": "direct-loopback",
             "providers": "fake",
             "cost": "unmeasured",
+            "source": dict(source),
             "topology": {
                 "docker_used": False,
                 "livekit_process_used": False,
@@ -853,14 +1016,8 @@ class PipecatBrowserStack:
             "artifact_safety": {
                 "passed": True,
                 "trace_video_screenshot_retained": False,
-                "files": [
-                    "pipecat-asgi.log",
-                    "web-build.log",
-                    "web.log",
-                    "playwright.log",
-                    "playwright/report.json",
-                    "playwright/voice-pipecat-rtc-result.json",
-                ],
+                "text_files_scanned": list(manifest_files),
+                "sha256_manifest": manifest_copy,
             },
             "limitations": [
                 "Direct loopback candidates only; no Coturn, forced relay, or TLS proof",
@@ -1557,6 +1714,284 @@ def _validate_playwright_report(path: Path) -> None:
         raise StackError("Playwright retained a failure or sensitive attachment")
 
 
+def _qualification_text_artifact_paths(paths: StackPaths) -> tuple[Path, ...]:
+    return (
+        paths.server_log,
+        paths.run_dir / "web-build.log",
+        paths.run_dir / "web.log",
+        paths.run_dir / "playwright.log",
+        paths.playwright_report,
+        paths.browser_result,
+        paths.evidence,
+    )
+
+
+def _repo_relative_artifact_path(path: Path, repository_root: Path) -> str:
+    try:
+        resolved_root = repository_root.resolve(strict=True)
+        if path.is_symlink() or not path.is_file():
+            raise OSError
+        lexical_path = Path(os.path.abspath(path))
+        resolved_path = path.resolve(strict=True)
+        if lexical_path != resolved_path:
+            raise OSError
+        relative = resolved_path.relative_to(resolved_root).as_posix()
+        cursor = resolved_root
+        for component in Path(relative).parts:
+            cursor /= component
+            if cursor.is_symlink():
+                raise OSError
+    except (OSError, ValueError):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR) from None
+    if not relative or relative.startswith("../") or relative.startswith("/"):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    return relative
+
+
+def _sha256_artifact(path: Path) -> str:
+    digest = hashlib.sha256()
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        file_descriptor = os.open(path, flags)
+        with os.fdopen(file_descriptor, "rb") as handle:
+            initial_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(initial_stat.st_mode):
+                raise OSError
+            while chunk := handle.read(128 * 1024):
+                digest.update(chunk)
+            final_stat = os.fstat(handle.fileno())
+        current_stat = path.lstat()
+    except OSError:
+        raise StackError(_ARTIFACT_MANIFEST_ERROR) from None
+    identity_fields = (
+        "st_dev",
+        "st_ino",
+        "st_mode",
+        "st_size",
+        "st_mtime_ns",
+        "st_ctime_ns",
+    )
+    if any(
+        getattr(initial_stat, field) != getattr(final_stat, field)
+        or getattr(final_stat, field) != getattr(current_stat, field)
+        for field in identity_fields
+    ):
+        raise StackError(_ARTIFACT_TAMPER_ERROR)
+    return digest.hexdigest()
+
+
+def _build_artifact_sha256_manifest(
+    paths: StackPaths,
+    *,
+    repository_root: Path = PROJECT_ROOT,
+) -> dict[str, object]:
+    entries: list[tuple[str, Path]] = []
+    for path in _qualification_text_artifact_paths(paths):
+        label = _repo_relative_artifact_path(path, repository_root)
+        entries.append((label, path))
+    entries.sort(key=lambda item: item[0])
+    labels = [label for label, _path in entries]
+    if len(labels) != 7 or len(set(labels)) != len(labels):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    files: dict[str, str] = {}
+    for label, path in entries:
+        files[label] = _sha256_artifact(path)
+        if _repo_relative_artifact_path(path, repository_root) != label:
+            raise StackError(_ARTIFACT_TAMPER_ERROR)
+    return {"algorithm": "sha256", "files": files}
+
+
+def _validate_artifact_sha256_manifest(
+    paths: StackPaths,
+    manifest: object,
+    *,
+    repository_root: Path = PROJECT_ROOT,
+) -> None:
+    if (
+        not isinstance(manifest, Mapping)
+        or set(manifest) != {"algorithm", "files"}
+        or manifest.get("algorithm") != "sha256"
+    ):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    files = manifest.get("files")
+    if (
+        not isinstance(files, dict)
+        or len(files) != 7
+        or list(files) != sorted(files)
+        or any(
+            not isinstance(label, str)
+            or not isinstance(digest, str)
+            or not _SHA256_PATTERN.fullmatch(digest)
+            for label, digest in files.items()
+        )
+    ):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    observed = _build_artifact_sha256_manifest(paths, repository_root=repository_root)
+    if observed != manifest:
+        raise StackError(_ARTIFACT_TAMPER_ERROR)
+
+
+def _validate_rtc_stack_proof(
+    paths: StackPaths,
+    proof: object,
+    source: object,
+    manifest: object,
+    *,
+    repository_root: Path = PROJECT_ROOT,
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "status",
+        "run_id",
+        "runtime",
+        "profile_id",
+        "network",
+        "providers",
+        "cost",
+        "source",
+        "topology",
+        "browser",
+        "terminal_cleanup",
+        "artifact_safety",
+        "limitations",
+    }
+    proof_schema_version = proof.get("schema_version") if isinstance(proof, Mapping) else None
+    if (
+        not isinstance(proof, Mapping)
+        or set(proof) != expected_keys
+        or (
+            isinstance(proof_schema_version, bool)
+            or not isinstance(proof_schema_version, int)
+            or proof_schema_version != 1
+            or proof.get("status") != "passed"
+            or proof.get("run_id") != paths.run_id
+            or proof.get("runtime") != VOICE_RUNTIME
+            or proof.get("profile_id") != VOICE_PROFILE_ID
+            or proof.get("network") != "direct-loopback"
+            or proof.get("providers") != "fake"
+            or proof.get("cost") != "unmeasured"
+        )
+    ):
+        raise StackError("RTC stack proof identity is invalid")
+    expected_source = _validate_source_provenance(source)
+    proof_source = proof.get("source")
+    if (
+        not isinstance(proof_source, dict)
+        or _validate_source_provenance(proof_source) != expected_source
+    ):
+        raise StackError(_SOURCE_PROVENANCE_ERROR)
+    topology = proof.get("topology")
+    if (
+        not isinstance(topology, dict)
+        or set(topology)
+        != {
+            "docker_used",
+            "livekit_process_used",
+            "livekit_imported_in_pipecat_process",
+            "public_voice_gate",
+            "smallwebrtc_peer_count",
+        }
+        or topology.get("docker_used") is not False
+        or topology.get("livekit_process_used") is not False
+        or topology.get("livekit_imported_in_pipecat_process") is not False
+        or topology.get("public_voice_gate") != "voice_v2"
+        or isinstance(topology.get("smallwebrtc_peer_count"), bool)
+        or topology.get("smallwebrtc_peer_count") != 1
+    ):
+        raise StackError("RTC stack proof topology is invalid")
+    browser = proof.get("browser")
+    if not isinstance(browser, dict) or browser != _read_pipecat_browser_result(
+        paths.browser_result
+    ):
+        raise StackError("RTC stack proof browser evidence is inconsistent")
+    voice_call_id = browser.get("voice_call_id")
+    terminal = proof.get("terminal_cleanup")
+    if (
+        not isinstance(voice_call_id, str)
+        or not isinstance(terminal, dict)
+        or terminal != browser.get("terminal_cleanup")
+    ):
+        raise StackError("RTC stack proof terminal cleanup is inconsistent")
+    _validate_pipecat_terminal_status(terminal, voice_call_id)
+    expected_limitations = [
+        "Direct loopback candidates only; no Coturn, forced relay, or TLS proof",
+        "Deterministic fake STT, LLM, and TTS; no provider quality claim",
+        "No geography, scale, paid-provider, or measured cost result",
+    ]
+    if proof.get("limitations") != expected_limitations:
+        raise StackError("RTC stack proof limitations are invalid")
+    safety = proof.get("artifact_safety")
+    if not isinstance(safety, dict) or set(safety) != {
+        "passed",
+        "trace_video_screenshot_retained",
+        "text_files_scanned",
+        "sha256_manifest",
+    }:
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    if not isinstance(manifest, Mapping):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    files = manifest.get("files")
+    if not isinstance(files, dict):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    if (
+        safety.get("passed") is not True
+        or safety.get("trace_video_screenshot_retained") is not False
+        or safety.get("text_files_scanned") != list(files)
+        or safety.get("sha256_manifest") != manifest
+    ):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    proof_manifest = safety.get("sha256_manifest")
+    if not isinstance(proof_manifest, dict):
+        raise StackError(_ARTIFACT_MANIFEST_ERROR)
+    _validate_artifact_sha256_manifest(
+        paths,
+        proof_manifest,
+        repository_root=repository_root,
+    )
+
+
+def _write_validated_rtc_stack_proof(
+    paths: StackPaths,
+    proof: dict[str, object],
+    source: object,
+    manifest: object,
+    *,
+    repository_root: Path = PROJECT_ROOT,
+) -> dict[str, object]:
+    _atomic_write_json(paths.rtc_proof, proof)
+    try:
+        _validate_artifact_sha256_manifest(
+            paths,
+            manifest,
+            repository_root=repository_root,
+        )
+        expected_serialized = json.dumps(proof, indent=2, sort_keys=True) + "\n"
+        try:
+            persisted_serialized = paths.rtc_proof.read_text(encoding="utf-8")
+        except OSError:
+            raise StackError("persisted RTC stack proof is unavailable") from None
+        if persisted_serialized != expected_serialized:
+            raise StackError("persisted RTC stack proof is not canonical")
+        persisted_proof = _read_json_object(paths.rtc_proof, "RTC stack proof")
+        _validate_rtc_stack_proof(
+            paths,
+            persisted_proof,
+            source,
+            manifest,
+            repository_root=repository_root,
+        )
+        _scan_qualification_artifacts(paths, include_proof=True)
+        _validate_artifact_sha256_manifest(
+            paths,
+            manifest,
+            repository_root=repository_root,
+        )
+    except BaseException:
+        paths.rtc_proof.unlink(missing_ok=True)
+        raise
+    return persisted_proof
+
+
 def _scan_qualification_artifacts(paths: StackPaths, *, include_proof: bool = False) -> None:
     forbidden_files = [
         path
@@ -1565,25 +2000,15 @@ def _scan_qualification_artifacts(paths: StackPaths, *, include_proof: bool = Fa
     ]
     if forbidden_files:
         raise StackError("qualification retained a trace, video, or screenshot")
-    _assert_browser_artifact_safe(
-        paths.browser_result.read_text(encoding="utf-8"),
-        "browser result",
-    )
-    service_paths = (
-        paths.server_log,
-        paths.run_dir / "web-build.log",
-        paths.run_dir / "web.log",
-        paths.run_dir / "playwright.log",
-        paths.playwright_report,
-        paths.evidence,
-    )
-    for path in service_paths:
+    for path in _qualification_text_artifact_paths(paths):
         try:
             value = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise StackError(f"qualification artifact is missing: {path.name}") from exc
         if _service_secret_findings(value):
             raise StackError(f"qualification artifact retained signaling data: {path.name}")
+        if path == paths.browser_result:
+            _assert_browser_artifact_safe(value, "browser result")
     if include_proof:
         _assert_browser_artifact_safe(
             paths.rtc_proof.read_text(encoding="utf-8"),
