@@ -15,6 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import scripts.voice_pipecat_e2e_stack as stack_module  # noqa: E402
+from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
+    COTURN_FIXTURE_PATH,
+    CoturnContractPaths,
+    render_coturn_configuration,
+)
 from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _ARTIFACT_MANIFEST_ERROR,
     _ARTIFACT_SAFETY_FAILURE_CLASSIFICATION,
@@ -24,6 +30,7 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _PROOF_TIMEOUT_PROGRESS_ERROR,
     _PROOF_TIMEOUT_PROGRESS_MAX_BYTES,
     _PROOF_TIMEOUT_PROGRESS_PREFIX,
+    _RELAY_TLS_CONTRACT_ONLY_ERROR,
     _SOURCE_CHANGED_ERROR,
     _SOURCE_PROVENANCE_ERROR,
     _TEARDOWN_FAILURE_CLASSIFICATION,
@@ -37,6 +44,7 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _default_git_command_runner,
     _extract_proof_timeout_progress_capsule,
     _ManagedProcess,
+    _parse_args,
     _pipecat_app_command,
     _pipecat_browser_command,
     _qualification_text_artifact_paths,
@@ -44,6 +52,7 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _read_source_provenance,
     _require_unchanged_source,
     _sanitize_log_file,
+    _sanitize_sensitive_text,
     _scan_qualification_artifacts,
     _service_secret_findings,
     _validate_artifact_sha256_manifest,
@@ -54,7 +63,30 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _write_validated_rtc_stack_proof,
     build_environment,
     build_web_environment,
+    main,
 )
+
+STATIC_TURN_SECRET = "0123456789abcdef" * 4
+TEST_CERTIFICATE_PEM = """\
+-----BEGIN CERTIFICATE-----
+MIIC9DCCAdygAwIBAgIJAN0Y0Nf5BhrTMA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNV
+BAMMCTEyNy4wLjAuMTAeFw0yNjA4MTUxODQzMzRaFw0zNjA4MTIxODQzMzRaMBQx
+EjAQBgNVBAMMCTEyNy4wLjAuMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC
+ggEBALm89xqJ+knCWn4TF0//M9iECFOV4Y8h7n7ByTv1xfru1pPvLCuw2a0smxu/
+Nw+RkpenNkAyXtlENtd4X+1EW5TGR4ekL78Ce5W6PtYZ0fVHpcS2idsIeILkIhYh
+3CQylQyqQxziumkEfMRB5h5v8Zc/o0hUYSTIi92oYPR8uZ2tfDjD1fY62ox/DVn7
+2GKu22JCCW0OI1ur5CXaMyg7cYeS2eq6iuK2z6JsXSYEr2J3T4sIr51njmFt7+OW
+TKfaby9oNVnc9D6aFdiQ1Q4LxZVOW9JyFk2GJYNultjAC7KPBPDz+mowauSRO2As
++6A2qUhdwzTI0j6f9JqEJedHvKECAwEAAaNJMEcwDwYDVR0RBAgwBocEfwAAATAP
+BgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwICpDATBgNVHSUEDDAKBggrBgEF
+BQcDATANBgkqhkiG9w0BAQsFAAOCAQEACi0bImQ3EJChUzmlyxdC35aN/HyGJo8a
+sf46nbyz4ILEP0XJS3aoGjCbwoDR5vh6SCADuhGDkbMJ4cgMchm0XoVbrij9PFpZ
+iCGf3zUmW+zfnzjvPm380IUPBgbpWX/o02gPHKyw095NhS7R0AUtBkSTeiJqcOdS
+dxfiPXDIzxtRTa6yDOfrJZYWSj10IqBc0c5XTaR9yQzxaJ4i/PWS7pN1xEGNPoDr
+AK1RHz0iqmKuoFCTbp/UyRWgH9dhRzXmPKkZVQ0IwPMfgaKyQQKDcxfJ6841kKtD
+f1dZKbTifuE8OGfJN/9l0jKcX+J07pzQm/x5TvrxfzUc1il21KFmzQ==
+-----END CERTIFICATE-----
+"""
 
 
 def _paths(tmp_path: Path) -> StackPaths:
@@ -67,6 +99,25 @@ def _paths(tmp_path: Path) -> StackPaths:
         server_log=run_dir / "pipecat-asgi.log",
         proof=run_dir / "backend-checkpoint.json",
     )
+
+
+def _relay_material(paths: StackPaths) -> CoturnContractPaths:
+    paths.run_dir.mkdir(mode=0o700)
+    paths.run_dir.chmod(0o700)
+    coturn = CoturnContractPaths.for_run_dir(paths.run_id, paths.run_dir)
+    coturn.coturn_dir.mkdir(mode=0o700)
+    coturn.coturn_dir.chmod(0o700)
+    coturn.config.write_text(
+        render_coturn_configuration(
+            COTURN_FIXTURE_PATH.read_text(encoding="utf-8"),
+            STATIC_TURN_SECRET,
+        ),
+        encoding="utf-8",
+    )
+    coturn.cert.write_text(TEST_CERTIFICATE_PEM, encoding="ascii")
+    coturn.config.chmod(0o444)
+    coturn.cert.chmod(0o400)
+    return coturn
 
 
 def _repo_paths(tmp_path: Path) -> StackPaths:
@@ -878,20 +929,51 @@ def test_backend_and_web_environments_are_separate_and_strip_ambient_secrets(
         "PATH": "/usr/bin",
         "OPENAI_API_KEY": "provider-secret",
         "UNLISTED_VENDOR_AUTH_TOKEN": "provider-secret",
+        "UNLISTED_VENDOR_PASSWORD": "provider-password",
+        "UNLISTED_VENDOR_PRIVATE_KEY": "provider-private-key",
+        "UNLISTED_VENDOR_SECRET": "provider-secret",
+        "UNLISTED_VENDOR_TOKEN": "provider-token",
         "NEXT_PUBLIC_FIREBASE_PROJECT_ID": "ambient-project",
         "NEXT_PUBLIC_LIVEKIT_URL": "ambient-livekit",
         "FORCE_COLOR": "1",
         "HTTPS_PROXY": "proxy.example.invalid",
+        "TURN_PASSWORD": "ambient-turn-password",
+        "COTURN_SHARED_SECRET": "ambient-coturn-secret",
+        "MURMUR_PIPECAT_E2E_TURN_URL": "turns:ambient.invalid:5349",
+        "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE": "/tmp/ambient-turnserver.conf",
+        "SSL_CERT_FILE": "/tmp/ambient-ca.pem",
+        "SSL_CERT_DIR": "/tmp/ambient-ca-dir",
+        "REQUESTS_CA_BUNDLE": "/tmp/ambient-requests.pem",
+        "CURL_CA_BUNDLE": "/tmp/ambient-curl.pem",
+        "OPENSSL_CONF": "/tmp/ambient-openssl.cnf",
+        "OPENSSL_MODULES": "/tmp/ambient-openssl-modules",
+        "SSLKEYLOGFILE": "/tmp/ambient-session-keys.log",
     }
 
     backend = build_environment(paths, ambient)
     web = build_web_environment(paths, ambient)
 
     assert backend["PYTHON_DOTENV_DISABLED"] == "1"
+    assert backend["MURMUR_PIPECAT_E2E_NETWORK"] == "direct"
     assert backend["NO_PROXY"] == backend["no_proxy"] == "127.0.0.1,localhost,::1"
     assert not any("FIREBASE" in name or "LIVEKIT" in name for name in backend)
     assert "OPENAI_API_KEY" not in backend
     assert "UNLISTED_VENDOR_AUTH_TOKEN" not in backend
+    assert "UNLISTED_VENDOR_PASSWORD" not in backend
+    assert "UNLISTED_VENDOR_PRIVATE_KEY" not in backend
+    assert "UNLISTED_VENDOR_SECRET" not in backend
+    assert "UNLISTED_VENDOR_TOKEN" not in backend
+    assert "TURN_PASSWORD" not in backend
+    assert "COTURN_SHARED_SECRET" not in backend
+    assert "MURMUR_PIPECAT_E2E_TURN_URL" not in backend
+    assert "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE" not in backend
+    assert "SSL_CERT_FILE" not in backend
+    assert "SSL_CERT_DIR" not in backend
+    assert "REQUESTS_CA_BUNDLE" not in backend
+    assert "CURL_CA_BUNDLE" not in backend
+    assert "OPENSSL_CONF" not in backend
+    assert "OPENSSL_MODULES" not in backend
+    assert "SSLKEYLOGFILE" not in backend
     assert web["NEXT_PUBLIC_FIREBASE_PROJECT_ID"] == "voice-pipecat-e2e"
     assert "NEXT_PUBLIC_LIVEKIT_URL" not in web
     assert "UNLISTED_VENDOR_AUTH_TOKEN" not in web
@@ -899,6 +981,139 @@ def test_backend_and_web_environments_are_separate_and_strip_ambient_secrets(
     assert web["NEXT_PUBLIC_VOICE_RUNTIME"] == "voice_v2"
     assert web["VOICE_E2E_API_URL"] == "http://127.0.0.1:8101"
     assert Path(web["VOICE_E2E_RESULT_PATH"]).is_absolute()
+    assert "TURN_PASSWORD" not in web
+    assert "COTURN_SHARED_SECRET" not in web
+    assert "MURMUR_PIPECAT_E2E_TURN_URL" not in web
+    assert "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE" not in web
+    assert "SSL_CERT_FILE" not in web
+    assert "SSL_CERT_DIR" not in web
+    assert "REQUESTS_CA_BUNDLE" not in web
+    assert "CURL_CA_BUNDLE" not in web
+    assert "OPENSSL_CONF" not in web
+    assert "OPENSSL_MODULES" not in web
+    assert "SSLKEYLOGFILE" not in web
+
+
+def test_relay_environment_accepts_only_exact_private_file_paths_and_no_raw_secret(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    coturn = _relay_material(paths)
+
+    environment = build_environment(
+        paths,
+        {
+            "PATH": "/usr/bin",
+            "TURN_PASSWORD": "ambient-turn-password",
+            "COTURN_SHARED_SECRET": "ambient-coturn-secret",
+            "MURMUR_PIPECAT_E2E_TURN_URL": "turns:ambient.invalid:5349",
+            "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE": "/tmp/ambient-turnserver.conf",
+            "SSL_CERT_FILE": "/tmp/ambient-ca.pem",
+            "SSL_CERT_DIR": "/tmp/ambient-ca-dir",
+            "OPENSSL_CONF": "/tmp/ambient-openssl.cnf",
+            "OPENSSL_MODULES": "/tmp/ambient-openssl-modules",
+            "SSLKEYLOGFILE": "/tmp/ambient-session-keys.log",
+        },
+        network="relay-tls",
+        turn_configuration_file=coturn.config,
+        turn_tls_ca_file=coturn.cert,
+    )
+
+    assert environment["MURMUR_PIPECAT_E2E_NETWORK"] == "relay-tls"
+    assert environment["MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE"] == str(coturn.config)
+    assert environment["SSL_CERT_FILE"] == str(coturn.cert)
+    assert "TURN_PASSWORD" not in environment
+    assert "COTURN_SHARED_SECRET" not in environment
+    assert "MURMUR_PIPECAT_E2E_TURN_URL" not in environment
+    assert "SSL_CERT_DIR" not in environment
+    assert "OPENSSL_CONF" not in environment
+    assert "OPENSSL_MODULES" not in environment
+    assert "SSLKEYLOGFILE" not in environment
+    assert STATIC_TURN_SECRET not in repr(environment)
+
+
+def test_environment_modes_reject_cross_mode_or_incomplete_relay_material(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    coturn = _relay_material(paths)
+
+    with pytest.raises(StackError, match="direct Pipecat E2E does not accept relay material"):
+        build_environment(paths, turn_configuration_file=coturn.config)
+    with pytest.raises(StackError, match="relay-tls Pipecat E2E material is unavailable"):
+        build_environment(paths, network="relay-tls")
+    with pytest.raises(StackError, match="relay-tls Pipecat E2E material is unavailable"):
+        build_environment(
+            paths,
+            network="relay-tls",
+            turn_configuration_file=coturn.config,
+            turn_tls_ca_file=coturn.config,
+        )
+
+
+def test_default_and_explicit_direct_cli_are_shape_compatible(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    proof = {"schema_version": 1, "status": "synthetic-direct"}
+    constructions: list[tuple[StackPaths, dict[str, object]]] = []
+
+    class _DirectStack:
+        def __init__(self, paths: StackPaths, **kwargs: object) -> None:
+            constructions.append((paths, kwargs))
+
+        def run(self) -> dict[str, object]:
+            return proof
+
+    monkeypatch.setattr(stack_module, "PipecatBrowserStack", _DirectStack)
+    monkeypatch.setattr(stack_module, "_new_run_id", lambda: "rtc-direct-contract")
+
+    assert main([]) == 0
+    default_output = capsys.readouterr()
+    assert main(["--network", "direct"]) == 0
+    explicit_output = capsys.readouterr()
+
+    assert default_output.err == explicit_output.err == ""
+    assert default_output.out == explicit_output.out == json.dumps(proof, sort_keys=True) + "\n"
+    assert len(constructions) == 2
+    assert constructions[0] == constructions[1]
+    assert _parse_args([]).network == _parse_args(["--network", "direct"]).network == "direct"
+
+
+@pytest.mark.parametrize("extra", [(), ("--backend-only",)])
+def test_relay_cli_refuses_before_paths_artifacts_or_any_runtime_owner(
+    extra: tuple[str, ...],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("relay contract-only refusal ran a side effect")
+
+    monkeypatch.setattr(stack_module, "make_paths", forbidden)
+    monkeypatch.setattr(stack_module, "read_private_coturn_configuration", forbidden)
+    monkeypatch.setattr(stack_module, "PipecatBrowserStack", forbidden)
+    monkeypatch.setattr(stack_module, "PipecatBackendCheckpoint", forbidden)
+
+    assert main(("--network", "relay-tls", "--run-id", "never-created", *extra)) == 1
+    captured = capsys.readouterr()
+
+    assert captured.out == ""
+    assert captured.err == (f"Pipecat RTC qualification failed: {_RELAY_TLS_CONTRACT_ONLY_ERROR}\n")
+    assert "passed" not in captured.err
+    assert "allocation" not in captured.err
+    assert "bytes" not in captured.err
+
+
+def test_standard_ice_urls_are_forbidden_artifact_data_but_mode_label_is_safe() -> None:
+    for value in (
+        "stun:127.0.0.1:3478",
+        "stuns:127.0.0.1:5349",
+        "turn:127.0.0.1:3478?transport=udp",
+        "turns:127.0.0.1:5349?transport=tcp",
+    ):
+        assert "raw ICE server URL" in _service_secret_findings(value)
+        assert "network URL" in _browser_secret_findings(value)
+        assert value not in _sanitize_sensitive_text(f"unsafe {value}\n")
+    assert _service_secret_findings("network: relay-tls") == set()
+    assert _browser_secret_findings("network: relay-tls") == set()
 
 
 def test_process_plan_is_docker_free_and_targets_only_pipecat_spec() -> None:

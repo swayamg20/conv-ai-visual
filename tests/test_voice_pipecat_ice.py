@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+from aiortc.rtcicetransport import connection_kwargs
 from murmur.voice.pipecat_ice import (
     LoopbackDirectIceLeaseIssuer,
     PipecatIceLease,
@@ -12,6 +15,12 @@ from murmur.voice.pipecat_ice import (
 )
 from murmur.voice.runtime_contracts import VoiceCallClaims, VoiceRuntimeKind
 from pydantic import ValidationError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.voice_pipecat_e2e_coturn import COTURN_TURNS_URL  # noqa: E402
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
 SESSION_ID = "10000000-0000-4000-8000-000000000001"
@@ -100,6 +109,22 @@ def test_sdk_projection_is_an_explicit_ephemeral_secret_bearing_sink() -> None:
     assert sdk_server.credential == TURN_CREDENTIAL
     assert TURN_USERNAME in repr(sdk_server)
     assert TURN_CREDENTIAL in repr(sdk_server)
+
+
+def test_pinned_aiortc_maps_exact_e2e_turns_url_to_tls_over_tcp() -> None:
+    server = PipecatIceServer(
+        urls=(COTURN_TURNS_URL,),
+        username=TURN_USERNAME,
+        credential=TURN_CREDENTIAL,
+    ).to_pipecat_ice_server()
+
+    assert connection_kwargs([server]) == {
+        "turn_server": ("127.0.0.1", 5349),
+        "turn_ssl": True,
+        "turn_transport": "tcp",
+        "turn_username": TURN_USERNAME,
+        "turn_password": TURN_CREDENTIAL,
+    }
 
 
 def test_lease_and_entries_redact_credentials_claims_and_provider_from_generic_dumps() -> None:

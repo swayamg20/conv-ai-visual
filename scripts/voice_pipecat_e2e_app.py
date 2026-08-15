@@ -11,8 +11,21 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from scripts.voice_pipecat_e2e_coturn import (
+    COTURN_TOPOLOGY_STATUS,
+    COTURN_TURNS_URL,
+    CoturnContractError,
+    PipecatE2ENetworkMode,
+    derive_turn_rest_credentials,
+    parse_network_mode,
+    read_private_coturn_configuration,
+    validate_turn_tls_ca_file,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DATABASE_ROOT = (_PROJECT_ROOT / "var" / "voice-pipecat-e2e").resolve()
@@ -55,10 +68,20 @@ _FORBIDDEN_CREDENTIAL_SUFFIXES = (
     "_API_SECRET",
     "_AUTH_TOKEN",
     "_CREDENTIALS",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_SECRET",
+    "_TOKEN",
 )
 
 
-def _require_guarded_environment() -> None:
+@dataclass(frozen=True)
+class _GuardedEnvironment:
+    network: PipecatE2ENetworkMode
+    turn_static_auth_secret: str | None = field(default=None, repr=False)
+
+
+def _require_guarded_environment() -> _GuardedEnvironment:
     if os.getenv("MURMUR_E2E_MODE") != "1":
         raise RuntimeError("Pipecat E2E app requires MURMUR_E2E_MODE=1")
     if os.getenv("MURMUR_ENVIRONMENT") != "test":
@@ -122,8 +145,62 @@ def _require_guarded_environment() -> None:
     except ValueError:
         raise RuntimeError("Pipecat E2E database must stay under var/voice-pipecat-e2e") from None
 
+    try:
+        network = parse_network_mode(os.getenv("MURMUR_PIPECAT_E2E_NETWORK"))
+    except CoturnContractError:
+        raise RuntimeError("Pipecat E2E app network mode is invalid") from None
+    relay_names = {
+        "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE",
+        "SSL_CERT_FILE",
+    }
+    trust_override_names = {
+        "CURL_CA_BUNDLE",
+        "OPENSSL_CONF",
+        "OPENSSL_MODULES",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSLKEYLOGFILE",
+    }
+    unexpected_relay_names = {
+        name
+        for name in os.environ
+        if (
+            name.startswith("TURN_")
+            or name.startswith("COTURN_")
+            or name.startswith("MURMUR_PIPECAT_E2E_TURN_")
+            or name.startswith("MURMUR_PIPECAT_E2E_COTURN_")
+        )
+        and name not in relay_names
+    }
+    if unexpected_relay_names or any(name in os.environ for name in trust_override_names):
+        raise RuntimeError("Pipecat E2E app does not accept ambient TURN configuration")
+    if network is PipecatE2ENetworkMode.DIRECT:
+        if any(name in os.environ for name in relay_names):
+            raise RuntimeError("direct Pipecat E2E does not accept relay material")
+        return _GuardedEnvironment(network=network)
 
-_require_guarded_environment()
+    expected_run_dir = database_path.parent
+    config_value = os.getenv("MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE")
+    certificate_value = os.getenv("SSL_CERT_FILE")
+    if config_value is None or certificate_value is None:
+        raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
+    try:
+        configuration = Path(config_value)
+        certificate = Path(certificate_value)
+        secret = read_private_coturn_configuration(
+            configuration,
+            expected_run_dir=expected_run_dir,
+        )
+        validate_turn_tls_ca_file(certificate, expected_run_dir=expected_run_dir)
+    except (CoturnContractError, OSError, ValueError):
+        raise RuntimeError("relay-tls Pipecat E2E material is unavailable") from None
+    return _GuardedEnvironment(
+        network=network,
+        turn_static_auth_secret=secret,
+    )
+
+
+_guarded_environment = _require_guarded_environment()
 
 from fastapi import HTTPException, Request  # noqa: E402
 from murmur.api.pipecat_schemas import PipecatSessionRequest  # noqa: E402
@@ -142,17 +219,44 @@ from murmur.voice.pipecat_fake_rtc import (  # noqa: E402
     build_pipecat_fake_rtc_provider_from_environment,
     summarize_pipecat_fake_evidence,
 )
+from murmur.voice.pipecat_ice import PipecatIceLease, PipecatIceServer  # noqa: E402
 from murmur.voice.pipecat_signaling import (  # noqa: E402
     PipecatReservationState,
     PipecatSignalingNotFound,
     PipecatSignalingSettings,
 )
+from murmur.voice.runtime_contracts import VoiceCallClaims  # noqa: E402
 from sqlmodel import Session, SQLModel  # noqa: E402
 
 E2E_USER_ID = "voice-e2e-user"
 E2E_USER_EMAIL = "voice-e2e@localhost.invalid"
 E2E_AGENT_ID = "90bd1253-90a6-459a-bf37-365bc3039a76"
 E2E_SESSION_ID = "a4f4328e-185e-4c65-b3f7-101e04a37578"
+
+
+@dataclass(frozen=True)
+class _RelayTlsIceLeaseIssuer:
+    static_auth_secret: str = field(repr=False)
+
+    async def issue(self, claims: VoiceCallClaims) -> PipecatIceLease:
+        credentials = derive_turn_rest_credentials(
+            static_auth_secret=self.static_auth_secret,
+            voice_call_id=claims.voice_call_id,
+            expires_at=claims.expires_at,
+            now=datetime.now(UTC),
+        )
+        return PipecatIceLease(
+            claims=claims,
+            provider_id="e2e-coturn-rest-v1",
+            expires_at=claims.expires_at,
+            ice_servers=(
+                PipecatIceServer(
+                    urls=(COTURN_TURNS_URL,),
+                    username=credentials.username,
+                    credential=credentials.credential,
+                ),
+            ),
+        )
 
 
 def _seed_owned_scope() -> None:
@@ -239,9 +343,17 @@ def _composition_settings() -> PipecatCompositionSettings:
 
 _provider = build_pipecat_fake_rtc_provider_from_environment()
 _evidence_path = Path(os.environ[EVIDENCE_PATH_ENV]).resolve()
+_ice_lease_issuer = None
+if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
+    if _guarded_environment.turn_static_auth_secret is None:
+        raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
+    _ice_lease_issuer = _RelayTlsIceLeaseIssuer(
+        _guarded_environment.turn_static_auth_secret,
+    )
 _composition = create_pipecat_composition(
     _composition_settings(),
     profile_provider=_provider,
+    ice_lease_issuer=_ice_lease_issuer,
 )
 app = create_app(
     composition=_composition,
@@ -252,20 +364,28 @@ app = create_app(
 
 @app.get("/_e2e/health", include_in_schema=False)
 async def e2e_health() -> dict[str, object]:
-    return {
+    health: dict[str, object] = {
         "schema_version": 1,
         "ok": True,
         "runtime": _RUNTIME,
         "profile_id": _PROFILE_ID,
         "agent_id": E2E_AGENT_ID,
         "session_id": E2E_SESSION_ID,
-        "network": "direct-loopback",
+        "network": _guarded_environment.network.evidence_name,
         "providers": "fake",
         "livekit_imported": any(
             name == "livekit" or name.startswith("livekit.") for name in sys.modules
         ),
         "cost": "unmeasured",
     }
+    if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
+        health.update(
+            {
+                "qualification": "unavailable",
+                "topology_status": COTURN_TOPOLOGY_STATUS,
+            }
+        )
+    return health
 
 
 @app.post("/_e2e/pipecat/status", include_in_schema=False)
@@ -333,11 +453,12 @@ async def e2e_status(body: PipecatSessionRequest, request: Request) -> dict[str,
         "expiry_pending": False,
         "trusted_release_pending": False,
     }
-    passed = (
-        snapshot.state is PipecatReservationState.TERMINAL
-        and snapshot.cleanup_complete
-        and control_plane_clean
-        and media["media_contract_satisfied"] is True
+    passed = _qualification_passed(
+        network=_guarded_environment.network,
+        reservation_terminal=snapshot.state is PipecatReservationState.TERMINAL,
+        cleanup_complete=snapshot.cleanup_complete,
+        control_plane_clean=control_plane_clean,
+        media_contract_satisfied=media["media_contract_satisfied"] is True,
     )
     return {
         "schema_version": 1,
@@ -350,6 +471,25 @@ async def e2e_status(body: PipecatSessionRequest, request: Request) -> dict[str,
         "control_plane": control_plane,
         "fake_media": media,
     }
+
+
+def _qualification_passed(
+    *,
+    network: PipecatE2ENetworkMode,
+    reservation_terminal: bool,
+    cleanup_complete: bool,
+    control_plane_clean: bool,
+    media_contract_satisfied: bool,
+) -> bool:
+    """Keep Checkpoint A relay-TLS contract runs categorically unqualified."""
+
+    return (
+        network is PipecatE2ENetworkMode.DIRECT
+        and reservation_terminal is True
+        and cleanup_complete is True
+        and control_plane_clean is True
+        and media_contract_satisfied is True
+    )
 
 
 def _task_pending(task: object) -> bool:

@@ -33,6 +33,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
+from scripts.voice_pipecat_e2e_coturn import (
+    CoturnContractError,
+    CoturnContractPaths,
+    PipecatE2ENetworkMode,
+    parse_network_mode,
+    read_private_coturn_configuration,
+    validate_turn_tls_ca_file,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = PROJECT_ROOT / "web"
 VOICE_FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "voice" / "audio"
@@ -64,6 +73,7 @@ _PROOF_TIMEOUT_PROGRESS_MAX_COUNTER = 2_147_483_647
 _PROOF_TIMEOUT_PROGRESS_ERROR = "Playwright proof timeout progress capsule is invalid"
 _TEARDOWN_FAILURE_CLASSIFICATION = "qualification_teardown=failed"
 _ARTIFACT_SAFETY_FAILURE_CLASSIFICATION = "artifact_safety=failed_closed"
+_RELAY_TLS_CONTRACT_ONLY_ERROR = "relay-tls contract defined; media qualification unavailable"
 
 _RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _CONTRACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -98,14 +108,23 @@ _STRIPPED_ENV_PREFIXES = (
     "SMART_TURN_",
     "TAVILY_",
     "TTS_",
+    "TURN_",
     "VOICE_",
+    "COTURN_",
 )
 _STRIPPED_ENV_NAMES = {
     "DATABASE_URL",
+    "CURL_CA_BUNDLE",
     "FORCE_COLOR",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "NO_PROXY",
+    "OPENSSL_CONF",
+    "OPENSSL_MODULES",
     "PYTHONPATH",
+    "REQUESTS_CA_BUNDLE",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "SSLKEYLOGFILE",
     "no_proxy",
 }
 _SENSITIVE_ENV_SUFFIXES = (
@@ -114,6 +133,10 @@ _SENSITIVE_ENV_SUFFIXES = (
     "_API_SECRET",
     "_AUTH_TOKEN",
     "_CREDENTIALS",
+    "_PASSWORD",
+    "_PRIVATE_KEY",
+    "_SECRET",
+    "_TOKEN",
 )
 
 
@@ -313,7 +336,41 @@ def _clean_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:
 def build_environment(
     paths: StackPaths,
     base: Mapping[str, str] | None = None,
+    *,
+    network: PipecatE2ENetworkMode | str = PipecatE2ENetworkMode.DIRECT,
+    turn_configuration_file: Path | None = None,
+    turn_tls_ca_file: Path | None = None,
 ) -> dict[str, str]:
+    try:
+        mode = parse_network_mode(network)
+    except CoturnContractError as exc:
+        raise StackError("Pipecat E2E network mode is invalid") from exc
+    if mode is PipecatE2ENetworkMode.DIRECT and (
+        turn_configuration_file is not None or turn_tls_ca_file is not None
+    ):
+        raise StackError("direct Pipecat E2E does not accept relay material")
+    relay_environment: dict[str, str] = {}
+    if mode is PipecatE2ENetworkMode.RELAY_TLS:
+        if turn_configuration_file is None or turn_tls_ca_file is None:
+            raise StackError("relay-tls Pipecat E2E material is unavailable")
+        try:
+            coturn_paths = CoturnContractPaths.for_run_dir(paths.run_id, paths.run_dir)
+            if turn_configuration_file != coturn_paths.config:
+                raise CoturnContractError("Coturn configuration path is invalid")
+            read_private_coturn_configuration(
+                turn_configuration_file,
+                expected_run_dir=paths.run_dir,
+            )
+            certificate = validate_turn_tls_ca_file(
+                turn_tls_ca_file,
+                expected_run_dir=paths.run_dir,
+            )
+        except CoturnContractError as exc:
+            raise StackError("relay-tls Pipecat E2E material is unavailable") from exc
+        relay_environment = {
+            "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE": str(coturn_paths.config),
+            "SSL_CERT_FILE": str(certificate),
+        }
     environment = _clean_environment(base)
     python_path = os.pathsep.join((str(PROJECT_ROOT / "backend"), str(PROJECT_ROOT)))
     environment.update(
@@ -324,6 +381,7 @@ def build_environment(
             "MURMUR_ENVIRONMENT": "test",
             "MURMUR_PIPECAT_E2E_ASSISTANT_FIXTURE_PATH": str(ASSISTANT_FIXTURE.resolve()),
             "MURMUR_PIPECAT_E2E_EVIDENCE_PATH": str(paths.evidence),
+            "MURMUR_PIPECAT_E2E_NETWORK": mode.value,
             "PIPECAT_HOST": PIPECAT_HOST,
             "PIPECAT_PORT": str(PIPECAT_PORT),
             "PIPECAT_SIGNALING_BASE_URL": PIPECAT_SIGNALING_BASE_URL,
@@ -332,6 +390,7 @@ def build_environment(
             "VOICE_V2_PROFILE_ID": VOICE_PROFILE_ID,
         }
     )
+    environment.update(relay_environment)
     return environment
 
 
@@ -1118,11 +1177,18 @@ _SERVICE_SECRET_PATTERNS = (
     ("raw SDP", re.compile(r"(?:^|[\s\"'])v=0(?:\\r\\n|\r?\n)", re.I)),
     ("raw ICE credential", re.compile(r"ice-(?:ufrag|pwd):", re.I)),
     ("raw ICE candidate", re.compile(r"candidate:", re.I)),
+    (
+        "raw ICE server URL",
+        re.compile(r"\b(?:stun|stuns|turn|turns):[^\s\"'<>]+", re.I),
+    ),
     ("raw SmallWebRTC peer ID", re.compile(r"SmallWebRTCConnection#[A-Za-z0-9._:-]+")),
 )
 _BROWSER_SECRET_PATTERNS = (
     ("signaling locator", re.compile(r"/api/voice/pipecat/signal/", re.I)),
-    ("network URL", re.compile(r"(?:https?|wss?|stun|turns?):\/\/", re.I)),
+    (
+        "network URL",
+        re.compile(r"(?:(?:https?|wss?):\/\/|\b(?:stun|stuns|turn|turns):)", re.I),
+    ),
     ("authorization value", re.compile(r"Bearer\s+", re.I)),
     ("authorization field", re.compile(r'"authorization"', re.I)),
     ("raw SDP field", re.compile(r'(?:(?:")|(?:\\"))sdp(?:(?:")|(?:\\"))', re.I)),
@@ -1359,7 +1425,8 @@ def _sanitize_sensitive_text(value: str) -> str:
         flags=re.I,
     )
     unsafe_line = re.compile(
-        r"candidate:|ice-(?:ufrag|pwd):|(?:^|[\s\"'])v=0(?:\\r\\n|\r?\n)",
+        r"candidate:|ice-(?:ufrag|pwd):|\b(?:stun|stuns|turn|turns):|"
+        r"(?:^|[\s\"'])v=0(?:\\r\\n|\r?\n)",
         re.I,
     )
     return "\n".join(
@@ -2354,6 +2421,12 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         default=240.0,
     )
     parser.add_argument(
+        "--network",
+        choices=tuple(mode.value for mode in PipecatE2ENetworkMode),
+        default=PipecatE2ENetworkMode.DIRECT.value,
+        help="deterministic network contract (relay-tls is contract-only in Checkpoint A)",
+    )
+    parser.add_argument(
         "--backend-only",
         action="store_true",
         help="run only guarded bootstrap/release without a media claim",
@@ -2363,6 +2436,13 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    network = parse_network_mode(args.network)
+    if network is PipecatE2ENetworkMode.RELAY_TLS:
+        print(
+            f"Pipecat RTC qualification failed: {_RELAY_TLS_CONTRACT_ONLY_ERROR}",
+            file=sys.stderr,
+        )
+        return 1
     run_id = args.run_id or _new_run_id()
     try:
         if args.backend_only:
@@ -2401,6 +2481,7 @@ __all__ = [
     "PIPECAT_PORT",
     "PipecatBackendCheckpoint",
     "PipecatBrowserStack",
+    "PipecatE2ENetworkMode",
     "StackError",
     "StackPaths",
     "build_environment",
