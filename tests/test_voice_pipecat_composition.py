@@ -13,7 +13,7 @@ from fastapi import HTTPException
 from loguru import logger as loguru_logger
 from murmur.voice import pipecat_app
 from murmur.voice.pipecat_app import PipecatServerSettings, uvicorn_options
-from murmur.voice.pipecat_bootstrap import PipecatBootstrapResult
+from murmur.voice.pipecat_bootstrap import PipecatBootstrapResult, PipecatBootstrapSettings
 from murmur.voice.pipecat_composition import (
     PipecatApplicationComposition,
     PipecatCompositionSettings,
@@ -28,6 +28,7 @@ from murmur.voice.pipecat_signaling import (
     PipecatOfferAnswer,
     PipecatOfferRequest,
     PipecatPatchRequest,
+    PipecatSignalingSettings,
 )
 from murmur.voice.runtime_contracts import (
     PipecatVoiceRuntimeAssignment,
@@ -620,6 +621,51 @@ def test_composition_factory_shares_one_signaling_owner_with_bootstrap(
     assert composition.cors.allowed_origins == (ORIGIN,)
     assert SECRET not in repr(composition.__dict__)
     assert disabled_namespaces == [PIPECAT_REQUEST_HANDLER_LOG_NAMESPACE]
+
+
+def test_injected_profile_can_use_matching_nonproduction_id_without_cascade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_profile_id = "pipecat-fake-rtc-v1"
+    provider = SimpleNamespace(prepare=None)
+    disabled_namespaces: list[str] = []
+    monkeypatch.setattr(loguru_logger, "disable", disabled_namespaces.append)
+    settings = PipecatCompositionSettings(
+        signaling=PipecatSignalingSettings(
+            signaling_base_url="http://127.0.0.1:8101/api/voice/pipecat/signal",
+            profile_id=fake_profile_id,
+            allowed_origins=("http://127.0.0.1:3100",),
+        ),
+        bootstrap=PipecatBootstrapSettings(profile_id=fake_profile_id),
+        cascade=None,
+    )
+
+    composition = create_pipecat_composition(
+        settings,
+        profile_provider=provider,  # type: ignore[arg-type]
+        handler_factory=lambda _lease: SimpleNamespace(),  # type: ignore[arg-type]
+    )
+
+    assert composition.bootstrap_service.settings.profile_id == fake_profile_id
+    assert composition.signaling_service.settings.profile_id == fake_profile_id
+    assert composition.signaling_service._runtime_starter._profile_provider is provider
+    assert disabled_namespaces == [PIPECAT_REQUEST_HANDLER_LOG_NAMESPACE]
+
+
+def test_missing_injected_provider_with_no_cascade_fails_closed() -> None:
+    fake_profile_id = "pipecat-fake-rtc-v1"
+    settings = PipecatCompositionSettings(
+        signaling=PipecatSignalingSettings(
+            signaling_base_url="http://127.0.0.1:8101/api/voice/pipecat/signal",
+            profile_id=fake_profile_id,
+            allowed_origins=("http://127.0.0.1:3100",),
+        ),
+        bootstrap=PipecatBootstrapSettings(profile_id=fake_profile_id),
+        cascade=None,
+    )
+
+    with pytest.raises(PipecatCompositionUnavailable, match="explicit profile provider"):
+        create_pipecat_composition(settings)
 
 
 def test_peer_handler_receives_fresh_claim_scoped_ice_and_single_connection_mode(

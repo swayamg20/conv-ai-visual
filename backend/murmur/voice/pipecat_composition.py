@@ -137,20 +137,20 @@ class PipecatCompositionSettings:
 
     signaling: PipecatSignalingSettings
     bootstrap: PipecatBootstrapSettings
-    cascade: PipecatCascadeSettings
+    cascade: PipecatCascadeSettings | None = None
     projection_cleanup_timeout_seconds: float = 5.0
     runtime_cleanup_timeout_seconds: float = 5.0
     runtime_readiness_timeout_seconds: float = 10.0
     active_call_idle_timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
-        profile_ids = {
-            self.signaling.profile_id,
-            self.bootstrap.profile_id,
-            self.cascade.profile_id,
-        }
-        if profile_ids != {PIPECAT_DIRECT_CASCADE_PROFILE_ID}:
-            raise ValueError("Pipecat composition requires its exact direct-cascade profile")
+        profile_ids = {self.signaling.profile_id, self.bootstrap.profile_id}
+        if len(profile_ids) != 1:
+            raise ValueError("Pipecat composition profile IDs must match")
+        if self.cascade is not None:
+            profile_ids.add(self.cascade.profile_id)
+            if profile_ids != {PIPECAT_DIRECT_CASCADE_PROFILE_ID}:
+                raise ValueError("Pipecat composition requires its exact direct-cascade profile")
         if self.signaling.reservation_ttl_seconds != self.bootstrap.assignment_ttl_seconds:
             raise ValueError("Pipecat bootstrap and signaling TTL policies must match")
         if not self.signaling.allowed_origins:
@@ -609,7 +609,14 @@ def create_pipecat_composition(
     """Wire one same-process bootstrap, handler, runtime, and signaling owner."""
 
     _disable_unsafe_pipecat_request_logging()
-    provider = profile_provider or build_pipecat_cascade_provider(settings.cascade)
+    if profile_provider is None:
+        if settings.cascade is None:
+            raise PipecatCompositionUnavailable(
+                "Pipecat composition requires an explicit profile provider"
+            )
+        provider = build_pipecat_cascade_provider(settings.cascade)
+    else:
+        provider = profile_provider
     scope_factory = RepositoryPipecatScopeFactory(
         profile_id=settings.bootstrap.profile_id,
         repository_timeout_seconds=settings.bootstrap.repository_timeout_seconds,
