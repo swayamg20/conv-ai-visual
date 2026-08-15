@@ -987,7 +987,26 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   expect(localPeak).toBeGreaterThanOrEqual(LOCAL_ACTIVE_RMS);
   expect(remotePeak).toBeGreaterThanOrEqual(REMOTE_ACTIVE_RMS);
 
+  const sessionEndObserved = page.waitForRequest(
+    (request) => {
+      try {
+        const parsed = new URL(request.url());
+        return (
+          parsed.origin === PIPECAT_API_URL &&
+          parsed.pathname === "/api/voice/session/end" &&
+          request.method() === "POST"
+        );
+      } catch {
+        return false;
+      }
+    },
+    { timeout: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS }
+  );
   await page.getByTestId("voice-e2e-end").click();
+  // The browser hook awaits this release, but Playwright delivers its request
+  // observation over a separate protocol turn. Await that exact observation
+  // before asserting the sanitized request ledger.
+  await sessionEndObserved;
   await expect
     .poll(
       async () => {
