@@ -1050,6 +1050,7 @@ def _validate_audio_clock_probe(
         "stale_frame_correction_count",
         "last_stale_observed_block_start_frame",
         "last_stale_logical_block_start_frame",
+        "stale_frame_catch_up_observed_block_start_frame",
         "stale_frame_correction_pending",
     }
     if not isinstance(value, dict) or set(value) != expected_keys:
@@ -1070,6 +1071,7 @@ def _validate_audio_clock_probe(
     correction_count = value.get("stale_frame_correction_count")
     stale_observed_frame = value.get("last_stale_observed_block_start_frame")
     stale_logical_frame = value.get("last_stale_logical_block_start_frame")
+    stale_catch_up_frame = value.get("stale_frame_catch_up_observed_block_start_frame")
     if (
         isinstance(correction_count, bool)
         or not isinstance(correction_count, int)
@@ -1077,7 +1079,11 @@ def _validate_audio_clock_probe(
         or value.get("stale_frame_correction_pending") is not False
         or (
             correction_count == 0
-            and (stale_observed_frame is not None or stale_logical_frame is not None)
+            and (
+                stale_observed_frame is not None
+                or stale_logical_frame is not None
+                or stale_catch_up_frame is not None
+            )
         )
         or (
             correction_count == 1
@@ -1088,7 +1094,12 @@ def _validate_audio_clock_probe(
                 or stale_observed_frame % _AUDIO_CLOCK_QUANTUM_FRAMES != 0
                 or isinstance(stale_logical_frame, bool)
                 or not isinstance(stale_logical_frame, int)
-                or stale_logical_frame != stale_observed_frame + _AUDIO_CLOCK_QUANTUM_FRAMES
+                or stale_logical_frame <= stale_observed_frame
+                or (stale_logical_frame - stale_observed_frame) % _AUDIO_CLOCK_QUANTUM_FRAMES != 0
+                or isinstance(stale_catch_up_frame, bool)
+                or not isinstance(stale_catch_up_frame, int)
+                or stale_catch_up_frame % _AUDIO_CLOCK_QUANTUM_FRAMES != 0
+                or stale_catch_up_frame != stale_logical_frame + _AUDIO_CLOCK_QUANTUM_FRAMES
             )
         )
     ):
@@ -1184,9 +1195,10 @@ def _validate_audio_clock_probe(
     ):
         raise StackError(f"audio sample-clock {label} timeline counters are inconsistent")
     if correction_count == 1 and (
-        not isinstance(stale_logical_frame, int)
-        or stale_logical_frame < first_transition_start + _AUDIO_CLOCK_QUANTUM_FRAMES
-        or stale_logical_frame + 2 * _AUDIO_CLOCK_QUANTUM_FRAMES > latest_block_end
+        not isinstance(stale_observed_frame, int)
+        or stale_observed_frame < first_transition_start
+        or not isinstance(stale_catch_up_frame, int)
+        or stale_catch_up_frame + _AUDIO_CLOCK_QUANTUM_FRAMES > latest_block_end
     ):
         raise StackError(
             f"audio sample-clock {label} stale-frame correction is outside its timeline"

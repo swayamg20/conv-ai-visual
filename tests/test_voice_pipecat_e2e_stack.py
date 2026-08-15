@@ -135,6 +135,7 @@ def _audio_sample_clock(
                 "stale_frame_correction_count": 0,
                 "last_stale_observed_block_start_frame": None,
                 "last_stale_logical_block_start_frame": None,
+                "stale_frame_catch_up_observed_block_start_frame": None,
                 "stale_frame_correction_pending": False,
             },
             "remote": {
@@ -181,6 +182,7 @@ def _audio_sample_clock(
                 "stale_frame_correction_count": 0,
                 "last_stale_observed_block_start_frame": None,
                 "last_stale_logical_block_start_frame": None,
+                "stale_frame_catch_up_observed_block_start_frame": None,
                 "stale_frame_correction_pending": False,
             },
         },
@@ -543,8 +545,17 @@ def test_browser_result_requires_null_audio_clock_fault_diagnostics(
         _read_pipecat_browser_result(path)
 
 
-def test_browser_result_accepts_one_exact_caught_up_stale_frame_correction(
+@pytest.mark.parametrize(
+    ("logical_frame", "catch_up_frame"),
+    [
+        (50_304, 50_432),  # Two corrected blocks.
+        (58_240, 58_368),  # A bounded 64-block plateau in the same episode.
+    ],
+)
+def test_browser_result_accepts_one_settled_stale_frame_plateau(
     tmp_path: Path,
+    logical_frame: int,
+    catch_up_frame: int,
 ) -> None:
     path = tmp_path / "result.json"
     value = _browser_result()
@@ -560,7 +571,8 @@ def test_browser_result_accepts_one_exact_caught_up_stale_frame_correction(
         {
             "stale_frame_correction_count": 1,
             "last_stale_observed_block_start_frame": 50_048,
-            "last_stale_logical_block_start_frame": 50_176,
+            "last_stale_logical_block_start_frame": logical_frame,
+            "stale_frame_catch_up_observed_block_start_frame": catch_up_frame,
         }
     )
 
@@ -576,12 +588,11 @@ def test_browser_result_accepts_one_exact_caught_up_stale_frame_correction(
         "zero_with_frame",
         "one_without_frame",
         "unaligned_frames",
-        "wrong_frame_mapping",
+        "wrong_plateau_order",
+        "wrong_catch_up_mapping",
         "pending_correction",
-        "correction_outside_timeline",
-        "correction_at_first_transition",
-        "correction_one_block_before_latest",
-        "correction_at_latest",
+        "correction_before_timeline",
+        "correction_after_timeline",
     ],
 )
 def test_browser_result_rejects_invalid_stale_frame_correction(
@@ -602,9 +613,16 @@ def test_browser_result_rejects_invalid_stale_frame_correction(
     if mutation == "boolean_count":
         local["stale_frame_correction_count"] = True
     elif mutation == "too_many_corrections":
-        local["stale_frame_correction_count"] = 2
+        local.update(
+            {
+                "stale_frame_correction_count": 2,
+                "last_stale_observed_block_start_frame": 50_048,
+                "last_stale_logical_block_start_frame": 50_304,
+                "stale_frame_catch_up_observed_block_start_frame": 50_432,
+            }
+        )
     elif mutation == "zero_with_frame":
-        local["last_stale_observed_block_start_frame"] = 50_048
+        local["stale_frame_catch_up_observed_block_start_frame"] = 50_432
     elif mutation == "one_without_frame":
         local["stale_frame_correction_count"] = 1
         local["last_stale_observed_block_start_frame"] = 50_048
@@ -613,28 +631,39 @@ def test_browser_result_rejects_invalid_stale_frame_correction(
             {
                 "stale_frame_correction_count": 1,
                 "last_stale_observed_block_start_frame": 50_049,
-                "last_stale_logical_block_start_frame": 50_177,
+                "last_stale_logical_block_start_frame": 50_305,
+                "stale_frame_catch_up_observed_block_start_frame": 50_433,
             }
         )
-    elif mutation == "wrong_frame_mapping":
+    elif mutation == "wrong_plateau_order":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 50_304,
+                "last_stale_logical_block_start_frame": 50_048,
+                "stale_frame_catch_up_observed_block_start_frame": 50_176,
+            }
+        )
+    elif mutation == "wrong_catch_up_mapping":
         local.update(
             {
                 "stale_frame_correction_count": 1,
                 "last_stale_observed_block_start_frame": 50_048,
                 "last_stale_logical_block_start_frame": 50_304,
+                "stale_frame_catch_up_observed_block_start_frame": 50_560,
             }
         )
     elif mutation == "pending_correction":
-        local["stale_frame_correction_pending"] = True
-    elif mutation == "correction_outside_timeline":
         local.update(
             {
                 "stale_frame_correction_count": 1,
-                "last_stale_observed_block_start_frame": 105_088,
-                "last_stale_logical_block_start_frame": 105_216,
+                "last_stale_observed_block_start_frame": 50_048,
+                "last_stale_logical_block_start_frame": 50_304,
+                "stale_frame_catch_up_observed_block_start_frame": 50_432,
+                "stale_frame_correction_pending": True,
             }
         )
-    elif mutation == "correction_at_first_transition":
+    elif mutation == "correction_before_timeline":
         transitions = local["transitions"]
         assert isinstance(transitions, list)
         first_transition = transitions[0]
@@ -645,23 +674,17 @@ def test_browser_result_rejects_invalid_stale_frame_correction(
                 "processed_block_count": 820,
                 "stale_frame_correction_count": 1,
                 "last_stale_observed_block_start_frame": 0,
-                "last_stale_logical_block_start_frame": 128,
+                "last_stale_logical_block_start_frame": 256,
+                "stale_frame_catch_up_observed_block_start_frame": 384,
             }
         )
-    elif mutation == "correction_one_block_before_latest":
+    elif mutation == "correction_after_timeline":
         local.update(
             {
                 "stale_frame_correction_count": 1,
-                "last_stale_observed_block_start_frame": 104_832,
+                "last_stale_observed_block_start_frame": 104_704,
                 "last_stale_logical_block_start_frame": 104_960,
-            }
-        )
-    elif mutation == "correction_at_latest":
-        local.update(
-            {
-                "stale_frame_correction_count": 1,
-                "last_stale_observed_block_start_frame": 104_960,
-                "last_stale_logical_block_start_frame": 105_088,
+                "stale_frame_catch_up_observed_block_start_frame": 105_088,
             }
         )
     else:  # pragma: no cover - the parameter list is exhaustive
@@ -669,6 +692,31 @@ def test_browser_result_rejects_invalid_stale_frame_correction(
 
     _write_json(path, value)
     with pytest.raises(StackError, match="stale-frame correction"):
+        _read_pipecat_browser_result(path)
+
+
+@pytest.mark.parametrize("mutation", ["missing_key", "extra_key"])
+def test_browser_result_requires_exact_stale_plateau_schema(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    path = tmp_path / "result.json"
+    value = _browser_result()
+    browser = value["browser_evidence"]
+    assert isinstance(browser, dict)
+    clock = browser["audio_sample_clock"]
+    assert isinstance(clock, dict)
+    evidence = clock["evidence"]
+    assert isinstance(evidence, dict)
+    local = evidence["local"]
+    assert isinstance(local, dict)
+    if mutation == "missing_key":
+        local.pop("stale_frame_catch_up_observed_block_start_frame")
+    else:
+        local["second_stale_frame_episode"] = None
+
+    _write_json(path, value)
+    with pytest.raises(StackError, match="probe schema is invalid"):
         _read_pipecat_browser_result(path)
 
 
