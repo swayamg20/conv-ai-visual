@@ -54,6 +54,7 @@ ORIGIN = "https://murmur.example.test"
 PROFILE_ID = "pipecat-direct-cascade-v1"
 SECRET = "composition-secret-that-must-never-leak"
 PIPECAT_REQUEST_HANDLER_LOG_NAMESPACE = "pipecat.transports.smallwebrtc.request_handler"
+PIPECAT_CONNECTION_LOG_NAMESPACE = "pipecat.transports.smallwebrtc.connection"
 AIORTC_PEER_CONNECTION_LOG_NAMESPACE = "aiortc.rtcpeerconnection"
 
 
@@ -745,6 +746,64 @@ async def test_real_pinned_handler_cannot_log_full_invalid_sdp_after_production_
     assert ice_ufrag not in rendered
     assert ice_password not in rendered
     assert "SmallWebRTC request details" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_real_pinned_connection_cannot_log_raw_candidate_below_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pipecat.transports.smallwebrtc import connection
+
+    raw_candidate = "candidate:raw-connection-secret-that-must-never-reach-loguru"
+    warning_sentinel = "Audio transceiver not found. Cannot replace audio track."
+    error_sentinel = "smallwebrtc-error-must-remain-visible"
+    captured_debug_or_higher: list[tuple[str, str]] = []
+    captured_error_or_higher: list[str] = []
+    monkeypatch.setattr(connection, "logger", loguru_logger)
+    debug_sink_id = loguru_logger.add(
+        lambda message: captured_debug_or_higher.append((message.record["name"], str(message))),
+        level="DEBUG",
+    )
+    error_sink_id = loguru_logger.add(
+        lambda message: captured_error_or_higher.append(str(message)),
+        level="ERROR",
+    )
+    adapter = None
+    received_candidates: list[object] = []
+
+    async def add_ice_candidate(candidate: object) -> None:
+        received_candidates.append(candidate)
+
+    try:
+        adapter = create_pipecat_peer_handler(_lease(_claims()))
+        fake_connection = SimpleNamespace(pc=SimpleNamespace(addIceCandidate=add_ice_candidate))
+        await connection.SmallWebRTCConnection.add_ice_candidate(
+            fake_connection,
+            raw_candidate,
+        )
+        connection.SmallWebRTCConnection.replace_audio_track(
+            SimpleNamespace(_pc=SimpleNamespace(getTransceivers=lambda: [])),
+            SimpleNamespace(kind="audio"),
+        )
+        connection.logger.error(error_sentinel)
+    finally:
+        if adapter is not None:
+            await adapter.close()
+        loguru_logger.remove(debug_sink_id)
+        loguru_logger.remove(error_sink_id)
+
+    rendered_debug_or_higher = "\n".join(rendered for _name, rendered in captured_debug_or_higher)
+    rendered_error_or_higher = "\n".join(captured_error_or_higher)
+    assert received_candidates == [raw_candidate]
+    assert raw_candidate not in rendered_debug_or_higher
+    assert warning_sentinel in rendered_debug_or_higher
+    assert any(
+        name == PIPECAT_CONNECTION_LOG_NAMESPACE and warning_sentinel in rendered
+        for name, rendered in captured_debug_or_higher
+    )
+    assert error_sentinel in rendered_debug_or_higher
+    assert warning_sentinel not in rendered_error_or_higher
+    assert error_sentinel in rendered_error_or_higher
 
 
 @pytest.mark.asyncio

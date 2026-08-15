@@ -9,7 +9,7 @@ import math
 import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol, TypeVar
+from typing import Any, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 from murmur.persistence.models import AgentModel, SessionModel
@@ -67,6 +67,37 @@ _PIPECAT_SIGNALING_PATH = "/api/voice/pipecat/signal"
 _DEFAULT_SIGNALING_BASE_URL = f"http://127.0.0.1:8001{_PIPECAT_SIGNALING_PATH}"
 _PIPECAT_REQUEST_HANDLER_LOG_NAMESPACE = "pipecat.transports.smallwebrtc.request_handler"
 _AIORTC_PEER_CONNECTION_LOG_NAMESPACE = "aiortc.rtcpeerconnection"
+
+
+class _PipecatConnectionWarningFloorLogger:
+    """Keep the pinned connection logger below WARNING from emitting secrets."""
+
+    def __init__(self, delegate: Any) -> None:
+        self._delegate = delegate
+
+    def trace(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def debug(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def info(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def success(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+    def warning(self, *args: object, **kwargs: object) -> Any:
+        return self._delegate.opt(depth=1).warning(*args, **kwargs)
+
+    def error(self, *args: object, **kwargs: object) -> Any:
+        return self._delegate.opt(depth=1).error(*args, **kwargs)
+
+    def critical(self, *args: object, **kwargs: object) -> Any:
+        return self._delegate.opt(depth=1).critical(*args, **kwargs)
+
+    def exception(self, *args: object, **kwargs: object) -> Any:
+        return self._delegate.opt(depth=1).exception(*args, **kwargs)
 
 
 class PipecatCompositionUnavailable(RuntimeError):
@@ -589,6 +620,7 @@ def create_pipecat_peer_handler(ice_lease: PipecatIceLease) -> PipecatPeerHandle
         SmallWebRTCRequestHandler,
     )
 
+    _install_pipecat_connection_warning_floor()
     handler = SmallWebRTCRequestHandler(
         ice_servers=ice_lease.to_pipecat_ice_servers(),
         connection_mode=ConnectionMode.SINGLE,
@@ -671,6 +703,16 @@ def _disable_unsafe_pipecat_request_logging() -> None:
     aiortc_logger = logging.getLogger(_AIORTC_PEER_CONNECTION_LOG_NAMESPACE)
     if aiortc_logger.level < logging.WARNING:
         aiortc_logger.setLevel(logging.WARNING)
+
+
+def _install_pipecat_connection_warning_floor() -> None:
+    """Suppress pinned connection details below WARNING without muting failures."""
+
+    from pipecat.transports.smallwebrtc import connection
+
+    if isinstance(connection.logger, _PipecatConnectionWarningFloorLogger):
+        return
+    connection.logger = _PipecatConnectionWarningFloorLogger(connection.logger)
 
 
 def _environment_int(source: Mapping[str, str], name: str, default: int) -> int:
