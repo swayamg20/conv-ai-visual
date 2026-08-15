@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@playwright/test", () => {
@@ -7,6 +9,11 @@ vi.mock("@playwright/test", () => {
 
 import {
   buildProofTimeoutProgressCapsule,
+  PIPECAT_PROOF_WAIT_TIMEOUT_MS,
+  PIPECAT_RUNNER_WATCHDOG_CONTRACT_MS,
+  PIPECAT_SPEC_SETUP_MARGIN_MS,
+  PIPECAT_SPEC_TIMEOUT_MS,
+  PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
   PROOF_TIMEOUT_PROGRESS_MAX_BYTES,
   PROOF_TIMEOUT_PROGRESS_PREFIX,
   serializeProofTimeoutProgressCapsule,
@@ -121,6 +128,49 @@ function timeoutSnapshot(): Parameters<typeof buildProofTimeoutProgressCapsule>[
 }
 
 describe("Pipecat proof timeout progress capsule", () => {
+  it("keeps nested waits below the exact spec and runner watchdog contracts", () => {
+    expect({
+      proofWaitMs: PIPECAT_PROOF_WAIT_TIMEOUT_MS,
+      terminalCleanupMs: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
+      setupMarginMs: PIPECAT_SPEC_SETUP_MARGIN_MS,
+      specTimeoutMs: PIPECAT_SPEC_TIMEOUT_MS,
+      runnerWatchdogMs: PIPECAT_RUNNER_WATCHDOG_CONTRACT_MS,
+    }).toEqual({
+      proofWaitMs: 45_000,
+      terminalCleanupMs: 20_000,
+      setupMarginMs: 30_000,
+      specTimeoutMs: 110_000,
+      runnerWatchdogMs: 120_000,
+    });
+    expect(
+      PIPECAT_PROOF_WAIT_TIMEOUT_MS +
+        PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS +
+        PIPECAT_SPEC_SETUP_MARGIN_MS
+    ).toBeLessThan(PIPECAT_SPEC_TIMEOUT_MS);
+    expect(PIPECAT_SPEC_TIMEOUT_MS).toBeLessThan(
+      PIPECAT_RUNNER_WATCHDOG_CONTRACT_MS
+    );
+
+    const specSource = readFileSync(
+      new URL("../../../../e2e/voice-pipecat-rtc.spec.ts", import.meta.url),
+      "utf8"
+    );
+    const exactTestStart = specSource.indexOf(
+      'test("real browser media crosses Pipecat SmallWebRTC and cleans one peer"'
+    );
+    expect(exactTestStart).toBeGreaterThanOrEqual(0);
+    const exactTestSource = specSource.slice(exactTestStart);
+    expect(exactTestSource.match(/\ntest\(/g) ?? []).toHaveLength(0);
+    for (const runtimeWiring of [
+      "test.setTimeout(PIPECAT_SPEC_TIMEOUT_MS);",
+      "waitForProof(page, PIPECAT_PROOF_WAIT_TIMEOUT_MS)",
+      "timeout: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,",
+    ]) {
+      expect(specSource.split(runtimeWiring)).toHaveLength(2);
+      expect(exactTestSource).toContain(runtimeWiring);
+    }
+  });
+
   it("emits one exact bounded allowlisted schema without raw browser evidence", () => {
     const snapshot = timeoutSnapshot();
     const capsule = buildProofTimeoutProgressCapsule(snapshot);

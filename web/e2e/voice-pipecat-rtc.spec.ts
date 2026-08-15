@@ -27,6 +27,12 @@ const LOCAL_REGION_BRIDGE_MS = 500;
 const REMOTE_ACTIVE_RMS = 0.02;
 const REMOTE_SILENCE_RMS = 0.012;
 const REMOTE_ATTRIBUTION_TOLERANCE_MS = 100;
+export const PIPECAT_PROOF_WAIT_TIMEOUT_MS = 45_000;
+export const PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS = 20_000;
+export const PIPECAT_SPEC_SETUP_MARGIN_MS = 30_000;
+export const PIPECAT_SPEC_TIMEOUT_MS = 110_000;
+// Mirrors the outer runner contract without changing its watchdog behavior.
+export const PIPECAT_RUNNER_WATCHDOG_CONTRACT_MS = 120_000;
 export const PROOF_TIMEOUT_PROGRESS_PREFIX =
   "VOICE_PIPECAT_PROOF_TIMEOUT_PROGRESS=";
 export const PROOF_TIMEOUT_PROGRESS_MAX_BYTES = 2_048;
@@ -668,6 +674,7 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   page,
   request,
 }) => {
+  test.setTimeout(PIPECAT_SPEC_TIMEOUT_MS);
   const resultPath = requiredAbsoluteEnv("VOICE_E2E_RESULT_PATH");
   const apiUrl = requiredPipecatApiUrl();
   const requestTrace = observeSanitizedRequests(page);
@@ -716,7 +723,7 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
 
   await expect(activationButton).toBeEnabled();
   await activationButton.click();
-  const proof = await waitForProof(page, 45_000);
+  const proof = await waitForProof(page, PIPECAT_PROOF_WAIT_TIMEOUT_MS);
   const assignment = proof.assignment;
   expect(assignment).not.toBeNull();
   if (!assignment) throw new Error("Accepted Pipecat assignment disappeared");
@@ -1029,7 +1036,7 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
         return status.status;
       },
       {
-        timeout: 20_000,
+        timeout: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
         message: "dedicated Pipecat app must finish exact terminal cleanup",
       }
     )
