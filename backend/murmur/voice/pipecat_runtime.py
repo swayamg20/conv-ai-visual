@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
@@ -63,6 +64,15 @@ _ACTIVE_CALL_IDLE_FRAMES = (
 
 class PipecatRuntimeError(RuntimeError):
     """The owned pipeline could not preserve its lifecycle contract."""
+
+
+def _canonical_smallwebrtc_connection_id(raw_pc_id: object) -> str | None:
+    """Project an SDK peer ID to a stable nonsecret canonical identifier."""
+
+    if not isinstance(raw_pc_id, str) or not raw_pc_id:
+        return None
+    digest = hashlib.sha256(raw_pc_id.encode("utf-8")).hexdigest()
+    return f"smallwebrtc-{digest}"
 
 
 def _validate_active_call_idle_timeout(seconds: float) -> None:
@@ -640,8 +650,8 @@ class PipecatRuntime:
         @transport.event_handler("on_client_connected")
         async def on_transport_connected(_transport: BaseTransport, client: object) -> None:
             try:
-                connection_id = getattr(client, "pc_id", None)
-                payload = {"connection_id": str(connection_id)} if connection_id else {}
+                connection_id = _canonical_smallwebrtc_connection_id(getattr(client, "pc_id", None))
+                payload = {"connection_id": connection_id} if connection_id is not None else {}
                 await self._events.emit(EventType.TRANSPORT_CONNECTED, payload)
                 await self._gate.mark_rtc_connected()
             except asyncio.CancelledError:

@@ -348,6 +348,33 @@ async def test_event_channel_buffers_then_serializes_ready_first_as_server_messa
 
 
 @pytest.mark.asyncio
+async def test_smallwebrtc_connection_id_is_stable_valid_and_never_exposes_raw_peer_id() -> None:
+    raw_pc_id = "SmallWebRTCConnection#0-a8e10eabd43f4359b92dd9259874b93d"
+    connection_id = pipecat_runtime_module._canonical_smallwebrtc_connection_id(raw_pc_id)
+
+    assert connection_id == (
+        "smallwebrtc-4c963a06133c8ade05602bf1c74665113a376a489ed0571b9e0439d00af3303f"
+    )
+    assert pipecat_runtime_module._canonical_smallwebrtc_connection_id(raw_pc_id) == connection_id
+    assert raw_pc_id not in connection_id
+    assert len(connection_id) == 76
+
+    rtvi = RecordingRTVI()
+    channel = PipecatEventChannel(
+        rtvi,  # type: ignore[arg-type]
+        _claims(),
+        clock=lambda: NOW,
+        event_id_factory=iter(("event-ready", "event-connected")).__next__,
+    )
+    await channel.emit(EventType.TRANSPORT_CONNECTED, {"connection_id": connection_id})
+    await channel.activate(_profile())
+
+    events = [EventEnvelope.model_validate(message) for message in rtvi.messages]
+    assert events[1].payload["connection_id"] == connection_id
+    assert raw_pc_id not in str(rtvi.messages)
+
+
+@pytest.mark.asyncio
 async def test_event_sequence_and_buffer_do_not_advance_on_failed_send() -> None:
     rtvi = FailOnceRTVI()
     channel = PipecatEventChannel(rtvi, _claims())  # type: ignore[arg-type]
