@@ -67,6 +67,7 @@ export interface AudioClockProbeEvidence {
   readonly stale_frame_correction_count: number;
   readonly last_stale_observed_block_start_frame: number | null;
   readonly last_stale_logical_block_start_frame: number | null;
+  readonly stale_frame_catch_up_observed_block_start_frame: number | null;
   readonly stale_frame_correction_pending: boolean;
 }
 
@@ -93,6 +94,7 @@ export interface AudioClockFailureProbeCapsule {
   readonly stale_frame_correction_count: number;
   readonly last_stale_observed_block_start_frame: number | null;
   readonly last_stale_logical_block_start_frame: number | null;
+  readonly stale_frame_catch_up_observed_block_start_frame: number | null;
   readonly stale_frame_correction_pending: boolean;
 }
 
@@ -157,6 +159,7 @@ interface AudioClockProbeMessage {
   readonly stale_frame_correction_count: number;
   readonly last_stale_observed_block_start_frame: number | null;
   readonly last_stale_logical_block_start_frame: number | null;
+  readonly stale_frame_catch_up_observed_block_start_frame: number | null;
   readonly stale_frame_correction_pending: boolean;
 }
 
@@ -182,6 +185,7 @@ interface MutableProbeState {
   staleFrameCorrectionCount: number;
   lastStaleObservedBlockStartFrame: number | null;
   lastStaleLogicalBlockStartFrame: number | null;
+  staleFrameCatchUpObservedBlockStartFrame: number | null;
   staleFrameCorrectionPending: boolean;
   expectedMessageSequence: number;
 }
@@ -249,6 +253,8 @@ export function audioClockFailureCapsule(
         value.last_stale_observed_block_start_frame,
       last_stale_logical_block_start_frame:
         value.last_stale_logical_block_start_frame,
+      stale_frame_catch_up_observed_block_start_frame:
+        value.stale_frame_catch_up_observed_block_start_frame,
       stale_frame_correction_pending: value.stale_frame_correction_pending,
     });
   return Object.freeze({
@@ -291,6 +297,7 @@ function emptyProbe(thresholdRms: number, silenceHoldFrames = 0): MutableProbeSt
     staleFrameCorrectionCount: 0,
     lastStaleObservedBlockStartFrame: null,
     lastStaleLogicalBlockStartFrame: null,
+    staleFrameCatchUpObservedBlockStartFrame: null,
     staleFrameCorrectionPending: false,
     expectedMessageSequence: 1,
   };
@@ -319,6 +326,8 @@ function freezeProbe(state: MutableProbeState): AudioClockProbeEvidence {
     stale_frame_correction_count: state.staleFrameCorrectionCount,
     last_stale_observed_block_start_frame: state.lastStaleObservedBlockStartFrame,
     last_stale_logical_block_start_frame: state.lastStaleLogicalBlockStartFrame,
+    stale_frame_catch_up_observed_block_start_frame:
+      state.staleFrameCatchUpObservedBlockStartFrame,
     stale_frame_correction_pending: state.staleFrameCorrectionPending,
   });
 }
@@ -392,6 +401,9 @@ function isProbeMessage(value: unknown): value is AudioClockProbeMessage {
     safeInteger(message.stale_frame_correction_count) &&
     nullableSafeInteger(message.last_stale_observed_block_start_frame) &&
     nullableSafeInteger(message.last_stale_logical_block_start_frame) &&
+    nullableSafeInteger(
+      message.stale_frame_catch_up_observed_block_start_frame
+    ) &&
     typeof message.stale_frame_correction_pending === "boolean"
   );
 }
@@ -400,6 +412,7 @@ function validStaleFrameCorrectionMetadata(value: {
   readonly stale_frame_correction_count: number;
   readonly last_stale_observed_block_start_frame: number | null;
   readonly last_stale_logical_block_start_frame: number | null;
+  readonly stale_frame_catch_up_observed_block_start_frame: number | null;
   readonly stale_frame_correction_pending: boolean;
 }): boolean {
   if (
@@ -412,14 +425,31 @@ function validStaleFrameCorrectionMetadata(value: {
     return (
       value.last_stale_observed_block_start_frame === null &&
       value.last_stale_logical_block_start_frame === null &&
+      value.stale_frame_catch_up_observed_block_start_frame === null &&
       !value.stale_frame_correction_pending
     );
   }
+  const plateauFrame = value.last_stale_observed_block_start_frame;
+  const lastLogicalFrame = value.last_stale_logical_block_start_frame;
+  if (
+    !safeInteger(plateauFrame) ||
+    !safeInteger(lastLogicalFrame) ||
+    plateauFrame % AUDIO_CLOCK_QUANTUM_FRAMES !== 0 ||
+    lastLogicalFrame % AUDIO_CLOCK_QUANTUM_FRAMES !== 0 ||
+    lastLogicalFrame <= plateauFrame ||
+    (lastLogicalFrame - plateauFrame) % AUDIO_CLOCK_QUANTUM_FRAMES !== 0
+  ) {
+    return false;
+  }
+  if (value.stale_frame_correction_pending) {
+    return value.stale_frame_catch_up_observed_block_start_frame === null;
+  }
+  const catchUpFrame =
+    value.stale_frame_catch_up_observed_block_start_frame;
   return (
-    safeInteger(value.last_stale_observed_block_start_frame) &&
-    safeInteger(value.last_stale_logical_block_start_frame) &&
-    value.last_stale_observed_block_start_frame + AUDIO_CLOCK_QUANTUM_FRAMES ===
-      value.last_stale_logical_block_start_frame
+    safeInteger(catchUpFrame) &&
+    catchUpFrame % AUDIO_CLOCK_QUANTUM_FRAMES === 0 &&
+    catchUpFrame === lastLogicalFrame + AUDIO_CLOCK_QUANTUM_FRAMES
   );
 }
 
@@ -433,6 +463,8 @@ function sameStaleFrameCorrectionMetadata(
       state.lastStaleObservedBlockStartFrame &&
     value.last_stale_logical_block_start_frame ===
       state.lastStaleLogicalBlockStartFrame &&
+    value.stale_frame_catch_up_observed_block_start_frame ===
+      state.staleFrameCatchUpObservedBlockStartFrame &&
     value.stale_frame_correction_pending === state.staleFrameCorrectionPending
   );
 }
@@ -442,23 +474,43 @@ function validStaleFrameCorrectionObservation(
   value: AudioClockProbeMessage
 ): boolean {
   if (state.staleFrameCorrectionPending) {
-    return (
-      !value.stale_frame_correction_pending &&
+    const previousLastLogicalFrame = state.lastStaleLogicalBlockStartFrame;
+    if (previousLastLogicalFrame === null) return false;
+    const commonPendingEpisode =
       value.stale_frame_correction_count === state.staleFrameCorrectionCount &&
       value.last_stale_observed_block_start_frame ===
         state.lastStaleObservedBlockStartFrame &&
+      value.processed_block_count === state.processedBlockCount + 1;
+    if (!commonPendingEpisode) return false;
+    if (value.stale_frame_correction_pending) {
+      return (
+        value.last_stale_logical_block_start_frame ===
+          previousLastLogicalFrame + AUDIO_CLOCK_QUANTUM_FRAMES &&
+        value.stale_frame_catch_up_observed_block_start_frame === null &&
+        value.latest_block_end_frame ===
+          value.last_stale_logical_block_start_frame +
+            AUDIO_CLOCK_QUANTUM_FRAMES
+      );
+    }
+    return (
       value.last_stale_logical_block_start_frame ===
-        state.lastStaleLogicalBlockStartFrame &&
-      value.processed_block_count === state.processedBlockCount + 1 &&
-      state.lastStaleLogicalBlockStartFrame !== null &&
+        previousLastLogicalFrame &&
+      value.stale_frame_catch_up_observed_block_start_frame ===
+        previousLastLogicalFrame + AUDIO_CLOCK_QUANTUM_FRAMES &&
       value.latest_block_end_frame ===
-        state.lastStaleLogicalBlockStartFrame + 2 * AUDIO_CLOCK_QUANTUM_FRAMES
+        previousLastLogicalFrame + 2 * AUDIO_CLOCK_QUANTUM_FRAMES
     );
   }
   if (value.stale_frame_correction_pending) {
     return (
       value.stale_frame_correction_count === state.staleFrameCorrectionCount + 1 &&
+      value.processed_block_count > state.processedBlockCount &&
+      value.last_stale_observed_block_start_frame !== null &&
       value.last_stale_logical_block_start_frame !== null &&
+      value.last_stale_logical_block_start_frame ===
+        value.last_stale_observed_block_start_frame +
+          AUDIO_CLOCK_QUANTUM_FRAMES &&
+      value.stale_frame_catch_up_observed_block_start_frame === null &&
       value.latest_block_end_frame ===
         value.last_stale_logical_block_start_frame + AUDIO_CLOCK_QUANTUM_FRAMES
     );
@@ -468,7 +520,28 @@ function validStaleFrameCorrectionObservation(
     value.last_stale_observed_block_start_frame ===
       state.lastStaleObservedBlockStartFrame &&
     value.last_stale_logical_block_start_frame ===
-      state.lastStaleLogicalBlockStartFrame
+      state.lastStaleLogicalBlockStartFrame &&
+    value.stale_frame_catch_up_observed_block_start_frame ===
+      state.staleFrameCatchUpObservedBlockStartFrame
+  );
+}
+
+function validSettledStaleFrameTimeline(
+  value: AudioClockProbeEvidence
+): boolean {
+  if (
+    value.stale_frame_correction_count === 0 ||
+    value.stale_frame_correction_pending
+  ) {
+    return true;
+  }
+  const catchUpFrame =
+    value.stale_frame_catch_up_observed_block_start_frame;
+  return (
+    catchUpFrame !== null &&
+    value.latest_block_end_frame !== null &&
+    value.latest_block_end_frame >=
+      catchUpFrame + AUDIO_CLOCK_QUANTUM_FRAMES
   );
 }
 
@@ -573,6 +646,8 @@ function applyAudioClockProbeMessage(
         value.last_stale_observed_block_start_frame;
       state.lastStaleLogicalBlockStartFrame =
         value.last_stale_logical_block_start_frame;
+      state.staleFrameCatchUpObservedBlockStartFrame =
+        value.stale_frame_catch_up_observed_block_start_frame;
       state.staleFrameCorrectionPending = value.stale_frame_correction_pending;
     }
     failProbe(state, failureCode, contextState);
@@ -600,6 +675,8 @@ function applyAudioClockProbeMessage(
     value.last_stale_observed_block_start_frame;
   state.lastStaleLogicalBlockStartFrame =
     value.last_stale_logical_block_start_frame;
+  state.staleFrameCatchUpObservedBlockStartFrame =
+    value.stale_frame_catch_up_observed_block_start_frame;
   state.staleFrameCorrectionPending = value.stale_frame_correction_pending;
   if (expectedProbe === "local" && value.active_region_count > 2) {
     failProbe(state, "too_many_local_active_regions", contextState);
@@ -685,7 +762,9 @@ export function interruptionClockBracket(
   if (!evidence.remote.attached) return pending("remote_probe_missing");
   if (
     !validStaleFrameCorrectionMetadata(evidence.local) ||
-    !validStaleFrameCorrectionMetadata(evidence.remote)
+    !validStaleFrameCorrectionMetadata(evidence.remote) ||
+    !validSettledStaleFrameTimeline(evidence.local) ||
+    !validSettledStaleFrameTimeline(evidence.remote)
   ) {
     return pending("unexpected_probe_message", "failed");
   }
@@ -753,6 +832,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
     this.staleFrameCorrectionCount = 0;
     this.lastStaleObservedFrame = null;
     this.lastStaleLogicalFrame = null;
+    this.staleFrameCatchUpObservedFrame = null;
     this.staleFrameCorrectionPending = false;
     this.processedBlocks = 0;
     this.state = null;
@@ -796,6 +876,8 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
       stale_frame_correction_count: this.staleFrameCorrectionCount,
       last_stale_observed_block_start_frame: this.lastStaleObservedFrame,
       last_stale_logical_block_start_frame: this.lastStaleLogicalFrame,
+      stale_frame_catch_up_observed_block_start_frame:
+        this.staleFrameCatchUpObservedFrame,
       stale_frame_correction_pending: this.staleFrameCorrectionPending,
     });
   }
@@ -830,12 +912,18 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
     let staleFrameCorrectionResolved = false;
     if (this.expectedFrame !== null) {
       if (this.staleFrameCorrectionPending) {
-        if (observedBlockStartFrame !== this.expectedFrame) {
+        if (observedBlockStartFrame === this.expectedFrame) {
+          logicalBlockStartFrame = this.expectedFrame;
+          this.staleFrameCatchUpObservedFrame = observedBlockStartFrame;
+          this.staleFrameCorrectionPending = false;
+          staleFrameCorrectionResolved = true;
+        } else if (observedBlockStartFrame === this.lastStaleObservedFrame) {
+          logicalBlockStartFrame = this.expectedFrame;
+          this.lastStaleLogicalFrame = logicalBlockStartFrame;
+          staleFrameCorrectionApplied = true;
+        } else {
           return this.fail("frame_gap", observedBlockStartFrame);
         }
-        logicalBlockStartFrame = this.expectedFrame;
-        this.staleFrameCorrectionPending = false;
-        staleFrameCorrectionResolved = true;
       } else if (observedBlockStartFrame === this.expectedFrame) {
         logicalBlockStartFrame = observedBlockStartFrame;
       } else if (
@@ -848,6 +936,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
         this.staleFrameCorrectionCount += 1;
         this.lastStaleObservedFrame = observedBlockStartFrame;
         this.lastStaleLogicalFrame = logicalBlockStartFrame;
+        this.staleFrameCatchUpObservedFrame = null;
         this.staleFrameCorrectionPending = true;
         staleFrameCorrectionApplied = true;
       } else {
