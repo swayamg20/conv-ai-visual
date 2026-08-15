@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import json
 import os
 import re
 from bisect import bisect_right
@@ -12,38 +13,46 @@ from dataclasses import dataclass, field
 from scripts.voice_pipecat_e2e_coturn import CoturnBridgeTopology
 from scripts.voice_pipecat_e2e_coturn_docker import (
     RUN_DIR_FINGERPRINT_LABEL,
-    CoturnDockerError,
     docker_request,
     one_inspection,
     translate_created_id,
 )
+from scripts.voice_pipecat_e2e_coturn_docker_inventory import (
+    MAX_NETWORK_INVENTORY_ITEMS,
+    CompletedNetworkInventory,
+    CoturnDockerNetworkError,
+    NetworkInventoryBudget,
+    complete_network_inventory,
+)
 from scripts.voice_pipecat_e2e_coturn_host import (
     CommandRequest,
+    CommandResult,
     CoturnRuntimePaths,
     HostIPv4Route,
     RuntimeIdentity,
     TrustedHostTools,
     require_full_resource_id,
 )
+from scripts.voice_pipecat_e2e_coturn_validation_boundary import (
+    validate_without_raw_traceback,
+)
 
 _PRIVATE_POOLS = tuple(
     ipaddress.IPv4Network(value) for value in ("10.224.0.0/11", "172.28.0.0/14", "192.168.0.0/16")
 )
-_MAX_OCCUPIED_NETWORKS = 4_096
+_MAX_OCCUPIED_NETWORKS = MAX_NETWORK_INVENTORY_ITEMS
+_MAX_INVENTORY_BYTES = _MAX_OCCUPIED_NETWORKS * 65
+_MAX_INSPECTION_BYTES = 1_048_576
 _RUN_DIR_FINGERPRINT_DOMAIN = b"murmur.voice-e2e.coturn.run-dir.v1\x00"
 _AUTHORITY_TOKEN = object()
 _VALIDATION_TOKEN = object()
-
-
-class CoturnDockerNetworkError(CoturnDockerError):
-    """An owned Docker bridge contract is malformed or unsafe."""
 
 
 def select_bridge_topology(
     *,
     owner_nonce: object,
     occupied_routes: tuple[HostIPv4Route, ...],
-    occupied_docker_networks: tuple[str, ...],
+    completed_inventory: CompletedNetworkInventory,
 ) -> CoturnBridgeTopology:
     """Choose a deterministic private /29 with no pre-existing overlap."""
 
@@ -55,11 +64,10 @@ def select_bridge_topology(
         or not all(isinstance(item, HostIPv4Route) for item in occupied_routes)
     ):
         raise CoturnDockerNetworkError("Coturn bridge collision input is invalid")
-    if (
-        not isinstance(occupied_docker_networks, tuple)
-        or len(occupied_docker_networks) > _MAX_OCCUPIED_NETWORKS
-        or len(occupied_routes) + len(occupied_docker_networks) > _MAX_OCCUPIED_NETWORKS
-    ):
+    if not isinstance(completed_inventory, CompletedNetworkInventory):
+        raise CoturnDockerNetworkError("Coturn Docker IPAM input is invalid")
+    occupied_docker_networks = completed_inventory.ipv4_subnets
+    if len(occupied_routes) + len(occupied_docker_networks) > _MAX_OCCUPIED_NETWORKS:
         raise CoturnDockerNetworkError("Coturn Docker IPAM input is invalid")
     docker_networks = []
     for value in occupied_docker_networks:
@@ -245,12 +253,48 @@ def establish_network_cleanup_authority(
     network_id: object,
     inspection: object,
 ) -> NetworkCleanupAuthority:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _establish_network_cleanup_authority(
+                plan=plan,
+                network_id=network_id,
+                inspection=inspection,
+            ),
+            error_type=CoturnDockerNetworkError,
+            fallback="Coturn network ownership is invalid",
+            allowed=_NETWORK_VALIDATION_ERRORS,
+        )
+    finally:
+        plan = network_id = inspection = None
+
+
+def _establish_network_cleanup_authority(
+    *,
+    plan: NetworkPlan,
+    network_id: object,
+    inspection: object,
+) -> NetworkCleanupAuthority:
     identifier = translate_created_id(network_id)
     _validate_identity(plan, identifier, inspection)
     return NetworkCleanupAuthority(_AUTHORITY_TOKEN, identifier, plan)
 
 
 def validate_network_for_container(
+    authority: NetworkCleanupAuthority,
+    inspection: object,
+) -> ValidatedNetwork:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_network_for_container(authority, inspection),
+            error_type=CoturnDockerNetworkError,
+            fallback="Coturn network is unsafe for container use",
+            allowed=_NETWORK_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_network_for_container(
     authority: NetworkCleanupAuthority,
     inspection: object,
 ) -> ValidatedNetwork:
@@ -291,6 +335,21 @@ def validate_network_cleanup_target(
     authority: NetworkCleanupAuthority,
     inspection: object,
 ) -> ValidatedNetworkCleanup:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_network_cleanup_target(authority, inspection),
+            error_type=CoturnDockerNetworkError,
+            fallback="Coturn network cleanup has unknown attachments",
+            allowed=_NETWORK_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_network_cleanup_target(
+    authority: NetworkCleanupAuthority,
+    inspection: object,
+) -> ValidatedNetworkCleanup:
     _validate_identity(authority.plan, authority.network_id, inspection)
     if one_inspection(inspection, "Coturn network inspection").get("Containers") != {}:
         raise CoturnDockerNetworkError("Coturn network cleanup has unknown attachments")
@@ -317,6 +376,187 @@ def build_network_create_request(
     for key, value in sorted(plan.labels("network").items()):
         arguments.extend(("--label", f"{key}={value}"))
     return docker_request(tools, plan.paths, *arguments, plan.identity.network_name)
+
+
+def build_network_inventory_request(
+    tools: TrustedHostTools,
+    paths: CoturnRuntimePaths,
+) -> CommandRequest:
+    """List bounded, non-truncated network IDs without accepting names."""
+
+    request = docker_request(tools, paths, "network", "ls", "--quiet", "--no-trunc")
+    return CommandRequest(
+        argv=request.argv,
+        timeout_seconds=request.timeout_seconds,
+        maximum_output_bytes=_MAX_INVENTORY_BYTES,
+    )
+
+
+def parse_network_inventory_ids(result: CommandResult) -> tuple[str, ...]:
+    """Parse at most 4096 exact full Docker network IDs."""
+
+    parsed = _parse_network_inventory_ids(result)
+    result = None  # type: ignore[assignment]
+    if parsed is None:
+        _raise_network_inventory_error()
+    return parsed
+
+
+def _parse_network_inventory_ids(result: object) -> tuple[str, ...] | None:
+    if (
+        not isinstance(result, CommandResult)
+        or result.returncode != 0
+        or result.stderr
+        or len(result.stdout) > _MAX_INVENTORY_BYTES
+    ):
+        return None
+    if not result.stdout:
+        return ()
+    try:
+        value = result.stdout.decode("ascii")
+    except UnicodeError:
+        return None
+    if value.endswith("\n"):
+        value = value[:-1]
+    identifiers = value.split("\n")
+    if (
+        not value
+        or len(identifiers) > _MAX_OCCUPIED_NETWORKS
+        or len(set(identifiers)) != len(identifiers)
+    ):
+        return None
+    try:
+        return tuple(require_full_resource_id(identifier) for identifier in identifiers)
+    except RuntimeError:
+        return None
+
+
+def build_network_inventory_inspect_request(
+    tools: TrustedHostTools,
+    paths: CoturnRuntimePaths,
+    network_id: str,
+    budget: NetworkInventoryBudget,
+) -> CommandRequest:
+    """Inspect exactly one full inventory ID so output remains bounded."""
+
+    try:
+        identifier = require_full_resource_id(network_id)
+    except RuntimeError:
+        identifier = ""
+    timeout = (
+        budget.begin_inspection(identifier) if isinstance(budget, NetworkInventoryBudget) else None
+    )
+    network_id = ""
+    if not identifier or timeout is None:
+        identifier = ""
+        budget = None  # type: ignore[assignment]
+        _raise_network_inventory_budget_error()
+    return docker_request(
+        tools,
+        paths,
+        "network",
+        "inspect",
+        identifier,
+        timeout_seconds=timeout,
+    )
+
+
+def parse_network_inventory_subnets(
+    result: CommandResult,
+    *,
+    expected_network_id: str,
+    budget: NetworkInventoryBudget,
+) -> tuple[str, ...]:
+    """Return canonical IPv4 IPAM subnets from one exact-ID inspection."""
+
+    try:
+        identifier = require_full_resource_id(expected_network_id)
+    except RuntimeError:
+        identifier = ""
+    parsed = _parse_network_inventory_subnets(result, identifier)
+    result = None  # type: ignore[assignment]
+    expected_network_id = ""
+    if parsed is None or not isinstance(budget, NetworkInventoryBudget):
+        if isinstance(budget, NetworkInventoryBudget):
+            budget.abort()
+        identifier = ""
+        budget = None  # type: ignore[assignment]
+        _raise_network_ipam_error()
+    networks, entry_count = parsed
+    parsed = None
+    if not budget.commit_inspection(
+        identifier,
+        ipam_entries=entry_count,
+        ipv4_subnets=networks,
+    ):
+        identifier = ""
+        networks = ()
+        budget = None  # type: ignore[assignment]
+        _raise_network_inventory_budget_error()
+    identifier = ""
+    return networks
+
+
+def _parse_network_inventory_subnets(
+    result: object,
+    identifier: str,
+) -> tuple[tuple[str, ...], int] | None:
+    if (
+        not isinstance(result, CommandResult)
+        or result.returncode != 0
+        or result.stderr
+        or not result.stdout
+        or len(result.stdout) > _MAX_INSPECTION_BYTES
+    ):
+        return None
+    try:
+        decoded = json.loads(result.stdout.decode("ascii"))
+    except (UnicodeError, ValueError, RecursionError):
+        return None
+    item = decoded[0] if isinstance(decoded, list) and len(decoded) == 1 else None
+    ipam = item.get("IPAM") if isinstance(item, dict) else None
+    config = ipam.get("Config") if isinstance(ipam, dict) else None
+    if (
+        not isinstance(item, dict)
+        or item.get("Id") != identifier
+        or not isinstance(ipam, dict)
+        or not isinstance(config, list)
+        or len(config) > _MAX_OCCUPIED_NETWORKS
+    ):
+        return None
+    networks: set[ipaddress.IPv4Network] = set()
+    try:
+        for entry in config:
+            if not isinstance(entry, dict) or not isinstance(entry.get("Subnet"), str):
+                raise ValueError
+            network = ipaddress.ip_network(entry["Subnet"], strict=True)
+            if isinstance(network, ipaddress.IPv4Network):
+                if network.prefixlen == 0:
+                    raise ValueError
+                networks.add(network)
+    except (TypeError, ValueError):
+        return None
+    return (
+        tuple(
+            str(network)
+            for network in sorted(
+                networks, key=lambda value: (int(value.network_address), value.prefixlen)
+            )
+        ),
+        len(config),
+    )
+
+
+def _raise_network_inventory_error() -> None:
+    raise CoturnDockerNetworkError("Coturn Docker network inventory is invalid") from None
+
+
+def _raise_network_inventory_budget_error() -> None:
+    raise CoturnDockerNetworkError("Coturn Docker network inventory budget is invalid") from None
+
+
+def _raise_network_ipam_error() -> None:
+    raise CoturnDockerNetworkError("Coturn Docker network IPAM is invalid") from None
 
 
 def build_network_inspect_request(
@@ -378,18 +618,34 @@ def _validate_identity(plan: NetworkPlan, identifier: str, inspection: object) -
         raise CoturnDockerNetworkError("Coturn network ownership is invalid")
 
 
+_NETWORK_VALIDATION_ERRORS = frozenset(
+    {
+        "Coturn network ownership is invalid",
+        "Coturn network is unsafe for container use",
+        "Coturn network cleanup has unknown attachments",
+    }
+)
+
+
 __all__ = [
+    "CompletedNetworkInventory",
     "CoturnDockerNetworkError",
     "NetworkCleanupAuthority",
+    "NetworkInventoryBudget",
     "NetworkPlan",
     "ValidatedNetwork",
     "ValidatedNetworkCleanup",
     "build_network_absence_request",
     "build_network_create_request",
     "build_network_inspect_request",
+    "build_network_inventory_inspect_request",
+    "build_network_inventory_request",
     "build_network_name_inspect_request",
     "build_network_remove_request",
+    "complete_network_inventory",
     "establish_network_cleanup_authority",
+    "parse_network_inventory_ids",
+    "parse_network_inventory_subnets",
     "select_bridge_topology",
     "validate_bridge_route_transition",
     "validate_network_cleanup_target",

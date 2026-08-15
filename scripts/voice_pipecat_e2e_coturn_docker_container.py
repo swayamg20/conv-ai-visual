@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import os
-import re
 from dataclasses import dataclass, field
-from typing import Final
 
 from scripts.voice_pipecat_e2e_coturn import (
     COTURN_IMAGE,
@@ -14,11 +12,23 @@ from scripts.voice_pipecat_e2e_coturn import (
     COTURN_RELAY_MIN_PORT,
     COTURN_TLS_PORT,
 )
+from scripts.voice_pipecat_e2e_coturn_container_inspection import (
+    CONTAINER_MEMORY,
+    CONTAINER_PIDS,
+    CONTAINER_SHM,
+    COTURN_CONTAINER_CONFIG,
+    COTURN_CONTAINER_DIRECTORY,
+    COTURN_ENTRYPOINT,
+    ContainerInspectionContract,
+    container_cleanup_running,
+    container_for_use_valid,
+    container_identity_valid,
+    coturn_tmpfs_options,
+)
 from scripts.voice_pipecat_e2e_coturn_docker import (
     CoturnDockerError,
     CoturnImageReceipt,
     docker_request,
-    one_inspection,
     translate_created_id,
 )
 from scripts.voice_pipecat_e2e_coturn_docker_network import ValidatedNetwork
@@ -29,17 +39,10 @@ from scripts.voice_pipecat_e2e_coturn_host import (
     TrustedHostTools,
     require_full_resource_id,
 )
+from scripts.voice_pipecat_e2e_coturn_validation_boundary import (
+    validate_without_raw_traceback,
+)
 
-COTURN_ENTRYPOINT: Final = "/usr/bin/turnserver"
-COTURN_CONTAINER_DIRECTORY: Final = "/run/murmur-coturn"
-COTURN_CONTAINER_CONFIG: Final = f"{COTURN_CONTAINER_DIRECTORY}/turnserver.conf"
-
-_FULL_ID = re.compile(r"^[0-9a-f]{64}$")
-_MAC = re.compile(r"^(?:[0-9a-f]{2}:){5}[0-9a-f]{2}$")
-_MEMORY = 67_108_864
-_SHM = 4_194_304
-_NANO_CPUS = 500_000_000
-_PIDS = 64
 _AUTHORITY_TOKEN = object()
 _VALIDATION_TOKEN = object()
 
@@ -117,6 +120,59 @@ class ValidatedContainer:
         return "ValidatedContainer()"
 
 
+class ValidatedRunningContainer:
+    """Factory-owned proof that the exact safe-use container is running."""
+
+    __slots__ = ("_authority",)
+
+    def __init__(self, token: object, authority: ContainerCleanupAuthority) -> None:
+        if token is not _VALIDATION_TOKEN:
+            raise TypeError("Validated running container is factory-owned")
+        self._authority = authority
+
+    @property
+    def authority(self) -> ContainerCleanupAuthority:
+        return self._authority
+
+    def __repr__(self) -> str:
+        return "ValidatedRunningContainer()"
+
+
+class _ValidatedCleanupTarget:
+    __slots__ = ("_authority",)
+
+    def __init__(self, token: object, authority: ContainerCleanupAuthority) -> None:
+        if token is not _VALIDATION_TOKEN:
+            raise TypeError("Container cleanup target is factory-owned")
+        self._authority = authority
+
+    @property
+    def container_id(self) -> str:
+        return self._authority.container_id
+
+    @property
+    def plan(self) -> ContainerPlan:
+        return self._authority.plan
+
+
+class ValidatedContainerStop(_ValidatedCleanupTarget):
+    """Factory-owned proof that the exact owned container may be stopped."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ValidatedContainerStop()"
+
+
+class ValidatedContainerRemoval(_ValidatedCleanupTarget):
+    """Factory-owned proof that the exact owned container may be removed."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ValidatedContainerRemoval()"
+
+
 class ValidatedContainerCleanup:
     __slots__ = ("_authority", "_running")
 
@@ -153,6 +209,27 @@ def establish_container_cleanup_authority(
     container_id: object,
     inspection: object,
 ) -> ContainerCleanupAuthority:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _establish_container_cleanup_authority(
+                plan=plan,
+                container_id=container_id,
+                inspection=inspection,
+            ),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn container ownership is invalid",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        plan = container_id = inspection = None
+
+
+def _establish_container_cleanup_authority(
+    *,
+    plan: ContainerPlan,
+    container_id: object,
+    inspection: object,
+) -> ContainerCleanupAuthority:
     identifier = translate_created_id(container_id)
     _validate_identity(plan, identifier, inspection)
     return ContainerCleanupAuthority(_AUTHORITY_TOKEN, identifier, plan)
@@ -162,50 +239,141 @@ def validate_container_for_start(
     authority: ContainerCleanupAuthority,
     inspection: object,
 ) -> ValidatedContainer:
-    plan = authority.plan
-    container = one_inspection(inspection, "Coturn container inspection")
-    _validate_identity(plan, authority.container_id, inspection)
-    network_settings = container.get("NetworkSettings")
-    networks = network_settings.get("Networks") if isinstance(network_settings, dict) else None
-    endpoint = networks.get(plan.identity.network_name) if isinstance(networks, dict) else None
-    topology = plan.network.authority.plan.topology
-    if (
-        container.get("Path") != COTURN_ENTRYPOINT
-        or container.get("Args") != ["-c", COTURN_CONTAINER_CONFIG]
-        or container.get("Platform") != "linux"
-        or not _created_state(container.get("State"))
-        or not _safe_config(container.get("Config"), plan)
-        or not _safe_host_config(container.get("HostConfig"), plan)
-        or not _safe_mounts(container.get("Mounts"), plan)
-        or not isinstance(network_settings, dict)
-        or network_settings.get("Ports") != _port_bindings()
-        or not isinstance(networks, dict)
-        or set(networks) != {plan.identity.network_name}
-        or not isinstance(endpoint, dict)
-        or endpoint.get("NetworkID") != plan.network.authority.network_id
-        or endpoint.get("IPAddress") != str(topology.container)
-        or endpoint.get("IPPrefixLen") != 29
-        or endpoint.get("Gateway") != str(topology.gateway)
-        or endpoint.get("GlobalIPv6Address") not in {None, ""}
-        or endpoint.get("GlobalIPv6PrefixLen") not in {None, 0}
-        or not isinstance(endpoint.get("EndpointID"), str)
-        or not _FULL_ID.fullmatch(endpoint["EndpointID"])
-        or not isinstance(endpoint.get("MacAddress"), str)
-        or not _MAC.fullmatch(endpoint["MacAddress"])
-    ):
-        raise CoturnDockerContainerError("Coturn container is unsafe to start")
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_container_for_start(authority, inspection),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn container is unsafe to start",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_container_for_start(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainer:
+    _validate_container_for_use(authority, inspection, running=False)
     return ValidatedContainer(_VALIDATION_TOKEN, authority)
+
+
+def validate_container_running(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedRunningContainer:
+    """Revalidate the full safe-use contract after attached start."""
+
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_container_running(authority, inspection),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn running container is invalid",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_container_running(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedRunningContainer:
+    _validate_container_for_use(authority, inspection, running=True)
+    return ValidatedRunningContainer(_VALIDATION_TOKEN, authority)
+
+
+def _validate_container_for_use(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+    *,
+    running: bool,
+) -> None:
+    if not container_for_use_valid(
+        _inspection_contract(authority.plan, authority.container_id),
+        inspection,
+        running=running,
+    ):
+        message = (
+            "Coturn running container is invalid"
+            if running
+            else "Coturn container is unsafe to start"
+        )
+        raise CoturnDockerContainerError(message)
+
+
+def validate_container_stop_target(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainerStop:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_container_stop_target(authority, inspection),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn running container is invalid",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_container_stop_target(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainerStop:
+    _validate_container_for_use(authority, inspection, running=True)
+    return ValidatedContainerStop(_VALIDATION_TOKEN, authority)
+
+
+def validate_container_removal_target(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainerRemoval:
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_container_removal_target(authority, inspection),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn container cleanup state is invalid",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_container_removal_target(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainerRemoval:
+    if _validate_cleanup_state(authority, inspection):
+        raise CoturnDockerContainerError("Running Coturn container removal is refused")
+    return ValidatedContainerRemoval(_VALIDATION_TOKEN, authority)
 
 
 def validate_container_cleanup_target(
     authority: ContainerCleanupAuthority,
     inspection: object,
 ) -> ValidatedContainerCleanup:
-    _validate_identity(authority.plan, authority.container_id, inspection)
-    state = one_inspection(inspection, "Coturn container inspection").get("State")
-    if not isinstance(state, dict) or not isinstance(state.get("Running"), bool):
-        raise CoturnDockerContainerError("Coturn container cleanup state is invalid")
-    return ValidatedContainerCleanup(_VALIDATION_TOKEN, authority, state["Running"])
+    """Compatibility wrapper; new owners should use the split validators."""
+
+    try:
+        return validate_without_raw_traceback(
+            lambda: _validate_container_cleanup_target(authority, inspection),
+            error_type=CoturnDockerContainerError,
+            fallback="Coturn container cleanup state is invalid",
+            allowed=_CONTAINER_VALIDATION_ERRORS,
+        )
+    finally:
+        authority = inspection = None
+
+
+def _validate_container_cleanup_target(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> ValidatedContainerCleanup:
+    running = _validate_cleanup_state(authority, inspection)
+    if running:
+        _validate_container_for_use(authority, inspection, running=True)
+    return ValidatedContainerCleanup(_VALIDATION_TOKEN, authority, running)
 
 
 def build_container_create_request(
@@ -238,17 +406,17 @@ def build_container_create_request(
         "--cgroupns",
         "private",
         "--pids-limit",
-        str(_PIDS),
+        str(CONTAINER_PIDS),
         "--memory",
-        str(_MEMORY),
+        str(CONTAINER_MEMORY),
         "--memory-swap",
-        str(_MEMORY),
+        str(CONTAINER_MEMORY),
         "--memory-swappiness",
         "0",
         "--cpus",
         "0.5",
         "--shm-size",
-        str(_SHM),
+        str(CONTAINER_SHM),
         "--ulimit",
         "core=0:0",
         "--ulimit",
@@ -256,7 +424,7 @@ def build_container_create_request(
         "--ulimit",
         "nproc=64:64",
         "--tmpfs",
-        f"/tmp:{_tmpfs(plan)}",
+        f"/tmp:{coturn_tmpfs_options(plan.uid, plan.gid)}",
         "--log-driver",
         "none",
         "--restart",
@@ -322,8 +490,13 @@ def build_container_start_attached_request(
 
 def build_container_stop_request(
     tools: TrustedHostTools,
-    target: ValidatedContainerCleanup,
+    target: ValidatedContainerStop | ValidatedContainerCleanup,
 ) -> CommandRequest:
+    if isinstance(target, ValidatedContainerCleanup):
+        if not target.running:
+            raise CoturnDockerContainerError("Coturn container is not running")
+    elif not isinstance(target, ValidatedContainerStop):
+        raise CoturnDockerContainerError("Coturn container stop target is invalid")
     return docker_request(
         tools,
         target.plan.paths,
@@ -337,18 +510,25 @@ def build_container_stop_request(
 
 def build_container_remove_request(
     tools: TrustedHostTools,
-    target: ValidatedContainerCleanup,
+    target: ValidatedContainerRemoval | ValidatedContainerCleanup,
 ) -> CommandRequest:
-    if target.running:
+    if isinstance(target, ValidatedContainerCleanup) and target.running:
         raise CoturnDockerContainerError("Running Coturn container removal is refused")
+    if not isinstance(target, (ValidatedContainerRemoval, ValidatedContainerCleanup)):
+        raise CoturnDockerContainerError("Coturn container removal target is invalid")
     return docker_request(tools, target.plan.paths, "container", "rm", target.container_id)
 
 
 def build_container_absence_request(
     tools: TrustedHostTools,
-    target: ValidatedContainerCleanup,
+    target: ValidatedContainerRemoval | ValidatedContainerCleanup,
 ) -> CommandRequest:
     """Query all containers for the exact validated full ID after removal."""
+
+    if isinstance(target, ValidatedContainerCleanup) and target.running:
+        raise CoturnDockerContainerError("Running Coturn container removal is refused")
+    if not isinstance(target, (ValidatedContainerRemoval, ValidatedContainerCleanup)):
+        raise CoturnDockerContainerError("Coturn container removal target is invalid")
 
     return docker_request(
         tools,
@@ -364,160 +544,41 @@ def build_container_absence_request(
 
 
 def _validate_identity(plan: ContainerPlan, identifier: str, inspection: object) -> None:
-    container = one_inspection(inspection, "Coturn container inspection")
-    config = container.get("Config")
-    if (
-        container.get("Id") != identifier
-        or container.get("Name") != f"/{plan.identity.container_name}"
-        or container.get("Image") != plan.image.image_id
-        or not isinstance(config, dict)
-        or config.get("Image") != COTURN_IMAGE
-        or config.get("Labels") != plan.labels
-    ):
+    if not container_identity_valid(_inspection_contract(plan, identifier), inspection):
         raise CoturnDockerContainerError("Coturn container ownership is invalid")
 
 
-def _safe_config(value: object, plan: ContainerPlan) -> bool:
-    expected = {
-        "User": f"{plan.uid}:{plan.gid}",
-        "AttachStdin": False,
-        "AttachStdout": True,
-        "AttachStderr": True,
-        "Tty": False,
-        "OpenStdin": False,
-        "StdinOnce": False,
-        "Env": list(plan.image.environment),
-        "Cmd": ["-c", COTURN_CONTAINER_CONFIG],
-        "Image": COTURN_IMAGE,
-        "WorkingDir": plan.image.working_directory,
-        "Entrypoint": [COTURN_ENTRYPOINT],
-        "Labels": plan.labels,
-        "ExposedPorts": {port: {} for port in _port_bindings()},
-        "Healthcheck": {"Test": ["NONE"]},
-        "StopTimeout": 5,
-    }
-    return isinstance(value, dict) and all(value.get(key) == item for key, item in expected.items())
+def _validate_cleanup_state(
+    authority: ContainerCleanupAuthority,
+    inspection: object,
+) -> bool:
+    contract = _inspection_contract(authority.plan, authority.container_id)
+    if not container_identity_valid(contract, inspection):
+        raise CoturnDockerContainerError("Coturn container ownership is invalid")
+    running = container_cleanup_running(contract, inspection)
+    if running is None:
+        raise CoturnDockerContainerError("Coturn container cleanup state is invalid")
+    return running
 
 
-def _safe_host_config(value: object, plan: ContainerPlan) -> bool:
-    if not isinstance(value, dict):
-        return False
-    expected = {
-        "NetworkMode": plan.network.authority.network_id,
-        "PortBindings": _port_bindings(),
-        "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
-        "AutoRemove": False,
-        "CapDrop": ["ALL"],
-        "CgroupnsMode": "private",
-        "PidMode": "",
-        "UTSMode": "",
-        "UsernsMode": "",
-        "Privileged": False,
-        "PublishAllPorts": False,
-        "ReadonlyRootfs": True,
-        "SecurityOpt": ["no-new-privileges:true"],
-        "LogConfig": {"Type": "none", "Config": {}},
-        "Memory": _MEMORY,
-        "MemorySwap": _MEMORY,
-        "MemorySwappiness": 0,
-        "NanoCpus": _NANO_CPUS,
-        "PidsLimit": _PIDS,
-        "ShmSize": _SHM,
-        "Ulimits": [
-            {"Name": "core", "Hard": 0, "Soft": 0},
-            {"Name": "nofile", "Hard": 1024, "Soft": 1024},
-            {"Name": "nproc", "Hard": 64, "Soft": 64},
-        ],
-        "Tmpfs": {"/tmp": _tmpfs(plan)},
-    }
-    empty = (None, [])
-    empty_keys = (
-        "CapAdd",
-        "Binds",
-        "Devices",
-        "DeviceRequests",
-        "GroupAdd",
-        "Dns",
-        "DnsOptions",
-        "DnsSearch",
-        "ExtraHosts",
-        "Links",
-        "VolumesFrom",
+def _inspection_contract(plan: ContainerPlan, identifier: str) -> ContainerInspectionContract:
+    topology = plan.network.authority.plan.topology
+    return ContainerInspectionContract(
+        container_id=identifier,
+        container_name=plan.identity.container_name,
+        image_id=plan.image.image_id,
+        labels=plan.labels,
+        environment=plan.image.environment,
+        working_directory=plan.image.working_directory,
+        network_name=plan.identity.network_name,
+        network_id=plan.network.authority.network_id,
+        subnet=str(topology.network),
+        gateway=str(topology.gateway),
+        container_ipv4=str(topology.container),
+        coturn_dir=os.fspath(plan.paths.contract.coturn_dir),
+        uid=plan.uid,
+        gid=plan.gid,
     )
-    return (
-        all(value.get(key) == item for key, item in expected.items())
-        and value.get("IpcMode") in {"private", ""}
-        and all(value.get(key) in empty for key in empty_keys)
-        and _safe_host_mount_specs(value.get("Mounts"), plan)
-    )
-
-
-def _safe_host_mount_specs(value: object, plan: ContainerPlan) -> bool:
-    if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], dict):
-        return False
-    mount = value[0]
-    options = mount.get("BindOptions")
-    return bool(
-        mount.get("Type") == "bind"
-        and mount.get("Source") == os.fspath(plan.paths.contract.coturn_dir)
-        and mount.get("Target") == COTURN_CONTAINER_DIRECTORY
-        and mount.get("ReadOnly") is True
-        and mount.get("Consistency") in {None, "", "default"}
-        and mount.get("VolumeOptions") is None
-        and mount.get("TmpfsOptions") is None
-        and isinstance(options, dict)
-        and options.get("Propagation") == "rprivate"
-        and options.get("NonRecursive") is True
-    )
-
-
-def _safe_mounts(value: object, plan: ContainerPlan) -> bool:
-    if (
-        not isinstance(value, list)
-        or not all(isinstance(item, dict) for item in value)
-        or not all(isinstance(item.get("Destination"), str) for item in value)
-    ):
-        return False
-    expected = [
-        {
-            "Type": "bind",
-            "Source": os.fspath(plan.paths.contract.coturn_dir),
-            "Destination": COTURN_CONTAINER_DIRECTORY,
-            "Mode": "ro",
-            "RW": False,
-            "Propagation": "rprivate",
-        },
-        {
-            "Type": "tmpfs",
-            "Source": "",
-            "Destination": "/tmp",
-            "Mode": _tmpfs(plan),
-            "RW": True,
-            "Propagation": "",
-        },
-    ]
-    return sorted(value, key=lambda item: item["Destination"]) == expected
-
-
-def _created_state(value: object) -> bool:
-    expected = {
-        "Status": "created",
-        "Running": False,
-        "Paused": False,
-        "Restarting": False,
-        "OOMKilled": False,
-        "Dead": False,
-        "Pid": 0,
-        "ExitCode": 0,
-    }
-    return isinstance(value, dict) and all(value.get(key) == item for key, item in expected.items())
-
-
-def _port_bindings() -> dict[str, list[dict[str, str]]]:
-    result = {f"{COTURN_TLS_PORT}/tcp": [{"HostIp": "127.0.0.1", "HostPort": str(COTURN_TLS_PORT)}]}
-    for port in range(COTURN_RELAY_MIN_PORT, COTURN_RELAY_MAX_PORT + 1):
-        result[f"{port}/udp"] = [{"HostIp": "127.0.0.1", "HostPort": str(port)}]
-    return result
 
 
 def _published_ports() -> tuple[str, ...]:
@@ -530,8 +591,15 @@ def _published_ports() -> tuple[str, ...]:
     )
 
 
-def _tmpfs(plan: ContainerPlan) -> str:
-    return f"rw,noexec,nosuid,nodev,size=16777216,mode=0700,uid={plan.uid},gid={plan.gid}"
+_CONTAINER_VALIDATION_ERRORS = frozenset(
+    {
+        "Coturn container ownership is invalid",
+        "Coturn container is unsafe to start",
+        "Coturn running container is invalid",
+        "Coturn container cleanup state is invalid",
+        "Running Coturn container removal is refused",
+    }
+)
 
 
 __all__ = [
@@ -543,6 +611,9 @@ __all__ = [
     "CoturnDockerContainerError",
     "ValidatedContainer",
     "ValidatedContainerCleanup",
+    "ValidatedContainerRemoval",
+    "ValidatedContainerStop",
+    "ValidatedRunningContainer",
     "build_container_absence_request",
     "build_container_create_request",
     "build_container_inspect_request",
@@ -553,4 +624,7 @@ __all__ = [
     "establish_container_cleanup_authority",
     "validate_container_cleanup_target",
     "validate_container_for_start",
+    "validate_container_removal_target",
+    "validate_container_running",
+    "validate_container_stop_target",
 ]

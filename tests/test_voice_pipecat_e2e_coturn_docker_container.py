@@ -12,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts import voice_pipecat_e2e_coturn_docker_container as container_module  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn import COTURN_IMAGE  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn_docker import (  # noqa: E402
     RUN_DIR_FINGERPRINT_LABEL,
@@ -24,6 +25,9 @@ from scripts.voice_pipecat_e2e_coturn_docker_container import (  # noqa: E402
     ContainerCleanupAuthority,
     ContainerPlan,
     CoturnDockerContainerError,
+    ValidatedContainerRemoval,
+    ValidatedContainerStop,
+    ValidatedRunningContainer,
     build_container_absence_request,
     build_container_create_request,
     build_container_inspect_request,
@@ -33,12 +37,16 @@ from scripts.voice_pipecat_e2e_coturn_docker_container import (  # noqa: E402
     establish_container_cleanup_authority,
     validate_container_cleanup_target,
     validate_container_for_start,
+    validate_container_removal_target,
+    validate_container_running,
+    validate_container_stop_target,
 )
 from scripts.voice_pipecat_e2e_coturn_docker_network import (  # noqa: E402
     establish_network_cleanup_authority,
     validate_network_for_container,
 )
 from scripts.voice_pipecat_e2e_coturn_host import RuntimeIdentity  # noqa: E402
+from tests.coturn_traceback_helpers import traceback_contains  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_docker import IMAGE_ID, image_inspection  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_docker_network import (  # noqa: E402
     NETWORK_ID,
@@ -92,6 +100,9 @@ def container_inspection(selected: ContainerPlan, *, running: bool = False):
         "Dead": False,
         "Pid": 4242 if running else 0,
         "ExitCode": 0,
+        "Error": "",
+        "StartedAt": "2026-08-16T12:00:00.000000000Z" if running else "0001-01-01T00:00:00Z",
+        "FinishedAt": "0001-01-01T00:00:00Z",
     }
     return [
         {
@@ -324,6 +335,30 @@ def test_container_full_start_validation_and_commands_are_factory_owned_and_reda
         ContainerCleanupAuthority(object(), CONTAINER_ID, selected)
 
 
+def test_running_container_is_fully_revalidated_and_receipt_is_redacted(tmp_path: Path) -> None:
+    selected = container_plan(tmp_path)
+    created = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=created,
+    )
+    running = container_inspection(selected, running=True)
+    receipt = validate_container_running(authority, running)
+    assert receipt.authority is authority
+    assert repr(receipt) == "ValidatedRunningContainer()"
+    assert CONTAINER_ID not in repr(receipt)
+    with pytest.raises(TypeError, match="factory-owned"):
+        ValidatedRunningContainer(object(), authority)
+
+    running[0]["NetworkSettings"]["Ports"]["5349/tcp"][0]["HostIp"] = "0.0.0.0"  # type: ignore[index]
+    with pytest.raises(
+        CoturnDockerContainerError,
+        match=r"^Coturn running container is invalid$",
+    ):
+        validate_container_running(authority, running)
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -390,7 +425,9 @@ def test_container_start_validation_rejects_malformed_mount_shape_with_fixed_err
         validate_container_for_start(authority, inspection)
 
 
-def test_cleanup_uses_identity_not_full_safe_use_and_refuses_running_remove(tmp_path: Path) -> None:
+def test_cleanup_requires_full_safe_use_before_stop_and_refuses_running_remove(
+    tmp_path: Path,
+) -> None:
     selected = container_plan(tmp_path)
     original = container_inspection(selected)
     authority = establish_container_cleanup_authority(
@@ -398,13 +435,240 @@ def test_cleanup_uses_identity_not_full_safe_use_and_refuses_running_remove(tmp_
         container_id=CONTAINER_ID,
         inspection=original,
     )
-    damaged = container_inspection(selected, running=True)
-    damaged[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
-    target = validate_container_cleanup_target(authority, damaged)
+    clean_running = container_inspection(selected, running=True)
+    target = validate_container_cleanup_target(authority, clean_running)
     assert target.running is True
     assert build_container_stop_request(_tools(), target).argv[-1] == CONTAINER_ID
     with pytest.raises(CoturnDockerContainerError, match="removal is refused"):
         build_container_remove_request(_tools(), target)
+
+    damaged = container_inspection(selected, running=True)
+    damaged[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
+    with pytest.raises(CoturnDockerContainerError, match="running container is invalid"):
+        validate_container_cleanup_target(authority, damaged)
+    with pytest.raises(CoturnDockerContainerError, match="running container is invalid"):
+        validate_container_stop_target(authority, damaged)
+    with pytest.raises(CoturnDockerContainerError, match="removal is refused"):
+        validate_container_removal_target(authority, container_inspection(selected, running=True))
     damaged[0]["Config"]["Labels"] = {"foreign": "true"}  # type: ignore[index]
     with pytest.raises(CoturnDockerContainerError, match="ownership is invalid"):
         validate_container_cleanup_target(authority, damaged)
+
+
+def test_cleanup_split_requires_running_stop_then_stopped_removal_and_absence(
+    tmp_path: Path,
+) -> None:
+    selected = container_plan(tmp_path)
+    created = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=created,
+    )
+    running = container_inspection(selected, running=True)
+    stop = validate_container_stop_target(authority, running)
+    assert repr(stop) == "ValidatedContainerStop()"
+    assert build_container_stop_request(_tools(), stop).argv[-1] == CONTAINER_ID
+    with pytest.raises(CoturnDockerContainerError, match="removal is refused"):
+        validate_container_removal_target(authority, running)
+
+    removal = validate_container_removal_target(authority, created)
+    assert repr(removal) == "ValidatedContainerRemoval()"
+    assert build_container_remove_request(_tools(), removal).argv[-1] == CONTAINER_ID
+    assert build_container_absence_request(_tools(), removal).argv[-1] == f"id={CONTAINER_ID}"
+    with pytest.raises(CoturnDockerContainerError, match="running container is invalid"):
+        validate_container_stop_target(authority, created)
+    with pytest.raises(TypeError, match="factory-owned"):
+        ValidatedContainerStop(object(), authority)
+    with pytest.raises(TypeError, match="factory-owned"):
+        ValidatedContainerRemoval(object(), authority)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Status", "running"),
+        ("Pid", 42),
+        ("Paused", True),
+        ("Restarting", True),
+        ("OOMKilled", "false"),
+        ("Dead", True),
+        ("ExitCode", True),
+        ("Error", 1),
+        ("StartedAt", "2026-08-16T12:00:00Z"),
+        ("FinishedAt", "invalid"),
+    ],
+)
+def test_cleanup_split_rejects_incoherent_stopped_state(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    selected = container_plan(tmp_path)
+    inspection = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=inspection,
+    )
+    inspection[0]["State"][field] = value  # type: ignore[index]
+    with pytest.raises(
+        CoturnDockerContainerError,
+        match=r"^Coturn container cleanup state is invalid$",
+    ):
+        validate_container_removal_target(authority, inspection)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("Status", "exited"),
+        ("Running", False),
+        ("Paused", True),
+        ("Restarting", True),
+        ("OOMKilled", True),
+        ("Dead", True),
+        ("Pid", 0),
+        ("ExitCode", 1),
+        ("Error", "failed"),
+        ("StartedAt", "0001-01-01T00:00:00Z"),
+        ("FinishedAt", "2026-08-16T12:01:00Z"),
+    ],
+)
+def test_running_use_and_stop_reject_every_incoherent_state_bit(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    selected = container_plan(tmp_path)
+    created = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=created,
+    )
+    running = container_inspection(selected, running=True)
+    running[0]["State"][field] = value  # type: ignore[index]
+    for validator in (validate_container_running, validate_container_stop_target):
+        with pytest.raises(
+            CoturnDockerContainerError,
+            match=r"^Coturn running container is invalid$",
+        ):
+            validator(authority, running)
+
+
+@pytest.mark.parametrize(
+    "surface",
+    ["establish", "start", "running", "stop", "removal", "cleanup"],
+)
+def test_container_validation_failures_discard_inspection_and_authority_plan_graphs(
+    tmp_path: Path,
+    surface: str,
+) -> None:
+    plan_secret = "traceback-sentinel-plan-env"
+    raw_secret = "traceback-sentinel-raw-container"
+    base = container_plan(tmp_path)
+    raw_image = image_inspection()
+    raw_image[0]["Config"]["Env"].append(f"HARMLESS={plan_secret}")  # type: ignore[index]
+    selected = ContainerPlan(
+        identity=base.identity,
+        paths=base.paths,
+        network=base.network,
+        image=validate_image_inspection(raw_image),
+        uid=base.uid,
+        gid=base.gid,
+    )
+    valid = container_inspection(selected)
+    authority = None
+    if surface != "establish":
+        authority = establish_container_cleanup_authority(
+            plan=selected,
+            container_id=CONTAINER_ID,
+            inspection=valid,
+        )
+    inspection = container_inspection(
+        selected,
+        running=surface in {"running", "stop", "removal", "cleanup"},
+    )
+    inspection[0]["RawSecret"] = raw_secret
+    if surface == "establish":
+        inspection[0]["Config"]["Labels"] = {"foreign": raw_secret}  # type: ignore[index]
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            establish_container_cleanup_authority(
+                plan=selected,
+                container_id=CONTAINER_ID,
+                inspection=inspection,
+            )
+    elif surface == "start":
+        inspection[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            validate_container_for_start(authority, inspection)  # type: ignore[arg-type]
+    elif surface == "running":
+        inspection[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            validate_container_running(authority, inspection)  # type: ignore[arg-type]
+    elif surface == "stop":
+        inspection[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            validate_container_stop_target(authority, inspection)  # type: ignore[arg-type]
+    elif surface == "removal":
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            validate_container_removal_target(authority, inspection)  # type: ignore[arg-type]
+    else:
+        inspection[0]["HostConfig"]["Privileged"] = True  # type: ignore[index]
+        with pytest.raises(CoturnDockerContainerError) as captured:
+            validate_container_cleanup_target(authority, inspection)  # type: ignore[arg-type]
+    assert captured.value.__context__ is None
+    assert not traceback_contains(captured.value, plan_secret, raw_secret)
+
+
+@pytest.mark.parametrize("shape", ["env", "labels", "mounts", "ports"])
+def test_container_start_failure_discards_every_nested_raw_inspection_shape(
+    tmp_path: Path,
+    shape: str,
+) -> None:
+    secret = f"traceback-sentinel-container-{shape}"
+    selected = container_plan(tmp_path)
+    valid = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=valid,
+    )
+    inspection = container_inspection(selected)
+    if shape == "env":
+        inspection[0]["Config"]["Env"].append(f"HARMLESS={secret}")  # type: ignore[index]
+    elif shape == "labels":
+        inspection[0]["Config"]["Labels"] = {"raw": secret}  # type: ignore[index]
+    elif shape == "mounts":
+        inspection[0]["Mounts"] = [{"Destination": secret}]
+    else:
+        inspection[0]["NetworkSettings"]["Ports"] = {secret: {}}  # type: ignore[index]
+    with pytest.raises(CoturnDockerContainerError) as captured:
+        validate_container_for_start(authority, inspection)
+    assert not traceback_contains(captured.value, secret)
+
+
+def test_validation_boundary_discards_non_allowlisted_same_type_error_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "traceback-sentinel-container-error-message"
+    selected = container_plan(tmp_path)
+    inspection = container_inspection(selected)
+    authority = establish_container_cleanup_authority(
+        plan=selected,
+        container_id=CONTAINER_ID,
+        inspection=inspection,
+    )
+
+    def hostile_validator(*_args: object, **_kwargs: object) -> object:
+        raise CoturnDockerContainerError(secret)
+
+    monkeypatch.setattr(container_module, "_validate_container_for_start", hostile_validator)
+    with pytest.raises(
+        CoturnDockerContainerError,
+        match=r"^Coturn container is unsafe to start$",
+    ) as captured:
+        validate_container_for_start(authority, inspection)
+    assert not traceback_contains(captured.value, secret)
