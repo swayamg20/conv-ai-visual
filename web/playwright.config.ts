@@ -25,6 +25,8 @@ export default defineConfig({
   retries: 0,
   timeout: 60_000,
   expect: { timeout: 20_000 },
+  metadata: { ci: { source: "runner-owned" } },
+  captureGitInfo: { commit: false, diff: false },
   outputDir: path.join(artifactDir, "test-results"),
   reporter: [
     ["line"],
