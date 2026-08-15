@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   AUDIO_CLOCK_LOCAL_ACTIVE_RMS,
+  AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
   AUDIO_CLOCK_MAX_TRANSITIONS,
   AUDIO_CLOCK_QUANTUM_FRAMES,
   AUDIO_CLOCK_REMOTE_SILENCE_RMS,
@@ -174,6 +175,10 @@ function probe(overrides: Partial<AudioClockProbeEvidence> = {}): AudioClockProb
     frame_delta_frames: null,
     last_observed_block_start_frame: null,
     context_state_at_message_delivery: null,
+    stale_frame_correction_count: 0,
+    last_stale_observed_block_start_frame: null,
+    last_stale_logical_block_start_frame: null,
+    stale_frame_correction_pending: false,
     ...overrides,
   };
 }
@@ -212,6 +217,12 @@ function observation(input: {
   readonly blockStartFrame: number;
   readonly activeRegions: number;
   readonly quantumFrames?: number;
+  readonly processedBlocks?: number;
+  readonly includeTransition?: boolean;
+  readonly staleFrameCorrectionCount?: number;
+  readonly lastStaleObservedBlockStartFrame?: number | null;
+  readonly lastStaleLogicalBlockStartFrame?: number | null;
+  readonly staleFrameCorrectionPending?: boolean;
 }) {
   return {
     schema_version: 1,
@@ -220,17 +231,26 @@ function observation(input: {
     message_sequence: input.sequence,
     sample_rate_hz: 48_000,
     quantum_frames: input.quantumFrames ?? AUDIO_CLOCK_QUANTUM_FRAMES,
-    processed_block_count: input.sequence,
+    processed_block_count: input.processedBlocks ?? input.sequence,
     latest_block_end_frame: input.blockStartFrame + AUDIO_CLOCK_QUANTUM_FRAMES,
     current_state: input.state,
     current_state_block_count: 1,
     active_region_count: input.activeRegions,
-    transition: transition(input.state, input.blockStartFrame),
+    transition:
+      input.includeTransition === false
+        ? null
+        : transition(input.state, input.blockStartFrame),
     failure_code: undefined,
     expected_block_start_frame: null,
     observed_block_start_frame: null,
     frame_delta_frames: null,
     last_observed_block_start_frame: null,
+    stale_frame_correction_count: input.staleFrameCorrectionCount ?? 0,
+    last_stale_observed_block_start_frame:
+      input.lastStaleObservedBlockStartFrame ?? null,
+    last_stale_logical_block_start_frame:
+      input.lastStaleLogicalBlockStartFrame ?? null,
+    stale_frame_correction_pending: input.staleFrameCorrectionPending ?? false,
   };
 }
 
@@ -241,6 +261,10 @@ function frameGapFault(input: {
   readonly expectedBlockStartFrame: number;
   readonly observedBlockStartFrame: number;
   readonly lastObservedBlockStartFrame: number;
+  readonly staleFrameCorrectionCount?: number;
+  readonly lastStaleObservedBlockStartFrame?: number | null;
+  readonly lastStaleLogicalBlockStartFrame?: number | null;
+  readonly staleFrameCorrectionPending?: boolean;
 }) {
   return {
     schema_version: 1,
@@ -262,6 +286,12 @@ function frameGapFault(input: {
     frame_delta_frames:
       input.observedBlockStartFrame - input.expectedBlockStartFrame,
     last_observed_block_start_frame: input.lastObservedBlockStartFrame,
+    stale_frame_correction_count: input.staleFrameCorrectionCount ?? 0,
+    last_stale_observed_block_start_frame:
+      input.lastStaleObservedBlockStartFrame ?? null,
+    last_stale_logical_block_start_frame:
+      input.lastStaleLogicalBlockStartFrame ?? null,
+    stale_frame_correction_pending: input.staleFrameCorrectionPending ?? false,
   } as const;
 }
 
@@ -296,9 +326,13 @@ describe("audio sample-clock bracket", () => {
         "failure_message_sequence",
         "frame_delta_frames",
         "last_observed_block_start_frame",
+        "last_stale_logical_block_start_frame",
+        "last_stale_observed_block_start_frame",
         "last_successful_block_end_frame",
         "last_successful_processed_block_count",
         "observed_block_start_frame",
+        "stale_frame_correction_count",
+        "stale_frame_correction_pending",
       ].sort()
     );
     expect(capsule.local).toMatchObject({
@@ -309,6 +343,10 @@ describe("audio sample-clock bracket", () => {
       frame_delta_frames: -128,
       last_observed_block_start_frame: 199_552,
       context_state_at_message_delivery: "running",
+      stale_frame_correction_count: 0,
+      last_stale_observed_block_start_frame: null,
+      last_stale_logical_block_start_frame: null,
+      stale_frame_correction_pending: false,
     });
     const serialized = JSON.stringify(capsule);
     expect(serialized.length).toBeLessThan(2_048);
@@ -335,6 +373,32 @@ describe("audio sample-clock bracket", () => {
     expect(failureMessage).not.toMatch(
       /exact_track_id|channel_samples|raw_pcm|audio_samples|voice_call|session|trace|sdp|ice/i
     );
+
+    const correctionCapsule = audioClockFailureCapsule(
+      evidence({
+        failure_code: "frame_gap",
+        failure_message_sequence: 3,
+        expected_block_start_frame: 205_056,
+        observed_block_start_frame: 204_928,
+        frame_delta_frames: -128,
+        last_observed_block_start_frame: 204_800,
+        context_state_at_message_delivery: "running",
+        stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+        last_stale_observed_block_start_frame: 204_800,
+        last_stale_logical_block_start_frame: 204_928,
+        stale_frame_correction_pending: true,
+      })
+    );
+    expect(correctionCapsule.local).toMatchObject({
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: 204_800,
+      last_stale_logical_block_start_frame: 204_928,
+      stale_frame_correction_pending: true,
+    });
+    expect(JSON.stringify(correctionCapsule)).not.toMatch(
+      /exact_track_id|channel_samples|raw_pcm|audio_samples|voice_call|session|trace|sdp|ice/i
+    );
+    expect(containsTypedArray(correctionCapsule)).toBe(false);
   });
 
   it("never lets terminal cleanup overwrite a harness error", () => {
@@ -361,6 +425,30 @@ describe("audio sample-clock bracket", () => {
       interruption_upper_bound_frames: 2_688,
       interruption_upper_bound_ms: 56,
     });
+  });
+
+  it("refuses a pending correction and preserves settled correction SLA math", () => {
+    const baseline = interruptionClockBracket(evidence());
+    const correction = {
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: 47_872,
+      last_stale_logical_block_start_frame: 48_000,
+    } as const;
+
+    expect(
+      interruptionClockBracket(
+        evidence({ ...correction, stale_frame_correction_pending: true })
+      )
+    ).toMatchObject({
+      status: "pending",
+      failure_code: "stale_frame_correction_pending",
+    });
+    expect(
+      interruptionClockBracket(
+        evidence({ ...correction, stale_frame_correction_pending: false })
+      )
+    ).toEqual(baseline);
+    expect(baseline.interruption_upper_bound_ms).toBe(56);
   });
 
   it("hard-fails when the conservative block bracket exceeds 250ms", () => {
@@ -428,7 +516,7 @@ describe("audio sample-clock bracket", () => {
 });
 
 describe("audio sample-clock worklet", () => {
-  it("bridges sub-500ms local gaps before counting semantic regions", async () => {
+  it("bridges semantic regions and enforces the one-shot stale-frame correction", async () => {
     const harness = runtimeHarness();
     const diagnostics = await prepareAudioClockDiagnostics(harness.context, harness.dependencies);
     const posted: unknown[] = [];
@@ -535,6 +623,8 @@ describe("audio sample-clock worklet", () => {
         "frame_delta_frames",
         "kind",
         "last_observed_block_start_frame",
+        "last_stale_logical_block_start_frame",
+        "last_stale_observed_block_start_frame",
         "latest_block_end_frame",
         "message_sequence",
         "observed_block_start_frame",
@@ -543,6 +633,8 @@ describe("audio sample-clock worklet", () => {
         "quantum_frames",
         "sample_rate_hz",
         "schema_version",
+        "stale_frame_correction_count",
+        "stale_frame_correction_pending",
         "transition",
       ].sort();
     expect(Object.keys(posted[0] as object).sort()).toEqual(expectedWorkletMessageKeys);
@@ -585,34 +677,143 @@ describe("audio sample-clock worklet", () => {
     expect(containsTypedArray(posted.at(-1))).toBe(false);
 
     posted.length = 0;
-    const repeatedFrameProcessor = new Processor({
+    const correctedFrameProcessor = new Processor({
+      processorOptions: {
+        probe: "remote",
+        thresholdRms: AUDIO_CLOCK_REMOTE_SILENCE_RMS,
+        silenceHoldFrames: AUDIO_CLOCK_QUANTUM_FRAMES,
+      },
+    });
+    const correctedSequence = [
+      { frame: 0, amplitude: 0.1 },
+      { frame: AUDIO_CLOCK_QUANTUM_FRAMES, amplitude: 0.1 },
+      { frame: AUDIO_CLOCK_QUANTUM_FRAMES, amplitude: 0 },
+      { frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3, amplitude: 0.1 },
+    ] as const;
+    for (const { frame: observedFrame, amplitude } of correctedSequence) {
+      sandbox.currentFrame = observedFrame;
+      const samples = new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES);
+      samples.fill(amplitude);
+      expect(
+        correctedFrameProcessor.process([[samples]])
+      ).toBe(true);
+    }
+    expect(posted).toHaveLength(3);
+    expect(posted[1]).toMatchObject({
+      kind: "observation",
+      message_sequence: 2,
+      processed_block_count: 3,
+      latest_block_end_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_stale_logical_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      stale_frame_correction_pending: true,
+      transition: transition("silent", AUDIO_CLOCK_QUANTUM_FRAMES * 2),
+    });
+    expect(posted[2]).toMatchObject({
+      kind: "observation",
+      message_sequence: 3,
+      processed_block_count: 4,
+      latest_block_end_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_stale_logical_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      stale_frame_correction_pending: false,
+      transition: transition("active", AUDIO_CLOCK_QUANTUM_FRAMES * 3),
+    });
+
+    const executeFrameSequence = (frames: readonly number[]) => {
+      posted.length = 0;
+      const candidate = new Processor({
+        processorOptions: {
+          probe: "remote",
+          thresholdRms: AUDIO_CLOCK_REMOTE_SILENCE_RMS,
+          silenceHoldFrames: 9_600,
+        },
+      });
+      let running = true;
+      for (const observedFrame of frames) {
+        sandbox.currentFrame = observedFrame;
+        running = candidate.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]]);
+        if (!running) break;
+      }
+      return { messages: [...posted], running };
+    };
+    const forwardGap = executeFrameSequence([0, 128, 384]);
+    expect(forwardGap.running).toBe(false);
+    expect(forwardGap.messages.at(-1)).toMatchObject({
+      failure_code: "frame_gap",
+      expected_block_start_frame: 256,
+      observed_block_start_frame: 384,
+      frame_delta_frames: 128,
+    });
+    const backwardReset = executeFrameSequence([0, 128, 0]);
+    expect(backwardReset.running).toBe(false);
+    expect(backwardReset.messages.at(-1)).toMatchObject({
+      failure_code: "frame_gap",
+      expected_block_start_frame: 256,
+      observed_block_start_frame: 0,
+      frame_delta_frames: -256,
+    });
+    const secondConsecutiveRepeat = executeFrameSequence([0, 128, 128, 128]);
+    expect(secondConsecutiveRepeat.running).toBe(false);
+    expect(secondConsecutiveRepeat.messages.at(-1)).toMatchObject({
+      failure_code: "frame_gap",
+      expected_block_start_frame: 384,
+      observed_block_start_frame: 128,
+      frame_delta_frames: -256,
+      stale_frame_correction_pending: true,
+    });
+    for (const wrongCatchUp of [256, 512]) {
+      const result = executeFrameSequence([0, 128, 128, wrongCatchUp]);
+      expect(result.running).toBe(false);
+      expect(result.messages.at(-1)).toMatchObject({
+        failure_code: "frame_gap",
+        expected_block_start_frame: 384,
+        observed_block_start_frame: wrongCatchUp,
+        frame_delta_frames: wrongCatchUp - 384,
+        stale_frame_correction_pending: true,
+      });
+    }
+    const correctionBudgetExceeded = executeFrameSequence([0, 128, 128, 384, 384]);
+    expect(correctionBudgetExceeded.running).toBe(false);
+    expect(correctionBudgetExceeded.messages.at(-1)).toMatchObject({
+      failure_code: "frame_gap",
+      expected_block_start_frame: 512,
+      observed_block_start_frame: 384,
+      frame_delta_frames: -128,
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      stale_frame_correction_pending: false,
+    });
+
+    posted.length = 0;
+    const periodicBoundaryProcessor = new Processor({
       processorOptions: {
         probe: "remote",
         thresholdRms: AUDIO_CLOCK_REMOTE_SILENCE_RMS,
         silenceHoldFrames: 9_600,
       },
     });
-    for (const observedFrame of [0, AUDIO_CLOCK_QUANTUM_FRAMES]) {
+    for (const observedFrame of [0, 128, 256, 384, 512, 640, 768, 768, 1_024]) {
       sandbox.currentFrame = observedFrame;
-      expect(
-        repeatedFrameProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
-      ).toBe(true);
+      const activeBlock = new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES);
+      activeBlock.fill(0.1);
+      expect(periodicBoundaryProcessor.process([[activeBlock]])).toBe(true);
     }
-    sandbox.currentFrame = AUDIO_CLOCK_QUANTUM_FRAMES;
-    expect(
-      repeatedFrameProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
-    ).toBe(false);
-    expect(posted.at(-1)).toMatchObject({
-      kind: "fault",
-      failure_code: "frame_gap",
-      message_sequence: 1,
-      processed_block_count: 2,
-      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
-      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
-      frame_delta_frames: -AUDIO_CLOCK_QUANTUM_FRAMES,
-      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+    expect(posted).toHaveLength(3);
+    expect(posted[1]).toMatchObject({
+      message_sequence: 2,
+      processed_block_count: 8,
+      latest_block_end_frame: 1_024,
+      stale_frame_correction_pending: true,
     });
-    expect(containsTypedArray(posted.at(-1))).toBe(false);
+    expect(posted[2]).toMatchObject({
+      message_sequence: 3,
+      processed_block_count: 9,
+      latest_block_end_frame: 1_152,
+      stale_frame_correction_pending: false,
+    });
+    expect(posted.every((message) => !containsTypedArray(message))).toBe(true);
     expect(JSON.stringify(posted)).not.toMatch(/channel_samples|raw_pcm|audio_samples/i);
     await diagnostics.dispose();
   });
@@ -629,6 +830,79 @@ describe("audio sample-clock lifecycle", () => {
 
     expect(harness.createModuleUrl).toHaveBeenCalledOnce();
     expect(harness.revokeModuleUrl).toHaveBeenCalledWith("blob:audio-clock-test");
+  });
+
+  it("publishes a pending correction and only settles it on exact catch-up", async () => {
+    vi.stubGlobal("MediaStream", class FakeMediaStream {});
+    const harness = runtimeHarness();
+    const diagnostics = await prepareAudioClockDiagnostics(
+      harness.context,
+      harness.dependencies
+    );
+    diagnostics.attach("remote", track("remote"), AUDIO_CLOCK_REMOTE_SILENCE_RMS);
+    const deliver = (data: unknown) =>
+      harness.worklets[0]?.port.onmessage?.({ data } as MessageEvent<unknown>);
+
+    deliver(
+      observation({
+        probe: "remote",
+        sequence: 1,
+        state: "active",
+        blockStartFrame: 0,
+        activeRegions: 1,
+        processedBlocks: 1,
+      })
+    );
+    deliver(
+      observation({
+        probe: "remote",
+        sequence: 2,
+        state: "active",
+        blockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        activeRegions: 1,
+        processedBlocks: 3,
+        includeTransition: false,
+        staleFrameCorrectionCount: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+        lastStaleObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        lastStaleLogicalBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        staleFrameCorrectionPending: true,
+      })
+    );
+    expect(diagnostics.read().remote).toMatchObject({
+      failure_code: null,
+      processed_block_count: 3,
+      latest_block_end_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_stale_logical_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      stale_frame_correction_pending: true,
+    });
+
+    deliver(
+      observation({
+        probe: "remote",
+        sequence: 3,
+        state: "active",
+        blockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        activeRegions: 1,
+        processedBlocks: 4,
+        includeTransition: false,
+        staleFrameCorrectionCount: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+        lastStaleObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        lastStaleLogicalBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        staleFrameCorrectionPending: false,
+      })
+    );
+    expect(diagnostics.read().remote).toMatchObject({
+      failure_code: null,
+      processed_block_count: 4,
+      latest_block_end_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_stale_logical_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      stale_frame_correction_pending: false,
+    });
+    await diagnostics.dispose();
   });
 
   it("retains bounded frame-gap diagnostics and context state from the fault", async () => {
@@ -674,11 +948,15 @@ describe("audio sample-clock lifecycle", () => {
         "failure_message_sequence",
         "frame_delta_frames",
         "last_observed_block_start_frame",
+        "last_stale_logical_block_start_frame",
+        "last_stale_observed_block_start_frame",
         "latest_block_end_frame",
         "observed_block_start_frame",
         "overflow",
         "processed_block_count",
         "silence_hold_frames",
+        "stale_frame_correction_count",
+        "stale_frame_correction_pending",
         "threshold_rms",
         "transitions",
       ].sort()
@@ -692,28 +970,52 @@ describe("audio sample-clock lifecycle", () => {
         probe: "local",
         sequence: 1,
         state: "silent",
-        blockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        blockStartFrame: 0,
         activeRegions: 0,
+        processedBlocks: 1,
+      }),
+    } as MessageEvent<unknown>);
+    harness.worklets[1]?.port.onmessage?.({
+      data: observation({
+        probe: "local",
+        sequence: 2,
+        state: "silent",
+        blockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        activeRegions: 0,
+        processedBlocks: 3,
+        includeTransition: false,
+        staleFrameCorrectionCount: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+        lastStaleObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        lastStaleLogicalBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        staleFrameCorrectionPending: true,
       }),
     } as MessageEvent<unknown>);
     harness.worklets[1]?.port.onmessage?.({
       data: frameGapFault({
         probe: "local",
-        sequence: 2,
-        processedBlocks: 1,
-        expectedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
-        observedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
-        lastObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        sequence: 3,
+        processedBlocks: 3,
+        expectedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        observedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        lastObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        staleFrameCorrectionCount: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+        lastStaleObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        lastStaleLogicalBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        staleFrameCorrectionPending: true,
       }),
     } as MessageEvent<unknown>);
     expect(diagnostics.read().local).toMatchObject({
       failure_code: "frame_gap",
-      failure_message_sequence: 2,
-      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
-      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
-      frame_delta_frames: -AUDIO_CLOCK_QUANTUM_FRAMES * 3,
-      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      failure_message_sequence: 3,
+      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      frame_delta_frames: -AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
       context_state_at_message_delivery: "running",
+      stale_frame_correction_count: AUDIO_CLOCK_MAX_STALE_FRAME_CORRECTIONS,
+      last_stale_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_stale_logical_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      stale_frame_correction_pending: true,
     });
     await diagnostics.dispose();
   });
