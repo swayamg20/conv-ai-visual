@@ -3,6 +3,15 @@ import path from "node:path";
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
+import {
+  AUDIO_CLOCK_MAX_INTERRUPTION_MS,
+  AUDIO_CLOCK_MAX_TRANSITIONS,
+  AUDIO_CLOCK_QUANTUM_FRAMES,
+  AUDIO_CLOCK_REQUIRED_SILENCE_MS,
+  audioClockCleanupComplete,
+  interruptionClockBracket,
+  type AudioClockEvidence,
+} from "../src/app/e2e/voice/audio-clock-diagnostics";
 import { interruptionAttribution } from "../src/app/e2e/voice/proof";
 import type { BrowserRtcEvidence } from "../src/app/e2e/voice/rtc-diagnostics";
 
@@ -12,10 +21,9 @@ const EXPECTED_PROFILE_ID = "pipecat-fake-rtc-v1";
 const EXPECTED_TRANSCRIPTS = ["Hello tutor.", "Actually, stop."] as const;
 const PIPECAT_API_URL = "http://127.0.0.1:8101";
 const LOCAL_ACTIVE_RMS = 0.005;
+const LOCAL_REGION_BRIDGE_MS = 500;
 const REMOTE_ACTIVE_RMS = 0.02;
 const REMOTE_SILENCE_RMS = 0.012;
-const MAX_INTERRUPTION_TO_SILENCE_MS = 250;
-const REQUIRED_SILENCE_MS = 200;
 const REMOTE_ATTRIBUTION_TOLERANCE_MS = 100;
 
 // Network traces retain the bearer locator, Authorization header, SDP, and ICE
@@ -92,6 +100,7 @@ interface BrowserSnapshot {
     readonly sequence: number;
     readonly action: "prepare" | "activate";
   }[];
+  readonly audio_clock: AudioClockEvidence;
   readonly rtc: BrowserRtcEvidence;
   readonly disconnect_requested: boolean;
   readonly hook_assignment_cleared: boolean;
@@ -205,7 +214,7 @@ function sustainedSilenceStart(
       end += 1;
     }
     const final = samples[end];
-    if (final && final.t_ms - first.t_ms >= REQUIRED_SILENCE_MS) {
+    if (final && final.t_ms - first.t_ms >= AUDIO_CLOCK_REQUIRED_SILENCE_MS) {
       return first.t_ms;
     }
   }
@@ -234,32 +243,25 @@ function proofReady(snapshot: BrowserSnapshot): boolean {
   ) {
     return false;
   }
-  const localRegions = activeRegions(snapshot.local_samples, LOCAL_ACTIVE_RMS, 500);
-  if (localRegions.length !== 2) return false;
-  const secondOnset = localRegions[1]?.start_ms;
-  if (secondOnset === undefined) return false;
-  const silenceStart = sustainedSilenceStart(snapshot.remote_samples, secondOnset);
-  if (
-    silenceStart === undefined ||
-    silenceStart - secondOnset > MAX_INTERRUPTION_TO_SILENCE_MS
-  ) {
+  if (interruptionClockBracket(snapshot.audio_clock).status !== "passed") {
     return false;
   }
+  const localPcmRegions = activeRegions(snapshot.local_samples, LOCAL_ACTIVE_RMS, 500);
+  const secondPcmOnset = localPcmRegions[1]?.start_ms;
+  if (secondPcmOnset === undefined) return false;
+  const silenceStart = sustainedSilenceStart(snapshot.remote_samples, secondPcmOnset);
+  if (silenceStart === undefined) return false;
   const turns = eventsOf(snapshot, "turn_committed");
   const firstTurnId = turns[0]?.event.turn_id;
   const secondTurnId = turns[1]?.event.turn_id;
   const interrupted = eventsOf(snapshot, "assistant_speech_stopped").find(
-    ({ event }) =>
-      event.payload.reason === "interrupted" && event.turn_id === firstTurnId
+    ({ event }) => event.payload.reason === "interrupted" && event.turn_id === firstTurnId
   );
-  if (!interrupted || !secondTurnId || interrupted.t_ms < secondOnset) return false;
+  if (!interrupted || !secondTurnId) return false;
   const nextSpeechStart = eventsOf(snapshot, "assistant_speech_started").find(
     ({ event, t_ms }) => event.turn_id === secondTurnId && t_ms > interrupted.t_ms
   );
-  if (
-    !nextSpeechStart ||
-    nextSpeechStart.t_ms < silenceStart + REQUIRED_SILENCE_MS
-  ) {
+  if (!nextSpeechStart || nextSpeechStart.t_ms < silenceStart + AUDIO_CLOCK_REQUIRED_SILENCE_MS) {
     return false;
   }
   const nextSpeechStop = eventsOf(snapshot, "assistant_speech_stopped").find(
@@ -274,7 +276,7 @@ function proofReady(snapshot: BrowserSnapshot): boolean {
     silenceStartMs: silenceStart,
     nextAssistantSpeechStartMs: nextSpeechStart.t_ms,
     activeRms: REMOTE_ACTIVE_RMS,
-    requiredSilenceMs: REQUIRED_SILENCE_MS,
+    requiredSilenceMs: AUDIO_CLOCK_REQUIRED_SILENCE_MS,
     samplingToleranceMs: REMOTE_ATTRIBUTION_TOLERANCE_MS,
   });
   return (
@@ -282,7 +284,7 @@ function proofReady(snapshot: BrowserSnapshot): boolean {
     snapshot.events[0]?.event.event_type === "agent_ready" &&
     turns.length >= 2 &&
     snapshot.remote_samples.some(
-      (sample) => sample.t_ms < secondOnset && sample.rms >= REMOTE_ACTIVE_RMS
+      (sample) => sample.t_ms < secondPcmOnset && sample.rms >= REMOTE_ACTIVE_RMS
     ) &&
     nextSpeechStop !== undefined &&
     snapshot.rtc.peer_connection_count === 1 &&
@@ -301,6 +303,10 @@ async function waitForProof(page: Page, timeoutMs: number): Promise<BrowserSnaps
   while (Date.now() < deadline) {
     await assertNoHarnessError(page);
     const snapshot = await readSnapshot(page);
+    const clockBracket = interruptionClockBracket(snapshot.audio_clock);
+    if (clockBracket.status === "failed") {
+      throw new Error(`Audio sample-clock proof failed: ${clockBracket.failure_code ?? "unknown"}`);
+    }
     if (proofReady(snapshot)) return snapshot;
     await page.waitForTimeout(100);
   }
@@ -464,6 +470,15 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   });
   expect(prepared.local_track).toBeNull();
   expect(prepared.remote_track).toBeNull();
+  expect(prepared.audio_clock).toMatchObject({
+    schema_version: 1,
+    worklet_loaded: true,
+    quantum_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+    disposed: false,
+    local: { attached: false },
+    remote: { attached: false },
+  });
+  expect(prepared.audio_clock.sample_rate_hz).toBeGreaterThan(0);
   expect(prepared.rtc.peer_connection_count).toBe(0);
   expect(requestTrace.bootstrapPosts).toBe(1);
   expect(requestTrace.signalingPosts).toBe(0);
@@ -558,11 +573,72 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
     expect(transcript.t_ms).toBeLessThanOrEqual(turn?.t_ms ?? -1);
   }
 
-  const localRegions = activeRegions(proof.local_samples, LOCAL_ACTIVE_RMS, 500);
-  expect(localRegions).toHaveLength(2);
-  const secondOnset = localRegions[1]?.start_ms;
-  expect(secondOnset).toBeDefined();
-  if (secondOnset === undefined) throw new Error("Second microphone onset was not measured");
+  const clockBracket = interruptionClockBracket(proof.audio_clock);
+  expect(clockBracket).toMatchObject({
+    status: "passed",
+    failure_code: null,
+    sample_rate_hz: proof.audio_clock.sample_rate_hz,
+    quantum_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+  });
+  expect(clockBracket.second_local_active_block_start_frame).not.toBeNull();
+  expect(clockBracket.remote_silence_transition_block_end_frame).not.toBeNull();
+  expect(clockBracket.interruption_upper_bound_frames).not.toBeNull();
+  expect(clockBracket.interruption_upper_bound_ms).not.toBeNull();
+  expect(clockBracket.interruption_upper_bound_ms).toBeGreaterThanOrEqual(0);
+  expect(clockBracket.interruption_upper_bound_ms).toBeLessThanOrEqual(
+    AUDIO_CLOCK_MAX_INTERRUPTION_MS
+  );
+  const localClockStart = clockBracket.second_local_active_block_start_frame;
+  const remoteClockEnd = clockBracket.remote_silence_transition_block_end_frame;
+  if (localClockStart === null || remoteClockEnd === null) {
+    throw new Error("Audio sample-clock bracket was incomplete");
+  }
+  expect(clockBracket.interruption_upper_bound_frames).toBe(remoteClockEnd - localClockStart);
+  expect(clockBracket.interruption_upper_bound_ms).toBe(
+    Math.ceil(((remoteClockEnd - localClockStart) * 1_000_000) / proof.audio_clock.sample_rate_hz) /
+      1_000
+  );
+  expect(proof.audio_clock.local).toMatchObject({
+    attached: true,
+    exact_track_id: proof.local_track?.id,
+    threshold_rms: LOCAL_ACTIVE_RMS,
+    active_region_count: 2,
+    overflow: false,
+    failure_code: null,
+  });
+  expect(proof.audio_clock.remote).toMatchObject({
+    attached: true,
+    exact_track_id: proof.remote_track?.id,
+    threshold_rms: REMOTE_SILENCE_RMS,
+    overflow: false,
+    failure_code: null,
+  });
+  expect(proof.audio_clock.local.silence_hold_frames).toBe(
+    Math.ceil(
+      (LOCAL_REGION_BRIDGE_MS * proof.audio_clock.sample_rate_hz) /
+        1000 /
+        AUDIO_CLOCK_QUANTUM_FRAMES
+    ) * AUDIO_CLOCK_QUANTUM_FRAMES
+  );
+  expect(proof.audio_clock.remote.silence_hold_frames).toBe(
+    clockBracket.required_silence_frames
+  );
+  expect(proof.audio_clock.local.transitions.length).toBeLessThanOrEqual(
+    AUDIO_CLOCK_MAX_TRANSITIONS
+  );
+  expect(proof.audio_clock.remote.transitions.length).toBeLessThanOrEqual(
+    AUDIO_CLOCK_MAX_TRANSITIONS
+  );
+  expect(proof.audio_clock.local.processed_block_count).toBeGreaterThan(0);
+  expect(proof.audio_clock.remote.processed_block_count).toBeGreaterThan(0);
+
+  const localPcmRegions = activeRegions(proof.local_samples, LOCAL_ACTIVE_RMS, 500);
+  expect(localPcmRegions).toHaveLength(2);
+  const secondPcmOnset = localPcmRegions[1]?.start_ms;
+  expect(secondPcmOnset).toBeDefined();
+  if (secondPcmOnset === undefined) {
+    throw new Error("Second microphone PCM region was not observed");
+  }
 
   const speechStarts = eventsOf(proof, "assistant_speech_started");
   const interrupted = eventsOf(proof, "assistant_speech_stopped").find(
@@ -577,7 +653,7 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
       event.payload.speech_id === interrupted.event.payload.speech_id
   );
   expect(firstSpeechStart).toBeDefined();
-  expect(interrupted.t_ms).toBeGreaterThanOrEqual(secondOnset);
+  expect(interrupted.t_ms).toBeGreaterThanOrEqual(secondPcmOnset);
 
   const secondSpeechStart = speechStarts.find(
     ({ event, t_ms }) => event.turn_id === turnIds[1] && t_ms > interrupted.t_ms
@@ -597,29 +673,24 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   const firstReplySamples = proof.remote_samples.filter(
     (sample) =>
       sample.t_ms >= (firstSpeechStart?.t_ms ?? 0) &&
-      sample.t_ms < secondOnset &&
+      sample.t_ms < secondPcmOnset &&
       sample.rms >= REMOTE_ACTIVE_RMS
   );
   expect(firstReplySamples.length).toBeGreaterThan(2);
-  const silenceStart = sustainedSilenceStart(proof.remote_samples, secondOnset);
+  const silenceStart = sustainedSilenceStart(proof.remote_samples, secondPcmOnset);
   expect(silenceStart).toBeDefined();
   if (silenceStart === undefined) {
     throw new Error("Pipecat remote PCM did not become silent after interruption");
   }
-  const interruptionToSilenceMs = silenceStart - secondOnset;
-  expect(interruptionToSilenceMs).toBeGreaterThanOrEqual(0);
-  expect(interruptionToSilenceMs).toBeLessThanOrEqual(
-    MAX_INTERRUPTION_TO_SILENCE_MS
-  );
   expect(secondSpeechStart.t_ms).toBeGreaterThanOrEqual(
-    silenceStart + REQUIRED_SILENCE_MS
+    silenceStart + AUDIO_CLOCK_REQUIRED_SILENCE_MS
   );
   const attribution = interruptionAttribution({
     samples: proof.remote_samples,
     silenceStartMs: silenceStart,
     nextAssistantSpeechStartMs: secondSpeechStart.t_ms,
     activeRms: REMOTE_ACTIVE_RMS,
-    requiredSilenceMs: REQUIRED_SILENCE_MS,
+    requiredSilenceMs: AUDIO_CLOCK_REQUIRED_SILENCE_MS,
     samplingToleranceMs: REMOTE_ATTRIBUTION_TOLERANCE_MS,
   });
   expect(attribution.observation_complete).toBe(true);
@@ -682,10 +753,22 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
 
   await page.getByTestId("voice-e2e-end").click();
   await expect
-    .poll(async () => (await readSnapshot(page)).status, {
-      message: "Pipecat disconnect must close tracks, audio, peer, and assignment",
-    })
-    .toBe("disconnected");
+    .poll(
+      async () => {
+        await assertNoHarnessError(page);
+        const terminal = await readSnapshot(page);
+        return {
+          audioClockCleanupComplete: audioClockCleanupComplete(
+            terminal.audio_clock
+          ),
+          status: terminal.status,
+        };
+      },
+      {
+        message: "Pipecat disconnect must close tracks, audio, peer, and assignment",
+      }
+    )
+    .toEqual({ audioClockCleanupComplete: true, status: "disconnected" });
 
   const cleaned = await readSnapshot(page);
   expect(cleaned.disconnect_requested).toBe(true);
@@ -695,6 +778,11 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   expect(cleaned.remote_track?.ready_state).toBe("ended");
   expect(cleaned.remote_audio_element_count).toBe(0);
   expect(cleaned.hook_assignment_cleared).toBe(true);
+  expect(cleaned.errors).toEqual([]);
+  expect(cleaned.audio_clock.disposed).toBe(true);
+  expect(cleaned.audio_clock.local.failure_code).toBeNull();
+  expect(cleaned.audio_clock.remote.failure_code).toBeNull();
+  expect(audioClockCleanupComplete(cleaned.audio_clock)).toBe(true);
   expect(cleaned.rtc.peer_connection_count).toBe(1);
   expect(cleaned.rtc.open_peer_connection_count).toBe(0);
   expect(cleaned.rtc.closed_peer_connection_count).toBe(1);
@@ -793,11 +881,14 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
       },
       local_peak_rms: localPeak,
       remote_peak_rms: remotePeak,
-      first_user_onset_ms: localRegions[0]?.start_ms,
-      second_user_onset_ms: secondOnset,
-      remote_silence_start_ms: silenceStart,
-      interruption_to_silence_ms: interruptionToSilenceMs,
-      sustained_silence_ms: REQUIRED_SILENCE_MS,
+      audio_sample_clock: {
+        evidence: proof.audio_clock,
+        interruption_bracket: clockBracket,
+      },
+      first_user_pcm_region_start_ms: localPcmRegions[0]?.start_ms,
+      second_user_pcm_region_start_ms: secondPcmOnset,
+      remote_pcm_silence_attribution_start_ms: silenceStart,
+      sustained_pcm_silence_ms: AUDIO_CLOCK_REQUIRED_SILENCE_MS,
       no_stale_audio_guard_start_ms: attribution.guard_start_ms,
       no_stale_audio_guard_end_ms: attribution.guard_end_ms,
       remote_attribution_tolerance_ms: REMOTE_ATTRIBUTION_TOLERANCE_MS,

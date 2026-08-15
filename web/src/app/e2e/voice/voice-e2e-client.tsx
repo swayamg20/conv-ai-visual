@@ -7,6 +7,16 @@ import type { LocalMicrophonePublicationObservation } from "@/features/voice/liv
 import { useVoiceSession } from "@/hooks/use-voice-session";
 
 import {
+  AUDIO_CLOCK_LOCAL_ACTIVE_RMS,
+  AUDIO_CLOCK_REMOTE_SILENCE_RMS,
+  emptyAudioClockEvidence,
+  prepareAudioClockDiagnostics,
+  settleAudioClockHarnessStatus,
+  type AudioClockDiagnostics,
+  type AudioClockEvidence,
+  type AudioClockHarnessStatus,
+} from "./audio-clock-diagnostics";
+import {
   emptyBrowserRtcEvidence,
   installBrowserRtcDiagnostics,
   observeBrowserMediaTrack,
@@ -91,14 +101,7 @@ interface ConnectionGestureEvidence {
 
 interface VoiceE2ESnapshot {
   readonly schema_version: 1;
-  readonly status:
-    | "idle"
-    | "connecting"
-    | "awaiting_audio"
-    | "observing"
-    | "disconnecting"
-    | "disconnected"
-    | "error";
+  readonly status: AudioClockHarnessStatus;
   readonly phase: string;
   readonly voice_call_id: string;
   readonly assignment: AssignmentEvidence | null;
@@ -115,6 +118,7 @@ interface VoiceE2ESnapshot {
   readonly errors: readonly string[];
   readonly logs: readonly string[];
   readonly connection_gestures: readonly ConnectionGestureEvidence[];
+  readonly audio_clock: AudioClockEvidence;
   readonly rtc: BrowserRtcEvidence;
   readonly disconnect_requested: boolean;
   readonly hook_assignment_cleared: boolean;
@@ -139,6 +143,7 @@ const INITIAL_SNAPSHOT: VoiceE2ESnapshot = {
   errors: [],
   logs: [],
   connection_gestures: [],
+  audio_clock: emptyAudioClockEvidence(),
   rtc: emptyBrowserRtcEvidence(),
   disconnect_requested: false,
   hook_assignment_cleared: true,
@@ -170,6 +175,7 @@ export function VoiceE2EClient({
 }: VoiceE2EClientProps) {
   const measurementOriginRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const audioClockDiagnosticsRef = useRef<AudioClockDiagnostics | null>(null);
   const localProbeRef = useRef<Probe | null>(null);
   const remoteProbeRef = useRef<RemoteProbe | null>(null);
   const localBufferRef = useRef<Float32Array<ArrayBuffer> | null>(null);
@@ -238,6 +244,7 @@ export function VoiceE2EClient({
 
   const releaseLocalProbe = useCallback(() => {
     localProbeRef.current?.source.disconnect();
+    localProbeRef.current?.analyser.disconnect();
     localProbeRef.current = null;
     localBufferRef.current = null;
   }, []);
@@ -259,7 +266,8 @@ export function VoiceE2EClient({
         localTrackEvidenceRef.current,
       );
       const context = audioContextRef.current;
-      if (!context) {
+      const audioClock = audioClockDiagnosticsRef.current;
+      if (!context || !audioClock) {
         observeError("The exact published microphone track arrived before audio setup");
         return;
       }
@@ -268,6 +276,7 @@ export function VoiceE2EClient({
       source.connect(analyser);
       localProbeRef.current = { analyser, source };
       localBufferRef.current = new Float32Array(analyser.fftSize);
+      audioClock.attach("local", track, AUDIO_CLOCK_LOCAL_ACTIVE_RMS);
     },
     [elapsed, observeError, releaseLocalProbe]
   );
@@ -358,6 +367,12 @@ export function VoiceE2EClient({
     remoteProbeRef.current = { analyser, source, element, sink };
     remoteBufferRef.current = new Float32Array(analyser.fftSize);
     remoteAttachedRef.current = true;
+    const audioClock = audioClockDiagnosticsRef.current;
+    if (!audioClock) {
+      observeError("Remote track arrived before sample-clock setup");
+      return;
+    }
+    audioClock.attach("remote", remoteTrack, AUDIO_CLOCK_REMOTE_SILENCE_RMS);
     await element.play();
   }, [elapsed, ensureAudioContext, observeError]);
 
@@ -422,7 +437,10 @@ export function VoiceE2EClient({
       localTrackReleasedRef.current &&
       remoteElementCount === 0 &&
       !hook.assignmentPresent;
-    if (disconnected) statusRef.current = "disconnected";
+    statusRef.current = settleAudioClockHarnessStatus(
+      statusRef.current,
+      disconnected
+    );
 
     return {
       schema_version: 1,
@@ -460,6 +478,8 @@ export function VoiceE2EClient({
       errors: [...errorsRef.current],
       logs: [...logsRef.current],
       connection_gestures: [...connectionGesturesRef.current],
+      audio_clock:
+        audioClockDiagnosticsRef.current?.read() ?? emptyAudioClockEvidence(),
       rtc: rtcEvidenceRef.current,
       disconnect_requested: disconnectRequestedRef.current,
       hook_assignment_cleared: !hook.assignmentPresent,
@@ -487,6 +507,29 @@ export function VoiceE2EClient({
       void refreshRtcDiagnostics().then(() => setSnapshot(buildSnapshot()));
     }, SNAPSHOT_INTERVAL_MS);
   }, [buildSnapshot, refreshRtcDiagnostics, sampleAudio, stopTimers]);
+
+  const disposeAudio = useCallback(async () => {
+    try {
+      const diagnostics = audioClockDiagnosticsRef.current;
+      if (diagnostics) {
+        await diagnostics.dispose();
+        const evidence = diagnostics.read();
+        if (
+          evidence.local.failure_code === "cleanup_failed" ||
+          evidence.remote.failure_code === "cleanup_failed"
+        ) {
+          observeError("Sample-clock cleanup did not complete");
+        }
+      } else {
+        const context = audioContextRef.current;
+        if (context && context.state !== "closed") await context.close();
+      }
+    } catch {
+      observeError("Sample-clock cleanup did not complete");
+    } finally {
+      audioContextRef.current = null;
+    }
+  }, [observeError]);
 
   const prepare = useCallback(async () => {
     measurementOriginRef.current = null;
@@ -518,7 +561,15 @@ export function VoiceE2EClient({
       setSnapshot(buildSnapshot());
       return;
     }
-    await ensureAudioContext();
+    try {
+      const context = await ensureAudioContext();
+      audioClockDiagnosticsRef.current = await prepareAudioClockDiagnostics(context);
+    } catch {
+      await disposeAudio();
+      observeError("Sample-clock preparation did not complete");
+      setSnapshot(buildSnapshot());
+      return;
+    }
     startTimers();
     setSnapshot(buildSnapshot());
     try {
@@ -528,7 +579,14 @@ export function VoiceE2EClient({
     }
     if (errorsRef.current.length === 0) statusRef.current = "awaiting_audio";
     setSnapshot(buildSnapshot());
-  }, [buildSnapshot, ensureAudioContext, observeError, startTimers, voice]);
+  }, [
+    buildSnapshot,
+    disposeAudio,
+    ensureAudioContext,
+    observeError,
+    startTimers,
+    voice,
+  ]);
 
   const activate = useCallback(() => {
     connectionGesturesRef.current.push({ sequence: 2, action: "activate" });
@@ -610,8 +668,15 @@ export function VoiceE2EClient({
     stopTimers();
     releaseLocalProbe();
     releaseRemoteProbe();
-    void audioContextRef.current?.close();
-  }, [releaseLocalProbe, releaseRemoteProbe, snapshot.status, stopTimers]);
+    void disposeAudio().then(() => setSnapshot(buildSnapshot()));
+  }, [
+    buildSnapshot,
+    disposeAudio,
+    releaseLocalProbe,
+    releaseRemoteProbe,
+    snapshot.status,
+    stopTimers,
+  ]);
 
   useEffect(
     () => () => {
@@ -620,9 +685,9 @@ export function VoiceE2EClient({
       releaseRemoteProbe();
       rtcDiagnosticsRef.current?.restore();
       rtcDiagnosticsRef.current = null;
-      void audioContextRef.current?.close();
+      void disposeAudio();
     },
-    [releaseLocalProbe, releaseRemoteProbe, stopTimers]
+    [disposeAudio, releaseLocalProbe, releaseRemoteProbe, stopTimers]
   );
 
   return (
