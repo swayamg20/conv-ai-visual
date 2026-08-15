@@ -249,12 +249,22 @@ def test_tls_ca_rejects_mutable_fake_or_symlinked_certificate(tmp_path: Path) ->
         "-----BEGIN CERTIFICATE-----\ndGVzdA==\n-----END CERTIFICATE-----\n",
         encoding="ascii",
     )
+    paths.cert.chmod(0o400)
     with pytest.raises(CoturnContractError, match="certificate is invalid"):
         validate_turn_tls_ca_file(paths.cert, expected_run_dir=paths.run_dir)
 
     paths.cert.unlink()
     paths.cert.symlink_to(paths.config)
     with pytest.raises(CoturnContractError, match="certificate is invalid"):
+        validate_turn_tls_ca_file(paths.cert, expected_run_dir=paths.run_dir)
+
+
+@pytest.mark.parametrize("mode", [0o440, 0o444, 0o600, 0o640, 0o644])
+def test_tls_ca_requires_exact_owner_only_mode(tmp_path: Path, mode: int) -> None:
+    paths = _private_paths(tmp_path)
+    paths.cert.chmod(mode)
+
+    with pytest.raises(CoturnContractError, match="permissions are unsafe"):
         validate_turn_tls_ca_file(paths.cert, expected_run_dir=paths.run_dir)
 
 

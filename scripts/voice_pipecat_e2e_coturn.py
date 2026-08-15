@@ -356,7 +356,7 @@ def validate_turn_tls_ca_file(path: object, *, expected_run_dir: Path) -> Path:
         value = _read_regular_file_no_follow(
             certificate,
             maximum_bytes=65_536,
-            forbidden_mode_mask=0o022,
+            exact_mode=0o400,
         ).decode("ascii")
     except _UnsafeFilePermissionsError:
         raise CoturnContractError("Coturn TLS certificate permissions are unsafe") from None
