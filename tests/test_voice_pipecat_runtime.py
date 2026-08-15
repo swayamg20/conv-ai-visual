@@ -43,6 +43,7 @@ from pipecat.frames.frames import (
     LLMContextFrame,
     LLMTextFrame,
     OutputTransportMessageUrgentFrame,
+    StartFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSStartedFrame,
@@ -52,7 +53,9 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi import RTVIProcessor
+from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 NOW = datetime(2026, 8, 12, 15, 0, tzinfo=UTC)
 
@@ -98,6 +101,13 @@ class FakeTransport(BaseTransport):
 
     def output(self) -> FrameProcessor:
         return self._output
+
+
+class FakeSmallWebRTCPeer:
+    pc_id = "SmallWebRTCConnection#transport-params-test"
+
+    def event_handler(self, _event_name: str) -> Any:
+        return lambda handler: handler
 
 
 class DeterministicSTT(FrameProcessor):
@@ -274,6 +284,29 @@ def _deterministic_profile(
         connection_policy=base.connection_policy,
         wait_streams_ready=base.wait_streams_ready,
     )
+
+
+@pytest.mark.asyncio
+async def test_pinned_smallwebrtc_output_uses_one_10ms_interruption_chunk() -> None:
+    profile = _profile()
+    transport = pipecat_runtime_module._smallwebrtc_transport(
+        FakeSmallWebRTCPeer(),  # type: ignore[arg-type]
+        profile,
+    )
+
+    assert isinstance(transport, SmallWebRTCTransport)
+    assert transport._params.audio_out_10ms_chunks == 1
+    assert transport._params.audio_out_10ms_chunks < type(transport._params)().audio_out_10ms_chunks
+
+    output = transport.output()
+    await BaseOutputTransport.start(
+        output,
+        StartFrame(audio_out_sample_rate=profile.media_policy.output_sample_rate),
+    )
+    expected_10ms_bytes = (
+        profile.media_policy.output_sample_rate // 100 * profile.media_policy.output_channels * 2
+    )
+    assert output.audio_chunk_size == expected_10ms_bytes == 480
 
 
 @pytest.mark.parametrize(

@@ -1185,5 +1185,9 @@ def _smallwebrtc_transport(
             audio_out_enabled=True,
             audio_out_sample_rate=media.output_sample_rate,
             audio_out_channels=media.output_channels,
+            # Pipecat's default batches four 10 ms chunks, and SmallWebRTC does
+            # not flush RawAudioTrack's already-enqueued tail on interruption.
+            # One chunk bounds that non-flushable tail at 10 ms instead of 40 ms.
+            audio_out_10ms_chunks=1,
         ),
     )
