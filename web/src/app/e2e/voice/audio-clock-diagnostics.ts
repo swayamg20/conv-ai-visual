@@ -10,6 +10,12 @@ export const AUDIO_CLOCK_LOCAL_REGION_BRIDGE_MS = 500;
 
 export type AudioClockProbeKind = "local" | "remote";
 export type AudioClockSignalState = "active" | "silent";
+export type AudioClockContextState =
+  | "closed"
+  | "interrupted"
+  | "running"
+  | "suspended"
+  | "unknown";
 export type AudioClockHarnessStatus =
   | "idle"
   | "connecting"
@@ -51,6 +57,12 @@ export interface AudioClockProbeEvidence {
   readonly transitions: readonly AudioClockTransition[];
   readonly overflow: boolean;
   readonly failure_code: AudioClockFailureCode | null;
+  readonly failure_message_sequence: number | null;
+  readonly expected_block_start_frame: number | null;
+  readonly observed_block_start_frame: number | null;
+  readonly frame_delta_frames: number | null;
+  readonly last_observed_block_start_frame: number | null;
+  readonly context_state_at_message_delivery: AudioClockContextState | null;
 }
 
 export interface AudioClockEvidence {
@@ -61,6 +73,26 @@ export interface AudioClockEvidence {
   readonly local: AudioClockProbeEvidence;
   readonly remote: AudioClockProbeEvidence;
   readonly disposed: boolean;
+}
+
+export interface AudioClockFailureProbeCapsule {
+  readonly failure_code: AudioClockFailureCode | null;
+  readonly failure_message_sequence: number | null;
+  readonly last_successful_processed_block_count: number;
+  readonly last_successful_block_end_frame: number | null;
+  readonly expected_block_start_frame: number | null;
+  readonly observed_block_start_frame: number | null;
+  readonly frame_delta_frames: number | null;
+  readonly last_observed_block_start_frame: number | null;
+  readonly context_state_at_message_delivery: AudioClockContextState | null;
+}
+
+export interface AudioClockFailureCapsule {
+  readonly schema_version: 1;
+  readonly sample_rate_hz: number;
+  readonly quantum_frames: typeof AUDIO_CLOCK_QUANTUM_FRAMES;
+  readonly local: AudioClockFailureProbeCapsule;
+  readonly remote: AudioClockFailureProbeCapsule;
 }
 
 export type AudioClockBracketFailure =
@@ -84,6 +116,16 @@ export interface AudioClockInterruptionBracket {
   readonly interruption_upper_bound_ms: number | null;
 }
 
+export function audioClockFailureMessage(
+  evidence: AudioClockEvidence,
+  failureCode: AudioClockBracketFailure | null
+): string {
+  return (
+    `Audio sample-clock proof failed: ${failureCode ?? "unknown"}; ` +
+    `diagnostics=${JSON.stringify(audioClockFailureCapsule(evidence))}`
+  );
+}
+
 interface AudioClockProbeMessage {
   readonly schema_version: 1;
   readonly kind: "observation" | "fault";
@@ -98,6 +140,10 @@ interface AudioClockProbeMessage {
   readonly active_region_count: number;
   readonly transition: AudioClockTransition | null;
   readonly failure_code?: AudioClockFailureCode;
+  readonly expected_block_start_frame: number | null;
+  readonly observed_block_start_frame: number | null;
+  readonly frame_delta_frames: number | null;
+  readonly last_observed_block_start_frame: number | null;
 }
 
 interface MutableProbeState {
@@ -113,6 +159,12 @@ interface MutableProbeState {
   transitions: AudioClockTransition[];
   overflow: boolean;
   failureCode: AudioClockFailureCode | null;
+  failureMessageSequence: number | null;
+  expectedBlockStartFrame: number | null;
+  observedBlockStartFrame: number | null;
+  frameDeltaFrames: number | null;
+  lastObservedBlockStartFrame: number | null;
+  contextStateAtMessageDelivery: AudioClockContextState | null;
   expectedMessageSequence: number;
 }
 
@@ -160,6 +212,30 @@ export function audioClockCleanupComplete(evidence: AudioClockEvidence): boolean
   );
 }
 
+export function audioClockFailureCapsule(
+  evidence: AudioClockEvidence
+): AudioClockFailureCapsule {
+  const probe = (value: AudioClockProbeEvidence): AudioClockFailureProbeCapsule =>
+    Object.freeze({
+      failure_code: value.failure_code,
+      failure_message_sequence: value.failure_message_sequence,
+      last_successful_processed_block_count: value.processed_block_count,
+      last_successful_block_end_frame: value.latest_block_end_frame,
+      expected_block_start_frame: value.expected_block_start_frame,
+      observed_block_start_frame: value.observed_block_start_frame,
+      frame_delta_frames: value.frame_delta_frames,
+      last_observed_block_start_frame: value.last_observed_block_start_frame,
+      context_state_at_message_delivery: value.context_state_at_message_delivery,
+    });
+  return Object.freeze({
+    schema_version: 1,
+    sample_rate_hz: evidence.sample_rate_hz,
+    quantum_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+    local: probe(evidence.local),
+    remote: probe(evidence.remote),
+  });
+}
+
 export function settleAudioClockHarnessStatus(
   currentStatus: AudioClockHarnessStatus,
   terminalConditionsMet: boolean
@@ -182,6 +258,12 @@ function emptyProbe(thresholdRms: number, silenceHoldFrames = 0): MutableProbeSt
     transitions: [],
     overflow: false,
     failureCode: null,
+    failureMessageSequence: null,
+    expectedBlockStartFrame: null,
+    observedBlockStartFrame: null,
+    frameDeltaFrames: null,
+    lastObservedBlockStartFrame: null,
+    contextStateAtMessageDelivery: null,
     expectedMessageSequence: 1,
   };
 }
@@ -200,11 +282,41 @@ function freezeProbe(state: MutableProbeState): AudioClockProbeEvidence {
     transitions: state.transitions.map((transition) => Object.freeze({ ...transition })),
     overflow: state.overflow,
     failure_code: state.failureCode,
+    failure_message_sequence: state.failureMessageSequence,
+    expected_block_start_frame: state.expectedBlockStartFrame,
+    observed_block_start_frame: state.observedBlockStartFrame,
+    frame_delta_frames: state.frameDeltaFrames,
+    last_observed_block_start_frame: state.lastObservedBlockStartFrame,
+    context_state_at_message_delivery: state.contextStateAtMessageDelivery,
   });
 }
 
 function safeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function signedSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value);
+}
+
+function nullableSafeInteger(value: unknown): value is number | null {
+  return value === null || safeInteger(value);
+}
+
+function nullableSignedSafeInteger(value: unknown): value is number | null {
+  return value === null || signedSafeInteger(value);
+}
+
+function audioClockContextState(value: unknown): AudioClockContextState {
+  if (
+    value === "closed" ||
+    value === "interrupted" ||
+    value === "running" ||
+    value === "suspended"
+  ) {
+    return value;
+  }
+  return "unknown";
 }
 
 const FAILURE_CODES = new Set<AudioClockFailureCode>([
@@ -240,35 +352,88 @@ function isProbeMessage(value: unknown): value is AudioClockProbeMessage {
     safeInteger(message.latest_block_end_frame) &&
     (message.current_state === "active" || message.current_state === "silent") &&
     safeInteger(message.current_state_block_count) &&
-    safeInteger(message.active_region_count)
+    safeInteger(message.active_region_count) &&
+    nullableSafeInteger(message.expected_block_start_frame) &&
+    nullableSafeInteger(message.observed_block_start_frame) &&
+    nullableSignedSafeInteger(message.frame_delta_frames) &&
+    nullableSafeInteger(message.last_observed_block_start_frame)
   );
 }
 
-function failProbe(state: MutableProbeState, failureCode: AudioClockFailureCode): void {
-  state.failureCode ??= failureCode;
+function failProbe(
+  state: MutableProbeState,
+  failureCode: AudioClockFailureCode,
+  contextState?: unknown
+): void {
+  if (state.failureCode !== null) return;
+  state.failureCode = failureCode;
+  if (contextState !== undefined) {
+    state.contextStateAtMessageDelivery = audioClockContextState(contextState);
+  }
 }
 
 function applyAudioClockProbeMessage(
   state: MutableProbeState,
   expectedProbe: AudioClockProbeKind,
   expectedSampleRate: number,
+  contextState: unknown,
   value: unknown
 ): void {
   if (!isProbeMessage(value) || value.probe !== expectedProbe) {
-    failProbe(state, "unexpected_probe_message");
+    failProbe(state, "unexpected_probe_message", contextState);
     return;
   }
   if (value.message_sequence !== state.expectedMessageSequence) {
-    failProbe(state, "message_gap");
+    failProbe(state, "message_gap", contextState);
     return;
   }
   state.expectedMessageSequence += 1;
   if (value.quantum_frames !== AUDIO_CLOCK_QUANTUM_FRAMES) {
-    failProbe(state, "inconsistent_quantum");
+    failProbe(state, "inconsistent_quantum", contextState);
     return;
   }
   if (value.sample_rate_hz !== expectedSampleRate) {
-    failProbe(state, "sample_rate_mismatch");
+    failProbe(state, "sample_rate_mismatch", contextState);
+    return;
+  }
+  if (value.kind === "fault") {
+    const failureCode = isFailureCode(value.failure_code)
+      ? value.failure_code
+      : "unexpected_probe_message";
+    const hasFrameGapDiagnostics =
+      safeInteger(value.expected_block_start_frame) &&
+      safeInteger(value.observed_block_start_frame) &&
+      signedSafeInteger(value.frame_delta_frames) &&
+      safeInteger(value.last_observed_block_start_frame) &&
+      value.observed_block_start_frame - value.expected_block_start_frame ===
+        value.frame_delta_frames &&
+      value.frame_delta_frames !== 0 &&
+      value.last_observed_block_start_frame + AUDIO_CLOCK_QUANTUM_FRAMES ===
+        value.expected_block_start_frame &&
+      value.latest_block_end_frame ===
+        value.observed_block_start_frame + AUDIO_CLOCK_QUANTUM_FRAMES;
+    const hasNullFrameGapDiagnostics =
+      value.expected_block_start_frame === null &&
+      value.observed_block_start_frame === null &&
+      value.frame_delta_frames === null &&
+      value.last_observed_block_start_frame === null;
+    if (
+      value.processed_block_count < state.processedBlockCount ||
+      value.active_region_count < state.activeRegionCount ||
+      (failureCode === "frame_gap" && !hasFrameGapDiagnostics) ||
+      (failureCode !== "frame_gap" && !hasNullFrameGapDiagnostics)
+    ) {
+      failProbe(state, "unexpected_probe_message", contextState);
+      return;
+    }
+    if (state.failureCode === null) {
+      state.failureMessageSequence = value.message_sequence;
+      state.expectedBlockStartFrame = value.expected_block_start_frame;
+      state.observedBlockStartFrame = value.observed_block_start_frame;
+      state.frameDeltaFrames = value.frame_delta_frames;
+      state.lastObservedBlockStartFrame = value.last_observed_block_start_frame;
+    }
+    failProbe(state, failureCode, contextState);
     return;
   }
   if (
@@ -276,14 +441,7 @@ function applyAudioClockProbeMessage(
     value.active_region_count < state.activeRegionCount ||
     (state.latestBlockEndFrame !== null && value.latest_block_end_frame < state.latestBlockEndFrame)
   ) {
-    failProbe(state, "frame_gap");
-    return;
-  }
-  if (value.kind === "fault") {
-    failProbe(
-      state,
-      isFailureCode(value.failure_code) ? value.failure_code : "unexpected_probe_message"
-    );
+    failProbe(state, "frame_gap", contextState);
     return;
   }
   state.processedBlockCount = value.processed_block_count;
@@ -292,7 +450,7 @@ function applyAudioClockProbeMessage(
   state.currentStateBlockCount = value.current_state_block_count;
   state.activeRegionCount = value.active_region_count;
   if (expectedProbe === "local" && value.active_region_count > 2) {
-    failProbe(state, "too_many_local_active_regions");
+    failProbe(state, "too_many_local_active_regions", contextState);
     return;
   }
   if (value.transition) {
@@ -308,12 +466,12 @@ function applyAudioClockProbeMessage(
         value.transition.block_start_frame < previousTransition.block_end_frame) ||
       (value.transition.state !== "active" && value.transition.state !== "silent")
     ) {
-      failProbe(state, "inconsistent_quantum");
+      failProbe(state, "inconsistent_quantum", contextState);
       return;
     }
     if (state.transitions.length >= AUDIO_CLOCK_MAX_TRANSITIONS) {
       state.overflow = true;
-      failProbe(state, "probe_overflow");
+      failProbe(state, "probe_overflow", contextState);
       return;
     }
     state.transitions.push(Object.freeze({ ...value.transition }));
@@ -427,6 +585,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
     this.threshold = config.thresholdRms;
     this.silenceHoldFrames = config.silenceHoldFrames;
     this.expectedFrame = null;
+    this.lastObservedFrame = null;
     this.processedBlocks = 0;
     this.state = null;
     this.stateBlocks = 0;
@@ -438,7 +597,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
     this.failed = false;
   }
 
-  emit(kind, transition, failureCode) {
+  emit(kind, transition, failureCode, blockStartFrame, frameGapDiagnostics) {
     this.messageSequence += 1;
     this.port.postMessage({
       schema_version: 1,
@@ -448,32 +607,57 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
       sample_rate_hz: sampleRate,
       quantum_frames: ${AUDIO_CLOCK_QUANTUM_FRAMES},
       processed_block_count: this.processedBlocks,
-      latest_block_end_frame: currentFrame + ${AUDIO_CLOCK_QUANTUM_FRAMES},
+      latest_block_end_frame: blockStartFrame + ${AUDIO_CLOCK_QUANTUM_FRAMES},
       current_state: this.state || "silent",
       current_state_block_count: this.stateBlocks,
       active_region_count: this.activeRegions,
       transition,
       failure_code: failureCode,
+      expected_block_start_frame: frameGapDiagnostics
+        ? frameGapDiagnostics.expectedBlockStartFrame
+        : null,
+      observed_block_start_frame: frameGapDiagnostics
+        ? frameGapDiagnostics.observedBlockStartFrame
+        : null,
+      frame_delta_frames: frameGapDiagnostics
+        ? frameGapDiagnostics.frameDeltaFrames
+        : null,
+      last_observed_block_start_frame: frameGapDiagnostics
+        ? frameGapDiagnostics.lastObservedBlockStartFrame
+        : null,
     });
   }
 
-  fail(code) {
-    if (!this.failed) this.emit("fault", null, code);
+  fail(code, blockStartFrame) {
+    const frameGapDiagnostics =
+      code === "frame_gap" && this.expectedFrame !== null && this.lastObservedFrame !== null
+        ? {
+            expectedBlockStartFrame: this.expectedFrame,
+            observedBlockStartFrame: blockStartFrame,
+            frameDeltaFrames: blockStartFrame - this.expectedFrame,
+            lastObservedBlockStartFrame: this.lastObservedFrame,
+          }
+        : null;
+    if (!this.failed) {
+      this.emit("fault", null, code, blockStartFrame, frameGapDiagnostics);
+    }
     this.failed = true;
     return false;
   }
 
   process(inputs) {
     if (this.failed) return false;
+    const blockStartFrame = currentFrame;
     const block = inputs[0] && inputs[0][0];
-    if (!block) return this.fail("missing_input");
+    if (!block) return this.fail("missing_input", blockStartFrame);
     if (block.length !== ${AUDIO_CLOCK_QUANTUM_FRAMES}) {
-      return this.fail("inconsistent_quantum");
+      return this.fail("inconsistent_quantum", blockStartFrame);
     }
-    if (this.expectedFrame !== null && currentFrame !== this.expectedFrame) {
-      return this.fail("frame_gap");
+    if (this.expectedFrame !== null && blockStartFrame !== this.expectedFrame) {
+      return this.fail("frame_gap", blockStartFrame);
     }
-    this.expectedFrame = currentFrame + ${AUDIO_CLOCK_QUANTUM_FRAMES};
+    this.expectedFrame = blockStartFrame + ${AUDIO_CLOCK_QUANTUM_FRAMES};
+    this.lastObservedFrame = blockStartFrame;
     this.processedBlocks += 1;
     let squared = 0;
     for (let index = 0; index < block.length; index += 1) {
@@ -484,7 +668,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
       : "silent";
     let transition = null;
     let nextState = this.state;
-    let transitionStartFrame = currentFrame;
+    let transitionStartFrame = blockStartFrame;
     if (rawState === "active") {
       this.pendingSilenceStartFrame = null;
       this.pendingSilenceBlocks = 0;
@@ -493,7 +677,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
       nextState = "silent";
     } else {
       if (this.pendingSilenceStartFrame === null) {
-        this.pendingSilenceStartFrame = currentFrame;
+        this.pendingSilenceStartFrame = blockStartFrame;
         this.pendingSilenceBlocks = 1;
       } else {
         this.pendingSilenceBlocks += 1;
@@ -516,10 +700,10 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
         block_end_frame: transitionStartFrame + ${AUDIO_CLOCK_QUANTUM_FRAMES},
       };
       if (this.transitionCount > ${AUDIO_CLOCK_MAX_TRANSITIONS}) {
-        return this.fail("probe_overflow");
+        return this.fail("probe_overflow", blockStartFrame);
       }
       if (this.probe === "local" && this.activeRegions > 2) {
-        return this.fail("too_many_local_active_regions");
+        return this.fail("too_many_local_active_regions", blockStartFrame);
       }
       if (nextState === "silent") {
         this.pendingSilenceStartFrame = null;
@@ -529,7 +713,7 @@ class MurmurAudioClockProbe extends AudioWorkletProcessor {
       this.stateBlocks += 1;
     }
     if (transition || (this.state !== null && this.processedBlocks % 8 === 0)) {
-      this.emit("observation", transition, undefined);
+      this.emit("observation", transition, undefined, blockStartFrame, null);
     }
     return true;
   }
@@ -612,7 +796,13 @@ export async function prepareAudioClockDiagnostics(
       node.connect(sink);
       sink.connect(context.destination);
       node.port.onmessage = (event) => {
-        applyAudioClockProbeMessage(state, probe, context.sampleRate, event.data);
+        applyAudioClockProbeMessage(
+          state,
+          probe,
+          context.sampleRate,
+          context.state,
+          event.data
+        );
       };
       node.port.start?.();
       state.attached = true;

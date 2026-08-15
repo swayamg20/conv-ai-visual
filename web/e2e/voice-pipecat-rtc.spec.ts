@@ -9,6 +9,7 @@ import {
   AUDIO_CLOCK_QUANTUM_FRAMES,
   AUDIO_CLOCK_REQUIRED_SILENCE_MS,
   audioClockCleanupComplete,
+  audioClockFailureMessage,
   interruptionClockBracket,
   type AudioClockEvidence,
 } from "../src/app/e2e/voice/audio-clock-diagnostics";
@@ -305,7 +306,9 @@ async function waitForProof(page: Page, timeoutMs: number): Promise<BrowserSnaps
     const snapshot = await readSnapshot(page);
     const clockBracket = interruptionClockBracket(snapshot.audio_clock);
     if (clockBracket.status === "failed") {
-      throw new Error(`Audio sample-clock proof failed: ${clockBracket.failure_code ?? "unknown"}`);
+      throw new Error(
+        audioClockFailureMessage(snapshot.audio_clock, clockBracket.failure_code)
+      );
     }
     if (proofReady(snapshot)) return snapshot;
     await page.waitForTimeout(100);

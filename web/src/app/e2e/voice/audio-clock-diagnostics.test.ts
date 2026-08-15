@@ -8,6 +8,8 @@ import {
   AUDIO_CLOCK_QUANTUM_FRAMES,
   AUDIO_CLOCK_REMOTE_SILENCE_RMS,
   audioClockCleanupComplete,
+  audioClockFailureCapsule,
+  audioClockFailureMessage,
   interruptionClockBracket,
   prepareAudioClockDiagnostics,
   settleAudioClockHarnessStatus,
@@ -166,6 +168,12 @@ function probe(overrides: Partial<AudioClockProbeEvidence> = {}): AudioClockProb
     ],
     overflow: false,
     failure_code: null,
+    failure_message_sequence: null,
+    expected_block_start_frame: null,
+    observed_block_start_frame: null,
+    frame_delta_frames: null,
+    last_observed_block_start_frame: null,
+    context_state_at_message_delivery: null,
     ...overrides,
   };
 }
@@ -218,7 +226,43 @@ function observation(input: {
     current_state_block_count: 1,
     active_region_count: input.activeRegions,
     transition: transition(input.state, input.blockStartFrame),
+    failure_code: undefined,
+    expected_block_start_frame: null,
+    observed_block_start_frame: null,
+    frame_delta_frames: null,
+    last_observed_block_start_frame: null,
   };
+}
+
+function frameGapFault(input: {
+  readonly probe: "local" | "remote";
+  readonly sequence: number;
+  readonly processedBlocks: number;
+  readonly expectedBlockStartFrame: number;
+  readonly observedBlockStartFrame: number;
+  readonly lastObservedBlockStartFrame: number;
+}) {
+  return {
+    schema_version: 1,
+    kind: "fault",
+    probe: input.probe,
+    message_sequence: input.sequence,
+    sample_rate_hz: 48_000,
+    quantum_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+    processed_block_count: input.processedBlocks,
+    latest_block_end_frame:
+      input.observedBlockStartFrame + AUDIO_CLOCK_QUANTUM_FRAMES,
+    current_state: "silent",
+    current_state_block_count: input.processedBlocks,
+    active_region_count: 0,
+    transition: null,
+    failure_code: "frame_gap",
+    expected_block_start_frame: input.expectedBlockStartFrame,
+    observed_block_start_frame: input.observedBlockStartFrame,
+    frame_delta_frames:
+      input.observedBlockStartFrame - input.expectedBlockStartFrame,
+    last_observed_block_start_frame: input.lastObservedBlockStartFrame,
+  } as const;
 }
 
 afterEach(() => {
@@ -226,6 +270,73 @@ afterEach(() => {
 });
 
 describe("audio sample-clock bracket", () => {
+  it("builds a fixed sanitized failure capsule without track or PCM evidence", () => {
+    const capsule = audioClockFailureCapsule(
+      evidence({
+        failure_code: "frame_gap",
+        failure_message_sequence: 17,
+        processed_block_count: 1_272,
+        latest_block_end_frame: 199_680,
+        expected_block_start_frame: 199_680,
+        observed_block_start_frame: 199_552,
+        frame_delta_frames: -128,
+        last_observed_block_start_frame: 199_552,
+        context_state_at_message_delivery: "running",
+      })
+    );
+
+    expect(Object.keys(capsule).sort()).toEqual(
+      ["local", "quantum_frames", "remote", "sample_rate_hz", "schema_version"].sort()
+    );
+    expect(Object.keys(capsule.local).sort()).toEqual(
+      [
+        "context_state_at_message_delivery",
+        "expected_block_start_frame",
+        "failure_code",
+        "failure_message_sequence",
+        "frame_delta_frames",
+        "last_observed_block_start_frame",
+        "last_successful_block_end_frame",
+        "last_successful_processed_block_count",
+        "observed_block_start_frame",
+      ].sort()
+    );
+    expect(capsule.local).toMatchObject({
+      failure_code: "frame_gap",
+      failure_message_sequence: 17,
+      expected_block_start_frame: 199_680,
+      observed_block_start_frame: 199_552,
+      frame_delta_frames: -128,
+      last_observed_block_start_frame: 199_552,
+      context_state_at_message_delivery: "running",
+    });
+    const serialized = JSON.stringify(capsule);
+    expect(serialized.length).toBeLessThan(2_048);
+    expect(serialized).not.toMatch(
+      /exact_track_id|channel_samples|raw_pcm|audio_samples|voice_call|session|trace|sdp|ice/i
+    );
+    expect(containsTypedArray(capsule)).toBe(false);
+    const failureMessage = audioClockFailureMessage(
+      evidence({
+        failure_code: "frame_gap",
+        failure_message_sequence: 17,
+        expected_block_start_frame: 199_680,
+        observed_block_start_frame: 199_552,
+        frame_delta_frames: -128,
+        last_observed_block_start_frame: 199_552,
+        context_state_at_message_delivery: "running",
+      }),
+      "frame_gap"
+    );
+    expect(failureMessage).toContain(
+      'Audio sample-clock proof failed: frame_gap; diagnostics={"schema_version":1'
+    );
+    expect(failureMessage.length).toBeLessThan(2_048);
+    expect(failureMessage).not.toMatch(
+      /exact_track_id|channel_samples|raw_pcm|audio_samples|voice_call|session|trace|sdp|ice/i
+    );
+  });
+
   it("never lets terminal cleanup overwrite a harness error", () => {
     expect(settleAudioClockHarnessStatus("error", true)).toBe("error");
     expect(settleAudioClockHarnessStatus("disconnecting", true)).toBe(
@@ -415,23 +526,26 @@ describe("audio sample-clock worklet", () => {
         block_end_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
       },
     });
-    expect(Object.keys(posted[0] as object).sort()).toEqual(
-      [
+    const expectedWorkletMessageKeys = [
         "active_region_count",
         "current_state",
         "current_state_block_count",
+        "expected_block_start_frame",
         "failure_code",
+        "frame_delta_frames",
         "kind",
+        "last_observed_block_start_frame",
         "latest_block_end_frame",
         "message_sequence",
+        "observed_block_start_frame",
         "probe",
         "processed_block_count",
         "quantum_frames",
         "sample_rate_hz",
         "schema_version",
         "transition",
-      ].sort()
-    );
+      ].sort();
+    expect(Object.keys(posted[0] as object).sort()).toEqual(expectedWorkletMessageKeys);
     expect(containsTypedArray(posted[0])).toBe(false);
     expect(JSON.stringify(posted[0])).not.toMatch(/channel_samples|raw_pcm|audio_samples/i);
 
@@ -447,14 +561,59 @@ describe("audio sample-clock worklet", () => {
     expect(
       gapProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
     ).toBe(true);
-    sandbox.currentFrame = AUDIO_CLOCK_QUANTUM_FRAMES * 2;
+    sandbox.currentFrame = AUDIO_CLOCK_QUANTUM_FRAMES;
+    expect(
+      gapProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
+    ).toBe(true);
+    sandbox.currentFrame = AUDIO_CLOCK_QUANTUM_FRAMES * 3;
     expect(
       gapProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
     ).toBe(false);
     expect(posted.at(-1)).toMatchObject({
       kind: "fault",
       failure_code: "frame_gap",
+      message_sequence: 1,
+      processed_block_count: 2,
+      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      frame_delta_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
     });
+    expect(Object.keys(posted.at(-1) as object).sort()).toEqual(
+      expectedWorkletMessageKeys
+    );
+    expect(containsTypedArray(posted.at(-1))).toBe(false);
+
+    posted.length = 0;
+    const repeatedFrameProcessor = new Processor({
+      processorOptions: {
+        probe: "remote",
+        thresholdRms: AUDIO_CLOCK_REMOTE_SILENCE_RMS,
+        silenceHoldFrames: 9_600,
+      },
+    });
+    for (const observedFrame of [0, AUDIO_CLOCK_QUANTUM_FRAMES]) {
+      sandbox.currentFrame = observedFrame;
+      expect(
+        repeatedFrameProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
+      ).toBe(true);
+    }
+    sandbox.currentFrame = AUDIO_CLOCK_QUANTUM_FRAMES;
+    expect(
+      repeatedFrameProcessor.process([[new Float32Array(AUDIO_CLOCK_QUANTUM_FRAMES)]])
+    ).toBe(false);
+    expect(posted.at(-1)).toMatchObject({
+      kind: "fault",
+      failure_code: "frame_gap",
+      message_sequence: 1,
+      processed_block_count: 2,
+      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      frame_delta_frames: -AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+    });
+    expect(containsTypedArray(posted.at(-1))).toBe(false);
+    expect(JSON.stringify(posted)).not.toMatch(/channel_samples|raw_pcm|audio_samples/i);
     await diagnostics.dispose();
   });
 });
@@ -470,6 +629,93 @@ describe("audio sample-clock lifecycle", () => {
 
     expect(harness.createModuleUrl).toHaveBeenCalledOnce();
     expect(harness.revokeModuleUrl).toHaveBeenCalledWith("blob:audio-clock-test");
+  });
+
+  it("retains bounded frame-gap diagnostics and context state from the fault", async () => {
+    vi.stubGlobal("MediaStream", class FakeMediaStream {});
+    const harness = runtimeHarness();
+    const diagnostics = await prepareAudioClockDiagnostics(
+      harness.context,
+      harness.dependencies
+    );
+    diagnostics.attach("remote", track("remote"), AUDIO_CLOCK_REMOTE_SILENCE_RMS);
+
+    harness.worklets[0]?.port.onmessage?.({
+      data: frameGapFault({
+        probe: "remote",
+        sequence: 1,
+        processedBlocks: 2,
+        expectedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+        observedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        lastObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      }),
+    } as MessageEvent<unknown>);
+
+    const fault = diagnostics.read().remote;
+    expect(fault).toMatchObject({
+      failure_code: "frame_gap",
+      failure_message_sequence: 1,
+      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 2,
+      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      frame_delta_frames: AUDIO_CLOCK_QUANTUM_FRAMES,
+      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      context_state_at_message_delivery: "running",
+    });
+    expect(Object.keys(fault).sort()).toEqual(
+      [
+        "active_region_count",
+        "attached",
+        "context_state_at_message_delivery",
+        "current_state",
+        "current_state_block_count",
+        "exact_track_id",
+        "expected_block_start_frame",
+        "failure_code",
+        "failure_message_sequence",
+        "frame_delta_frames",
+        "last_observed_block_start_frame",
+        "latest_block_end_frame",
+        "observed_block_start_frame",
+        "overflow",
+        "processed_block_count",
+        "silence_hold_frames",
+        "threshold_rms",
+        "transitions",
+      ].sort()
+    );
+    expect(containsTypedArray(fault)).toBe(false);
+    expect(JSON.stringify(fault)).not.toMatch(/channel_samples|raw_pcm|audio_samples/i);
+
+    diagnostics.attach("local", track("local"), AUDIO_CLOCK_LOCAL_ACTIVE_RMS);
+    harness.worklets[1]?.port.onmessage?.({
+      data: observation({
+        probe: "local",
+        sequence: 1,
+        state: "silent",
+        blockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+        activeRegions: 0,
+      }),
+    } as MessageEvent<unknown>);
+    harness.worklets[1]?.port.onmessage?.({
+      data: frameGapFault({
+        probe: "local",
+        sequence: 2,
+        processedBlocks: 1,
+        expectedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
+        observedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES,
+        lastObservedBlockStartFrame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      }),
+    } as MessageEvent<unknown>);
+    expect(diagnostics.read().local).toMatchObject({
+      failure_code: "frame_gap",
+      failure_message_sequence: 2,
+      expected_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 4,
+      observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES,
+      frame_delta_frames: -AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      last_observed_block_start_frame: AUDIO_CLOCK_QUANTUM_FRAMES * 3,
+      context_state_at_message_delivery: "running",
+    });
+    await diagnostics.dispose();
   });
 
   it("reuses repeated callbacks for the exact track and rejects replacement", async () => {
