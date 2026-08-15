@@ -115,7 +115,7 @@ def _relay_material(paths: StackPaths) -> CoturnContractPaths:
         encoding="utf-8",
     )
     coturn.cert.write_text(TEST_CERTIFICATE_PEM, encoding="ascii")
-    coturn.config.chmod(0o444)
+    coturn.config.chmod(0o400)
     coturn.cert.chmod(0o400)
     return coturn
 

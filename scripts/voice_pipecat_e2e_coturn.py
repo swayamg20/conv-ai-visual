@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import ipaddress
 import os
 import re
 import stat
@@ -45,14 +46,19 @@ _RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _STATIC_AUTH_SECRET_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _FORBIDDEN_OPENSSL_ENV_NAMES = frozenset({"OPENSSL_CONF", "OPENSSL_MODULES", "SSLKEYLOGFILE"})
 _EXPECTED_FIXTURE = """\
-listening-ip=0.0.0.0
+# Render-only owned /29 bridge template. Braced values are not executable.
+# owned-network={network_cidr}
+# owned-gateway={gateway_ipv4}
+# owned-container={container_ipv4}
+listening-ip={container_ipv4}
 listening-port=3478
 tls-listening-port=5349
-relay-ip=0.0.0.0
-external-ip=127.0.0.1
+relay-ip={container_ipv4}
+external-ip=127.0.0.1/{container_ipv4}
 min-port=49160
 max-port=49169
-# Candidate bound: one allocation for each endpoint in the one-call harness.
+relay-threads=1
+# Call-level quota bound: at most two allocations; no endpoint attribution.
 user-quota=2
 total-quota=2
 fingerprint
@@ -64,18 +70,18 @@ no-udp
 no-tcp
 # Keep peer-side relay UDP-only; client-to-TURN remains TLS/TCP on turns:.
 no-tcp-relay
-no-dtls
-no-tlsv1
-no-tlsv1_1
-no-cli
-allow-loopback-peers
 no-multicast-peers
 stale-nonce=60
 log-file=stdout
 simple-log
+verbose
+log-min-level=info
 pidfile=/tmp/turnserver.pid
 userdb=/tmp/turnserver.db
 """
+_PRIVATE_IPV4_NETWORKS = tuple(
+    ipaddress.IPv4Network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
 
 
 class CoturnContractError(RuntimeError):
@@ -99,6 +105,74 @@ class PipecatE2ENetworkMode(str, Enum):
         return "relay-tls"
 
 
+@dataclass(frozen=True)
+class CoturnBridgeTopology:
+    """One exact private /29 bridge layout, redacted from diagnostics."""
+
+    network: ipaddress.IPv4Network = field(repr=False)
+    gateway: ipaddress.IPv4Address = field(repr=False)
+    container: ipaddress.IPv4Address = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.network, ipaddress.IPv4Network) or self.network.prefixlen != 29:
+            raise CoturnContractError("Coturn bridge topology is invalid")
+        if not any(self.network.subnet_of(private) for private in _PRIVATE_IPV4_NETWORKS):
+            raise CoturnContractError("Coturn bridge topology is invalid")
+        if (
+            not isinstance(self.gateway, ipaddress.IPv4Address)
+            or not isinstance(self.container, ipaddress.IPv4Address)
+            or self.gateway != self.network.network_address + 1
+            or self.container != self.network.network_address + 2
+        ):
+            raise CoturnContractError("Coturn bridge topology is invalid")
+
+    @classmethod
+    def parse(
+        cls,
+        *,
+        network: object,
+        gateway: object,
+        container: object,
+    ) -> CoturnBridgeTopology:
+        if not all(isinstance(value, str) for value in (network, gateway, container)):
+            raise CoturnContractError("Coturn bridge topology is invalid")
+        try:
+            parsed_network = ipaddress.IPv4Network(network, strict=True)
+            parsed_gateway = ipaddress.IPv4Address(gateway)
+            parsed_container = ipaddress.IPv4Address(container)
+        except ipaddress.AddressValueError:
+            raise CoturnContractError("Coturn bridge topology is invalid") from None
+        except ipaddress.NetmaskValueError:
+            raise CoturnContractError("Coturn bridge topology is invalid") from None
+        if str(parsed_network) != network:
+            raise CoturnContractError("Coturn bridge topology is invalid")
+        return cls(
+            network=parsed_network,
+            gateway=parsed_gateway,
+            container=parsed_container,
+        )
+
+
+_CONTRACT_ONLY_TOPOLOGY = CoturnBridgeTopology.parse(
+    network="10.255.255.0/29",
+    gateway="10.255.255.1",
+    container="10.255.255.2",
+)
+
+
+@dataclass(frozen=True)
+class CoturnConfigurationReceipt:
+    """Parsed private configuration bound to its exact rendered topology."""
+
+    static_auth_secret: str = field(repr=False)
+    topology: CoturnBridgeTopology = field(repr=False)
+
+    def __post_init__(self) -> None:
+        validate_static_auth_secret(self.static_auth_secret)
+        if not isinstance(self.topology, CoturnBridgeTopology):
+            raise CoturnContractError("Coturn configuration receipt is invalid")
+
+
 def parse_network_mode(value: object) -> PipecatE2ENetworkMode:
     """Parse an exact mode without reflecting attacker-controlled input."""
 
@@ -119,6 +193,7 @@ class CoturnContractPaths:
     coturn_dir: Path
     config: Path
     cert: Path
+    private_key: Path
 
     def __post_init__(self) -> None:
         if not _RUN_ID_PATTERN.fullmatch(self.run_id):
@@ -130,6 +205,7 @@ class CoturnContractPaths:
             "coturn_dir": expected_dir,
             "config": expected_dir / "turnserver.conf",
             "cert": expected_dir / "cert.pem",
+            "private_key": expected_dir / "key.pem",
         }
         for name, path in expected.items():
             if getattr(self, name) != path or not path.is_absolute():
@@ -147,6 +223,7 @@ class CoturnContractPaths:
             coturn_dir=coturn_dir,
             config=coturn_dir / "turnserver.conf",
             cert=coturn_dir / "cert.pem",
+            private_key=coturn_dir / "key.pem",
         )
 
 
@@ -155,17 +232,42 @@ def validate_coturn_fixture(value: object) -> str:
 
     if not isinstance(value, str) or value != _EXPECTED_FIXTURE:
         raise CoturnContractError("Coturn configuration fixture is invalid")
-    if "static-auth-secret" in value:
+    if (
+        "static-auth-secret" in value
+        or "allow-loopback-peers" in value
+        or "0.0.0.0" in value
+        or value.count("{network_cidr}") != 1
+        or value.count("{gateway_ipv4}") != 1
+        or value.count("{container_ipv4}") != 4
+    ):
         raise CoturnContractError("Coturn configuration fixture is invalid")
     return value
 
 
-def render_coturn_configuration(fixture: object, static_auth_secret: object) -> str:
-    """Append one REST secret to the exact reviewed template."""
+def render_coturn_configuration(
+    fixture: object,
+    static_auth_secret: object,
+    topology: CoturnBridgeTopology | None = None,
+) -> str:
+    """Render one exact owned bridge layout and append one REST secret.
+
+    The default is a contract-only private layout retained for Checkpoint A
+    callers. Checkpoint B must supply the collision-checked owned topology.
+    """
 
     template = validate_coturn_fixture(fixture)
     secret = validate_static_auth_secret(static_auth_secret)
-    return f"{template}static-auth-secret={secret}\n"
+    selected = _CONTRACT_ONLY_TOPOLOGY if topology is None else topology
+    if not isinstance(selected, CoturnBridgeTopology):
+        raise CoturnContractError("Coturn bridge topology is invalid")
+    rendered = (
+        template.replace("{network_cidr}", str(selected.network))
+        .replace("{gateway_ipv4}", str(selected.gateway))
+        .replace("{container_ipv4}", str(selected.container))
+    )
+    if "{" in rendered or "}" in rendered:
+        raise CoturnContractError("Coturn configuration fixture is invalid")
+    return f"{rendered}static-auth-secret={secret}\n"
 
 
 def validate_static_auth_secret(value: object) -> str:
@@ -174,12 +276,12 @@ def validate_static_auth_secret(value: object) -> str:
     return value
 
 
-def read_private_coturn_configuration(
+def read_private_coturn_configuration_receipt(
     path: object,
     *,
     expected_run_dir: Path,
-) -> str:
-    """Validate and read the exact owned config without leaking its secret."""
+) -> CoturnConfigurationReceipt:
+    """Read the exact config and return a fully redacted parsed receipt."""
 
     expected_path = expected_run_dir / "coturn" / "turnserver.conf"
     config_path = _require_exact_regular_file(
@@ -193,22 +295,49 @@ def read_private_coturn_configuration(
         value = _read_regular_file_no_follow(
             config_path,
             maximum_bytes=8_192,
-            exact_mode=0o444,
+            exact_mode=0o400,
         ).decode("utf-8")
     except _UnsafeFilePermissionsError:
         raise CoturnContractError("Coturn configuration permissions are unsafe") from None
     except (OSError, UnicodeError):
         raise CoturnContractError("Coturn configuration is unavailable") from None
-    prefix = f"{_EXPECTED_FIXTURE}static-auth-secret="
-    if not value.startswith(prefix) or not value.endswith("\n"):
+    if not value.endswith("\n") or value.count("static-auth-secret=") != 1:
         raise CoturnContractError("Coturn generated configuration is invalid")
-    secret = value.removeprefix(prefix).removesuffix("\n")
+    rendered, separator, secret_line = value.rpartition("static-auth-secret=")
+    if not separator:
+        raise CoturnContractError("Coturn generated configuration is invalid")
+    secret = secret_line.removesuffix("\n")
     if "\n" in secret or "\r" in secret:
         raise CoturnContractError("Coturn generated configuration is invalid")
     validate_static_auth_secret(secret)
-    if value.count("static-auth-secret=") != 1:
+    try:
+        lines = rendered.splitlines()
+        if len(lines) < 4:
+            raise CoturnContractError("Coturn generated configuration is invalid")
+        topology = CoturnBridgeTopology.parse(
+            network=lines[1].removeprefix("# owned-network="),
+            gateway=lines[2].removeprefix("# owned-gateway="),
+            container=lines[3].removeprefix("# owned-container="),
+        )
+    except (IndexError, CoturnContractError):
+        raise CoturnContractError("Coturn generated configuration is invalid") from None
+    expected = render_coturn_configuration(_EXPECTED_FIXTURE, secret, topology)
+    if value != expected:
         raise CoturnContractError("Coturn generated configuration is invalid")
-    return secret
+    return CoturnConfigurationReceipt(static_auth_secret=secret, topology=topology)
+
+
+def read_private_coturn_configuration(
+    path: object,
+    *,
+    expected_run_dir: Path,
+) -> str:
+    """Compatibility reader returning only the validated static secret."""
+
+    return read_private_coturn_configuration_receipt(
+        path,
+        expected_run_dir=expected_run_dir,
+    ).static_auth_secret
 
 
 def validate_turn_tls_ca_file(path: object, *, expected_run_dir: Path) -> Path:
@@ -431,6 +560,8 @@ __all__ = [
     "COTURN_TLS_PORT",
     "COTURN_TOPOLOGY_STATUS",
     "COTURN_TURNS_URL",
+    "CoturnBridgeTopology",
+    "CoturnConfigurationReceipt",
     "CoturnContractError",
     "CoturnContractPaths",
     "PipecatE2ENetworkMode",
@@ -438,6 +569,7 @@ __all__ = [
     "derive_turn_rest_credentials",
     "parse_network_mode",
     "read_private_coturn_configuration",
+    "read_private_coturn_configuration_receipt",
     "render_coturn_configuration",
     "validate_coturn_fixture",
     "validate_static_auth_secret",

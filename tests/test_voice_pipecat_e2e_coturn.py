@@ -28,12 +28,14 @@ from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
     COTURN_TLS_PORT,
     COTURN_TOPOLOGY_STATUS,
     COTURN_TURNS_URL,
+    CoturnBridgeTopology,
     CoturnContractError,
     CoturnContractPaths,
     PipecatE2ENetworkMode,
     derive_turn_rest_credentials,
     parse_network_mode,
     read_private_coturn_configuration,
+    read_private_coturn_configuration_receipt,
     render_coturn_configuration,
     validate_coturn_fixture,
     validate_static_auth_secret,
@@ -65,6 +67,11 @@ AK1RHz0iqmKuoFCTbp/UyRWgH9dhRzXmPKkZVQ0IwPMfgaKyQQKDcxfJ6841kKtD
 f1dZKbTifuE8OGfJN/9l0jKcX+J07pzQm/x5TvrxfzUc1il21KFmzQ==
 -----END CERTIFICATE-----
 """
+TOPOLOGY = CoturnBridgeTopology.parse(
+    network="172.28.44.0/29",
+    gateway="172.28.44.1",
+    container="172.28.44.2",
+)
 
 
 def _private_paths(tmp_path: Path) -> CoturnContractPaths:
@@ -78,11 +85,12 @@ def _private_paths(tmp_path: Path) -> CoturnContractPaths:
         render_coturn_configuration(
             COTURN_FIXTURE_PATH.read_text(encoding="utf-8"),
             STATIC_SECRET,
+            TOPOLOGY,
         ),
         encoding="utf-8",
     )
     paths.cert.write_text(TEST_CERTIFICATE_PEM, encoding="ascii")
-    paths.config.chmod(0o444)
+    paths.config.chmod(0o400)
     paths.cert.chmod(0o400)
     return paths
 
@@ -126,30 +134,51 @@ def test_fixture_is_exact_secret_free_and_renderer_adds_one_validated_secret() -
     assert "user=" not in fixture
     assert "cli-password" not in fixture
     assert "lt-cred-mech" not in fixture
-    assert "verbose" not in fixture
+    assert fixture.count("verbose") == 1
+    assert fixture.count("log-min-level=info") == 1
     assert "max-allocate-lifetime" not in fixture
     assert "bps-capacity" not in fixture
     assert fixture.count("use-auth-secret") == 1
-    assert fixture.count("no-cli") == 1
+    assert "no-cli" not in fixture
     assert fixture.count("no-tcp-relay") == 1
     assert fixture.count("user-quota=2") == 1
     assert fixture.count("total-quota=2") == 1
-    assert all(f"{directive}\n" in fixture for directive in ("no-udp", "no-tcp", "no-dtls"))
-    rendered = render_coturn_configuration(fixture, STATIC_SECRET)
-    assert rendered == f"{fixture}static-auth-secret={STATIC_SECRET}\n"
+    assert fixture.count("relay-threads=1") == 1
+    assert (
+        "# Call-level quota bound: at most two allocations; no endpoint attribution.\n" in fixture
+    )
+    assert all(f"{directive}\n" in fixture for directive in ("no-udp", "no-tcp"))
+    assert "no-dtls" not in fixture
+    assert "no-tlsv1" not in fixture
+    assert "no-tlsv1_1" not in fixture
+    assert "allow-loopback-peers" not in fixture
+    assert "0.0.0.0" not in fixture
+    rendered = render_coturn_configuration(fixture, STATIC_SECRET, TOPOLOGY)
+    assert "{network_cidr}" not in rendered
+    assert "# owned-network=172.28.44.0/29" in rendered
+    assert "listening-ip=172.28.44.2" in rendered
+    assert "relay-ip=172.28.44.2" in rendered
+    assert "external-ip=127.0.0.1/172.28.44.2" in rendered
+    assert rendered.endswith(f"static-auth-secret={STATIC_SECRET}\n")
     assert rendered.count("static-auth-secret=") == 1
 
 
 @pytest.mark.parametrize(
     "mutation",
     [
-        lambda value: value.replace("no-cli\n", ""),
+        lambda value: value + "no-cli\n",
+        lambda value: value + "no-tlsv1\n",
+        lambda value: value + "no-tlsv1_1\n",
         lambda value: value + "user=unsafe:password\n",
         lambda value: value.replace("tls-listening-port=5349", "tls-listening-port=5350"),
         lambda value: value.replace("no-udp\n", ""),
         lambda value: value.replace("no-tcp-relay\n", ""),
+        lambda value: value.replace("verbose\n", ""),
+        lambda value: value.replace("log-min-level=info\n", ""),
+        lambda value: value + "allow-loopback-peers\n",
         lambda value: value.replace("user-quota=2\n", ""),
         lambda value: value.replace("total-quota=2", "total-quota=3"),
+        lambda value: value.replace("relay-threads=1", "relay-threads=2"),
         lambda value: value.replace("use-auth-secret", "lt-cred-mech"),
         lambda value: value.replace("\n", "\r\n"),
     ],
@@ -175,18 +204,29 @@ def test_static_auth_secret_is_exact_lowercase_hex_without_reflection(secret: ob
 def test_owned_generated_configuration_and_parseable_ca_paths_are_exact(tmp_path: Path) -> None:
     paths = _private_paths(tmp_path)
 
+    assert paths.private_key == paths.coturn_dir / "key.pem"
     assert (
         read_private_coturn_configuration(paths.config, expected_run_dir=paths.run_dir)
         == STATIC_SECRET
     )
     assert validate_turn_tls_ca_file(paths.cert, expected_run_dir=paths.run_dir) == paths.cert
+    receipt = read_private_coturn_configuration_receipt(
+        paths.config,
+        expected_run_dir=paths.run_dir,
+    )
+    assert receipt.static_auth_secret == STATIC_SECRET
+    assert receipt.topology == TOPOLOGY
+    rendered_receipt = repr(receipt)
+    assert rendered_receipt == "CoturnConfigurationReceipt()"
+    assert STATIC_SECRET not in rendered_receipt
+    assert str(receipt.topology.gateway) not in rendered_receipt
     with pytest.raises(CoturnContractError, match="path is invalid"):
         read_private_coturn_configuration(paths.cert, expected_run_dir=paths.run_dir)
     with pytest.raises(CoturnContractError, match="path is invalid"):
         validate_turn_tls_ca_file(paths.config, expected_run_dir=paths.run_dir)
 
 
-@pytest.mark.parametrize("mode", [0o400, 0o440, 0o600, 0o644, 0o666])
+@pytest.mark.parametrize("mode", [0o440, 0o444, 0o600, 0o644, 0o666])
 def test_generated_configuration_requires_exact_container_readable_mode(
     tmp_path: Path,
     mode: int,
@@ -250,7 +290,7 @@ def test_generated_configuration_rejects_duplicates_controls_and_symlinks(tmp_pa
     original = paths.config.read_text(encoding="utf-8")
     paths.config.chmod(0o600)
     paths.config.write_text(original + f"static-auth-secret={STATIC_SECRET}\n", encoding="utf-8")
-    paths.config.chmod(0o444)
+    paths.config.chmod(0o400)
     with pytest.raises(CoturnContractError, match="generated configuration is invalid"):
         read_private_coturn_configuration(paths.config, expected_run_dir=paths.run_dir)
 
@@ -259,7 +299,7 @@ def test_generated_configuration_rejects_duplicates_controls_and_symlinks(tmp_pa
         original.replace(STATIC_SECRET, f"{STATIC_SECRET}\n#"),
         encoding="utf-8",
     )
-    paths.config.chmod(0o444)
+    paths.config.chmod(0o400)
     with pytest.raises(CoturnContractError, match="generated configuration is invalid"):
         read_private_coturn_configuration(paths.config, expected_run_dir=paths.run_dir)
 
@@ -484,6 +524,8 @@ def test_core_public_surface_is_exact() -> None:
         "COTURN_TLS_PORT",
         "COTURN_TOPOLOGY_STATUS",
         "COTURN_TURNS_URL",
+        "CoturnBridgeTopology",
+        "CoturnConfigurationReceipt",
         "CoturnContractError",
         "CoturnContractPaths",
         "PipecatE2ENetworkMode",
@@ -491,6 +533,7 @@ def test_core_public_surface_is_exact() -> None:
         "derive_turn_rest_credentials",
         "parse_network_mode",
         "read_private_coturn_configuration",
+        "read_private_coturn_configuration_receipt",
         "render_coturn_configuration",
         "validate_coturn_fixture",
         "validate_static_auth_secret",
