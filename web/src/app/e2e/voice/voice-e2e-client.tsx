@@ -23,6 +23,7 @@ import {
   type BrowserRtcDiagnostics,
   type BrowserRtcEvidence,
   type BrowserMediaTrackEvidence,
+  type BrowserRtcNetworkMode,
 } from "./rtc-diagnostics";
 
 const SAMPLE_INTERVAL_MS = 16;
@@ -31,6 +32,7 @@ const SNAPSHOT_INTERVAL_MS = 80;
 interface VoiceE2EClientProps {
   readonly agentId: string;
   readonly apiUrl: string;
+  readonly network: BrowserRtcNetworkMode;
   readonly sessionId: string;
 }
 
@@ -171,6 +173,7 @@ function createAnalyser(context: AudioContext): AnalyserNode {
 export function VoiceE2EClient({
   agentId,
   apiUrl,
+  network,
   sessionId,
 }: VoiceE2EClientProps) {
   const measurementOriginRef = useRef<number | null>(null);
@@ -551,7 +554,7 @@ export function VoiceE2EClient({
     disconnectRequestedRef.current = false;
     statusRef.current = "connecting";
     try {
-      rtcDiagnosticsRef.current ??= installBrowserRtcDiagnostics();
+      rtcDiagnosticsRef.current ??= installBrowserRtcDiagnostics(network);
     } catch (error) {
       observeError(
         error instanceof Error
@@ -583,6 +586,7 @@ export function VoiceE2EClient({
     buildSnapshot,
     disposeAudio,
     ensureAudioContext,
+    network,
     observeError,
     startTimers,
     voice,

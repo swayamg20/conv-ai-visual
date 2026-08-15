@@ -1,5 +1,9 @@
 import { notFound } from "next/navigation";
 
+import {
+  parseBrowserRtcNetworkMode,
+  type BrowserRtcNetworkMode,
+} from "./rtc-diagnostics";
 import { VoiceE2EClient } from "./voice-e2e-client";
 
 export const dynamic = "force-dynamic";
@@ -11,6 +15,14 @@ const E2E_API_ORIGINS = new Set([
   "http://127.0.0.1:8101",
 ]);
 
+function trustedNetworkMode(): BrowserRtcNetworkMode {
+  try {
+    return parseBrowserRtcNetworkMode(process.env.VOICE_E2E_NETWORK);
+  } catch {
+    notFound();
+  }
+}
+
 export default function VoiceE2EPage() {
   const apiUrl = process.env.VOICE_E2E_API_URL ?? "http://127.0.0.1:8100";
   if (
@@ -20,11 +32,13 @@ export default function VoiceE2EPage() {
   ) {
     notFound();
   }
+  const network = trustedNetworkMode();
 
   return (
     <VoiceE2EClient
       agentId={E2E_AGENT_ID}
       apiUrl={apiUrl}
+      network={network}
       sessionId={E2E_SESSION_ID}
     />
   );

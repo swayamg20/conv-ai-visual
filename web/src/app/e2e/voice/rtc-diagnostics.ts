@@ -48,6 +48,8 @@ export interface BrowserRtcDiagnostics {
   readonly restore: () => void;
 }
 
+export type BrowserRtcNetworkMode = "direct" | "relay-tls";
+
 export interface BrowserMediaTrackEvidence {
   readonly id: string;
   readonly kind: string;
@@ -75,6 +77,17 @@ const EMPTY_RTP: RtcRtpEvidence = Object.freeze({
   bytes: 0,
   packets: 0,
 });
+
+const RELAY_CONSTRUCTOR_ERROR =
+  "Relay RTC constructor configuration is incompatible";
+
+export function parseBrowserRtcNetworkMode(
+  value: string | undefined
+): BrowserRtcNetworkMode {
+  if (value === undefined) return "direct";
+  if (value === "direct" || value === "relay-tls") return value;
+  throw new Error("Browser RTC network mode is invalid");
+}
 
 /** Keep immutable first-seen state while refreshing the same track's live state. */
 export function observeBrowserMediaTrack(
@@ -310,8 +323,12 @@ export async function summarizeRtcPeerConnections(
 
 /** Install before either runtime's dynamically imported SDK constructs a peer. */
 export function installBrowserRtcDiagnostics(
+  network: BrowserRtcNetworkMode = "direct",
   target: RtcConstructorOwner = globalThis
 ): BrowserRtcDiagnostics {
+  if (network !== "direct" && network !== "relay-tls") {
+    throw new Error("Browser RTC network mode is invalid");
+  }
   const NativePeerConnection = target.RTCPeerConnection;
   if (typeof NativePeerConnection !== "function") {
     throw new Error("RTCPeerConnection is unavailable in this browser");
@@ -323,11 +340,67 @@ export function installBrowserRtcDiagnostics(
   const connections: RTCPeerConnection[] = [];
   const CapturingPeerConnection = new Proxy(NativePeerConnection, {
     construct(constructor, argumentsList, newTarget) {
-      const connection = Reflect.construct(
-        constructor,
-        argumentsList,
-        newTarget
-      ) as RTCPeerConnection;
+      if (network === "direct") {
+        const connection = Reflect.construct(
+          constructor,
+          argumentsList,
+          newTarget
+        ) as RTCPeerConnection;
+        connections.push(connection);
+        return connection;
+      }
+
+      let relayConfig: RTCConfiguration;
+      try {
+        if (argumentsList.length !== 1) {
+          throw new Error(RELAY_CONSTRUCTOR_ERROR);
+        }
+        const config = argumentsList[0];
+        if (
+          typeof config !== "object" ||
+          config === null ||
+          Array.isArray(config) ||
+          Object.getPrototypeOf(config) !== Object.prototype ||
+          Reflect.ownKeys(config).length !== 1 ||
+          !Object.prototype.hasOwnProperty.call(config, "iceServers")
+        ) {
+          throw new Error(RELAY_CONSTRUCTOR_ERROR);
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(config, "iceServers");
+        if (
+          descriptor === undefined ||
+          !("value" in descriptor) ||
+          descriptor.enumerable !== true
+        ) {
+          throw new Error(RELAY_CONSTRUCTOR_ERROR);
+        }
+        relayConfig = {
+          iceServers: descriptor.value,
+          iceTransportPolicy: "relay",
+        };
+      } catch {
+        throw new Error(RELAY_CONSTRUCTOR_ERROR);
+      }
+
+      let connection: RTCPeerConnection | undefined;
+      try {
+        connection = Reflect.construct(
+          constructor,
+          [relayConfig],
+          newTarget
+        ) as RTCPeerConnection;
+        if (connection.getConfiguration().iceTransportPolicy !== "relay") {
+          throw new Error(RELAY_CONSTRUCTOR_ERROR);
+        }
+      } catch {
+        try {
+          connection?.close();
+        } catch {
+          // The fixed contract error below remains the only surfaced detail.
+        }
+        throw new Error(RELAY_CONSTRUCTOR_ERROR);
+      }
+      if (connection === undefined) throw new Error(RELAY_CONSTRUCTOR_ERROR);
       connections.push(connection);
       return connection;
     },
