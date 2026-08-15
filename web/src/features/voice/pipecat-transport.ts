@@ -96,6 +96,7 @@ export interface PipecatVoiceTransportCallbacks {
 }
 
 interface PipecatClientPort {
+  initDevices(): Promise<void>;
   connect(connectParams?: unknown): Promise<unknown>;
   disconnect(): Promise<void>;
   setLogLevel(level: LogLevel): void;
@@ -911,6 +912,7 @@ function requireClientShape(value: unknown): PipecatClientPort {
     throw new Error("Pipecat client adapter shape is incompatible");
   }
   for (const method of [
+    "initDevices",
     "connect",
     "disconnect",
     "setLogLevel",
@@ -1086,21 +1088,53 @@ export class PipecatVoiceTransport {
       try {
         if (options.signal?.aborted) controller.abort();
         if (controller.signal.aborted) throw new ConnectOperationAborted();
-        let clientConnect: Promise<unknown>;
+        let clientInitialization: Promise<void>;
         try {
           // Pipecat's logger is package-global and mutable. Reassert the privacy
-          // floor at the operation boundary in case another consumer changed it
-          // after this adapter was constructed.
+          // floor before device initialization in case another consumer changed
+          // it after this adapter was constructed.
+          logger.setLevel(LogLevel.NONE);
+          this.client.setLogLevel(LogLevel.NONE);
+          // PipecatClient 1.13 skips its implicit device initialization when
+          // enableMic and enableCam are both false. Start the public initializer
+          // synchronously in this activation gesture, then keep it inside the
+          // same aggregate connection deadline below.
+          clientInitialization = this.client.initDevices();
+        } catch (error) {
+          clientInitialization = Promise.reject(error);
+        }
+        // Some media managers expose their track synchronously before their
+        // initializer promise settles. Close that track immediately as well as
+        // on eventual settlement below.
+        this.containInitializedMicrophone(controller.signal);
+
+        const containedInitialization = clientInitialization.then(
+          () => this.containInitializedMicrophone(controller.signal),
+          (error: unknown) => {
+            this.containInitializedMicrophone(controller.signal);
+            throw error;
+          },
+        );
+        await settleOnSignal(
+          containedInitialization,
+          controller.signal,
+        );
+        if (controller.signal.aborted) throw new ConnectOperationAborted();
+        if (this.closed || !this.isCurrent()) {
+          throw new Error(
+            "Pipecat voice transport became stale during device initialization",
+          );
+        }
+
+        let clientConnect: Promise<unknown>;
+        try {
           logger.setLevel(LogLevel.NONE);
           this.client.setLogLevel(LogLevel.NONE);
           clientConnect = this.client.connect(connectParams);
         } catch (error) {
           clientConnect = Promise.reject(error);
         }
-        await settleOnSignal(
-          clientConnect,
-          controller.signal,
-        );
+        await settleOnSignal(clientConnect, controller.signal);
         this.captureLocalTrack();
         this.forceMicrophoneDisabled();
         if (!this.isCurrent()) {
@@ -1462,7 +1496,10 @@ export class PipecatVoiceTransport {
     const localTrack = this.currentLocalTrack();
     const isLocal = participant?.local === true || track === localTrack;
     if (!this.isCurrent()) {
-      if (isLocal) track.enabled = false;
+      if (isLocal) {
+        track.enabled = false;
+        if (this.closed && track.readyState !== "ended") track.stop();
+      }
       return;
     }
     if (isLocal) {
@@ -1520,6 +1557,24 @@ export class PipecatVoiceTransport {
     this.localTracks.add(track);
     this.reportLocalTrack(track);
     return track;
+  }
+
+  private containInitializedMicrophone(signal: AbortSignal): void {
+    try {
+      this.client.enableMic(false);
+    } catch {
+      // The native track is still forced closed below when the SDK is stale.
+    }
+    const track = this.currentLocalTrack();
+    if (!track) return;
+    track.enabled = false;
+    this.localTracks.add(track);
+    if (this.closed || signal.aborted || !this.isCurrent()) {
+      if (track.readyState !== "ended") track.stop();
+      this.localTracks.delete(track);
+      return;
+    }
+    this.reportLocalTrack(track);
   }
 
   private forceMicrophoneDisabled(): void {

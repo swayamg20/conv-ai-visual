@@ -185,6 +185,7 @@ function createTrack(id: string, enabled = true): MediaStreamTrack {
 }
 
 class FakeClient {
+  readonly initDevices = vi.fn(async (): Promise<void> => undefined);
   readonly connect = vi.fn(
     async (_params?: unknown): Promise<void> => undefined,
   );
@@ -439,16 +440,20 @@ function installPeer(
 function installSyntheticDefaultConnect(
   transport: PipecatVoiceTransport,
   operation: (sdkTransport: object) => Promise<void>,
+  initialize: () => Promise<void> = async () => undefined,
 ): ReturnType<typeof defaultInternals> & {
+  readonly initDevices: ReturnType<typeof vi.fn>;
   readonly connect: ReturnType<typeof vi.fn>;
   readonly localTrack: MediaStreamTrack;
 } {
   const internals = defaultInternals(transport);
   const localTrack = createTrack("default-local");
+  const initDevices = vi.fn(initialize);
   const connect = vi.fn(async (): Promise<void> => {
     await operation(internals.sdkTransport);
   });
   if (
+    !Reflect.set(internals.client, "initDevices", initDevices) ||
     !Reflect.set(internals.client, "connect", connect) ||
     !Reflect.set(
       internals.client,
@@ -465,7 +470,7 @@ function installSyntheticDefaultConnect(
   ) {
     throw new Error("Could not install the synthetic default client seams");
   }
-  return { ...internals, connect, localTrack };
+  return { ...internals, initDevices, connect, localTrack };
 }
 
 function requestBody(
@@ -480,12 +485,15 @@ function requestBody(
 function deferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
+  readonly reject: (reason?: unknown) => void;
 } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 describe("PipecatVoiceTransport", () => {
@@ -502,6 +510,245 @@ describe("PipecatVoiceTransport", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("starts the pinned public device initializer synchronously before connect", async () => {
+    const owner = createCallbacks();
+    const initialization = deferred<void>();
+    const order: string[] = [];
+    const transport = new PipecatVoiceTransport({
+      callbacks: owner.callbacks,
+      audioElementFactory: createAudioElement,
+      signalingPortFactory: () => createSignalingPort(),
+    });
+    const synthetic = installSyntheticDefaultConnect(
+      transport,
+      async () => {
+        order.push("connect");
+      },
+      () => {
+        order.push("init");
+        return initialization.promise;
+      },
+    );
+
+    const connecting = transport.connect(connection);
+
+    expect(synthetic.client).toBeInstanceOf(PipecatClient);
+    expect(synthetic.initDevices).toHaveBeenCalledOnce();
+    expect(synthetic.connect).not.toHaveBeenCalled();
+    expect(order).toEqual(["init"]);
+    expect(synthetic.localTrack.enabled).toBe(false);
+    expect(
+      owner.callbacks.onLocalMicrophoneTrack.mock.calls[0]?.[1],
+    ).toMatchObject({ enabled: false, readyState: "live" });
+
+    initialization.resolve(undefined);
+    await connecting;
+
+    expect(order).toEqual(["init", "connect"]);
+    expect(
+      synthetic.initDevices.mock.invocationCallOrder[0],
+    ).toBeLessThan(synthetic.connect.mock.invocationCallOrder[0] ?? 0);
+    expect(synthetic.localTrack.enabled).toBe(false);
+    expect(
+      synthetic.connect.mock.calls[0]?.[0],
+    ).toEqual({
+      webrtcRequestParams: { endpoint: connection.webrtcUrl },
+      iceConfig: { iceServers: connection.iceServers },
+    });
+    await transport.disconnect();
+  });
+
+  it("times out abort-ignoring device init without a late signaling POST", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ connectTimeoutMs: 25 });
+    const initialization = deferred<void>();
+    let lateTrack: MediaStreamTrack | undefined;
+    harness.client.initDevices.mockImplementationOnce(() =>
+      initialization.promise.then(() => {
+        lateTrack = createTrack("late-initialized-microphone", true);
+        harness.client.localTrack = lateTrack;
+      }),
+    );
+    harness.client.connect.mockImplementationOnce(async () => {
+      await harness.signalingPort.offer({
+        sdp: "v=0\r\n",
+        type: "offer",
+        pcId: null,
+      });
+    });
+
+    const connecting = harness.transport.connect(connection);
+    const failure = connecting.catch((error: unknown) => error);
+    expect(harness.client.initDevices).toHaveBeenCalledOnce();
+    expect(harness.client.connect).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(25);
+    const error = await failure;
+
+    expect(error).toMatchObject({
+      name: "Error",
+      message: "Pipecat voice connection timed out",
+    });
+    expect(harness.client.disconnect).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(harness.client.connect).not.toHaveBeenCalled();
+    expect(harness.signalingPort.offer).not.toHaveBeenCalled();
+
+    initialization.resolve(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.client.connect).not.toHaveBeenCalled();
+    expect(harness.signalingPort.offer).not.toHaveBeenCalled();
+    expect(lateTrack?.enabled).toBe(false);
+    expect(lateTrack?.readyState).toBe("ended");
+    expect(
+      harness.callbacks.onLocalMicrophoneTrack,
+    ).toHaveBeenLastCalledWith(null, null);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("contains caller-aborted device init and never starts signaling", async () => {
+    const harness = createHarness();
+    const initialization = deferred<void>();
+    const controller = new AbortController();
+    let lateTrack: MediaStreamTrack | undefined;
+    harness.client.initDevices.mockImplementationOnce(() =>
+      initialization.promise.then(() => {
+        lateTrack = createTrack("aborted-initialized-microphone", true);
+        harness.client.localTrack = lateTrack;
+      }),
+    );
+    harness.client.connect.mockImplementationOnce(async () => {
+      await harness.signalingPort.offer({
+        sdp: "v=0\r\n",
+        type: "offer",
+        pcId: null,
+      });
+    });
+
+    const connecting = harness.transport.connect(connection, {
+      signal: controller.signal,
+    });
+    expect(harness.client.initDevices).toHaveBeenCalledOnce();
+    expect(harness.client.connect).not.toHaveBeenCalled();
+    controller.abort();
+
+    await expect(connecting).rejects.toMatchObject({
+      name: "AbortError",
+      message: "Pipecat voice connection was aborted",
+    });
+    expect(harness.client.disconnect).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+
+    initialization.resolve(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(harness.client.connect).not.toHaveBeenCalled();
+    expect(harness.signalingPort.offer).not.toHaveBeenCalled();
+    expect(lateTrack?.enabled).toBe(false);
+    expect(lateTrack?.readyState).toBe("ended");
+  });
+
+  it("sanitizes a synchronous device initialization failure", async () => {
+    const harness = createHarness();
+    harness.client.initDevices.mockImplementationOnce(() => {
+      throw new Error(
+        `Device setup leaked ${connection.webrtcUrl} Bearer init-secret`,
+      );
+    });
+
+    const connecting = harness.transport.connect(connection);
+    expect(harness.client.initDevices).toHaveBeenCalledOnce();
+    await expect(connecting).rejects.toThrow("Pipecat voice connection failed");
+
+    expect(harness.client.connect).not.toHaveBeenCalled();
+    expect(harness.client.disconnect).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+  });
+
+  it("requires the pinned public device initialization shape", () => {
+    expect(
+      () =>
+        new PipecatVoiceTransport({
+          callbacks: createCallbacks().callbacks,
+          clientFactory: (callbacks) => {
+            const client = new FakeClient(callbacks);
+            expect(Reflect.set(client, "initDevices", undefined)).toBe(true);
+            return client;
+          },
+          audioElementFactory: createAudioElement,
+        }),
+    ).toThrow("Pipecat client adapter shape is incompatible");
+  });
+
+  it("shares one deadline across device initialization and SDK connect", async () => {
+    vi.useFakeTimers();
+    const harness = createHarness({ connectTimeoutMs: 25 });
+    const initialization = deferred<void>();
+    harness.client.initDevices.mockImplementationOnce(
+      () => initialization.promise,
+    );
+    harness.client.connect.mockImplementationOnce(
+      () => new Promise<void>(() => undefined),
+    );
+    let settled = false;
+
+    const failure = harness.transport
+      .connect(connection)
+      .catch((error: unknown) => error);
+    void failure.then(() => {
+      settled = true;
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    initialization.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.client.connect).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(4);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(failure).resolves.toMatchObject({
+      message: "Pipecat voice connection timed out",
+    });
+    expect(harness.client.disconnect).toHaveBeenCalledOnce();
+    expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("consumes a late device initialization rejection after abort", async () => {
+    const harness = createHarness();
+    const initialization = deferred<void>();
+    const controller = new AbortController();
+    const unhandledRejection = vi.fn();
+    window.addEventListener("unhandledrejection", unhandledRejection);
+    harness.client.initDevices.mockImplementationOnce(
+      () => initialization.promise,
+    );
+
+    try {
+      const connecting = harness.transport.connect(connection, {
+        signal: controller.signal,
+      });
+      controller.abort();
+      await expect(connecting).rejects.toMatchObject({ name: "AbortError" });
+
+      initialization.reject(new Error("late device initialization failure"));
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(harness.client.connect).not.toHaveBeenCalled();
+      expect(harness.client.disconnect).toHaveBeenCalledOnce();
+      expect(unhandledRejection).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("unhandledrejection", unhandledRejection);
+    }
   });
 
   it("reasserts package-global and client log suppression at connect", async () => {
@@ -545,15 +792,24 @@ describe("PipecatVoiceTransport", () => {
       [LogLevel.DEBUG],
       [LogLevel.NONE],
       [LogLevel.NONE],
+      [LogLevel.NONE],
+      [LogLevel.NONE],
     ]);
     expect(clientLogLevel.mock.calls).toEqual([
       [LogLevel.DEBUG],
       [LogLevel.NONE],
+      [LogLevel.NONE],
     ]);
     expect(globalLogLevel.mock.invocationCallOrder[2]).toBeLessThan(
-      synthetic.connect.mock.invocationCallOrder[0] ?? 0,
+      synthetic.initDevices.mock.invocationCallOrder[0] ?? 0,
     );
     expect(clientLogLevel.mock.invocationCallOrder[1]).toBeLessThan(
+      synthetic.initDevices.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(globalLogLevel.mock.invocationCallOrder[4]).toBeLessThan(
+      synthetic.connect.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(clientLogLevel.mock.invocationCallOrder[2]).toBeLessThan(
       synthetic.connect.mock.invocationCallOrder[0] ?? 0,
     );
     await transport.disconnect();
@@ -1317,6 +1573,9 @@ describe("PipecatVoiceTransport", () => {
     );
 
     const connecting = harness.transport.connect(connection);
+    await vi.waitFor(() =>
+      expect(harness.client.connect).toHaveBeenCalledOnce(),
+    );
     harness.client.emitServerMessage(readyEvent());
     const accepted = harness.callbacks.onEvent.mock.calls[0]?.[0];
     if (!accepted || accepted.event_type !== "agent_ready") {
@@ -1703,6 +1962,9 @@ describe("PipecatVoiceTransport", () => {
       if (typeof client !== "object" || client === null) {
         throw new Error("Expected the default Pipecat client");
       }
+      expect(
+        Reflect.set(client, "initDevices", vi.fn(async () => undefined)),
+      ).toBe(true);
       const sdkTransport: unknown = Reflect.get(client, "_transport");
       if (typeof sdkTransport !== "object" || sdkTransport === null) {
         throw new Error("Expected the pinned SmallWebRTC transport");
