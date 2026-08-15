@@ -132,6 +132,10 @@ def _audio_sample_clock(
                 "frame_delta_frames": None,
                 "last_observed_block_start_frame": None,
                 "context_state_at_message_delivery": None,
+                "stale_frame_correction_count": 0,
+                "last_stale_observed_block_start_frame": None,
+                "last_stale_logical_block_start_frame": None,
+                "stale_frame_correction_pending": False,
             },
             "remote": {
                 "attached": True,
@@ -174,6 +178,10 @@ def _audio_sample_clock(
                 "frame_delta_frames": None,
                 "last_observed_block_start_frame": None,
                 "context_state_at_message_delivery": None,
+                "stale_frame_correction_count": 0,
+                "last_stale_observed_block_start_frame": None,
+                "last_stale_logical_block_start_frame": None,
+                "stale_frame_correction_pending": False,
             },
         },
         "interruption_bracket": {
@@ -532,6 +540,135 @@ def test_browser_result_requires_null_audio_clock_fault_diagnostics(
 
     _write_json(path, value)
     with pytest.raises(StackError, match="probe is not clean and exact"):
+        _read_pipecat_browser_result(path)
+
+
+def test_browser_result_accepts_one_exact_caught_up_stale_frame_correction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "result.json"
+    value = _browser_result()
+    browser = value["browser_evidence"]
+    assert isinstance(browser, dict)
+    clock = browser["audio_sample_clock"]
+    assert isinstance(clock, dict)
+    evidence = clock["evidence"]
+    assert isinstance(evidence, dict)
+    local = evidence["local"]
+    assert isinstance(local, dict)
+    local.update(
+        {
+            "stale_frame_correction_count": 1,
+            "last_stale_observed_block_start_frame": 50_048,
+            "last_stale_logical_block_start_frame": 50_176,
+        }
+    )
+
+    _write_json(path, value)
+    assert _read_pipecat_browser_result(path) == value
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "boolean_count",
+        "too_many_corrections",
+        "zero_with_frame",
+        "one_without_frame",
+        "unaligned_frames",
+        "wrong_frame_mapping",
+        "pending_correction",
+        "correction_outside_timeline",
+        "correction_at_first_transition",
+        "correction_one_block_before_latest",
+        "correction_at_latest",
+    ],
+)
+def test_browser_result_rejects_invalid_stale_frame_correction(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    path = tmp_path / "result.json"
+    value = _browser_result()
+    browser = value["browser_evidence"]
+    assert isinstance(browser, dict)
+    clock = browser["audio_sample_clock"]
+    assert isinstance(clock, dict)
+    evidence = clock["evidence"]
+    assert isinstance(evidence, dict)
+    local = evidence["local"]
+    assert isinstance(local, dict)
+
+    if mutation == "boolean_count":
+        local["stale_frame_correction_count"] = True
+    elif mutation == "too_many_corrections":
+        local["stale_frame_correction_count"] = 2
+    elif mutation == "zero_with_frame":
+        local["last_stale_observed_block_start_frame"] = 50_048
+    elif mutation == "one_without_frame":
+        local["stale_frame_correction_count"] = 1
+        local["last_stale_observed_block_start_frame"] = 50_048
+    elif mutation == "unaligned_frames":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 50_049,
+                "last_stale_logical_block_start_frame": 50_177,
+            }
+        )
+    elif mutation == "wrong_frame_mapping":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 50_048,
+                "last_stale_logical_block_start_frame": 50_304,
+            }
+        )
+    elif mutation == "pending_correction":
+        local["stale_frame_correction_pending"] = True
+    elif mutation == "correction_outside_timeline":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 105_088,
+                "last_stale_logical_block_start_frame": 105_216,
+            }
+        )
+    elif mutation == "correction_at_first_transition":
+        transitions = local["transitions"]
+        assert isinstance(transitions, list)
+        first_transition = transitions[0]
+        assert isinstance(first_transition, dict)
+        first_transition.update({"block_start_frame": 128, "block_end_frame": 256})
+        local.update(
+            {
+                "processed_block_count": 820,
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 0,
+                "last_stale_logical_block_start_frame": 128,
+            }
+        )
+    elif mutation == "correction_one_block_before_latest":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 104_832,
+                "last_stale_logical_block_start_frame": 104_960,
+            }
+        )
+    elif mutation == "correction_at_latest":
+        local.update(
+            {
+                "stale_frame_correction_count": 1,
+                "last_stale_observed_block_start_frame": 104_960,
+                "last_stale_logical_block_start_frame": 105_088,
+            }
+        )
+    else:  # pragma: no cover - the parameter list is exhaustive
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    _write_json(path, value)
+    with pytest.raises(StackError, match="stale-frame correction"):
         _read_pipecat_browser_result(path)
 
 

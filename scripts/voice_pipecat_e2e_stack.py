@@ -1047,6 +1047,10 @@ def _validate_audio_clock_probe(
         "frame_delta_frames",
         "last_observed_block_start_frame",
         "context_state_at_message_delivery",
+        "stale_frame_correction_count",
+        "last_stale_observed_block_start_frame",
+        "last_stale_logical_block_start_frame",
+        "stale_frame_correction_pending",
     }
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise StackError(f"audio sample-clock {label} probe schema is invalid")
@@ -1063,6 +1067,32 @@ def _validate_audio_clock_probe(
         or value.get("context_state_at_message_delivery") is not None
     ):
         raise StackError(f"audio sample-clock {label} probe is not clean and exact")
+    correction_count = value.get("stale_frame_correction_count")
+    stale_observed_frame = value.get("last_stale_observed_block_start_frame")
+    stale_logical_frame = value.get("last_stale_logical_block_start_frame")
+    if (
+        isinstance(correction_count, bool)
+        or not isinstance(correction_count, int)
+        or correction_count not in {0, 1}
+        or value.get("stale_frame_correction_pending") is not False
+        or (
+            correction_count == 0
+            and (stale_observed_frame is not None or stale_logical_frame is not None)
+        )
+        or (
+            correction_count == 1
+            and (
+                isinstance(stale_observed_frame, bool)
+                or not isinstance(stale_observed_frame, int)
+                or stale_observed_frame < 0
+                or stale_observed_frame % _AUDIO_CLOCK_QUANTUM_FRAMES != 0
+                or isinstance(stale_logical_frame, bool)
+                or not isinstance(stale_logical_frame, int)
+                or stale_logical_frame != stale_observed_frame + _AUDIO_CLOCK_QUANTUM_FRAMES
+            )
+        )
+    ):
+        raise StackError(f"audio sample-clock {label} stale-frame correction is invalid")
     observed_threshold = value.get("threshold_rms")
     if (
         isinstance(observed_threshold, bool)
@@ -1153,6 +1183,14 @@ def _validate_audio_clock_probe(
         != current_state_blocks * _AUDIO_CLOCK_QUANTUM_FRAMES
     ):
         raise StackError(f"audio sample-clock {label} timeline counters are inconsistent")
+    if correction_count == 1 and (
+        not isinstance(stale_logical_frame, int)
+        or stale_logical_frame < first_transition_start + _AUDIO_CLOCK_QUANTUM_FRAMES
+        or stale_logical_frame + 2 * _AUDIO_CLOCK_QUANTUM_FRAMES > latest_block_end
+    ):
+        raise StackError(
+            f"audio sample-clock {label} stale-frame correction is outside its timeline"
+        )
     for index, transition in enumerate(transitions):
         if transition["state"] != "silent":
             continue
