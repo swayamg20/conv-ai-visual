@@ -6,6 +6,15 @@ import type { VoiceEvent } from "@/features/voice/events";
 import type { LocalMicrophonePublicationObservation } from "@/features/voice/livekit-transport";
 import { useVoiceSession } from "@/hooks/use-voice-session";
 
+import {
+  emptyBrowserRtcEvidence,
+  installBrowserRtcDiagnostics,
+  observeBrowserMediaTrack,
+  type BrowserRtcDiagnostics,
+  type BrowserRtcEvidence,
+  type BrowserMediaTrackEvidence,
+} from "./rtc-diagnostics";
+
 const SAMPLE_INTERVAL_MS = 16;
 const SNAPSHOT_INTERVAL_MS = 80;
 
@@ -23,13 +32,6 @@ interface AudioSample {
 interface ObservedEvent {
   readonly t_ms: number;
   readonly event: VoiceEvent;
-}
-
-interface TrackEvidence {
-  readonly id: string;
-  readonly kind: string;
-  readonly label: string;
-  readonly ready_state: MediaStreamTrackState;
 }
 
 interface MicrophonePublicationEvidence {
@@ -56,15 +58,35 @@ interface RemoteProbe extends Probe {
   readonly sink: GainNode;
 }
 
-interface AssignmentEvidence {
+interface CommonAssignmentEvidence {
+  readonly runtime: "livekit_v2" | "pipecat_smallwebrtc_v1";
   readonly trace_id: string;
   readonly voice_call_id: string;
   readonly session_id: string;
   readonly agent_id: string;
+  readonly profile_id: string;
+}
+
+interface LiveKitAssignmentEvidence extends CommonAssignmentEvidence {
+  readonly runtime: "livekit_v2";
   readonly room_name: string;
   readonly dispatch_id: string;
-  readonly profile_id: string;
   readonly worker_name: string;
+}
+
+interface PipecatAssignmentEvidence extends CommonAssignmentEvidence {
+  readonly runtime: "pipecat_smallwebrtc_v1";
+  readonly peer_reservation_id: string;
+  readonly event_protocol: "rtvi-murmur-v2";
+}
+
+type AssignmentEvidence =
+  | LiveKitAssignmentEvidence
+  | PipecatAssignmentEvidence;
+
+interface ConnectionGestureEvidence {
+  readonly sequence: number;
+  readonly action: "prepare" | "activate";
 }
 
 interface VoiceE2ESnapshot {
@@ -80,9 +102,11 @@ interface VoiceE2ESnapshot {
   readonly phase: string;
   readonly voice_call_id: string;
   readonly assignment: AssignmentEvidence | null;
-  readonly local_track: TrackEvidence | null;
+  readonly local_track: BrowserMediaTrackEvidence | null;
+  readonly remote_track: BrowserMediaTrackEvidence | null;
   readonly microphone_publication: MicrophonePublicationEvidence | null;
   readonly local_track_released: boolean;
+  readonly remote_track_released: boolean;
   readonly remote_audio_element_attached: boolean;
   readonly remote_audio_element_count: number;
   readonly local_samples: readonly AudioSample[];
@@ -90,6 +114,8 @@ interface VoiceE2ESnapshot {
   readonly events: readonly ObservedEvent[];
   readonly errors: readonly string[];
   readonly logs: readonly string[];
+  readonly connection_gestures: readonly ConnectionGestureEvidence[];
+  readonly rtc: BrowserRtcEvidence;
   readonly disconnect_requested: boolean;
   readonly hook_assignment_cleared: boolean;
 }
@@ -101,8 +127,10 @@ const INITIAL_SNAPSHOT: VoiceE2ESnapshot = {
   voice_call_id: "",
   assignment: null,
   local_track: null,
+  remote_track: null,
   microphone_publication: null,
   local_track_released: false,
+  remote_track_released: false,
   remote_audio_element_attached: false,
   remote_audio_element_count: 0,
   local_samples: [],
@@ -110,6 +138,8 @@ const INITIAL_SNAPSHOT: VoiceE2ESnapshot = {
   events: [],
   errors: [],
   logs: [],
+  connection_gestures: [],
+  rtc: emptyBrowserRtcEvidence(),
   disconnect_requested: false,
   hook_assignment_cleared: true,
 };
@@ -146,16 +176,21 @@ export function VoiceE2EClient({
   const remoteBufferRef = useRef<Float32Array<ArrayBuffer> | null>(null);
   const samplerTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const snapshotTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const rtcDiagnosticsRef = useRef<BrowserRtcDiagnostics | null>(null);
+  const rtcEvidenceRef = useRef<BrowserRtcEvidence>(emptyBrowserRtcEvidence());
   const localSamplesRef = useRef<AudioSample[]>([]);
   const remoteSamplesRef = useRef<AudioSample[]>([]);
   const eventsRef = useRef<ObservedEvent[]>([]);
   const errorsRef = useRef<string[]>([]);
   const logsRef = useRef<string[]>([]);
+  const connectionGesturesRef = useRef<ConnectionGestureEvidence[]>([]);
   const assignmentEvidenceRef = useRef<AssignmentEvidence | null>(null);
-  const localTrackEvidenceRef = useRef<TrackEvidence | null>(null);
+  const localTrackEvidenceRef = useRef<BrowserMediaTrackEvidence | null>(null);
+  const remoteTrackEvidenceRef = useRef<BrowserMediaTrackEvidence | null>(null);
   const microphonePublicationEvidenceRef =
     useRef<MicrophonePublicationEvidence | null>(null);
   const localTrackRef = useRef<MediaStreamTrack | null>(null);
+  const remoteTrackRef = useRef<MediaStreamTrack | null>(null);
   const localTrackReleasedRef = useRef(false);
   const remoteAttachedRef = useRef(false);
   const consumedRemoteElementsRef = useRef(new WeakSet<HTMLMediaElement>());
@@ -218,12 +253,11 @@ export function VoiceE2EClient({
 
       localTrackRef.current = track;
       localTrackReleasedRef.current = false;
-      localTrackEvidenceRef.current = {
-        id: track.id,
-        kind: track.kind,
-        label: track.label,
-        ready_state: track.readyState,
-      };
+      localTrackEvidenceRef.current = observeBrowserMediaTrack(
+        track,
+        elapsed(),
+        localTrackEvidenceRef.current,
+      );
       const context = audioContextRef.current;
       if (!context) {
         observeError("The exact published microphone track arrived before audio setup");
@@ -235,7 +269,7 @@ export function VoiceE2EClient({
       localProbeRef.current = { analyser, source };
       localBufferRef.current = new Float32Array(analyser.fftSize);
     },
-    [observeError, releaseLocalProbe]
+    [elapsed, observeError, releaseLocalProbe]
   );
 
   const observeMicrophonePublication = useCallback(
@@ -283,7 +317,6 @@ export function VoiceE2EClient({
   const voiceAssignment = voice.assignment;
   const voiceCallId = voice.voiceCallId;
   const voicePhase = voice.phase;
-  const cancelVoiceConnection = voice.cancelConnection;
 
   const attachRemoteElement = useCallback(async () => {
     if (remoteProbeRef.current) return;
@@ -302,15 +335,11 @@ export function VoiceE2EClient({
     const context = await ensureAudioContext();
     const analyser = createAnalyser(context);
     const stream = element.srcObject;
-    if (!(stream instanceof MediaStream)) {
-      observeError("Remote audio element has no MediaStream source");
-      return;
-    }
+    // Pipecat creates and primes its owned element in the activation gesture,
+    // before the remote track exists. Keep polling until the SDK attaches it.
+    if (!(stream instanceof MediaStream)) return;
     const remoteTrack = stream.getAudioTracks()[0];
-    if (!remoteTrack || remoteTrack.readyState !== "live") {
-      observeError("Remote audio element has no live decoded audio track");
-      return;
-    }
+    if (!remoteTrack || remoteTrack.readyState !== "live") return;
     const source = context.createMediaStreamSource(
       new MediaStream([remoteTrack])
     );
@@ -320,11 +349,17 @@ export function VoiceE2EClient({
     analyser.connect(sink);
     sink.connect(context.destination);
     consumedRemoteElementsRef.current.add(element);
+    remoteTrackRef.current = remoteTrack;
+    remoteTrackEvidenceRef.current = observeBrowserMediaTrack(
+      remoteTrack,
+      elapsed(),
+      remoteTrackEvidenceRef.current,
+    );
     remoteProbeRef.current = { analyser, source, element, sink };
     remoteBufferRef.current = new Float32Array(analyser.fftSize);
     remoteAttachedRef.current = true;
     await element.play();
-  }, [ensureAudioContext, observeError]);
+  }, [elapsed, ensureAudioContext, observeError]);
 
   const releaseRemoteProbe = useCallback(() => {
     const probe = remoteProbeRef.current;
@@ -367,8 +402,18 @@ export function VoiceE2EClient({
     }
   }, [attachRemoteElement, elapsed, observeError, releaseRemoteProbe]);
 
+  const refreshRtcDiagnostics = useCallback(async () => {
+    const diagnostics = rtcDiagnosticsRef.current;
+    if (!diagnostics) return;
+    rtcEvidenceRef.current = await diagnostics.read();
+  }, []);
+
   const buildSnapshot = useCallback((): VoiceE2ESnapshot => {
     const hook = hookStateRef.current;
+    const localTrack = localTrackRef.current;
+    const localTrackEvidence = localTrackEvidenceRef.current;
+    const remoteTrack = remoteTrackRef.current;
+    const remoteTrackEvidence = remoteTrackEvidenceRef.current;
     const remoteElementCount = document.querySelectorAll(
       "audio[data-murmur-voice-call]"
     ).length;
@@ -386,9 +431,27 @@ export function VoiceE2EClient({
       voice_call_id:
         assignmentEvidenceRef.current?.voice_call_id ?? hook.voiceCallId,
       assignment: assignmentEvidenceRef.current,
-      local_track: localTrackEvidenceRef.current,
+      local_track:
+        localTrack && localTrackEvidence
+          ? {
+              ...localTrackEvidence,
+              media_stream_track_enabled: localTrack.enabled,
+              muted: localTrack.muted,
+              ready_state: localTrack.readyState,
+            }
+          : localTrackEvidence,
+      remote_track:
+        remoteTrack && remoteTrackEvidence
+          ? {
+              ...remoteTrackEvidence,
+              media_stream_track_enabled: remoteTrack.enabled,
+              muted: remoteTrack.muted,
+              ready_state: remoteTrack.readyState,
+            }
+          : remoteTrackEvidence,
       microphone_publication: microphonePublicationEvidenceRef.current,
       local_track_released: localTrackReleasedRef.current,
+      remote_track_released: remoteTrack?.readyState === "ended",
       remote_audio_element_attached: remoteAttachedRef.current,
       remote_audio_element_count: remoteElementCount,
       local_samples: [...localSamplesRef.current],
@@ -396,6 +459,8 @@ export function VoiceE2EClient({
       events: [...eventsRef.current],
       errors: [...errorsRef.current],
       logs: [...logsRef.current],
+      connection_gestures: [...connectionGesturesRef.current],
+      rtc: rtcEvidenceRef.current,
       disconnect_requested: disconnectRequestedRef.current,
       hook_assignment_cleared: !hook.assignmentPresent,
     };
@@ -419,9 +484,9 @@ export function VoiceE2EClient({
     stopTimers();
     samplerTimerRef.current = setInterval(sampleAudio, SAMPLE_INTERVAL_MS);
     snapshotTimerRef.current = setInterval(() => {
-      setSnapshot(buildSnapshot());
+      void refreshRtcDiagnostics().then(() => setSnapshot(buildSnapshot()));
     }, SNAPSHOT_INTERVAL_MS);
-  }, [buildSnapshot, sampleAudio, stopTimers]);
+  }, [buildSnapshot, refreshRtcDiagnostics, sampleAudio, stopTimers]);
 
   const prepare = useCallback(async () => {
     measurementOriginRef.current = null;
@@ -430,14 +495,29 @@ export function VoiceE2EClient({
     eventsRef.current = [];
     errorsRef.current = [];
     logsRef.current = [];
+    connectionGesturesRef.current = [{ sequence: 1, action: "prepare" }];
+    rtcEvidenceRef.current = emptyBrowserRtcEvidence();
     assignmentEvidenceRef.current = null;
     localTrackEvidenceRef.current = null;
+    remoteTrackEvidenceRef.current = null;
     microphonePublicationEvidenceRef.current = null;
     localTrackRef.current = null;
+    remoteTrackRef.current = null;
     localTrackReleasedRef.current = false;
     remoteAttachedRef.current = false;
     disconnectRequestedRef.current = false;
     statusRef.current = "connecting";
+    try {
+      rtcDiagnosticsRef.current ??= installBrowserRtcDiagnostics();
+    } catch (error) {
+      observeError(
+        error instanceof Error
+          ? error.message
+          : "Could not install browser RTC diagnostics"
+      );
+      setSnapshot(buildSnapshot());
+      return;
+    }
     await ensureAudioContext();
     startTimers();
     setSnapshot(buildSnapshot());
@@ -451,6 +531,7 @@ export function VoiceE2EClient({
   }, [buildSnapshot, ensureAudioContext, observeError, startTimers, voice]);
 
   const activate = useCallback(() => {
+    connectionGesturesRef.current.push({ sequence: 2, action: "activate" });
     measurementOriginRef.current = performance.now();
     statusRef.current = "connecting";
     let connecting: Promise<void>;
@@ -483,8 +564,9 @@ export function VoiceE2EClient({
     } catch {
       observeError("Voice teardown did not complete");
     }
+    await refreshRtcDiagnostics();
     setSnapshot(buildSnapshot());
-  }, [buildSnapshot, observeError, voice]);
+  }, [buildSnapshot, observeError, refreshRtcDiagnostics, voice]);
 
   useEffect(() => {
     hookStateRef.current = {
@@ -492,29 +574,32 @@ export function VoiceE2EClient({
       phase: voicePhase,
       voiceCallId,
     };
-    if (voiceAssignment && voiceAssignment.runtime !== "livekit_v2") {
-      assignmentEvidenceRef.current = null;
-      observeError("The isolated LiveKit RTC proof received a different runtime");
-      void cancelVoiceConnection().catch(() => {
-        observeError("Voice teardown did not complete");
-      });
-      return;
-    }
     if (voiceAssignment) {
-      assignmentEvidenceRef.current = {
-        trace_id: voiceAssignment.trace_id,
-        voice_call_id: voiceAssignment.voice_call_id,
-        session_id: voiceAssignment.session_id,
-        agent_id: voiceAssignment.agent_id,
-        room_name: voiceAssignment.room_name,
-        dispatch_id: voiceAssignment.dispatch_id,
-        profile_id: voiceAssignment.profile_id,
-        worker_name: voiceAssignment.worker_name,
-      };
+      assignmentEvidenceRef.current =
+        voiceAssignment.runtime === "livekit_v2"
+          ? {
+              runtime: voiceAssignment.runtime,
+              trace_id: voiceAssignment.trace_id,
+              voice_call_id: voiceAssignment.voice_call_id,
+              session_id: voiceAssignment.session_id,
+              agent_id: voiceAssignment.agent_id,
+              room_name: voiceAssignment.room_name,
+              dispatch_id: voiceAssignment.dispatch_id,
+              profile_id: voiceAssignment.profile_id,
+              worker_name: voiceAssignment.worker_name,
+            }
+          : {
+              runtime: voiceAssignment.runtime,
+              trace_id: voiceAssignment.trace_id,
+              voice_call_id: voiceAssignment.voice_call_id,
+              session_id: voiceAssignment.session_id,
+              agent_id: voiceAssignment.agent_id,
+              profile_id: voiceAssignment.profile_id,
+              peer_reservation_id: voiceAssignment.peer_reservation_id,
+              event_protocol: voiceAssignment.event_protocol,
+            };
     }
   }, [
-    cancelVoiceConnection,
-    observeError,
     voiceAssignment,
     voiceCallId,
     voicePhase,
@@ -533,6 +618,8 @@ export function VoiceE2EClient({
       stopTimers();
       releaseLocalProbe();
       releaseRemoteProbe();
+      rtcDiagnosticsRef.current?.restore();
+      rtcDiagnosticsRef.current = null;
       void audioContextRef.current?.close();
     },
     [releaseLocalProbe, releaseRemoteProbe, stopTimers]

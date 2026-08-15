@@ -118,6 +118,59 @@ describe("Voice V2 event reducer", () => {
     expect(stale.state).toBe(state);
   });
 
+  it("keeps Ready after a second producer replays its buffered transport fact", () => {
+    let state = createInitialVoiceEventState("session-1", "call-1");
+    state = apply(
+      state,
+      rawEvent("transport_connected", {}, {
+        event_id: "browser-connected-1",
+        producer_id: "browser:call-1",
+        producer_sequence: 1,
+      })
+    );
+    state = apply(
+      state,
+      rawEvent(
+        "agent_ready",
+        {
+          profile_id: "pipecat-cascade-v1",
+          required_components: REQUIRED_VOICE_READY_COMPONENTS,
+          ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+        },
+        {
+          event_id: "pipecat-ready-1",
+          producer_id: "pipecat-call-1",
+          producer_sequence: 1,
+        }
+      )
+    );
+
+    const readySession = state.session;
+    const replayedTransport = reduceVoiceEvent(
+      state,
+      rawEvent("transport_connected", {}, {
+        event_id: "pipecat-connected-2",
+        producer_id: "pipecat-call-1",
+        producer_sequence: 2,
+      })
+    );
+
+    expect(replayedTransport.disposition).toBe("applied");
+    expect(replayedTransport.state.session).toBe(readySession);
+    expect(replayedTransport.state.session).toMatchObject({
+      phase: "ready",
+      transportConnected: true,
+      voiceReady: true,
+    });
+    expect(replayedTransport.state.lastAppliedEventId).toBe(
+      "pipecat-connected-2"
+    );
+    expect(replayedTransport.state.producerCursors).toEqual([
+      { producerId: "browser:call-1", sequence: 1 },
+      { producerId: "pipecat-call-1", sequence: 2 },
+    ]);
+  });
+
   it("rejects durable ledger regressions even across different producers", () => {
     let state = createInitialVoiceEventState("session-1");
     state = apply(

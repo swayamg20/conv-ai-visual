@@ -1951,6 +1951,82 @@ describe("useVoiceSession", () => {
     });
   });
 
+  it("keeps Ready while replaying canonical transport-connected after deferred activation", async () => {
+    api.bootstrapVoiceSession.mockImplementationOnce(
+      async (request: { session_id: string; voice_call_id: string }) =>
+        pipecatAssignment(request)
+    );
+    const activation = deferred<void>();
+    let callbacks: VoiceTransportCallbacks | undefined;
+    const transportLoader: VoiceTransportLoader = async (
+      assignment,
+      options
+    ) => {
+      callbacks = options.callbacks;
+      return {
+        runtime: assignment.runtime,
+        primeAudioPlayback: vi.fn(),
+        connect: vi.fn(async () => options.callbacks.onConnected()),
+        activateMicrophoneAfterReady: vi.fn(() => activation.promise),
+        setMicrophoneEnabled: vi.fn(async () => undefined),
+        setTtsEnabled: vi.fn(),
+        resumeAudio: vi.fn(async () => undefined),
+        disconnect: vi.fn(async () => undefined),
+      };
+    };
+    const onEvent = vi.fn();
+    const mounted = await mountHook({ onEvent, transportLoader });
+    await act(async () => mounted.read().connect({ sessionId }));
+    await act(async () => mounted.read().connect({ sessionId }));
+
+    const ready = decodeVoiceEvent(
+      workerEvent(mounted.read().voiceCallId, "agent_ready", {
+        profile_id: "pipecat-cascade-v1",
+        required_components: REQUIRED_VOICE_READY_COMPONENTS,
+        ready_components: REQUIRED_VOICE_READY_COMPONENTS,
+      })
+    );
+    const bufferedTransport = decodeVoiceEvent(
+      workerEvent(mounted.read().voiceCallId, "transport_connected", {})
+    );
+    if (!ready.ok) throw new Error(ready.error.message);
+    if (!bufferedTransport.ok) {
+      throw new Error(bufferedTransport.error.message);
+    }
+
+    await act(async () => {
+      callbacks?.onEvent(ready.event);
+      await Promise.resolve();
+      callbacks?.onEvent(bufferedTransport.event);
+      await Promise.resolve();
+    });
+
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(mounted.read().phase).toBe("transport_connected");
+
+    await act(async () => {
+      activation.resolve();
+      await activation.promise;
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onEvent.mock.calls.map(([event]) => event)).toEqual([
+      ready.event,
+      bufferedTransport.event,
+    ]);
+    expect(mounted.read().phase).toBe("ready");
+    expect(mounted.read().session).toMatchObject({
+      phase: "ready",
+      transportConnected: true,
+      voiceReady: true,
+    });
+    await act(async () => {
+      await mounted.read().cancelConnection();
+      mounted.root.unmount();
+    });
+  });
+
   it("keeps a pending selected loader owned until cancel disconnects it before release", async () => {
     api.bootstrapVoiceSession.mockImplementationOnce(
       async (request: { session_id: string; voice_call_id: string }) =>
