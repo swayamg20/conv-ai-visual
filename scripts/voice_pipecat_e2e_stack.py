@@ -58,6 +58,12 @@ _AUDIO_CLOCK_REMOTE_SILENCE_RMS = 0.012
 _AUDIO_CLOCK_LOCAL_REGION_BRIDGE_MS = 500
 _AUDIO_CLOCK_REQUIRED_SILENCE_MS = 200
 _AUDIO_CLOCK_MAX_INTERRUPTION_MS = 250
+_PROOF_TIMEOUT_PROGRESS_PREFIX = "VOICE_PIPECAT_PROOF_TIMEOUT_PROGRESS="
+_PROOF_TIMEOUT_PROGRESS_MAX_BYTES = 2_048
+_PROOF_TIMEOUT_PROGRESS_MAX_COUNTER = 2_147_483_647
+_PROOF_TIMEOUT_PROGRESS_ERROR = "Playwright proof timeout progress capsule is invalid"
+_TEARDOWN_FAILURE_CLASSIFICATION = "qualification_teardown=failed"
+_ARTIFACT_SAFETY_FAILURE_CLASSIFICATION = "artifact_safety=failed_closed"
 
 _RUN_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _CONTRACT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -727,6 +733,7 @@ class PipecatBrowserStack:
         browser: dict[str, object] | None = None
         health: dict[str, object] | None = None
         terminal: dict[str, object] | None = None
+        primary_failure: BaseException | None = None
         try:
             self._prepare_web_workspace()
             self._run_step(
@@ -781,11 +788,38 @@ class PipecatBrowserStack:
             if terminal != browser.get("terminal_cleanup"):
                 raise StackError("browser and authoritative terminal cleanup snapshots differ")
             _validate_pipecat_terminal_status(terminal, str(browser["voice_call_id"]))
-        finally:
+        except BaseException as exc:
+            primary_failure = self._classify_primary_failure(exc)
+
+        finalizer_classifications: list[str] = []
+        finalizer_system_failure: BaseException | None = None
+        for classification, finalizer in (
+            (_TEARDOWN_FAILURE_CLASSIFICATION, self._teardown),
+            (_ARTIFACT_SAFETY_FAILURE_CLASSIFICATION, self._sanitize_owned_logs),
+        ):
             try:
-                self._teardown()
-            finally:
-                self._sanitize_owned_logs()
+                finalizer()
+            except BaseException as exc:
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    if finalizer_system_failure is None:
+                        finalizer_system_failure = exc
+                else:
+                    finalizer_classifications.append(classification)
+
+        if primary_failure is not None:
+            if isinstance(primary_failure, (KeyboardInterrupt, SystemExit)):
+                raise primary_failure
+            if finalizer_system_failure is not None:
+                raise finalizer_system_failure
+            if finalizer_classifications:
+                raise StackError(
+                    "\n".join((str(primary_failure), *finalizer_classifications))
+                ) from None
+            raise primary_failure
+        if finalizer_system_failure is not None:
+            raise finalizer_system_failure
+        if finalizer_classifications:
+            raise StackError("\n".join(finalizer_classifications)) from None
 
         if browser is None or health is None or terminal is None:
             raise StackError("Pipecat browser stack ended without complete proof state")
@@ -936,6 +970,24 @@ class PipecatBrowserStack:
         if status != 200:
             raise StackError("authoritative Pipecat terminal status was unavailable")
         return body
+
+    def _classify_primary_failure(self, failure: BaseException) -> BaseException:
+        if isinstance(failure, (KeyboardInterrupt, SystemExit)):
+            return failure
+        try:
+            raw_playwright_log = (self.paths.run_dir / "playwright.log").read_text(
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError:
+            return failure
+        try:
+            capsule = _extract_proof_timeout_progress_capsule(raw_playwright_log)
+        except StackError as exc:
+            return exc
+        if capsule is None:
+            return failure
+        return StackError(f"primary=proof_wait_timeout\n{capsule}")
 
     def _teardown(self) -> None:
         first_failure: BaseException | None = None
@@ -1088,6 +1140,107 @@ _BROWSER_SECRET_PATTERNS = (
     ),
     ("raw IPv4 address", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
 )
+_PROOF_TIMEOUT_PROGRESS_FIELDS = {
+    "snapshot": {
+        "booleans": {
+            "assignment_present",
+            "local_track_present",
+            "remote_track_present",
+            "remote_audio_attached",
+        },
+        "counters": {"harness_error_count", "connection_gesture_count"},
+    },
+    "events": {
+        "booleans": set(),
+        "counters": {
+            "total",
+            "agent_ready",
+            "turn_committed",
+            "speech_started",
+            "speech_stopped",
+            "speech_stopped_interrupted",
+            "speech_stopped_completed",
+        },
+    },
+    "clock": {
+        "booleans": {
+            "worklet_loaded",
+            "local_attached",
+            "remote_attached",
+            "local_correction_pending",
+            "remote_correction_pending",
+            "local_failed",
+            "remote_failed",
+        },
+        "counters": {
+            "local_processed_blocks",
+            "remote_processed_blocks",
+            "local_active_regions",
+            "remote_active_regions",
+        },
+        "enums": {"bracket_status", "bracket_failure"},
+    },
+    "pcm": {
+        "booleans": {
+            "second_local_region_present",
+            "remote_silence_present",
+            "remote_audio_before_second_local",
+        },
+        "counters": {
+            "local_sample_count",
+            "remote_sample_count",
+            "local_active_region_count",
+        },
+    },
+    "rtc": {
+        "booleans": {
+            "outbound_bytes_present",
+            "outbound_packets_present",
+            "inbound_bytes_present",
+            "inbound_packets_present",
+        },
+        "counters": {"peer_connection_count", "selected_candidate_pair_count"},
+    },
+    "gates": {
+        "booleans": {
+            "local_disabled_at_observation",
+            "local_live_at_observation",
+            "local_precedes_ready",
+            "first_event_agent_ready",
+            "first_reply_interrupted",
+            "second_turn_present",
+            "second_reply_started",
+            "second_reply_after_silence",
+            "second_reply_completed",
+            "attribution_observation_complete",
+            "stale_audio_detected",
+            "proof_ready",
+        },
+        "counters": set(),
+    },
+}
+_PROOF_TIMEOUT_CLOCK_FAILURES = {
+    "none",
+    "disposed",
+    "cleanup_failed",
+    "duplicate_probe",
+    "frame_gap",
+    "inconsistent_quantum",
+    "message_gap",
+    "missing_input",
+    "probe_overflow",
+    "probe_setup_failed",
+    "sample_rate_mismatch",
+    "too_many_local_active_regions",
+    "unexpected_probe_message",
+    "clock_not_prepared",
+    "interruption_exceeds_limit",
+    "local_active_region_count",
+    "local_probe_missing",
+    "remote_probe_missing",
+    "remote_sustained_silence_missing",
+    "stale_frame_correction_pending",
+}
 
 
 def _service_secret_findings(value: str) -> set[str]:
@@ -1096,6 +1249,95 @@ def _service_secret_findings(value: str) -> set[str]:
 
 def _browser_secret_findings(value: str) -> set[str]:
     return {label for label, pattern in _BROWSER_SECRET_PATTERNS if pattern.search(value)}
+
+
+def _validate_proof_timeout_progress_capsule(value: object) -> str:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "schema_version",
+            "kind",
+            "snapshot",
+            "events",
+            "clock",
+            "pcm",
+            "rtc",
+            "gates",
+        }
+        or isinstance(value.get("schema_version"), bool)
+        or not isinstance(value.get("schema_version"), int)
+        or value.get("schema_version") != 1
+        or value.get("kind") != "pipecat_proof_wait_timeout"
+    ):
+        raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+
+    for section_name, field_groups in _PROOF_TIMEOUT_PROGRESS_FIELDS.items():
+        section = value.get(section_name)
+        boolean_fields = field_groups["booleans"]
+        counter_fields = field_groups["counters"]
+        enum_fields = field_groups.get("enums", set())
+        if (
+            not isinstance(section, dict)
+            or set(section) != boolean_fields | counter_fields | enum_fields
+            or any(not isinstance(section.get(field), bool) for field in boolean_fields)
+            or any(
+                isinstance(section.get(field), bool)
+                or not isinstance(section.get(field), int)
+                or not 0 <= section[field] <= _PROOF_TIMEOUT_PROGRESS_MAX_COUNTER
+                for field in counter_fields
+            )
+        ):
+            raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+
+    clock = value["clock"]
+    if not isinstance(clock, dict):
+        raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+    bracket_status = clock.get("bracket_status")
+    bracket_failure = clock.get("bracket_failure")
+    if (
+        not isinstance(bracket_status, str)
+        or bracket_status not in {"pending", "passed", "failed"}
+        or not isinstance(bracket_failure, str)
+        or bracket_failure not in _PROOF_TIMEOUT_CLOCK_FAILURES
+    ):
+        raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+
+    rendered = _PROOF_TIMEOUT_PROGRESS_PREFIX + json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if (
+        len(rendered.encode("utf-8")) >= _PROOF_TIMEOUT_PROGRESS_MAX_BYTES
+        or _browser_secret_findings(rendered)
+        or _service_secret_findings(rendered)
+    ):
+        raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+    return rendered
+
+
+def _extract_proof_timeout_progress_capsule(value: str) -> str | None:
+    offsets: list[int] = []
+    offset = value.find(_PROOF_TIMEOUT_PROGRESS_PREFIX)
+    while offset >= 0:
+        offsets.append(offset + len(_PROOF_TIMEOUT_PROGRESS_PREFIX))
+        offset = value.find(_PROOF_TIMEOUT_PROGRESS_PREFIX, offsets[-1])
+    if not offsets:
+        return None
+
+    decoder = json.JSONDecoder()
+    rendered_capsules: set[str] = set()
+    for offset in offsets:
+        try:
+            candidate = value[offset : offset + _PROOF_TIMEOUT_PROGRESS_MAX_BYTES]
+            capsule, _ = decoder.raw_decode(candidate)
+            rendered_capsules.add(_validate_proof_timeout_progress_capsule(capsule))
+        except (json.JSONDecodeError, RecursionError, StackError, ValueError):
+            raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR) from None
+    if len(rendered_capsules) != 1:
+        raise StackError(_PROOF_TIMEOUT_PROGRESS_ERROR)
+    return rendered_capsules.pop()
 
 
 def _sanitize_sensitive_text(value: str) -> str:

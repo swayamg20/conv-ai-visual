@@ -17,18 +17,25 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _ARTIFACT_MANIFEST_ERROR,
+    _ARTIFACT_SAFETY_FAILURE_CLASSIFICATION,
     _ARTIFACT_TAMPER_ERROR,
     _DIRTY_SOURCE_ERROR,
     _PLAYWRIGHT_PROCESS_NAME,
+    _PROOF_TIMEOUT_PROGRESS_ERROR,
+    _PROOF_TIMEOUT_PROGRESS_MAX_BYTES,
+    _PROOF_TIMEOUT_PROGRESS_PREFIX,
     _SOURCE_CHANGED_ERROR,
     _SOURCE_PROVENANCE_ERROR,
+    _TEARDOWN_FAILURE_CLASSIFICATION,
     PipecatBackendCheckpoint,
     PipecatBrowserStack,
     StackError,
     StackPaths,
     _atomic_write_json,
+    _browser_secret_findings,
     _build_artifact_sha256_manifest,
     _default_git_command_runner,
+    _extract_proof_timeout_progress_capsule,
     _ManagedProcess,
     _pipecat_app_command,
     _pipecat_browser_command,
@@ -38,8 +45,10 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
     _require_unchanged_source,
     _sanitize_log_file,
     _scan_qualification_artifacts,
+    _service_secret_findings,
     _validate_artifact_sha256_manifest,
     _validate_playwright_report,
+    _validate_proof_timeout_progress_capsule,
     _validate_rtc_stack_proof,
     _validate_source_provenance,
     _write_validated_rtc_stack_proof,
@@ -331,6 +340,75 @@ def _source(commit_sha: str = "a" * 40) -> dict[str, object]:
     }
 
 
+def _proof_timeout_progress_capsule() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "kind": "pipecat_proof_wait_timeout",
+        "snapshot": {
+            "assignment_present": True,
+            "harness_error_count": 0,
+            "connection_gesture_count": 2,
+            "local_track_present": True,
+            "remote_track_present": True,
+            "remote_audio_attached": True,
+        },
+        "events": {
+            "total": 12,
+            "agent_ready": 1,
+            "turn_committed": 2,
+            "speech_started": 2,
+            "speech_stopped": 2,
+            "speech_stopped_interrupted": 1,
+            "speech_stopped_completed": 1,
+        },
+        "clock": {
+            "bracket_status": "pending",
+            "bracket_failure": "local_active_region_count",
+            "worklet_loaded": True,
+            "local_attached": True,
+            "remote_attached": True,
+            "local_processed_blocks": 100,
+            "remote_processed_blocks": 101,
+            "local_active_regions": 1,
+            "remote_active_regions": 2,
+            "local_correction_pending": False,
+            "remote_correction_pending": False,
+            "local_failed": False,
+            "remote_failed": False,
+        },
+        "pcm": {
+            "local_sample_count": 500,
+            "remote_sample_count": 501,
+            "local_active_region_count": 1,
+            "second_local_region_present": False,
+            "remote_silence_present": False,
+            "remote_audio_before_second_local": False,
+        },
+        "rtc": {
+            "peer_connection_count": 1,
+            "selected_candidate_pair_count": 1,
+            "outbound_bytes_present": True,
+            "outbound_packets_present": True,
+            "inbound_bytes_present": True,
+            "inbound_packets_present": True,
+        },
+        "gates": {
+            "local_disabled_at_observation": True,
+            "local_live_at_observation": True,
+            "local_precedes_ready": True,
+            "first_event_agent_ready": True,
+            "first_reply_interrupted": True,
+            "second_turn_present": True,
+            "second_reply_started": True,
+            "second_reply_after_silence": False,
+            "second_reply_completed": True,
+            "attribution_observation_complete": False,
+            "stale_audio_detected": False,
+            "proof_ready": False,
+        },
+    }
+
+
 def _write_safe_qualification_artifacts(paths: StackPaths) -> None:
     _write_json(paths.browser_result, _browser_result())
     _write_json(paths.playwright_report, _playwright_report())
@@ -339,6 +417,92 @@ def _write_safe_qualification_artifacts(paths: StackPaths) -> None:
         (paths.run_dir / name).write_text("clean local qualification log\n", encoding="utf-8")
     paths.evidence.parent.mkdir(parents=True, exist_ok=True)
     paths.evidence.write_text('{"event":"profile_closed"}\n', encoding="utf-8")
+
+
+def test_proof_timeout_progress_capsule_is_exact_bounded_and_secret_free() -> None:
+    capsule = _proof_timeout_progress_capsule()
+    rendered = _validate_proof_timeout_progress_capsule(capsule)
+
+    assert rendered.startswith(_PROOF_TIMEOUT_PROGRESS_PREFIX)
+    assert len(rendered.encode("utf-8")) < _PROOF_TIMEOUT_PROGRESS_MAX_BYTES
+    assert json.loads(rendered.removeprefix(_PROOF_TIMEOUT_PROGRESS_PREFIX)) == capsule
+    assert _browser_secret_findings(rendered) == set()
+    assert _service_secret_findings(rendered) == set()
+    assert not any(
+        forbidden in rendered
+        for forbidden in (
+            "voice_call_id",
+            "trace_id",
+            "peer_reservation_id",
+            "local_samples",
+            "remote_samples",
+            "transitions",
+            "authorization",
+            "sdp",
+            "ice_servers",
+        )
+    )
+    assert (
+        _extract_proof_timeout_progress_capsule(
+            f"Error: {rendered}\nunsafe suffix https://secret.invalid/path"
+        )
+        == rendered
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "malformed",
+        "extra",
+        "string_secret",
+        "invalid_enum",
+        "invalid_enum_type",
+        "float_schema",
+        "distinct_duplicate",
+    ],
+)
+def test_proof_timeout_progress_capsule_rejects_non_allowlisted_input(
+    mutation: str,
+) -> None:
+    capsule = json.loads(json.dumps(_proof_timeout_progress_capsule()))
+    if mutation == "malformed":
+        raw = "{"
+    elif mutation == "extra":
+        capsule["secret"] = "https://secret.invalid/path"
+        raw = json.dumps(capsule, separators=(",", ":"))
+    elif mutation == "string_secret":
+        capsule["events"]["total"] = "Bearer raw-secret"
+        raw = json.dumps(capsule, separators=(",", ":"))
+    elif mutation == "invalid_enum":
+        capsule["clock"]["bracket_failure"] = "https://secret.invalid/path"
+        raw = json.dumps(capsule, separators=(",", ":"))
+    elif mutation == "invalid_enum_type":
+        capsule["clock"]["bracket_failure"] = []
+        raw = json.dumps(capsule, separators=(",", ":"))
+    elif mutation == "float_schema":
+        capsule["schema_version"] = 1.0
+        raw = json.dumps(capsule, separators=(",", ":"))
+    else:
+        raw = json.dumps(capsule, separators=(",", ":"))
+        other = json.loads(json.dumps(capsule))
+        other["events"]["total"] = 13
+        raw += (
+            "\n"
+            + _PROOF_TIMEOUT_PROGRESS_PREFIX
+            + json.dumps(
+                other,
+                separators=(",", ":"),
+            )
+        )
+
+    with pytest.raises(StackError) as captured:
+        _extract_proof_timeout_progress_capsule(
+            _PROOF_TIMEOUT_PROGRESS_PREFIX + raw,
+        )
+
+    assert str(captured.value) == _PROOF_TIMEOUT_PROGRESS_ERROR
+    assert "secret" not in str(captured.value).casefold()
 
 
 def test_source_provenance_derives_exact_root_sha_and_clean_state() -> None:
@@ -803,7 +967,7 @@ def test_managed_process_closes_log_when_process_group_stop_raises(
     assert process._log_handle is None
 
 
-def test_teardown_stops_every_process_and_sanitizes_after_stop_failure(
+def test_primary_failure_survives_teardown_failure_and_still_sanitizes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -842,13 +1006,124 @@ def test_teardown_stops_every_process_and_sanitizes_after_stop_failure(
     monkeypatch.setattr(stack, "_teardown", teardown)
     monkeypatch.setattr(stack, "_sanitize_owned_logs", lambda: sanitized.append(True))
 
-    with pytest.raises(StackError, match="qualification process teardown failed") as captured:
+    with pytest.raises(StackError, match="synthetic setup failure") as captured:
         stack.run()
 
-    assert isinstance(captured.value.__cause__, RuntimeError)
-    assert str(captured.value.__cause__) == "synthetic stop failure"
+    assert str(captured.value) == (f"synthetic setup failure\n{_TEARDOWN_FAILURE_CLASSIFICATION}")
+    assert captured.value.__cause__ is None
     assert stopped == ["failing", "healthy"]
     assert sanitized == [True]
+
+
+@pytest.mark.parametrize("teardown_fails", [False, True])
+def test_finalizer_failures_are_fixed_and_fatal_when_browser_body_succeeds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    teardown_fails: bool,
+) -> None:
+    paths = _paths(tmp_path)
+    browser = _browser_result()
+    terminal = browser["terminal_cleanup"]
+    assert isinstance(terminal, dict)
+    stack = PipecatBrowserStack(paths, source_reader=_source)
+    monkeypatch.setattr(stack, "_prepare", lambda: paths.run_dir.mkdir(parents=True))
+    monkeypatch.setattr(stack, "_prepare_web_workspace", lambda: None)
+    monkeypatch.setattr(stack, "_run_step", lambda *_args: None)
+    process = SimpleNamespace(ensure_running=lambda: None)
+    monkeypatch.setattr(stack, "_start", lambda *_args: process)
+    monkeypatch.setattr(
+        stack,
+        "_wait_for_app",
+        lambda _app: {"livekit_imported": False},
+    )
+    monkeypatch.setattr(stack, "_wait_for_web", lambda _web, _app: None)
+    monkeypatch.setattr(stack, "_authoritative_terminal_status", lambda _call_id: terminal)
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._read_pipecat_browser_result",
+        lambda _path: browser,
+    )
+    monkeypatch.setattr(
+        "scripts.voice_pipecat_e2e_stack._validate_playwright_report",
+        lambda _path: None,
+    )
+    finalizers: list[str] = []
+
+    def teardown() -> None:
+        finalizers.append("teardown")
+        if teardown_fails:
+            raise StackError("synthetic teardown failure")
+
+    def sanitize() -> None:
+        finalizers.append("sanitize")
+        raise StackError("synthetic sanitizer failure")
+
+    monkeypatch.setattr(stack, "_teardown", teardown)
+    monkeypatch.setattr(stack, "_sanitize_owned_logs", sanitize)
+
+    with pytest.raises(StackError) as captured:
+        stack.run()
+
+    expected = [_ARTIFACT_SAFETY_FAILURE_CLASSIFICATION]
+    if teardown_fails:
+        expected.insert(0, _TEARDOWN_FAILURE_CLASSIFICATION)
+    assert str(captured.value) == "\n".join(expected)
+    assert "synthetic" not in str(captured.value)
+    assert finalizers == ["teardown", "sanitize"]
+
+
+def test_timeout_capsule_is_classified_before_whole_file_redaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    stack = PipecatBrowserStack(paths, source_reader=_source)
+    capsule = _validate_proof_timeout_progress_capsule(_proof_timeout_progress_capsule())
+    playwright_log = paths.run_dir / "playwright.log"
+    events: list[str] = []
+
+    def prepare() -> None:
+        paths.run_dir.mkdir(parents=True)
+
+    def fail_browser_step() -> None:
+        playwright_log.write_text(
+            f"Error: {capsule}\nnormal report URL https://secret.invalid/path\n",
+            encoding="utf-8",
+        )
+        stack._owned_logs.append(playwright_log)
+        raise StackError("synthetic Playwright process failure")
+
+    original_classify = stack._classify_primary_failure
+    original_sanitize = stack._sanitize_owned_logs
+
+    def classify(failure: BaseException) -> BaseException:
+        events.append("classify")
+        return original_classify(failure)
+
+    def teardown() -> None:
+        events.append("teardown")
+
+    def sanitize() -> None:
+        events.append("sanitize")
+        original_sanitize()
+
+    monkeypatch.setattr(stack, "_prepare", prepare)
+    monkeypatch.setattr(stack, "_prepare_web_workspace", fail_browser_step)
+    monkeypatch.setattr(stack, "_classify_primary_failure", classify)
+    monkeypatch.setattr(stack, "_teardown", teardown)
+    monkeypatch.setattr(stack, "_sanitize_owned_logs", sanitize)
+
+    with pytest.raises(StackError) as captured:
+        stack.run()
+
+    assert str(captured.value) == (
+        f"primary=proof_wait_timeout\n{capsule}\n{_ARTIFACT_SAFETY_FAILURE_CLASSIFICATION}"
+    )
+    assert captured.value.__cause__ is None
+    assert "synthetic" not in str(captured.value)
+    assert events == ["classify", "teardown", "sanitize"]
+    assert playwright_log.read_text(encoding="utf-8") == (
+        "[qualification artifact redacted after forbidden signaling data]\n"
+    )
 
 
 def test_playwright_error_tail_never_returns_browser_secret_fields(tmp_path: Path) -> None:

@@ -11,6 +11,7 @@ import {
   audioClockCleanupComplete,
   audioClockFailureMessage,
   interruptionClockBracket,
+  type AudioClockBracketFailure,
   type AudioClockEvidence,
 } from "../src/app/e2e/voice/audio-clock-diagnostics";
 import { interruptionAttribution } from "../src/app/e2e/voice/proof";
@@ -26,6 +27,10 @@ const LOCAL_REGION_BRIDGE_MS = 500;
 const REMOTE_ACTIVE_RMS = 0.02;
 const REMOTE_SILENCE_RMS = 0.012;
 const REMOTE_ATTRIBUTION_TOLERANCE_MS = 100;
+export const PROOF_TIMEOUT_PROGRESS_PREFIX =
+  "VOICE_PIPECAT_PROOF_TIMEOUT_PROGRESS=";
+export const PROOF_TIMEOUT_PROGRESS_MAX_BYTES = 2_048;
+const PROOF_TIMEOUT_PROGRESS_MAX_COUNTER = 2_147_483_647;
 
 // Network traces retain the bearer locator, Authorization header, SDP, and ICE
 // bodies on failure. This proof emits only its deliberately sanitized JSON.
@@ -111,6 +116,73 @@ interface ActiveRegion {
   readonly start_ms: number;
   readonly end_ms: number;
   readonly active_samples: number;
+}
+
+export interface ProofTimeoutProgressCapsule {
+  readonly schema_version: 1;
+  readonly kind: "pipecat_proof_wait_timeout";
+  readonly snapshot: {
+    readonly assignment_present: boolean;
+    readonly harness_error_count: number;
+    readonly connection_gesture_count: number;
+    readonly local_track_present: boolean;
+    readonly remote_track_present: boolean;
+    readonly remote_audio_attached: boolean;
+  };
+  readonly events: {
+    readonly total: number;
+    readonly agent_ready: number;
+    readonly turn_committed: number;
+    readonly speech_started: number;
+    readonly speech_stopped: number;
+    readonly speech_stopped_interrupted: number;
+    readonly speech_stopped_completed: number;
+  };
+  readonly clock: {
+    readonly bracket_status: "pending" | "passed" | "failed";
+    readonly bracket_failure: AudioClockBracketFailure | "none";
+    readonly worklet_loaded: boolean;
+    readonly local_attached: boolean;
+    readonly remote_attached: boolean;
+    readonly local_processed_blocks: number;
+    readonly remote_processed_blocks: number;
+    readonly local_active_regions: number;
+    readonly remote_active_regions: number;
+    readonly local_correction_pending: boolean;
+    readonly remote_correction_pending: boolean;
+    readonly local_failed: boolean;
+    readonly remote_failed: boolean;
+  };
+  readonly pcm: {
+    readonly local_sample_count: number;
+    readonly remote_sample_count: number;
+    readonly local_active_region_count: number;
+    readonly second_local_region_present: boolean;
+    readonly remote_silence_present: boolean;
+    readonly remote_audio_before_second_local: boolean;
+  };
+  readonly rtc: {
+    readonly peer_connection_count: number;
+    readonly selected_candidate_pair_count: number;
+    readonly outbound_bytes_present: boolean;
+    readonly outbound_packets_present: boolean;
+    readonly inbound_bytes_present: boolean;
+    readonly inbound_packets_present: boolean;
+  };
+  readonly gates: {
+    readonly local_disabled_at_observation: boolean;
+    readonly local_live_at_observation: boolean;
+    readonly local_precedes_ready: boolean;
+    readonly first_event_agent_ready: boolean;
+    readonly first_reply_interrupted: boolean;
+    readonly second_turn_present: boolean;
+    readonly second_reply_started: boolean;
+    readonly second_reply_after_silence: boolean;
+    readonly second_reply_completed: boolean;
+    readonly attribution_observation_complete: boolean;
+    readonly stale_audio_detected: boolean;
+    readonly proof_ready: boolean;
+  };
 }
 
 interface PipecatTerminalStatus {
@@ -299,11 +371,166 @@ function proofReady(snapshot: BrowserSnapshot): boolean {
   );
 }
 
+function boundedProgressCounter(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) return 0;
+  return Math.min(value, PROOF_TIMEOUT_PROGRESS_MAX_COUNTER);
+}
+
+export function buildProofTimeoutProgressCapsule(
+  snapshot: BrowserSnapshot
+): ProofTimeoutProgressCapsule {
+  const firstReady = eventsOf(snapshot, "agent_ready")[0];
+  const turns = eventsOf(snapshot, "turn_committed");
+  const speechStarts = eventsOf(snapshot, "assistant_speech_started");
+  const speechStops = eventsOf(snapshot, "assistant_speech_stopped");
+  const firstTurnId = turns[0]?.event.turn_id;
+  const secondTurnId = turns[1]?.event.turn_id;
+  const interrupted = speechStops.find(
+    ({ event }) => event.payload.reason === "interrupted" && event.turn_id === firstTurnId
+  );
+  const localPcmRegions = activeRegions(snapshot.local_samples, LOCAL_ACTIVE_RMS, 500);
+  const secondPcmOnset = localPcmRegions[1]?.start_ms;
+  const silenceStart =
+    secondPcmOnset === undefined
+      ? undefined
+      : sustainedSilenceStart(snapshot.remote_samples, secondPcmOnset);
+  const nextSpeechStart =
+    interrupted && secondTurnId
+      ? speechStarts.find(
+          ({ event, t_ms }) => event.turn_id === secondTurnId && t_ms > interrupted.t_ms
+        )
+      : undefined;
+  const nextSpeechStop =
+    nextSpeechStart && secondTurnId
+      ? speechStops.find(
+          ({ event, t_ms }) =>
+            event.turn_id === secondTurnId &&
+            event.payload.speech_id === nextSpeechStart.event.payload.speech_id &&
+            event.payload.reason === "completed" &&
+            t_ms >= nextSpeechStart.t_ms
+        )
+      : undefined;
+  const attribution =
+    silenceStart === undefined || nextSpeechStart === undefined
+      ? undefined
+      : interruptionAttribution({
+          samples: snapshot.remote_samples,
+          silenceStartMs: silenceStart,
+          nextAssistantSpeechStartMs: nextSpeechStart.t_ms,
+          activeRms: REMOTE_ACTIVE_RMS,
+          requiredSilenceMs: AUDIO_CLOCK_REQUIRED_SILENCE_MS,
+          samplingToleranceMs: REMOTE_ATTRIBUTION_TOLERANCE_MS,
+        });
+  const clockBracket = interruptionClockBracket(snapshot.audio_clock);
+  const localTrack = snapshot.local_track;
+
+  return {
+    schema_version: 1,
+    kind: "pipecat_proof_wait_timeout",
+    snapshot: {
+      assignment_present: snapshot.assignment !== null,
+      harness_error_count: boundedProgressCounter(snapshot.errors.length),
+      connection_gesture_count: boundedProgressCounter(snapshot.connection_gestures.length),
+      local_track_present: localTrack !== null,
+      remote_track_present: snapshot.remote_track !== null,
+      remote_audio_attached: snapshot.remote_audio_element_attached,
+    },
+    events: {
+      total: boundedProgressCounter(snapshot.events.length),
+      agent_ready: boundedProgressCounter(eventsOf(snapshot, "agent_ready").length),
+      turn_committed: boundedProgressCounter(turns.length),
+      speech_started: boundedProgressCounter(speechStarts.length),
+      speech_stopped: boundedProgressCounter(speechStops.length),
+      speech_stopped_interrupted: boundedProgressCounter(
+        speechStops.filter(({ event }) => event.payload.reason === "interrupted").length
+      ),
+      speech_stopped_completed: boundedProgressCounter(
+        speechStops.filter(({ event }) => event.payload.reason === "completed").length
+      ),
+    },
+    clock: {
+      bracket_status: clockBracket.status,
+      bracket_failure: clockBracket.failure_code ?? "none",
+      worklet_loaded: snapshot.audio_clock.worklet_loaded,
+      local_attached: snapshot.audio_clock.local.attached,
+      remote_attached: snapshot.audio_clock.remote.attached,
+      local_processed_blocks: boundedProgressCounter(
+        snapshot.audio_clock.local.processed_block_count
+      ),
+      remote_processed_blocks: boundedProgressCounter(
+        snapshot.audio_clock.remote.processed_block_count
+      ),
+      local_active_regions: boundedProgressCounter(
+        snapshot.audio_clock.local.active_region_count
+      ),
+      remote_active_regions: boundedProgressCounter(
+        snapshot.audio_clock.remote.active_region_count
+      ),
+      local_correction_pending: snapshot.audio_clock.local.stale_frame_correction_pending,
+      remote_correction_pending: snapshot.audio_clock.remote.stale_frame_correction_pending,
+      local_failed: snapshot.audio_clock.local.failure_code !== null,
+      remote_failed: snapshot.audio_clock.remote.failure_code !== null,
+    },
+    pcm: {
+      local_sample_count: boundedProgressCounter(snapshot.local_samples.length),
+      remote_sample_count: boundedProgressCounter(snapshot.remote_samples.length),
+      local_active_region_count: boundedProgressCounter(localPcmRegions.length),
+      second_local_region_present: secondPcmOnset !== undefined,
+      remote_silence_present: silenceStart !== undefined,
+      remote_audio_before_second_local:
+        secondPcmOnset !== undefined &&
+        snapshot.remote_samples.some(
+          (sample) => sample.t_ms < secondPcmOnset && sample.rms >= REMOTE_ACTIVE_RMS
+        ),
+    },
+    rtc: {
+      peer_connection_count: boundedProgressCounter(snapshot.rtc.peer_connection_count),
+      selected_candidate_pair_count: boundedProgressCounter(
+        snapshot.rtc.selected_candidate_pair_count
+      ),
+      outbound_bytes_present: snapshot.rtc.outbound_audio.bytes > 0,
+      outbound_packets_present: snapshot.rtc.outbound_audio.packets > 0,
+      inbound_bytes_present: snapshot.rtc.inbound_audio.bytes > 0,
+      inbound_packets_present: snapshot.rtc.inbound_audio.packets > 0,
+    },
+    gates: {
+      local_disabled_at_observation: localTrack?.enabled_at_observation === false,
+      local_live_at_observation: localTrack?.ready_state_at_observation === "live",
+      local_precedes_ready:
+        localTrack !== null && firstReady !== undefined && localTrack.observed_at_ms < firstReady.t_ms,
+      first_event_agent_ready: snapshot.events[0]?.event.event_type === "agent_ready",
+      first_reply_interrupted: interrupted !== undefined,
+      second_turn_present: secondTurnId !== undefined,
+      second_reply_started: nextSpeechStart !== undefined,
+      second_reply_after_silence:
+        nextSpeechStart !== undefined &&
+        silenceStart !== undefined &&
+        nextSpeechStart.t_ms >= silenceStart + AUDIO_CLOCK_REQUIRED_SILENCE_MS,
+      second_reply_completed: nextSpeechStop !== undefined,
+      attribution_observation_complete: attribution?.observation_complete === true,
+      stale_audio_detected: attribution?.stale_audio_detected === true,
+      proof_ready: proofReady(snapshot),
+    },
+  };
+}
+
+export function serializeProofTimeoutProgressCapsule(snapshot: BrowserSnapshot): string {
+  const rendered = `${PROOF_TIMEOUT_PROGRESS_PREFIX}${JSON.stringify(
+    buildProofTimeoutProgressCapsule(snapshot)
+  )}`;
+  if (new TextEncoder().encode(rendered).byteLength >= PROOF_TIMEOUT_PROGRESS_MAX_BYTES) {
+    throw new Error("Pipecat proof timeout progress capsule exceeded its fixed size bound");
+  }
+  return rendered;
+}
+
 async function waitForProof(page: Page, timeoutMs: number): Promise<BrowserSnapshot> {
   const deadline = Date.now() + timeoutMs;
+  let lastSnapshot: BrowserSnapshot | null = null;
   while (Date.now() < deadline) {
     await assertNoHarnessError(page);
     const snapshot = await readSnapshot(page);
+    lastSnapshot = snapshot;
     const clockBracket = interruptionClockBracket(snapshot.audio_clock);
     if (clockBracket.status === "failed") {
       throw new Error(
@@ -313,9 +540,8 @@ async function waitForProof(page: Page, timeoutMs: number): Promise<BrowserSnaps
     if (proofReady(snapshot)) return snapshot;
     await page.waitForTimeout(100);
   }
-  throw new Error(
-    "Timed out waiting for one Pipecat peer, bidirectional RTP, two turns, remote PCM, and interruption"
-  );
+  const snapshot = lastSnapshot ?? (await readSnapshot(page));
+  throw new Error(serializeProofTimeoutProgressCapsule(snapshot));
 }
 
 function requiredAbsoluteEnv(name: string): string {

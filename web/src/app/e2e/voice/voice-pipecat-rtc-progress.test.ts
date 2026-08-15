@@ -1,0 +1,204 @@
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock("@playwright/test", () => {
+  const playwrightTest = Object.assign(vi.fn(), { use: vi.fn() });
+  return { expect: vi.fn(), test: playwrightTest };
+});
+
+import {
+  buildProofTimeoutProgressCapsule,
+  PROOF_TIMEOUT_PROGRESS_MAX_BYTES,
+  PROOF_TIMEOUT_PROGRESS_PREFIX,
+  serializeProofTimeoutProgressCapsule,
+} from "../../../../e2e/voice-pipecat-rtc.spec";
+
+function timeoutSnapshot(): Parameters<typeof buildProofTimeoutProgressCapsule>[0] {
+  return {
+    schema_version: 1,
+    status: "observing",
+    phase: "ready",
+    voice_call_id: "raw-call-id",
+    assignment: {
+      runtime: "pipecat_smallwebrtc_v1",
+      trace_id: "raw-trace-id",
+      voice_call_id: "raw-call-id",
+      session_id: "raw-session-id",
+      agent_id: "raw-agent-id",
+      profile_id: "pipecat-fake-rtc-v1",
+      peer_reservation_id: "raw-reservation-id",
+      event_protocol: "rtvi-murmur-v2",
+    },
+    local_track: {
+      id: "raw-local-track-id",
+      kind: "audio",
+      label: "raw-local-track-label",
+      observed_at_ms: 1,
+      enabled_at_observation: false,
+      muted_at_observation: false,
+      ready_state_at_observation: "live",
+      media_stream_track_enabled: true,
+      muted: false,
+      ready_state: "live",
+    },
+    remote_track: {
+      id: "raw-remote-track-id",
+      kind: "audio",
+      label: "raw-remote-track-label",
+      observed_at_ms: 3,
+      enabled_at_observation: true,
+      muted_at_observation: false,
+      ready_state_at_observation: "live",
+      media_stream_track_enabled: true,
+      muted: false,
+      ready_state: "live",
+    },
+    microphone_publication: null,
+    local_track_released: false,
+    remote_track_released: false,
+    remote_audio_element_attached: true,
+    remote_audio_element_count: 1,
+    local_samples: [
+      { t_ms: 10, rms: 0.1 },
+      { t_ms: 20, rms: 0.1 },
+      { t_ms: 30, rms: 0.1 },
+    ],
+    remote_samples: [
+      { t_ms: 5, rms: 0.1 },
+      { t_ms: 40, rms: 0 },
+    ],
+    events: [
+      {
+        t_ms: 2,
+        event: {
+          schema_version: 1,
+          event_id: "raw-event-id",
+          event_type: "agent_ready",
+          trace_id: "raw-trace-id",
+          voice_call_id: "raw-call-id",
+          session_id: "raw-session-id",
+          producer_id: "raw-producer-id",
+          producer_sequence: 1,
+          payload: { secret: "candidate:raw-secret" },
+        },
+      },
+    ],
+    errors: ["Bearer raw-secret https://secret.invalid/path"],
+    logs: ["raw-secret-log"],
+    connection_gestures: [
+      { sequence: 1, action: "prepare" },
+      { sequence: 2, action: "activate" },
+    ],
+    audio_clock: {
+      schema_version: 1,
+      worklet_loaded: false,
+      sample_rate_hz: 48_000,
+      quantum_frames: 128,
+      disposed: false,
+      local: {
+        attached: false,
+        processed_block_count: 3,
+        active_region_count: 1,
+        stale_frame_correction_pending: false,
+        failure_code: null,
+      },
+      remote: {
+        attached: false,
+        processed_block_count: 4,
+        active_region_count: 1,
+        stale_frame_correction_pending: false,
+        failure_code: null,
+      },
+    },
+    rtc: {
+      peer_connection_count: 1,
+      selected_candidate_pair_count: 1,
+      outbound_audio: { stream_count: 1, bytes: 10, packets: 2 },
+      inbound_audio: { stream_count: 1, bytes: 11, packets: 3 },
+    },
+    disconnect_requested: false,
+    hook_assignment_cleared: false,
+  } as unknown as Parameters<typeof buildProofTimeoutProgressCapsule>[0];
+}
+
+describe("Pipecat proof timeout progress capsule", () => {
+  it("emits one exact bounded allowlisted schema without raw browser evidence", () => {
+    const snapshot = timeoutSnapshot();
+    const capsule = buildProofTimeoutProgressCapsule(snapshot);
+
+    expect(capsule).toEqual({
+      schema_version: 1,
+      kind: "pipecat_proof_wait_timeout",
+      snapshot: {
+        assignment_present: true,
+        harness_error_count: 1,
+        connection_gesture_count: 2,
+        local_track_present: true,
+        remote_track_present: true,
+        remote_audio_attached: true,
+      },
+      events: {
+        total: 1,
+        agent_ready: 1,
+        turn_committed: 0,
+        speech_started: 0,
+        speech_stopped: 0,
+        speech_stopped_interrupted: 0,
+        speech_stopped_completed: 0,
+      },
+      clock: {
+        bracket_status: "failed",
+        bracket_failure: "clock_not_prepared",
+        worklet_loaded: false,
+        local_attached: false,
+        remote_attached: false,
+        local_processed_blocks: 3,
+        remote_processed_blocks: 4,
+        local_active_regions: 1,
+        remote_active_regions: 1,
+        local_correction_pending: false,
+        remote_correction_pending: false,
+        local_failed: false,
+        remote_failed: false,
+      },
+      pcm: {
+        local_sample_count: 3,
+        remote_sample_count: 2,
+        local_active_region_count: 1,
+        second_local_region_present: false,
+        remote_silence_present: false,
+        remote_audio_before_second_local: false,
+      },
+      rtc: {
+        peer_connection_count: 1,
+        selected_candidate_pair_count: 1,
+        outbound_bytes_present: true,
+        outbound_packets_present: true,
+        inbound_bytes_present: true,
+        inbound_packets_present: true,
+      },
+      gates: {
+        local_disabled_at_observation: true,
+        local_live_at_observation: true,
+        local_precedes_ready: true,
+        first_event_agent_ready: true,
+        first_reply_interrupted: false,
+        second_turn_present: false,
+        second_reply_started: false,
+        second_reply_after_silence: false,
+        second_reply_completed: false,
+        attribution_observation_complete: false,
+        stale_audio_detected: false,
+        proof_ready: false,
+      },
+    });
+
+    const rendered = serializeProofTimeoutProgressCapsule(snapshot);
+    expect(rendered.startsWith(PROOF_TIMEOUT_PROGRESS_PREFIX)).toBe(true);
+    expect(new TextEncoder().encode(rendered).byteLength).toBeLessThan(
+      PROOF_TIMEOUT_PROGRESS_MAX_BYTES
+    );
+    expect(rendered).not.toMatch(
+      /raw-|https?:\/\/|Bearer|candidate:|voice_call_id|trace_id|peer_reservation_id|local_samples|remote_samples|transitions|sdp|ice_servers/i
+    );
+  });
+});
