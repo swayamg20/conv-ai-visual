@@ -409,8 +409,11 @@ def derive_turn_rest_credentials(
     expiry_seconds = int(expiry.timestamp())
     if expiry_seconds <= int(current.timestamp()):
         raise CoturnContractError("TURN credential expiry is invalid")
-    call_tag = hashlib.sha256(call_id.encode("ascii")).hexdigest()[:16]
-    username = f"{expiry_seconds}:{call_tag}"
+    username = derive_turn_rest_username(
+        voice_call_id=call_id,
+        expires_at_epoch_seconds=expiry_seconds,
+    )
+    call_tag = username.split(":", 1)[1]
     credential = base64.b64encode(
         hmac.new(secret.encode("ascii"), username.encode("ascii"), hashlib.sha1).digest()
     ).decode("ascii")
@@ -420,6 +423,29 @@ def derive_turn_rest_credentials(
         username=username,
         credential=credential,
     )
+
+
+def derive_turn_rest_username(
+    *,
+    voice_call_id: object,
+    expires_at_epoch_seconds: object,
+) -> str:
+    """Derive the exact public Coturn REST username without its HMAC secret.
+
+    This is the shared identity seam for the guarded app and its parent relay
+    probe.  The expiry must come from the authoritative bootstrap owner; callers
+    must never approximate it from a local clock plus the configured TTL.
+    """
+
+    call_id = _validate_uuid4(voice_call_id)
+    if (
+        isinstance(expires_at_epoch_seconds, bool)
+        or not isinstance(expires_at_epoch_seconds, int)
+        or not 1 <= expires_at_epoch_seconds <= (1 << 63) - 1
+    ):
+        raise CoturnContractError("TURN credential expiry is invalid")
+    call_tag = hashlib.sha256(call_id.encode("ascii")).hexdigest()[:16]
+    return f"{expires_at_epoch_seconds}:{call_tag}"
 
 
 def _require_private_directory(path: Path, *, label: str) -> None:
@@ -567,6 +593,7 @@ __all__ = [
     "PipecatE2ENetworkMode",
     "TurnRestCredentials",
     "derive_turn_rest_credentials",
+    "derive_turn_rest_username",
     "parse_network_mode",
     "read_private_coturn_configuration",
     "read_private_coturn_configuration_receipt",

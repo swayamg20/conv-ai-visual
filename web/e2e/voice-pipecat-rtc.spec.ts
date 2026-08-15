@@ -38,8 +38,11 @@ const PIPECAT_NETWORK_MODE = parseBrowserRtcNetworkMode(
 );
 const COTURN_SPKI_ENV = "VOICE_E2E_COTURN_SPKI_SHA256_B64";
 const COTURN_GATEWAY_ENV = "VOICE_E2E_COTURN_BRIDGE_GATEWAY_IPV4";
+const CALL_ID_ENV = "VOICE_E2E_CALL_ID";
 const SPKI_ARGUMENT_PREFIX = "--ignore-certificate-errors-spki-list=";
 const SPKI_SHA256_B64 = /^[A-Za-z0-9+/]{43}=$/;
+const CANONICAL_UUID4 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const PIPECAT_PROOF_WAIT_TIMEOUT_MS = 45_000;
 export const PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS = 20_000;
 export const PIPECAT_SPEC_SETUP_MARGIN_MS = 30_000;
@@ -50,6 +53,20 @@ export const PROOF_TIMEOUT_PROGRESS_PREFIX =
   "VOICE_PIPECAT_PROOF_TIMEOUT_PROGRESS=";
 export const PROOF_TIMEOUT_PROGRESS_MAX_BYTES = 2_048;
 const PROOF_TIMEOUT_PROGRESS_MAX_COUNTER = 2_147_483_647;
+
+const EXPECTED_RELAY_CALL_ID = (() => {
+  const configured = process.env[CALL_ID_ENV];
+  if (PIPECAT_NETWORK_MODE === "direct") {
+    if (configured !== undefined) {
+      throw new Error("Direct Pipecat proof does not accept a fixed call identity");
+    }
+    return null;
+  }
+  if (configured === undefined || !CANONICAL_UUID4.test(configured)) {
+    throw new Error("Relay Pipecat proof call identity is unavailable");
+  }
+  return configured;
+})();
 
 // Network traces retain the bearer locator, Authorization header, SDP, and ICE
 // bodies on failure. This proof emits only its deliberately sanitized JSON.
@@ -240,6 +257,7 @@ interface PipecatTerminalStatus {
 
 interface SanitizedRequestTrace {
   bootstrapPosts: number;
+  bootstrapCallIdAttested: boolean | null;
   signalingPosts: number;
   authenticatedSignalingPosts: number;
   signalingPatches: number;
@@ -733,6 +751,7 @@ function writeResultAtomically(resultPath: string, result: object): void {
 function observeSanitizedRequests(page: Page): SanitizedRequestTrace {
   const trace: SanitizedRequestTrace = {
     bootstrapPosts: 0,
+    bootstrapCallIdAttested: null,
     signalingPosts: 0,
     authenticatedSignalingPosts: 0,
     signalingPatches: 0,
@@ -754,6 +773,23 @@ function observeSanitizedRequests(page: Page): SanitizedRequestTrace {
     const method = request.method();
     if (parsed.pathname === "/api/voice/session" && method === "POST") {
       trace.bootstrapPosts += 1;
+      if (EXPECTED_RELAY_CALL_ID !== null) {
+        let attested = false;
+        try {
+          const body = request.postDataJSON() as unknown;
+          attested =
+            typeof body === "object" &&
+            body !== null &&
+            "session_id" in body &&
+            body.session_id === EXPECTED_SESSION_ID &&
+            "voice_call_id" in body &&
+            body.voice_call_id === EXPECTED_RELAY_CALL_ID;
+        } catch {
+          attested = false;
+        }
+        trace.bootstrapCallIdAttested =
+          trace.bootstrapCallIdAttested !== false && attested;
+      }
       return;
     }
     if (parsed.pathname === "/api/voice/session/end" && method === "POST") {
@@ -854,6 +890,13 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
     runtime: "pipecat_smallwebrtc_v1",
     profile_id: EXPECTED_PROFILE_ID,
   });
+  if (EXPECTED_RELAY_CALL_ID === null) {
+    expect(requestTrace.bootstrapCallIdAttested).toBeNull();
+  } else {
+    expect(prepared.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(prepared.assignment?.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(requestTrace.bootstrapCallIdAttested).toBe(true);
+  }
   expect(prepared.local_track).toBeNull();
   expect(prepared.remote_track).toBeNull();
   expect(prepared.audio_clock).toMatchObject({
@@ -877,6 +920,10 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   const assignment = proof.assignment;
   expect(assignment).not.toBeNull();
   if (!assignment) throw new Error("Accepted Pipecat assignment disappeared");
+  if (EXPECTED_RELAY_CALL_ID !== null) {
+    expect(proof.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(assignment.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+  }
 
   expect(proof.schema_version).toBe(1);
   expect(proof.errors).toEqual([]);

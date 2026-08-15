@@ -262,6 +262,7 @@ interface MountedHook {
 }
 
 async function mountHook(callbacks: {
+  initialVoiceCallId?: string;
   onTranscript?: (event: VoiceSessionTranscriptEvent) => void;
   onEvent?: (event: VoiceEvent) => void;
   onLocalMicrophoneTrack?: (track: MediaStreamTrack | null) => void;
@@ -280,6 +281,7 @@ async function mountHook(callbacks: {
       enabled: true,
       agentId,
       sessionId,
+      initialVoiceCallId: callbacks.initialVoiceCallId,
       onTranscript: callbacks.onTranscript,
       onEvent: callbacks.onEvent,
       onLocalMicrophoneTrack: callbacks.onLocalMicrophoneTrack,
@@ -1491,6 +1493,51 @@ describe("useVoiceSession", () => {
     expect(api.bootstrapVoiceSession.mock.calls[2]?.[0]?.voice_call_id).not.toBe(
       retryStableCallId
     );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("consumes one injected call ID, retains it for retry, then returns to random IDs", async () => {
+    const initialVoiceCallId = "70000000-0000-4000-8000-000000000007";
+    api.bootstrapVoiceSession
+      .mockRejectedValueOnce(new Error("temporary control-plane outage"))
+      .mockImplementation(
+        async (request: { session_id: string; voice_call_id: string }) => ({
+          runtime: "livekit_v2",
+          trace_id: assignmentTraceId,
+          profile_id: "cascade-v1",
+          server_url: "wss://voice.example.test",
+          room_name: "room-injected-call",
+          participant_token: "signed.jwt.token",
+          participant_identity: "user-1",
+          agent_participant_identity: "agent-worker-1",
+          session_id: request.session_id,
+          agent_id: agentId,
+          voice_call_id: request.voice_call_id,
+          dispatch_id: "dispatch-injected-call",
+          worker_name: "murmur-worker",
+          event_topic: eventTopic,
+          expires_at: "2099-01-01T00:00:00Z",
+        })
+      );
+    const mounted = await mountHook({ initialVoiceCallId });
+
+    await act(async () => mounted.read().connect({ sessionId }));
+    await act(async () => mounted.read().connect({ sessionId }));
+    expect(api.bootstrapVoiceSession.mock.calls[0]?.[0]?.voice_call_id).toBe(
+      initialVoiceCallId
+    );
+    expect(api.bootstrapVoiceSession.mock.calls[1]?.[0]?.voice_call_id).toBe(
+      initialVoiceCallId
+    );
+
+    await act(async () => mounted.read().disconnect());
+    await act(async () => mounted.read().connect({ sessionId }));
+    const futureCallId = api.bootstrapVoiceSession.mock.calls[2]?.[0]?.voice_call_id;
+    expect(futureCallId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+    );
+    expect(futureCallId).not.toBe(initialVoiceCallId);
+
     await act(async () => mounted.root.unmount());
   });
 

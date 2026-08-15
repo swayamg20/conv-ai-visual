@@ -33,6 +33,7 @@ from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
     CoturnContractPaths,
     PipecatE2ENetworkMode,
     derive_turn_rest_credentials,
+    derive_turn_rest_username,
     parse_network_mode,
     read_private_coturn_configuration,
     read_private_coturn_configuration_receipt,
@@ -438,6 +439,13 @@ def test_rest_credentials_match_known_vector_floor_microseconds_and_redact_repr(
     assert credentials.call_tag == "342ace7df588b4b7"
     assert credentials.username == EXPECTED_USERNAME
     assert credentials.credential == EXPECTED_CREDENTIAL
+    assert (
+        derive_turn_rest_username(
+            voice_call_id=VOICE_CALL_ID,
+            expires_at_epoch_seconds=credentials.expires_at_epoch_seconds,
+        )
+        == credentials.username
+    )
     rendered = repr(credentials)
     assert rendered == "TurnRestCredentials()"
     assert STATIC_SECRET not in rendered
@@ -475,6 +483,35 @@ def test_rest_credentials_reject_malformed_or_expired_claim_material(
             expires_at=expiry,
             now=now,
         )
+
+
+@pytest.mark.parametrize(
+    ("call_id", "expiry"),
+    [
+        (None, 1_786_622_700),
+        ("not-a-call", 1_786_622_700),
+        (VOICE_CALL_ID, None),
+        (VOICE_CALL_ID, True),
+        (VOICE_CALL_ID, 0),
+        (VOICE_CALL_ID, -1),
+        (VOICE_CALL_ID, 1 << 63),
+    ],
+)
+def test_rest_username_rejects_invalid_identity_without_reflection(
+    call_id: object,
+    expiry: object,
+) -> None:
+    with pytest.raises(
+        CoturnContractError,
+        match=r"^TURN (?:voice call scope|credential expiry) is invalid$",
+    ) as captured:
+        derive_turn_rest_username(
+            voice_call_id=call_id,
+            expires_at_epoch_seconds=expiry,
+        )
+
+    assert str(call_id) not in str(captured.value)
+    assert str(expiry) not in str(captured.value)
 
 
 def test_checkpoint_a_core_makes_no_media_or_forced_relay_claim() -> None:
@@ -541,6 +578,7 @@ def test_core_public_surface_is_exact() -> None:
         "PipecatE2ENetworkMode",
         "TurnRestCredentials",
         "derive_turn_rest_credentials",
+        "derive_turn_rest_username",
         "parse_network_mode",
         "read_private_coturn_configuration",
         "read_private_coturn_configuration_receipt",

@@ -32,6 +32,7 @@ const SNAPSHOT_INTERVAL_MS = 80;
 interface VoiceE2EClientProps {
   readonly agentId: string;
   readonly apiUrl: string;
+  readonly initialVoiceCallId?: string;
   readonly network: BrowserRtcNetworkMode;
   readonly sessionId: string;
 }
@@ -173,6 +174,7 @@ function createAnalyser(context: AudioContext): AnalyserNode {
 export function VoiceE2EClient({
   agentId,
   apiUrl,
+  initialVoiceCallId,
   network,
   sessionId,
 }: VoiceE2EClientProps) {
@@ -321,6 +323,7 @@ export function VoiceE2EClient({
     apiUrl,
     agentId,
     sessionId,
+    initialVoiceCallId,
     authHeaderProvider: e2eAuthHeader,
     onEvent: observeEvent,
     onError: observeError,
