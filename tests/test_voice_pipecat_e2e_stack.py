@@ -126,6 +126,12 @@ def _audio_sample_clock(
                 ],
                 "overflow": False,
                 "failure_code": None,
+                "failure_message_sequence": None,
+                "expected_block_start_frame": None,
+                "observed_block_start_frame": None,
+                "frame_delta_frames": None,
+                "last_observed_block_start_frame": None,
+                "context_state_at_message_delivery": None,
             },
             "remote": {
                 "attached": True,
@@ -162,6 +168,12 @@ def _audio_sample_clock(
                 ],
                 "overflow": False,
                 "failure_code": None,
+                "failure_message_sequence": None,
+                "expected_block_start_frame": None,
+                "observed_block_start_frame": None,
+                "frame_delta_frames": None,
+                "last_observed_block_start_frame": None,
+                "context_state_at_message_delivery": None,
             },
         },
         "interruption_bracket": {
@@ -487,6 +499,39 @@ def test_browser_result_rejects_extra_selected_candidate_fields(tmp_path: Path) 
 
     _write_json(path, value)
     with pytest.raises(StackError, match="exact selected candidate pair"):
+        _read_pipecat_browser_result(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "failure_value"),
+    [
+        ("failure_message_sequence", 1),
+        ("expected_block_start_frame", 128),
+        ("observed_block_start_frame", 256),
+        ("frame_delta_frames", 128),
+        ("last_observed_block_start_frame", 0),
+        ("context_state_at_message_delivery", "running"),
+    ],
+)
+def test_browser_result_requires_null_audio_clock_fault_diagnostics(
+    tmp_path: Path,
+    field: str,
+    failure_value: object,
+) -> None:
+    path = tmp_path / "result.json"
+    value = _browser_result()
+    browser = value["browser_evidence"]
+    assert isinstance(browser, dict)
+    clock = browser["audio_sample_clock"]
+    assert isinstance(clock, dict)
+    evidence = clock["evidence"]
+    assert isinstance(evidence, dict)
+    local = evidence["local"]
+    assert isinstance(local, dict)
+    local[field] = failure_value
+
+    _write_json(path, value)
+    with pytest.raises(StackError, match="probe is not clean and exact"):
         _read_pipecat_browser_result(path)
 
 

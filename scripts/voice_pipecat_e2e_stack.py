@@ -1041,6 +1041,12 @@ def _validate_audio_clock_probe(
         "transitions",
         "overflow",
         "failure_code",
+        "failure_message_sequence",
+        "expected_block_start_frame",
+        "observed_block_start_frame",
+        "frame_delta_frames",
+        "last_observed_block_start_frame",
+        "context_state_at_message_delivery",
     }
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise StackError(f"audio sample-clock {label} probe schema is invalid")
@@ -1049,6 +1055,12 @@ def _validate_audio_clock_probe(
         or value.get("exact_track_id") != exact_track_id
         or value.get("overflow") is not False
         or value.get("failure_code") is not None
+        or value.get("failure_message_sequence") is not None
+        or value.get("expected_block_start_frame") is not None
+        or value.get("observed_block_start_frame") is not None
+        or value.get("frame_delta_frames") is not None
+        or value.get("last_observed_block_start_frame") is not None
+        or value.get("context_state_at_message_delivery") is not None
     ):
         raise StackError(f"audio sample-clock {label} probe is not clean and exact")
     observed_threshold = value.get("threshold_rms")
