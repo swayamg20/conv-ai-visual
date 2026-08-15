@@ -980,6 +980,7 @@ export class PipecatVoiceTransport {
   private microphoneActivationPromise: Promise<void> | null = null;
   private microphoneAuthorized = false;
   private microphoneEnabledRequested = false;
+  private deviceInitializationMicrophoneOpen = false;
 
   constructor(options: PipecatVoiceTransportOptions) {
     logger.setLevel(LogLevel.NONE);
@@ -1099,14 +1100,16 @@ export class PipecatVoiceTransport {
           // enableMic and enableCam are both false. Start the public initializer
           // synchronously in this activation gesture, then keep it inside the
           // same aggregate connection deadline below.
+          // SmallWebRTC's Daily media manager also honors the current mic flag
+          // as startAudioOff. Open acquisition only while initDevices starts;
+          // the first local-track callback closes it before observation.
+          this.deviceInitializationMicrophoneOpen = true;
+          this.client.enableMic(true);
           clientInitialization = this.client.initDevices();
         } catch (error) {
           clientInitialization = Promise.reject(error);
+          this.containInitializedMicrophone(controller.signal);
         }
-        // Some media managers expose their track synchronously before their
-        // initializer promise settles. Close that track immediately as well as
-        // on eventual settlement below.
-        this.containInitializedMicrophone(controller.signal);
 
         const containedInitialization = clientInitialization.then(
           () => this.containInitializedMicrophone(controller.signal),
@@ -1498,13 +1501,19 @@ export class PipecatVoiceTransport {
     if (!this.isCurrent()) {
       if (isLocal) {
         track.enabled = false;
+        this.closeDeviceInitializationMicrophone();
         if (this.closed && track.readyState !== "ended") track.stop();
       }
       return;
     }
     if (isLocal) {
       this.disableSupersededLocalTracks(track);
-      track.enabled = this.shouldEnableMicrophone();
+      if (this.deviceInitializationMicrophoneOpen) {
+        track.enabled = false;
+        this.closeDeviceInitializationMicrophone();
+      } else {
+        track.enabled = this.shouldEnableMicrophone();
+      }
       this.localTracks.add(track);
       this.reportLocalTrack(track);
       return;
@@ -1560,24 +1569,32 @@ export class PipecatVoiceTransport {
   }
 
   private containInitializedMicrophone(signal: AbortSignal): void {
-    try {
-      this.client.enableMic(false);
-    } catch {
-      // The native track is still forced closed below when the SDK is stale.
-    }
     const track = this.currentLocalTrack();
+    if (track) track.enabled = false;
+    this.closeDeviceInitializationMicrophone();
     if (!track) return;
-    track.enabled = false;
+    const alreadyOwned = this.localTracks.has(track);
     this.localTracks.add(track);
     if (this.closed || signal.aborted || !this.isCurrent()) {
       if (track.readyState !== "ended") track.stop();
       this.localTracks.delete(track);
       return;
     }
-    this.reportLocalTrack(track);
+    if (!alreadyOwned) this.reportLocalTrack(track);
+  }
+
+  private closeDeviceInitializationMicrophone(): void {
+    if (!this.deviceInitializationMicrophoneOpen) return;
+    this.deviceInitializationMicrophoneOpen = false;
+    try {
+      this.client.enableMic(false);
+    } catch {
+      // Native track state is always forced separately by the caller.
+    }
   }
 
   private forceMicrophoneDisabled(): void {
+    this.deviceInitializationMicrophoneOpen = false;
     try {
       this.client.enableMic(false);
     } catch {

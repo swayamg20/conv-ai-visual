@@ -444,6 +444,7 @@ function installSyntheticDefaultConnect(
 ): ReturnType<typeof defaultInternals> & {
   readonly initDevices: ReturnType<typeof vi.fn>;
   readonly connect: ReturnType<typeof vi.fn>;
+  readonly enableMic: ReturnType<typeof vi.fn>;
   readonly localTrack: MediaStreamTrack;
 } {
   const internals = defaultInternals(transport);
@@ -451,6 +452,9 @@ function installSyntheticDefaultConnect(
   const initDevices = vi.fn(initialize);
   const connect = vi.fn(async (): Promise<void> => {
     await operation(internals.sdkTransport);
+  });
+  const enableMic = vi.fn((enabled: boolean) => {
+    localTrack.enabled = enabled;
   });
   if (
     !Reflect.set(internals.client, "initDevices", initDevices) ||
@@ -463,14 +467,12 @@ function installSyntheticDefaultConnect(
     !Reflect.set(
       internals.client,
       "enableMic",
-      vi.fn((enabled: boolean) => {
-        localTrack.enabled = enabled;
-      }),
+      enableMic,
     )
   ) {
     throw new Error("Could not install the synthetic default client seams");
   }
-  return { ...internals, initDevices, connect, localTrack };
+  return { ...internals, initDevices, connect, enableMic, localTrack };
 }
 
 function requestBody(
@@ -516,10 +518,11 @@ describe("PipecatVoiceTransport", () => {
     const owner = createCallbacks();
     const initialization = deferred<void>();
     const order: string[] = [];
+    const signalingPort = createSignalingPort();
     const transport = new PipecatVoiceTransport({
       callbacks: owner.callbacks,
       audioElementFactory: createAudioElement,
-      signalingPortFactory: () => createSignalingPort(),
+      signalingPortFactory: () => signalingPort,
     });
     const synthetic = installSyntheticDefaultConnect(
       transport,
@@ -531,26 +534,41 @@ describe("PipecatVoiceTransport", () => {
         return initialization.promise;
       },
     );
+    synthetic.enableMic.mockImplementation((enabled: boolean) => {
+      order.push(`enable:${String(enabled)}`);
+      synthetic.localTrack.enabled = enabled;
+    });
 
     const connecting = transport.connect(connection);
 
     expect(synthetic.client).toBeInstanceOf(PipecatClient);
     expect(synthetic.initDevices).toHaveBeenCalledOnce();
     expect(synthetic.connect).not.toHaveBeenCalled();
-    expect(order).toEqual(["init"]);
-    expect(synthetic.localTrack.enabled).toBe(false);
+    expect(order).toEqual(["enable:true", "init"]);
+    expect(synthetic.localTrack.enabled).toBe(true);
+    expect(owner.callbacks.onLocalMicrophoneTrack).not.toHaveBeenCalled();
+    expect(signalingPort.offer).not.toHaveBeenCalled();
+    expect(Reflect.get(synthetic.sdkTransport, "pc")).toBeNull();
     expect(
-      owner.callbacks.onLocalMicrophoneTrack.mock.calls[0]?.[1],
-    ).toMatchObject({ enabled: false, readyState: "live" });
+      synthetic.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(1);
 
     initialization.resolve(undefined);
     await connecting;
 
-    expect(order).toEqual(["init", "connect"]);
+    expect(order.slice(0, 4)).toEqual([
+      "enable:true",
+      "init",
+      "enable:false",
+      "connect",
+    ]);
     expect(
       synthetic.initDevices.mock.invocationCallOrder[0],
     ).toBeLessThan(synthetic.connect.mock.invocationCallOrder[0] ?? 0);
     expect(synthetic.localTrack.enabled).toBe(false);
+    expect(
+      owner.callbacks.onLocalMicrophoneTrack.mock.calls[0]?.[1],
+    ).toMatchObject({ enabled: false, readyState: "live" });
     expect(
       synthetic.connect.mock.calls[0]?.[0],
     ).toEqual({
@@ -558,6 +576,90 @@ describe("PipecatVoiceTransport", () => {
       iceConfig: { iceServers: connection.iceServers },
     });
     await transport.disconnect();
+  });
+
+  it("closes the acquired microphone before signaling and reuses it after Ready", async () => {
+    const harness = createHarness();
+    const order: string[] = [];
+    const acquiredTrack = createTrack("initialized-local-microphone", true);
+    harness.client.enableMic.mockClear();
+    harness.client.enableMic.mockImplementation((enabled: boolean) => {
+      if (!enabled && harness.client.localTrack === acquiredTrack) {
+        expect(acquiredTrack.enabled).toBe(false);
+      }
+      order.push(`enable:${String(enabled)}`);
+      harness.client.localTrack.enabled = enabled;
+    });
+    harness.callbacks.onLocalMicrophoneTrack.mockImplementation(
+      (track: MediaStreamTrack | null) => {
+        if (!track) return;
+        order.push(`report:${String(track.enabled)}`);
+        expect(track).toBe(acquiredTrack);
+        expect(track.readyState).toBe("live");
+        if (!harness.client.connect.mock.calls.length) {
+          expect(track.enabled).toBe(false);
+          expect(harness.signalingPort.offer).not.toHaveBeenCalled();
+        }
+      },
+    );
+    harness.client.initDevices.mockImplementationOnce(async () => {
+      order.push("init");
+      harness.client.localTrack = acquiredTrack;
+      order.push("local-callback");
+      harness.client.emitTrackStarted(acquiredTrack, {
+        id: "browser",
+        name: "browser",
+        local: true,
+      });
+    });
+    harness.client.connect.mockImplementationOnce(async () => {
+      order.push("connect");
+      expect(acquiredTrack.enabled).toBe(false);
+      await harness.signalingPort.offer({
+        sdp: "v=0\r\n",
+        type: "offer",
+        pcId: null,
+      });
+    });
+
+    await harness.transport.connect(connection);
+
+    expect(order.slice(0, 6)).toEqual([
+      "enable:true",
+      "init",
+      "local-callback",
+      "enable:false",
+      "report:false",
+      "connect",
+    ]);
+    expect(acquiredTrack.enabled).toBe(false);
+    expect(harness.signalingPort.offer).toHaveBeenCalledOnce();
+    expect(
+      harness.client.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(1);
+    const firstObservedTrack =
+      harness.callbacks.onLocalMicrophoneTrack.mock.calls.find(
+        ([track]) => track !== null,
+      )?.[0];
+    expect(firstObservedTrack).toBe(acquiredTrack);
+
+    harness.client.emitServerMessage(readyEvent());
+    const accepted = harness.callbacks.onEvent.mock.calls[0]?.[0];
+    if (!accepted || accepted.event_type !== "agent_ready") {
+      throw new Error("Expected strict Ready envelope");
+    }
+    await harness.transport.acceptCanonicalReady(accepted);
+
+    expect(acquiredTrack.enabled).toBe(true);
+    expect(
+      harness.client.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(2);
+    const observedTracks = harness.callbacks.onLocalMicrophoneTrack.mock.calls
+      .map(([track]) => track)
+      .filter((track): track is MediaStreamTrack => track !== null);
+    expect(observedTracks.every((track) => track === acquiredTrack)).toBe(true);
+    expect(observedTracks.at(-1)).toBe(acquiredTrack);
+    await harness.transport.disconnect();
   });
 
   it("times out abort-ignoring device init without a late signaling POST", async () => {
@@ -569,6 +671,11 @@ describe("PipecatVoiceTransport", () => {
       initialization.promise.then(() => {
         lateTrack = createTrack("late-initialized-microphone", true);
         harness.client.localTrack = lateTrack;
+        harness.client.emitTrackStarted(lateTrack, {
+          id: "browser",
+          name: "browser",
+          local: true,
+        });
       }),
     );
     harness.client.connect.mockImplementationOnce(async () => {
@@ -595,6 +702,10 @@ describe("PipecatVoiceTransport", () => {
     expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
     expect(harness.client.connect).not.toHaveBeenCalled();
     expect(harness.signalingPort.offer).not.toHaveBeenCalled();
+    expect(
+      harness.client.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(1);
+    expect(harness.client.enableMic).toHaveBeenLastCalledWith(false);
 
     initialization.resolve(undefined);
     await Promise.resolve();
@@ -620,6 +731,11 @@ describe("PipecatVoiceTransport", () => {
       initialization.promise.then(() => {
         lateTrack = createTrack("aborted-initialized-microphone", true);
         harness.client.localTrack = lateTrack;
+        harness.client.emitTrackStarted(lateTrack, {
+          id: "browser",
+          name: "browser",
+          local: true,
+        });
       }),
     );
     harness.client.connect.mockImplementationOnce(async () => {
@@ -643,6 +759,10 @@ describe("PipecatVoiceTransport", () => {
     });
     expect(harness.client.disconnect).toHaveBeenCalledOnce();
     expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(
+      harness.client.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(1);
+    expect(harness.client.enableMic).toHaveBeenLastCalledWith(false);
 
     initialization.resolve(undefined);
     await Promise.resolve();
@@ -657,6 +777,7 @@ describe("PipecatVoiceTransport", () => {
 
   it("sanitizes a synchronous device initialization failure", async () => {
     const harness = createHarness();
+    const localTrack = harness.client.localTrack;
     harness.client.initDevices.mockImplementationOnce(() => {
       throw new Error(
         `Device setup leaked ${connection.webrtcUrl} Bearer init-secret`,
@@ -670,6 +791,12 @@ describe("PipecatVoiceTransport", () => {
     expect(harness.client.connect).not.toHaveBeenCalled();
     expect(harness.client.disconnect).toHaveBeenCalledOnce();
     expect(harness.signalingPort.deletePeer).toHaveBeenCalledWith(null);
+    expect(
+      harness.client.enableMic.mock.calls.filter(([enabled]) => enabled),
+    ).toHaveLength(1);
+    expect(harness.client.enableMic).toHaveBeenLastCalledWith(false);
+    expect(localTrack.enabled).toBe(false);
+    expect(localTrack.readyState).toBe("ended");
   });
 
   it("requires the pinned public device initialization shape", () => {
@@ -1335,9 +1462,17 @@ describe("PipecatVoiceTransport", () => {
     expect(sentParams.iceConfig.iceServers[0]?.urls).not.toBe(
       connection.iceServers?.[0]?.urls,
     );
+    const acquisitionIndex = harness.client.enableMic.mock.calls.findIndex(
+      ([enabled]) => enabled,
+    );
+    const containmentIndex = harness.client.enableMic.mock.calls.findIndex(
+      ([enabled], index) => index > acquisitionIndex && !enabled,
+    );
+    expect(acquisitionIndex).toBeGreaterThanOrEqual(0);
+    expect(containmentIndex).toBeGreaterThan(acquisitionIndex);
     expect(
-      harness.client.enableMic.mock.calls.every(([enabled]) => !enabled),
-    ).toBe(true);
+      harness.client.enableMic.mock.invocationCallOrder[containmentIndex],
+    ).toBeLessThan(harness.client.connect.mock.invocationCallOrder[0] ?? 0);
     expect(harness.client.localTrack.enabled).toBe(false);
     expect(harness.callbacks.onConnected).toHaveBeenCalledTimes(1);
     expect(harness.audioElement.dataset.murmurVoiceCall).toBe(
@@ -1441,6 +1576,7 @@ describe("PipecatVoiceTransport", () => {
       harness.client.emitConnected();
     });
     await harness.transport.connect(connection);
+    harness.client.enableMic.mockClear();
 
     harness.client.emitServerMessage({ event_type: "agent_ready" });
     harness.client.emitServerMessage(
@@ -1576,6 +1712,7 @@ describe("PipecatVoiceTransport", () => {
     await vi.waitFor(() =>
       expect(harness.client.connect).toHaveBeenCalledOnce(),
     );
+    harness.client.enableMic.mockClear();
     harness.client.emitServerMessage(readyEvent());
     const accepted = harness.callbacks.onEvent.mock.calls[0]?.[0];
     if (!accepted || accepted.event_type !== "agent_ready") {
