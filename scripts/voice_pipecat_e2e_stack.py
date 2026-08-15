@@ -33,7 +33,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from scripts.voice_pipecat_e2e_coturn import (
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+# The documented CLI executes this file by path, while tests import it through
+# the namespace package. Make the same reviewed contract module win in both.
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
     CoturnContractError,
     CoturnContractPaths,
     PipecatE2ENetworkMode,
@@ -42,7 +48,6 @@ from scripts.voice_pipecat_e2e_coturn import (
     validate_turn_tls_ca_file,
 )
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = PROJECT_ROOT / "web"
 VOICE_FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "voice" / "audio"
 ASSISTANT_FIXTURE = VOICE_FIXTURE_ROOT / "assistant-long.wav"

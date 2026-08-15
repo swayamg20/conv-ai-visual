@@ -1102,6 +1102,33 @@ def test_relay_cli_refuses_before_paths_artifacts_or_any_runtime_owner(
     assert "bytes" not in captured.err
 
 
+def test_direct_script_entrypoint_imports_contract_before_fixed_relay_refusal() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/voice_pipecat_e2e_stack.py",
+            "--network",
+            "relay-tls",
+            "--run-id",
+            "never-created-by-script-entrypoint",
+        ],
+        cwd=PROJECT_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"Pipecat RTC qualification failed: {_RELAY_TLS_CONTRACT_ONLY_ERROR}\n"
+    )
+    assert not (
+        PROJECT_ROOT / "var" / "voice-pipecat-e2e" / "never-created-by-script-entrypoint"
+    ).exists()
+
+
 def test_standard_ice_urls_are_forbidden_artifact_data_but_mode_label_is_safe() -> None:
     for value in (
         "stun:127.0.0.1:3478",
