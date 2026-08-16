@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import stat
 import sys
 from dataclasses import dataclass, field
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts import voice_pipecat_e2e_coturn_host as host_module  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
     CoturnBridgeTopology,
     CoturnContractPaths,
@@ -31,8 +33,10 @@ from scripts.voice_pipecat_e2e_coturn_host import (  # noqa: E402
     TrustedHostTools,
     execute_checked,
     prepare_runtime_directories,
+    require_full_resource_id,
     validate_trusted_host_tools,
 )
+from tests.coturn_traceback_helpers import traceback_contains  # noqa: E402
 
 NONCE = "ab" * 32
 TOPOLOGY = CoturnBridgeTopology.parse(
@@ -141,6 +145,103 @@ def test_command_contract_is_tiny_redacted_and_fixed_failure_does_not_reflect() 
     with pytest.raises(CoturnHostError, match=r"^fixed failure$") as captured:
         execute_checked(runner, request, failure="fixed failure")
     assert "private-key-material" not in str(captured.value)
+    assert captured.value.__context__ is None
+    assert not traceback_contains(captured.value, secret)
+    text_subclass = type("TextSubclass", (str,), {})
+    untouched = QueueRunner([_result()])
+    with pytest.raises(CoturnHostError, match="classification is invalid"):
+        execute_checked(untouched, request, failure=text_subclass("fixed failure"))
+    assert untouched.requests == []
+
+    raw = b"traceback-sentinel-malformed-command-result"
+    malformed = QueueRunner([_result(stderr=raw, returncode=1)])
+    with pytest.raises(CoturnHostError, match=r"^fixed failure$") as rejected:
+        execute_checked(malformed, request, failure="fixed failure")
+    assert not traceback_contains(rejected.value, raw)
+
+
+def test_execute_checked_discards_request_runner_context_and_control_graphs() -> None:
+    raw = b"traceback-sentinel-execute-boundary"
+    request = CommandRequest(argv=("/bin/false",), stdin=raw)
+
+    @dataclass
+    class RetainingRunner:
+        value: object
+
+        def run(self, _request: CommandRequest) -> CommandResult:
+            if isinstance(self.value, BaseException):
+                raise self.value
+            assert type(self.value) is CommandResult
+            return self.value
+
+    for value in (
+        RuntimeError(raw.decode("ascii")),
+        CommandResult(1, b"", raw),
+    ):
+        with pytest.raises(CoturnHostError, match=r"^fixed failure$") as captured:
+            execute_checked(RetainingRunner(value), request, failure="fixed failure")
+        assert captured.value.__context__ is None
+        assert not traceback_contains(captured.value, raw)
+
+    for value, expected, code in (
+        (KeyboardInterrupt(raw.decode("ascii")), KeyboardInterrupt, None),
+        (SystemExit(23), SystemExit, 23),
+        (SystemExit(raw.decode("ascii")), SystemExit, 1),
+    ):
+        with pytest.raises(expected) as captured:
+            execute_checked(RetainingRunner(value), request, failure="fixed failure")
+        assert captured.value.__context__ is None
+        assert not traceback_contains(captured.value, raw)
+        if expected is KeyboardInterrupt:
+            assert str(captured.value) == ""
+        else:
+            assert captured.value.code == code  # type: ignore[attr-defined]
+
+
+def test_execute_checked_rejects_invalid_request_before_dispatch() -> None:
+    runner = QueueRunner([_result()])
+    with pytest.raises(CoturnHostError, match=r"^Coturn subprocess request is invalid$"):
+        execute_checked(
+            runner,
+            object(),  # type: ignore[arg-type]
+            failure="fixed failure",
+        )
+    assert runner.requests == []
+
+
+def test_execute_checked_scrubs_control_after_runner_return() -> None:
+    raw = b"raw-post-run-validation-control"
+    request = CommandRequest(argv=("/bin/true",), stdin=raw)
+    runner = QueueRunner([CommandResult(0, raw, b"")])
+    lines, first = inspect.getsourcelines(host_module._execute_checked_result)
+    target = next(
+        first + offset for offset, line in enumerate(lines) if "or result.returncode" in line
+    )
+    fired = False
+
+    def trace(frame, event: str, _arg):
+        nonlocal fired
+        if (
+            frame.f_code is host_module._execute_checked_result.__code__
+            and event == "line"
+            and frame.f_lineno == target
+            and not fired
+        ):
+            fired = True
+            raise KeyboardInterrupt(raw.decode("ascii"))
+        return trace
+
+    sys.settrace(trace)
+    try:
+        with pytest.raises(KeyboardInterrupt) as captured:
+            execute_checked(runner, request, failure="fixed failure")
+    finally:
+        sys.settrace(None)
+
+    assert fired
+    assert str(captured.value) == ""
+    assert captured.value.__context__ is None
+    assert not traceback_contains(captured.value, raw)
 
 
 @pytest.mark.parametrize(
@@ -185,6 +286,7 @@ def test_paths_identity_and_directory_creation_are_exact_and_redacted(tmp_path: 
     assert stat.S_IMODE(paths.docker_config.stat().st_mode) == 0o700
     assert paths.control_dir.parent == paths.contract.run_dir
     assert paths.control_dir != paths.contract.coturn_dir
+    assert paths.container_absence_receipt == paths.control_dir / "container-absence.json"
     identity = RuntimeIdentity.create(run_id="relay-test", owner_nonce=NONCE)
     assert identity.bridge_name == f"mtn{NONCE[:10]}"
     assert len(identity.bridge_name) <= 15
@@ -192,6 +294,13 @@ def test_paths_identity_and_directory_creation_are_exact_and_redacted(tmp_path: 
     assert NONCE not in repr(identity)
     with pytest.raises(CoturnHostError, match="identity is invalid"):
         RuntimeIdentity.create(run_id="UPPER", owner_nonce=NONCE)
+    text_subclass = type("TextSubclass", (str,), {})
+    with pytest.raises(CoturnHostError, match="identity is invalid"):
+        RuntimeIdentity.create(run_id=text_subclass("relay-test"), owner_nonce=NONCE)
+    with pytest.raises(CoturnHostError, match="identity is invalid"):
+        RuntimeIdentity.create(run_id="relay-test", owner_nonce=text_subclass(NONCE))
+    with pytest.raises(CoturnHostError, match="resource ID is invalid"):
+        require_full_resource_id(text_subclass("a" * 64))
     with pytest.raises(CoturnHostError, match="directory is unsafe"):
         prepare_runtime_directories(paths)
 
@@ -201,3 +310,6 @@ def test_host_route_value_rejects_noncanonical_interface_and_redacts() -> None:
     assert "172.28.44.0" not in repr(route)
     with pytest.raises(CoturnHostError, match="route is invalid"):
         HostIPv4Route(TOPOLOGY.network, "interface-name-is-too-long")
+    text_subclass = type("TextSubclass", (str,), {})
+    with pytest.raises(CoturnHostError, match="route is invalid"):
+        HostIPv4Route(TOPOLOGY.network, text_subclass("mtn0123456789"))

@@ -16,6 +16,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts import voice_pipecat_e2e_coturn_runtime as runtime_module  # noqa: E402
+from scripts import (  # noqa: E402
+    voice_pipecat_e2e_coturn_runtime_container_persistence as container_persistence_module,
+)
+from scripts import voice_pipecat_e2e_coturn_runtime_directory as directory_module  # noqa: E402
+from scripts import voice_pipecat_e2e_coturn_runtime_network as network_module  # noqa: E402
+from scripts import (  # noqa: E402
+    voice_pipecat_e2e_coturn_runtime_private_cleanup as private_cleanup_module,
+)
 from scripts.voice_pipecat_e2e_coturn_docker import validate_image_inspection  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn_docker_container import (  # noqa: E402
     ContainerPlan,
@@ -31,22 +40,33 @@ from scripts.voice_pipecat_e2e_coturn_docker_network import (  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn_host import (  # noqa: E402
     CommandRequest,
     CommandResult,
+    CoturnHostError,
     HostIPv4Route,
     RuntimeIdentity,
 )
 from scripts.voice_pipecat_e2e_coturn_runtime import (  # noqa: E402
     AttachedCoturnProcess,
+    ContainerAbsenceReceipt,
+    CoturnDirectorySyncCleanupRequired,
     CoturnRuntimeError,
+    CoturnRuntimePrivateCleanupRequired,
+    RuntimePrivateCleanupAuthority,
+    cleanup_directory_sync_authority,
     cleanup_owned_container,
     cleanup_owned_network,
+    cleanup_runtime_private_authority,
     create_owned_container,
     create_owned_network,
+    finalize_container_absence,
+    finalize_network_absence,
+    new_attached_coturn_process,
     pull_and_validate_image,
     read_private_cidfile,
     recover_container_cleanup_authority,
     recover_network_cleanup_authority,
     start_owned_container_attached,
 )
+from tests.coturn_traceback_helpers import traceback_contains  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_docker import image_inspection  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_docker_container import (  # noqa: E402
     CONTAINER_ID,
@@ -64,18 +84,63 @@ from tests.test_voice_pipecat_e2e_coturn_docker_network import (  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_host import _paths, _tools  # noqa: E402
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"argv": ["/bin/true"]},
+        {"argv": ("/bin/true",), "timeout_seconds": True},
+        {"argv": ("/bin/true",), "timeout_seconds": 1},
+        {"argv": ("/bin/true",), "timeout_seconds": float("inf")},
+        {"argv": ("/bin/true",), "maximum_output_bytes": True},
+        {"argv": ("/bin/true",), "maximum_output_bytes": 1.5},
+        {"argv": ("/bin/true",), "stdin": bytearray(b"x")},
+    ],
+)
+def test_command_request_rejects_cross_type_boundary_values(values: dict[str, object]) -> None:
+    with pytest.raises(CoturnHostError, match=r"^Coturn subprocess request is invalid$"):
+        CommandRequest(**values)  # type: ignore[arg-type]
+
+
+def _recovered_container(plan: ContainerPlan, inspection: object):
+    if not plan.paths.container_receipt.exists():
+        runtime_module._write_container_plan_receipt(plan)
+    if not plan.paths.cidfile.exists():
+        plan.paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
+        plan.paths.cidfile.chmod(0o600)
+    return recover_container_cleanup_authority(
+        runner=RuntimeRunner([_json_result(inspection)]),
+        tools=_tools(),
+        plan=plan,
+    )
+
+
+@dataclass
+class RawChunk:
+    stream: object
+    data: object
+
+
 @dataclass
 class FakeAttached:
-    result: CommandResult
+    chunks: list[object]
     state: int | None = None
-    collects: list[float] = field(default_factory=list)
+    drain_state: bool = False
+    reads: list[float] = field(default_factory=list)
+    terminations: int = 0
 
     def poll(self) -> int | None:
         return self.state
 
-    def collect(self, *, timeout_seconds: float) -> CommandResult:
-        self.collects.append(timeout_seconds)
-        return self.result
+    def read_chunk(self, *, timeout_seconds: float) -> object | None:
+        self.reads.append(timeout_seconds)
+        return self.chunks.pop(0) if self.chunks else None
+
+    @property
+    def drained(self) -> bool:
+        return self.drain_state and not self.chunks
+
+    def terminate(self) -> None:
+        self.terminations += 1
 
     def __repr__(self) -> str:
         return "FakeAttached()"
@@ -87,6 +152,8 @@ class RuntimeRunner:
     attached: object | None = None
     requests: list[CommandRequest] = field(default_factory=list)
     attached_requests: list[CommandRequest] = field(default_factory=list)
+    settle_result: object = True
+    settlements: int = 0
 
     def run(self, request: CommandRequest) -> CommandResult:
         self.requests.append(request)
@@ -106,6 +173,12 @@ class RuntimeRunner:
         if isinstance(self.attached, BaseException):
             raise self.attached
         return self.attached
+
+    def settle_owned(self) -> object:
+        self.settlements += 1
+        if isinstance(self.settle_result, BaseException):
+            raise self.settle_result
+        return self.settle_result
 
 
 @dataclass
@@ -228,6 +301,70 @@ def test_network_lifecycle_writes_receipt_before_full_validation_and_binds_host_
     assert name_runner.requests[0].argv[-1] == selected.identity.network_name
 
 
+def test_network_plan_directory_commit_precedes_create_and_id_commit_precedes_inspect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = make_network_plan(paths)
+    inspection = network_inspection(selected)
+    commits: list[Path] = []
+
+    def commit(path: Path) -> None:
+        commits.append(path)
+
+    class OrderedRunner(RuntimeRunner):
+        def run(self, request: CommandRequest) -> CommandResult:
+            operation = request.argv[5:7]
+            if operation == ("network", "create"):
+                assert commits == [paths.control_dir]
+            elif operation == ("network", "inspect"):
+                assert commits == [paths.control_dir, paths.control_dir]
+            return super().run(request)
+
+    monkeypatch.setattr(network_module, "_sync_control_directory", commit)
+    create_owned_network(
+        runner=OrderedRunner(
+            [
+                CommandResult(0, (NETWORK_ID + "\n").encode("ascii"), b""),
+                _json_result(inspection),
+            ]
+        ),
+        bridge_probe=FakeBridgeProbe(
+            (),
+            (HostIPv4Route(TOPOLOGY.network, selected.identity.bridge_name),),
+        ),
+        tools=_tools(),
+        plan=selected,
+    )
+
+    assert commits == [paths.control_dir, paths.control_dir]
+
+
+def test_bridge_probe_failure_is_scrubbed_before_any_resource_effect(tmp_path: Path) -> None:
+    raw = "raw-bridge-probe-sentinel"
+
+    class FailingBridgeProbe:
+        def ipv4_routes(self):
+            raise RuntimeError(raw)
+
+        def interface_ipv4(self, _interface: str):
+            raise AssertionError("bridge address must not be read")
+
+    runner = RuntimeRunner([])
+    with pytest.raises(CoturnRuntimeError) as captured:
+        create_owned_network(
+            runner=runner,
+            bridge_probe=FailingBridgeProbe(),  # type: ignore[arg-type]
+            tools=_tools(),
+            plan=make_network_plan(_paths(tmp_path)),
+        )
+
+    assert raw not in str(captured.value)
+    assert not traceback_contains(captured.value, raw)
+    assert runner.requests == []
+
+
 def test_failed_network_validation_with_unavailable_cleanup_is_fixed_and_retained(
     tmp_path: Path,
 ) -> None:
@@ -316,6 +453,376 @@ def test_uncertain_network_create_failure_recovers_by_exact_owned_name(tmp_path:
     assert not paths.network_plan_receipt.exists()
 
 
+def test_network_create_recovery_preserves_private_noncontrol_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = make_network_plan(paths)
+    private = object()
+    source = MemoryError("untrusted-private-authority-source")
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is source else None,
+    )
+    cleanup_authority = private_cleanup_module._runtime_private_cleanup_authority(source)
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+
+    def fail_recovery(**_kwargs: object) -> object:
+        raise CoturnRuntimePrivateCleanupRequired(cleanup_authority)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "recover_network_cleanup_authority",
+        fail_recovery,
+    )
+    with pytest.raises(CoturnRuntimePrivateCleanupRequired) as caught:
+        create_owned_network(
+            runner=RuntimeRunner([CommandResult(1, b"", b"untrusted-create-result")]),
+            bridge_probe=FakeBridgeProbe((), ()),
+            tools=_tools(),
+            plan=selected,
+        )
+    assert caught.value.cleanup_authority is cleanup_authority
+    assert not traceback_contains(caught.value, "untrusted-create-result")
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "cleanup_tls_private_authority",
+        lambda _candidate: None,
+    )
+    cleanup_runtime_private_authority(cleanup_authority)
+
+
+@pytest.mark.parametrize(
+    ("stage", "failure", "expected"),
+    [
+        (
+            "plan",
+            MemoryError("untrusted-private-plan-publication"),
+            CoturnRuntimePrivateCleanupRequired,
+        ),
+        (
+            "id",
+            KeyboardInterrupt("untrusted-private-id-publication"),
+            KeyboardInterrupt,
+        ),
+    ],
+)
+def test_network_create_preserves_first_private_publication_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    failure: BaseException,
+    expected: type[BaseException],
+) -> None:
+    paths = _paths(tmp_path)
+    selected = make_network_plan(paths)
+    private = object()
+    recovery_calls = 0
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is failure else None,
+    )
+
+    def fail_write(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    def forbid_recovery(*_args: object, **_kwargs: object) -> bool:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        raise AssertionError("private publication must settle before Docker recovery")
+
+    target = "_write_network_plan_receipt" if stage == "plan" else "_write_network_receipt"
+    monkeypatch.setattr(runtime_module, target, fail_write)
+    monkeypatch.setattr(runtime_module, "_attempt_network_recovery_cleanup", forbid_recovery)
+    runner = RuntimeRunner(
+        [] if stage == "plan" else [CommandResult(0, (NETWORK_ID + "\n").encode("ascii"), b"")]
+    )
+    with pytest.raises(expected) as caught:
+        create_owned_network(
+            runner=runner,
+            bridge_probe=FakeBridgeProbe((), ()),
+            tools=_tools(),
+            plan=selected,
+        )
+
+    cleanup_authority = caught.value.cleanup_authority  # type: ignore[attr-defined]
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+    assert recovery_calls == 0
+    assert len(runner.requests) == (0 if stage == "plan" else 1)
+    if type(failure) is KeyboardInterrupt:
+        assert str(caught.value) == ""
+    assert not traceback_contains(caught.value, *failure.args)
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "cleanup_tls_private_authority",
+        lambda _candidate: None,
+    )
+    cleanup_runtime_private_authority(cleanup_authority)
+
+
+def test_network_create_recovery_preserves_private_control_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = make_network_plan(paths)
+    private = object()
+    source = MemoryError("untrusted-private-control-source")
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is source else None,
+    )
+    cleanup_authority = private_cleanup_module._runtime_private_cleanup_authority(source)
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+
+    def interrupt_recovery(**_kwargs: object) -> object:
+        error = KeyboardInterrupt("untrusted-recovery-control")
+        error.cleanup_authority = cleanup_authority  # type: ignore[attr-defined]
+        raise error
+
+    monkeypatch.setattr(
+        runtime_module,
+        "recover_network_cleanup_authority",
+        interrupt_recovery,
+    )
+    with pytest.raises(KeyboardInterrupt) as caught:
+        create_owned_network(
+            runner=RuntimeRunner([CommandResult(1, b"", b"untrusted-create-result")]),
+            bridge_probe=FakeBridgeProbe((), ()),
+            tools=_tools(),
+            plan=selected,
+        )
+    assert str(caught.value) == ""
+    assert caught.value.cleanup_authority is cleanup_authority  # type: ignore[attr-defined]
+    assert not traceback_contains(
+        caught.value,
+        "untrusted-recovery-control",
+        "untrusted-create-result",
+    )
+
+
+def test_network_create_preserves_first_control_over_private_recovery_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = make_network_plan(paths)
+    private = object()
+    source = MemoryError("untrusted-private-first-control-source")
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is source else None,
+    )
+    cleanup_authority = private_cleanup_module._runtime_private_cleanup_authority(source)
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+
+    def fail_recovery(**_kwargs: object) -> object:
+        raise CoturnRuntimePrivateCleanupRequired(cleanup_authority)
+
+    monkeypatch.setattr(
+        runtime_module,
+        "recover_network_cleanup_authority",
+        fail_recovery,
+    )
+    with pytest.raises(KeyboardInterrupt) as caught:
+        create_owned_network(
+            runner=RuntimeRunner([KeyboardInterrupt("untrusted-first-control")]),
+            bridge_probe=FakeBridgeProbe((), ()),
+            tools=_tools(),
+            plan=selected,
+        )
+    assert str(caught.value) == ""
+    assert caught.value.cleanup_authority is cleanup_authority  # type: ignore[attr-defined]
+    assert not traceback_contains(caught.value, "untrusted-first-control")
+
+
+def test_runtime_control_authority_accepts_only_exact_network_private_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = object()
+    source = MemoryError("untrusted-private-control-extractor")
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is source else None,
+    )
+    cleanup_authority = private_cleanup_module._runtime_private_cleanup_authority(source)
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+    control = KeyboardInterrupt()
+    control.cleanup_authority = cleanup_authority  # type: ignore[attr-defined]
+    assert runtime_module._runtime_control_authority(control) is cleanup_authority
+    control.cleanup_authority = object()  # type: ignore[attr-defined]
+    assert runtime_module._runtime_control_authority(control) is None
+
+
+@pytest.mark.parametrize(
+    ("stage", "failure", "expected"),
+    [
+        (
+            "plan-write",
+            MemoryError("untrusted-container-plan-private"),
+            CoturnRuntimePrivateCleanupRequired,
+        ),
+        (
+            "cid-read",
+            KeyboardInterrupt("untrusted-container-cid-private"),
+            KeyboardInterrupt,
+        ),
+        ("recovery-read", SystemExit(23), SystemExit),
+    ],
+)
+def test_container_persistence_preserves_runtime_private_authority_and_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    failure: BaseException,
+    expected: type[BaseException],
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    private = object()
+    cleanup_calls: list[object] = []
+    failure.private_sentinel = "untrusted-container-private-attribute"  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "tls_private_cleanup_authority",
+        lambda error: private if error is failure else None,
+    )
+
+    def fail(*_args: object, **_kwargs: object) -> None:
+        raise failure
+
+    if stage == "plan-write":
+        monkeypatch.setattr(container_persistence_module, "write_owned_file_exclusive", fail)
+        runner = RuntimeRunner([])
+
+        def operation() -> object:
+            return create_owned_container(runner=runner, tools=_tools(), plan=selected)
+
+        expected_requests = 0
+    elif stage == "cid-read":
+        monkeypatch.setattr(container_persistence_module, "read_owned_file", fail)
+        runner = RuntimeRunner(["container-create"])
+
+        def operation() -> object:
+            return create_owned_container(runner=runner, tools=_tools(), plan=selected)
+
+        expected_requests = 1
+    else:
+        runtime_module._write_container_plan_receipt(selected)
+        paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
+        paths.cidfile.chmod(0o600)
+        monkeypatch.setattr(container_persistence_module, "read_owned_file", fail)
+        runner = RuntimeRunner([])
+
+        def operation() -> object:
+            return recover_container_cleanup_authority(
+                runner=runner,
+                tools=_tools(),
+                plan=selected,
+            )
+
+        expected_requests = 0
+
+    with pytest.raises(expected) as caught:
+        operation()
+    cleanup_authority = caught.value.cleanup_authority  # type: ignore[attr-defined]
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+    assert len(runner.requests) == expected_requests
+    if type(failure) is SystemExit:
+        assert caught.value.code == 23
+    elif type(failure) is KeyboardInterrupt:
+        assert str(caught.value) == ""
+    raw_arguments = tuple(value for value in failure.args if type(value) in {str, bytes})
+    assert not traceback_contains(
+        caught.value,
+        *raw_arguments,
+        "untrusted-container-private-attribute",
+    )
+
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "cleanup_tls_private_authority",
+        lambda candidate: cleanup_calls.append(candidate),
+    )
+    cleanup_runtime_private_authority(cleanup_authority)
+    cleanup_runtime_private_authority(cleanup_authority)
+    assert cleanup_calls == [private]
+
+
+def test_runtime_private_extractor_control_is_wrapped_without_base_authority_escape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = MemoryError("untrusted-container-extractor-source")
+    private = object()
+    calls = 0
+
+    def extract(_error: BaseException) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise SystemExit(23)
+        return private
+
+    monkeypatch.setattr(private_cleanup_module, "tls_private_cleanup_authority", extract)
+    with pytest.raises(SystemExit) as caught:
+        private_cleanup_module._runtime_private_cleanup_authority(source)
+    cleanup_authority = caught.value.cleanup_authority  # type: ignore[attr-defined]
+    assert caught.value.code == 23
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+    assert cleanup_authority is not private
+    assert not traceback_contains(caught.value, *source.args)
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "cleanup_tls_private_authority",
+        lambda _candidate: None,
+    )
+    cleanup_runtime_private_authority(cleanup_authority)
+
+
+def test_container_create_preserves_first_control_over_extractor_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    first = KeyboardInterrupt("untrusted-container-first-control")
+    private = object()
+    extraction_calls = 0
+
+    def extract(_error: BaseException) -> object:
+        nonlocal extraction_calls
+        extraction_calls += 1
+        if extraction_calls == 1:
+            raise SystemExit(29)
+        return private
+
+    monkeypatch.setattr(private_cleanup_module, "tls_private_cleanup_authority", extract)
+    monkeypatch.setattr(
+        container_persistence_module,
+        "write_owned_file_exclusive",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(first),
+    )
+    with pytest.raises(KeyboardInterrupt) as caught:
+        create_owned_container(runner=RuntimeRunner([]), tools=_tools(), plan=selected)
+    cleanup_authority = caught.value.cleanup_authority  # type: ignore[attr-defined]
+    assert str(caught.value) == ""
+    assert type(cleanup_authority) is RuntimePrivateCleanupAuthority
+    assert extraction_calls == 2
+    assert not traceback_contains(caught.value, *first.args)
+    monkeypatch.setattr(
+        private_cleanup_module,
+        "cleanup_tls_private_authority",
+        lambda _candidate: None,
+    )
+    cleanup_runtime_private_authority(cleanup_authority)
+
+
 def test_container_two_phase_stdout_cidfile_inspect_and_start_attached_are_bounded(
     tmp_path: Path,
 ) -> None:
@@ -335,16 +842,18 @@ def test_container_two_phase_stdout_cidfile_inspect_and_start_attached_are_bound
     assert owned.validated.authority is owned.authority
 
     raw = b"allocation line with ephemeral credentials"
-    attached = FakeAttached(CommandResult(0, raw, b""))
+    attached = FakeAttached([RawChunk("stdout", raw)])
     start_runner = RuntimeRunner([], attached=attached)
-    handle = start_owned_container_attached(
+    handle = new_attached_coturn_process(owned.validated)
+    start_owned_container_attached(
         runner=start_runner,
         tools=_tools(),
         container=owned.validated,
+        process=handle,
     )
     assert isinstance(handle, AttachedCoturnProcess)
-    assert handle.poll() is None
-    assert handle.collect(timeout_seconds=1.0).stdout == raw
+    assert handle.read_chunk(timeout_seconds=1.0) == raw
+    assert not hasattr(handle, "collect")
     assert raw.decode() not in repr(handle)
     assert start_runner.requests == []
     assert start_runner.attached_requests[0].argv[-5:] == (
@@ -359,6 +868,134 @@ def test_container_two_phase_stdout_cidfile_inspect_and_start_attached_are_bound
         for path in paths.contract.coturn_dir.iterdir()
         if path.is_file()
     )
+
+
+def test_container_plan_directory_commit_precedes_create_and_cid_commit_precedes_inspect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    inspection = container_inspection(selected)
+    commits: list[Path] = []
+
+    def commit(path: Path) -> None:
+        commits.append(path)
+
+    class OrderedRunner(RuntimeRunner):
+        def run(self, request: CommandRequest) -> CommandResult:
+            operation = request.argv[5:7]
+            if operation == ("container", "create"):
+                assert commits == [paths.control_dir]
+            elif operation == ("container", "inspect"):
+                assert commits == [paths.control_dir, paths.control_dir]
+            return super().run(request)
+
+    monkeypatch.setattr(container_persistence_module, "sync_owned_directory", commit)
+    monkeypatch.setattr(runtime_module, "sync_owned_directory", commit)
+    create_owned_container(
+        runner=OrderedRunner(["container-create", _json_result(inspection)]),
+        tools=_tools(),
+        plan=selected,
+    )
+
+    assert commits == [paths.control_dir, paths.control_dir]
+
+
+@pytest.mark.parametrize(
+    ("cut", "expected"),
+    [
+        (KeyboardInterrupt("raw-container-preflight-path-sentinel"), KeyboardInterrupt),
+        (SystemExit(23), SystemExit),
+        (MemoryError("raw-container-preflight-path-sentinel"), CoturnRuntimeError),
+    ],
+)
+def test_container_preflight_sanitizes_path_controls_before_runner_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cut: BaseException,
+    expected: type[BaseException],
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    runner = RuntimeRunner([])
+    real_exists = Path.exists
+    fired = False
+
+    def fail_once(path: Path) -> bool:
+        nonlocal fired
+        if path == paths.cidfile and not fired:
+            fired = True
+            raise cut
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fail_once)
+    with pytest.raises(expected) as captured:
+        create_owned_container(runner=runner, tools=_tools(), plan=selected)
+
+    assert fired
+    assert runner.requests == []
+    assert not traceback_contains(captured.value, "raw-container-preflight-path-sentinel")
+    if expected is KeyboardInterrupt:
+        assert str(captured.value) == ""
+    elif expected is SystemExit:
+        assert captured.value.code == 23  # type: ignore[attr-defined]
+    else:
+        assert str(captured.value) == "Coturn container plan is invalid"
+
+
+def test_container_preflight_rejects_invalid_plan_without_raw_attribute_error() -> None:
+    runner = RuntimeRunner([])
+    with pytest.raises(
+        CoturnRuntimeError,
+        match=r"^Coturn container plan is invalid$",
+    ) as captured:
+        create_owned_container(
+            runner=runner,
+            tools=_tools(),
+            plan=object(),  # type: ignore[arg-type]
+        )
+
+    assert captured.value.__context__ is None
+    assert runner.requests == []
+
+
+@pytest.mark.parametrize("resource", ["network", "container"])
+def test_plan_directory_cleanup_authority_is_preserved_before_docker_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resource: str,
+) -> None:
+    paths = _paths(tmp_path)
+    runner = RuntimeRunner([])
+    real_close = directory_module.close_owned_descriptor
+    monkeypatch.setattr(
+        directory_module,
+        "close_owned_descriptor",
+        lambda _descriptor, _identity, _control: False,
+    )
+
+    with pytest.raises(CoturnDirectorySyncCleanupRequired) as captured:
+        if resource == "network":
+            selected = make_network_plan(paths)
+            create_owned_network(
+                runner=runner,
+                bridge_probe=FakeBridgeProbe((), ()),
+                tools=_tools(),
+                plan=selected,
+            )
+        else:
+            create_owned_container(
+                runner=runner,
+                tools=_tools(),
+                plan=_container_plan(paths),
+            )
+
+    assert runner.requests == []
+    authority = captured.value.cleanup_authority
+    assert repr(authority) == "DirectorySyncCleanupAuthority()"
+    monkeypatch.setattr(directory_module, "close_owned_descriptor", real_close)
+    cleanup_directory_sync_authority(authority)
 
 
 def test_container_receipt_mismatch_refuses_inspect_and_preserves_cidfile(tmp_path: Path) -> None:
@@ -479,6 +1116,102 @@ def test_container_recovery_uses_exact_plan_receipt_then_cid_or_owned_name(tmp_p
             )
 
 
+def test_container_restart_reconciles_post_remove_pre_marker_from_exact_id(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    runtime_module._write_container_plan_receipt(selected)
+    paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
+    paths.cidfile.chmod(0o600)
+    runner = RuntimeRunner(
+        [
+            CommandResult(1, b"", b"untrusted-already-removed"),
+            CommandResult(0, b"", b""),
+        ]
+    )
+    absence = recover_container_cleanup_authority(
+        runner=runner,
+        tools=_tools(),
+        plan=selected,
+    )
+    assert type(absence) is ContainerAbsenceReceipt
+    assert [request.argv[5:7] for request in runner.requests] == [
+        ("container", "inspect"),
+        ("container", "ls"),
+    ]
+    assert runner.requests[-1].argv[-1] == f"id={CONTAINER_ID}"
+    assert paths.container_absence_receipt.exists()
+    assert stat.S_IMODE(paths.container_absence_receipt.stat().st_mode) == 0o600
+    marker = json.loads(paths.container_absence_receipt.read_text(encoding="ascii"))
+    assert marker["full_id"] == CONTAINER_ID
+    assert marker["run_dir_fingerprint"] == (selected.network.authority.plan.run_dir_fingerprint)
+    assert os.fspath(paths.contract.run_dir) not in paths.container_absence_receipt.read_text(
+        encoding="ascii"
+    )
+    blocked = RuntimeRunner([])
+    with pytest.raises(CoturnRuntimeError, match=r"container receipt already exists"):
+        create_owned_container(runner=blocked, tools=_tools(), plan=selected)
+    assert blocked.requests == []
+
+    restart = RuntimeRunner([CommandResult(0, b"", b"")])
+    recovered = recover_container_cleanup_authority(
+        runner=restart,
+        tools=_tools(),
+        plan=selected,
+    )
+    assert type(recovered) is ContainerAbsenceReceipt
+    assert [request.argv[5:7] for request in restart.requests] == [("container", "ls")]
+    finalize_container_absence(recovered)
+    assert recovered.finalization_complete
+    assert not paths.cidfile.exists()
+    assert not paths.container_receipt.exists()
+    assert not paths.container_absence_receipt.exists()
+
+
+def test_container_recovery_never_infers_absence_from_name_only(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    runtime_module._write_container_plan_receipt(selected)
+    runner = RuntimeRunner([CommandResult(1, b"", b"untrusted-name-missing")])
+    with pytest.raises(
+        CoturnRuntimeError,
+        match=r"^Coturn container recovery inspection failed$",
+    ) as caught:
+        recover_container_cleanup_authority(
+            runner=runner,
+            tools=_tools(),
+            plan=selected,
+        )
+    assert [request.argv[5:7] for request in runner.requests] == [("container", "inspect")]
+    assert runner.requests[0].argv[-1] == selected.identity.container_name
+    assert not paths.container_absence_receipt.exists()
+    assert not traceback_contains(caught.value, "untrusted-name-missing")
+
+
+def test_container_absence_recovery_rechecks_private_id_before_exact_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    selected = _container_plan(paths)
+    runtime_module._write_container_plan_receipt(selected)
+    paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
+    paths.cidfile.chmod(0o600)
+    identifiers = iter((CONTAINER_ID, "4" * 64))
+    monkeypatch.setattr(runtime_module, "read_private_cidfile", lambda _paths: next(identifiers))
+    runner = RuntimeRunner([CommandResult(1, b"", b"untrusted-inspect-missing")])
+    with pytest.raises(CoturnRuntimeError, match=r"^Coturn cidfile is invalid$") as caught:
+        recover_container_cleanup_authority(
+            runner=runner,
+            tools=_tools(),
+            plan=selected,
+        )
+    assert [request.argv[5:7] for request in runner.requests] == [("container", "inspect")]
+    assert not paths.container_absence_receipt.exists()
+    assert not traceback_contains(caught.value, "untrusted-inspect-missing")
+
+
 def test_recovery_refuses_symlinked_optional_id_receipts_before_inspection(
     tmp_path: Path,
 ) -> None:
@@ -536,13 +1269,7 @@ def test_cleanup_order_reinspects_stops_then_removes_container_before_network(
     paths = _paths(tmp_path)
     selected = _container_plan(paths)
     created = container_inspection(selected)
-    authority = establish_container_cleanup_authority(
-        plan=selected,
-        container_id=CONTAINER_ID,
-        inspection=created,
-    )
-    paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
-    paths.cidfile.chmod(0o600)
+    authority = _recovered_container(selected, created)
     running = container_inspection(selected, running=True)
     runner = RuntimeRunner(
         [
@@ -553,11 +1280,12 @@ def test_cleanup_order_reinspects_stops_then_removes_container_before_network(
             CommandResult(0, b"", b""),
         ]
     )
-    cleanup_owned_container(
+    container_absence = cleanup_owned_container(
         runner=runner,
         tools=_tools(),
         authority=authority,
     )
+    finalize_container_absence(container_absence)
     operations = [request.argv[5:7] for request in runner.requests]
     assert operations == [
         ("container", "inspect"),
@@ -597,11 +1325,12 @@ def test_cleanup_order_reinspects_stops_then_removes_container_before_network(
             CommandResult(0, b"", b""),
         ]
     )
-    cleanup_owned_network(
+    network_absence = cleanup_owned_network(
         runner=network_runner,
         tools=_tools(),
         authority=network_authority,
     )
+    finalize_network_absence(network_absence)
     assert [request.argv[5:7] for request in network_runner.requests] == [
         ("network", "inspect"),
         ("network", "rm"),
@@ -654,20 +1383,11 @@ def test_container_cross_root_recovery_and_cleanup_authority_are_path_domain_bou
     )
     assert os.fsencode(second.contract.run_dir) not in second_receipt
 
-    authority = establish_container_cleanup_authority(
-        plan=selected,
-        container_id=CONTAINER_ID,
-        inspection=inspection,
-    )
-    for path, value in (
-        (first.cidfile, CONTAINER_ID + "\n"),
-        (first.container_receipt, "first receipt\n"),
-        (second.cidfile, "second cid\n"),
-    ):
-        path.write_text(value, encoding="ascii")
-        path.chmod(0o600)
+    authority = _recovered_container(selected, inspection)
+    second.cidfile.write_text("second cid\n", encoding="ascii")
+    second.cidfile.chmod(0o600)
 
-    cleanup_owned_container(
+    container_absence = cleanup_owned_container(
         runner=RuntimeRunner(
             [
                 _json_result(inspection),
@@ -678,6 +1398,7 @@ def test_container_cross_root_recovery_and_cleanup_authority_are_path_domain_bou
         tools=_tools(),
         authority=authority,
     )
+    finalize_container_absence(container_absence)
     assert not first.cidfile.exists()
     assert not first.container_receipt.exists()
     assert second.cidfile.read_text(encoding="ascii") == "second cid\n"
@@ -741,7 +1462,7 @@ def test_network_cross_root_recovery_and_cleanup_authority_are_path_domain_bound
         path.write_text(value, encoding="ascii")
         path.chmod(0o600)
 
-    cleanup_owned_network(
+    absence = cleanup_owned_network(
         runner=RuntimeRunner(
             [
                 _json_result(inspection),
@@ -752,6 +1473,7 @@ def test_network_cross_root_recovery_and_cleanup_authority_are_path_domain_bound
         tools=_tools(),
         authority=authority,
     )
+    finalize_network_absence(absence)
     assert not first.network_receipt.exists()
     assert not first.network_plan_receipt.exists()
     assert second.network_receipt.read_text(encoding="ascii") == "second receipt\n"
@@ -764,15 +1486,7 @@ def test_container_cleanup_preserves_receipts_when_exact_id_still_exists(
     paths = _paths(tmp_path)
     selected = _container_plan(paths)
     inspection = container_inspection(selected)
-    authority = establish_container_cleanup_authority(
-        plan=selected,
-        container_id=CONTAINER_ID,
-        inspection=inspection,
-    )
-    paths.cidfile.write_text(CONTAINER_ID + "\n", encoding="ascii")
-    paths.cidfile.chmod(0o600)
-    paths.container_receipt.write_text("private recovery receipt\n", encoding="ascii")
-    paths.container_receipt.chmod(0o600)
+    authority = _recovered_container(selected, inspection)
     runner = RuntimeRunner(
         [
             _json_result(inspection),
@@ -782,7 +1496,7 @@ def test_container_cleanup_preserves_receipts_when_exact_id_still_exists(
     )
     with pytest.raises(
         CoturnRuntimeError,
-        match=r"^Coturn container removal was not confirmed$",
+        match=r"^Coturn recovered container cleanup failed$",
     ):
         cleanup_owned_container(
             runner=runner,
@@ -817,7 +1531,7 @@ def test_network_cleanup_preserves_receipts_when_absence_query_fails(
             CommandResult(1, b"", raw),
         ]
     )
-    with pytest.raises(RuntimeError, match=r"^Coturn network absence check failed$") as captured:
+    with pytest.raises(CoturnRuntimeError, match=r"^Coturn network cleanup failed$") as captured:
         cleanup_owned_network(
             runner=runner,
             tools=_tools(),
@@ -836,7 +1550,7 @@ def test_create_preserves_system_exceptions_when_best_effort_recovery_fails(
     network_root.mkdir()
     network_paths = _paths(network_root)
     network_plan = make_network_plan(network_paths)
-    with pytest.raises(KeyboardInterrupt, match="network interrupt"):
+    with pytest.raises(KeyboardInterrupt) as network_error:
         create_owned_network(
             runner=RuntimeRunner(
                 [
@@ -848,6 +1562,8 @@ def test_create_preserves_system_exceptions_when_best_effort_recovery_fails(
             tools=_tools(),
             plan=network_plan,
         )
+    assert str(network_error.value) == ""
+    assert not traceback_contains(network_error.value, "network interrupt")
     assert network_paths.network_plan_receipt.exists()
 
     container_root = tmp_path / "container"
@@ -877,9 +1593,9 @@ def test_cleanup_refuses_ownership_or_attachment_tamper_before_destructive_comma
     tampered = copy.deepcopy(original)
     tampered[0]["Config"]["Labels"] = {"foreign": "true"}  # type: ignore[index]
     runner = RuntimeRunner([_json_result(tampered)])
-    with pytest.raises(RuntimeError, match="ownership is invalid"):
+    with pytest.raises(CoturnRuntimeError, match="recovered container cleanup failed"):
         cleanup_owned_container(runner=runner, tools=_tools(), authority=authority)
-    assert len(runner.requests) == 1
+    assert runner.requests == []
 
     network_selected = make_network_plan(paths)
     network_authority = establish_network_cleanup_authority(
@@ -892,7 +1608,7 @@ def test_cleanup_refuses_ownership_or_attachment_tamper_before_destructive_comma
         containers={"9" * 64: {"Name": "foreign"}},
     )
     network_runner = RuntimeRunner([_json_result(attached)])
-    with pytest.raises(RuntimeError, match="unknown attachments"):
+    with pytest.raises(CoturnRuntimeError, match="network cleanup failed"):
         cleanup_owned_network(
             runner=network_runner,
             tools=_tools(),
@@ -911,11 +1627,13 @@ def test_attached_failures_and_receipt_tamper_are_fixed_and_secret_free(tmp_path
         inspection=inspection,
     )
     validated = validate_container_for_start(authority, inspection)
+    process = new_attached_coturn_process(validated)
     with pytest.raises(CoturnRuntimeError, match=r"^Coturn attached start failed$") as captured:
         start_owned_container_attached(
             runner=RuntimeRunner([], attached=RuntimeError("raw-secret")),
             tools=_tools(),
             container=validated,
+            process=process,
         )
     assert "raw-secret" not in str(captured.value)
 

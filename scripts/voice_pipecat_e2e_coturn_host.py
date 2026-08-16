@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import ipaddress
+import math
 import os
 import re
 import socket
@@ -49,14 +50,24 @@ class CommandRequest:
 
     def __post_init__(self) -> None:
         if (
-            not self.argv
-            or not all(
-                isinstance(value, str) and value and "\x00" not in value for value in self.argv
-            )
+            type(self.argv) is not tuple
+            or not self.argv
+            or not all(type(value) is str and value and "\x00" not in value for value in self.argv)
+            or type(self.environment) is not tuple
             or self.environment != _RUNTIME_ENVIRONMENT
-            or not isinstance(self.stdin, bytes)
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or any(type(value) is not str for value in item)
+                for item in self.environment
+            )
+            or type(self.stdin) is not bytes
+            or type(self.timeout_seconds) is not float
+            or not math.isfinite(self.timeout_seconds)
             or not 0.1 <= self.timeout_seconds <= 60.0
+            or type(self.maximum_output_bytes) is not int
             or not 1 <= self.maximum_output_bytes <= _MAX_COMMAND_OUTPUT
+            or type(self.umask) is not int
             or self.umask != 0o077
         ):
             raise CoturnHostError("Coturn subprocess request is invalid")
@@ -72,13 +83,19 @@ class CommandResult:
 
     def __post_init__(self) -> None:
         if (
-            isinstance(self.returncode, bool)
-            or not isinstance(self.returncode, int)
-            or not isinstance(self.stdout, bytes)
-            or not isinstance(self.stderr, bytes)
+            type(self.returncode) is not int
+            or type(self.stdout) is not bytes
+            or type(self.stderr) is not bytes
             or len(self.stdout) + len(self.stderr) > _MAX_COMMAND_OUTPUT
         ):
             raise CoturnHostError("Coturn subprocess result is invalid")
+
+
+class AttachedCommandChunk(Protocol):
+    """Structural bounded stream value validated again by the runtime."""
+
+    stream: str
+    data: bytes
 
 
 class AttachedCommand(Protocol):
@@ -86,7 +103,12 @@ class AttachedCommand(Protocol):
 
     def poll(self) -> int | None: ...
 
-    def collect(self, *, timeout_seconds: float) -> CommandResult: ...
+    def read_chunk(self, *, timeout_seconds: float) -> AttachedCommandChunk | None: ...
+
+    @property
+    def drained(self) -> bool: ...
+
+    def terminate(self) -> None: ...
 
 
 class CommandRunner(Protocol):
@@ -96,6 +118,8 @@ class CommandRunner(Protocol):
 
     def start_attached(self, request: CommandRequest) -> AttachedCommand: ...
 
+    def settle_owned(self) -> bool: ...
+
 
 def execute_checked(
     runner: CommandRunner,
@@ -103,20 +127,52 @@ def execute_checked(
     *,
     failure: str,
 ) -> CommandResult:
-    if not isinstance(failure, str) or not failure or len(failure) > 128:
+    if type(failure) is not str or not failure or len(failure) > 128:
+        runner = request = None  # type: ignore[assignment]
+        failure = ""
         raise CoturnHostError("Coturn command failure classification is invalid")
+    if type(request) is not CommandRequest:
+        runner = request = None  # type: ignore[assignment]
+        failure = ""
+        raise CoturnHostError("Coturn subprocess request is invalid")
+    result: CommandResult | None = None
+    control: type[KeyboardInterrupt] | type[SystemExit] | None = None
+    exit_code: int | None = None
     try:
-        result = runner.run(request)
-    except BaseException as exc:
-        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-            raise
-        raise CoturnHostError(failure) from None
+        result = _execute_checked_result(runner, request)
+        runner = request = None  # type: ignore[assignment]
+        return result
+    except KeyboardInterrupt:
+        result = None
+        control = KeyboardInterrupt
+    except SystemExit as error:
+        result = None
+        control = SystemExit
+        exit_code = error.code if error.code is None or type(error.code) is int else 1
+    except BaseException:
+        result = None
+    runner = request = None  # type: ignore[assignment]
+    message = failure
+    failure = ""
+    if control is KeyboardInterrupt:
+        raise KeyboardInterrupt() from None
+    if control is SystemExit:
+        raise SystemExit(exit_code) from None
+    raise CoturnHostError(message) from None
+
+
+def _execute_checked_result(
+    runner: CommandRunner,
+    request: CommandRequest,
+) -> CommandResult:
+    result = runner.run(request)
     if (
-        not isinstance(result, CommandResult)
+        type(result) is not CommandResult
         or result.returncode != 0
         or len(result.stdout) + len(result.stderr) > request.maximum_output_bytes
     ):
-        raise CoturnHostError(failure)
+        result = runner = request = None  # type: ignore[assignment]
+        raise CoturnHostError("Coturn command result is invalid")
     return result
 
 
@@ -253,8 +309,10 @@ class CoturnRuntimePaths:
     contract: CoturnContractPaths = field(repr=False)
     control_dir: Path = field(repr=False)
     cidfile: Path = field(repr=False)
+    container_absence_receipt: Path = field(repr=False)
     container_receipt: Path = field(repr=False)
     docker_config: Path = field(repr=False)
+    network_absence_receipt: Path = field(repr=False)
     network_plan_receipt: Path = field(repr=False)
     network_receipt: Path = field(repr=False)
 
@@ -263,8 +321,10 @@ class CoturnRuntimePaths:
         expected = {
             "control_dir": directory,
             "cidfile": directory / "container.cid",
+            "container_absence_receipt": directory / "container-absence.json",
             "container_receipt": directory / "container-plan.json",
             "docker_config": directory / "docker-config",
+            "network_absence_receipt": directory / "network-absence.json",
             "network_plan_receipt": directory / "network-plan.json",
             "network_receipt": directory / "network-recovery.json",
         }
@@ -280,8 +340,10 @@ class CoturnRuntimePaths:
             contract=contract,
             control_dir=directory,
             cidfile=directory / "container.cid",
+            container_absence_receipt=directory / "container-absence.json",
             container_receipt=directory / "container-plan.json",
             docker_config=directory / "docker-config",
+            network_absence_receipt=directory / "network-absence.json",
             network_plan_receipt=directory / "network-plan.json",
             network_receipt=directory / "network-recovery.json",
         )
@@ -318,9 +380,9 @@ class RuntimeIdentity:
     @classmethod
     def create(cls, *, run_id: object, owner_nonce: object) -> RuntimeIdentity:
         if (
-            not isinstance(run_id, str)
+            type(run_id) is not str
             or not _SAFE_NAME_PATTERN.fullmatch(run_id)
-            or not isinstance(owner_nonce, str)
+            or type(owner_nonce) is not str
             or not _NONCE_PATTERN.fullmatch(owner_nonce)
         ):
             raise CoturnHostError("Coturn runtime identity is invalid")
@@ -353,8 +415,8 @@ class HostIPv4Route:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.network, ipaddress.IPv4Network)
-            or not isinstance(self.interface, str)
+            type(self.network) is not ipaddress.IPv4Network
+            or type(self.interface) is not str
             or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", self.interface)
         ):
             raise CoturnHostError("Host IPv4 route is invalid")
@@ -432,7 +494,7 @@ def require_safe_path(path: Path) -> None:
 
 
 def require_full_resource_id(value: object) -> str:
-    if not isinstance(value, str) or not _ID_PATTERN.fullmatch(value):
+    if type(value) is not str or not _ID_PATTERN.fullmatch(value):
         raise CoturnHostError("Docker resource ID is invalid")
     return value
 
@@ -443,6 +505,7 @@ __all__ = [
     "DOCKER_SOCKET",
     "OPENSSL_EXECUTABLE",
     "AttachedCommand",
+    "AttachedCommandChunk",
     "BridgeHostProbe",
     "CommandRequest",
     "CommandResult",
