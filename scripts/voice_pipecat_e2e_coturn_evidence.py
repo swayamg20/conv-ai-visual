@@ -11,11 +11,21 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Iterable, NoReturn
 
+from scripts import voice_pipecat_e2e_coturn_evidence_result as result_owner
+from scripts.voice_pipecat_e2e_coturn_evidence_result import (
+    CoturnEvidenceError,
+    CoturnProbeResultSlot,
+    CoturnProbeSummary,
+    _control_signal,
+    _make_probe,
+    _raise_control,
+    coturn_probe_summary_from_slot,
+    new_coturn_probe_result_slot,
+)
 from scripts.voice_pipecat_e2e_coturn_evidence_state import (
     CoturnEvidenceState,
     CoturnEvidenceStateError,
     CoturnStateEvidence,
-    CoturnStateProbe,
 )
 from scripts.voice_pipecat_e2e_coturn_log_grammar import (
     COTURN_MAX_RECORD_BYTES,
@@ -30,12 +40,7 @@ _MAX_RECORDS = 8192
 _FACTORY_TOKEN = object()
 _PROBE_TOKEN = object()
 
-
-class CoturnEvidenceError(RuntimeError):
-    """The attached Coturn stream cannot support qualification evidence."""
-
-    def __repr__(self) -> str:
-        return "CoturnEvidenceError()"
+_ControlSignal = tuple[type[KeyboardInterrupt] | type[SystemExit], int | None]
 
 
 class _ParseFailure(Exception):
@@ -75,33 +80,19 @@ class CoturnEvidence:
         return "CoturnEvidence()"
 
 
-@dataclass(frozen=True)
-class CoturnProbeSummary:
-    """Sanitized discovery output that can never represent qualification."""
-
-    grammar_verified: bool = field(repr=False)
-    allocation_count: int = field(repr=False)
-    observed_categories: frozenset[CoturnLogCategory] = field(repr=False)
-    unknown_info_records: int = field(repr=False)
-    grammar_violation_records: int = field(repr=False)
-    total_records: int = field(repr=False)
-    _token: object = field(repr=False, compare=False, default=None)
-
-    def __post_init__(self) -> None:
-        if self._token is not _FACTORY_TOKEN or self.grammar_verified is not False:
-            raise TypeError("Coturn probe summary is factory-owned")
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __repr__(self) -> str:
-        return "CoturnProbeSummary(grammar_verified=False)"
-
-
 class CoturnEvidenceParser:
     """Consume attached output incrementally while retaining one bounded record."""
 
-    __slots__ = ("_failed", "_finished", "_line", "_probe_only", "_record_count", "_state")
+    __slots__ = (
+        "_failed",
+        "_finish_owner",
+        "_finished",
+        "_line",
+        "_probe_only",
+        "_probe_result_slot",
+        "_record_count",
+        "_state",
+    )
 
     def __init__(
         self,
@@ -110,15 +101,24 @@ class CoturnEvidenceParser:
         expected_topology: object,
         expected_realm: object = COTURN_REALM,
         _mode: object = None,
+        _result_slot: object = None,
     ) -> None:
         self._line = bytearray()
         self._record_count = 0
         self._probe_only = _mode is _PROBE_TOKEN
+        self._probe_result_slot: CoturnProbeResultSlot | None = None
+        self._finish_owner = object()
         self._finished = False
         self._failed = False
         self._state: CoturnEvidenceState | None = None
         failure: str | None = None
         try:
+            if _result_slot is not None:
+                if not self._probe_only or type(_result_slot) is not CoturnProbeResultSlot:
+                    raise CoturnEvidenceStateError("Coturn probe result slot is invalid")
+                self._probe_result_slot = _result_slot
+                if not _result_slot._claim(self._finish_owner):
+                    raise CoturnEvidenceStateError("Coturn probe result slot is invalid")
             self._state = CoturnEvidenceState(
                 expected_username=expected_username,
                 expected_topology=expected_topology,
@@ -134,11 +134,13 @@ class CoturnEvidenceParser:
             expected_username = None
             expected_topology = None
             expected_realm = None
+            _result_slot = None
             _scrub_control_flow_exception(error)
             raise
         expected_username = None
         expected_topology = None
         expected_realm = None
+        _result_slot = None
         if failure is not None:
             self._terminalize(failed=True)
             _raise_public(failure)
@@ -150,6 +152,7 @@ class CoturnEvidenceParser:
         expected_username: object,
         expected_topology: object,
         expected_realm: object = COTURN_REALM,
+        result_slot: object = None,
     ) -> CoturnEvidenceParser:
         parser: CoturnEvidenceParser | None = None
         failure: str | None = None
@@ -159,6 +162,7 @@ class CoturnEvidenceParser:
                 expected_topology=expected_topology,
                 expected_realm=expected_realm,
                 _mode=_PROBE_TOKEN,
+                _result_slot=result_slot,
             )
         except CoturnEvidenceError as error:
             failure = str(error)
@@ -170,11 +174,13 @@ class CoturnEvidenceParser:
             expected_username = None
             expected_topology = None
             expected_realm = None
+            result_slot = None
             _scrub_control_flow_exception(error)
             raise
         expected_username = None
         expected_topology = None
         expected_realm = None
+        result_slot = None
         if failure is not None:
             _raise_public(failure)
         assert parser is not None
@@ -256,6 +262,139 @@ class CoturnEvidenceParser:
         assert result is not None
         self._terminalize(failed=False)
         return result
+
+    def finish_probe_into(self) -> None:
+        """Publish once into a caller-owned slot before terminal control can escape."""
+
+        operation: object | None = object()
+        control: _ControlSignal | None = None
+        failure: str | None = None
+        phase = 0
+        while phase < 2:
+            try:
+                if phase == 0:
+                    current_control, current_failure = self._finish_probe_into_owned(
+                        operation,
+                        control,
+                    )
+                    if control is None:
+                        control = current_control
+                    if failure is None:
+                        failure = current_failure
+                    phase = 1
+                    result_owner._probe_result_boundary_hook("finalization-returned")
+                else:
+                    self = None  # type: ignore[assignment]
+                    operation = None
+                    phase = 2
+            except (KeyboardInterrupt, SystemExit) as error:
+                if control is None:
+                    control = _control_signal(error)
+                _scrub_control_flow_exception(error)
+            except BaseException as error:
+                failure = "Coturn evidence finalization failed"
+                _scrub_control_flow_exception(error)
+        if control is not None:
+            _raise_control(control)
+        if failure is not None:
+            _raise_public(failure)
+
+    def _finish_probe_into_owned(
+        self,
+        operation: object,
+        control: _ControlSignal | None,
+    ) -> tuple[_ControlSignal | None, str | None]:
+        failure: str | None = None
+        result: CoturnProbeSummary | None = None
+        owner: object | None = self._finish_owner
+        slot: CoturnProbeResultSlot | None = self._probe_result_slot
+        published = False
+        phase = 0
+        while phase != 5:
+            try:
+                if phase == 0:
+                    if type(slot) is not CoturnProbeResultSlot:
+                        failure = "Coturn probe result slot is invalid"
+                        phase = 3
+                    else:
+                        claim = slot._claim_finish(owner, operation)
+                    if type(slot) is CoturnProbeResultSlot and claim == "published":
+                        published = True
+                        phase = 3
+                    elif type(slot) is CoturnProbeResultSlot and claim != "claimed":
+                        failure = "Coturn probe result slot is invalid"
+                        phase = 3
+                    elif phase == 0 and (self._failed or self._finished or not self._probe_only):
+                        failure = "Coturn evidence parser is unavailable"
+                        phase = 3
+                    elif phase == 0 and self._line:
+                        failure = "Coturn log stream is truncated"
+                        phase = 3
+                    elif phase == 0:
+                        phase = 1
+                    result_owner._probe_result_boundary_hook("validated")
+                elif phase == 1:
+                    state = self._require_state().finish_probe()
+                    result = _make_probe(state, total_records=self._record_count)
+                    state = None
+                    phase = 2
+                    result_owner._probe_result_boundary_hook("summary-created")
+                elif phase == 2:
+                    published = bool(result is not None and slot._publish(owner, result))
+                    if not published:
+                        failure = "Coturn probe result slot is invalid"
+                    phase = 3
+                    result_owner._probe_result_boundary_hook("summary-published")
+                elif phase == 3:
+                    self._terminalize(failed=not published)
+                    phase = 4
+                    result_owner._probe_result_boundary_hook("parser-terminal")
+                else:
+                    if type(slot) is CoturnProbeResultSlot:
+                        released = slot._release_finish(owner, operation)
+                        if not released:
+                            failure = "Coturn probe result slot is invalid"
+                    phase = 5
+                    result_owner._probe_result_boundary_hook("finalizer-released")
+            except (KeyboardInterrupt, SystemExit) as error:
+                if control is None:
+                    control = _control_signal(error)
+            except (_ParseFailure, CoturnEvidenceStateError) as error:
+                failure = str(error)
+                phase = 3
+            except BaseException as error:
+                failure = "Coturn evidence finalization failed"
+                _scrub_control_flow_exception(error)
+                if phase == 0:
+                    phase = 6
+                elif phase not in (3, 4, 6):
+                    phase = 3
+            if phase == 6:
+                try:
+                    status = (
+                        slot._finish_status(owner, operation)
+                        if type(slot) is CoturnProbeResultSlot
+                        else "invalid"
+                    )
+                    if status == "claimed":
+                        phase = 0
+                    elif status == "published":
+                        published = True
+                        phase = 3
+                    else:
+                        phase = 5
+                except (KeyboardInterrupt, SystemExit) as error:
+                    if control is None:
+                        control = _control_signal(error)
+                    _scrub_control_flow_exception(error)
+                except BaseException as error:
+                    _scrub_control_flow_exception(error)
+        slot = None  # type: ignore[assignment]
+        self = None  # type: ignore[assignment]
+        result = None
+        owner = None
+        operation = None
+        return control, failure
 
     def __repr__(self) -> str:
         return "CoturnEvidenceParser()"
@@ -504,18 +643,6 @@ def _make_evidence(state: CoturnStateEvidence, *, total_records: int) -> CoturnE
     )
 
 
-def _make_probe(state: CoturnStateProbe, *, total_records: int) -> CoturnProbeSummary:
-    return CoturnProbeSummary(
-        grammar_verified=False,
-        allocation_count=state.allocation_count,
-        observed_categories=state.observed_categories,
-        unknown_info_records=state.unknown_info_records,
-        grammar_violation_records=state.grammar_violation_records,
-        total_records=total_records,
-        _token=_FACTORY_TOKEN,
-    )
-
-
 def _wipe(value: bytearray) -> None:
     value[:] = b"\x00" * len(value)
     value.clear()
@@ -549,8 +676,11 @@ __all__ = [
     "CoturnEvidenceError",
     "CoturnEvidenceParser",
     "CoturnLogCategory",
+    "CoturnProbeResultSlot",
     "CoturnProbeSummary",
     "CoturnTrafficTotals",
+    "coturn_probe_summary_from_slot",
+    "new_coturn_probe_result_slot",
     "parse_coturn_evidence",
     "parse_coturn_probe",
 ]

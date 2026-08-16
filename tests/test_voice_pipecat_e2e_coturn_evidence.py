@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts import voice_pipecat_e2e_coturn_evidence as coturn_evidence_module  # noqa: E402
+from scripts import (  # noqa: E402
+    voice_pipecat_e2e_coturn_evidence_result as coturn_evidence_result_module,
+)
 from scripts import voice_pipecat_e2e_coturn_evidence_state as coturn_state  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn import CoturnBridgeTopology  # noqa: E402
 from scripts.voice_pipecat_e2e_coturn_evidence import (  # noqa: E402
@@ -21,7 +25,10 @@ from scripts.voice_pipecat_e2e_coturn_evidence import (  # noqa: E402
     CoturnEvidenceError,
     CoturnEvidenceParser,
     CoturnLogCategory,
+    CoturnProbeResultSlot,
     CoturnProbeSummary,
+    coturn_probe_summary_from_slot,
+    new_coturn_probe_result_slot,
     parse_coturn_evidence,
     parse_coturn_probe,
 )
@@ -177,9 +184,15 @@ def _parse(records: list[bytes]) -> CoturnEvidence:
     )
 
 
-def _parser(*, probe: bool = False) -> CoturnEvidenceParser:
+def _parser(*, probe: bool = False, result_slot: object = None) -> CoturnEvidenceParser:
     factory = CoturnEvidenceParser.for_probe if probe else CoturnEvidenceParser
-    return factory(expected_username=USERNAME, expected_topology=TOPOLOGY)
+    arguments: dict[str, object] = {
+        "expected_username": USERNAME,
+        "expected_topology": TOPOLOGY,
+    }
+    if probe:
+        arguments["result_slot"] = result_slot
+    return factory(**arguments)
 
 
 def _replace_startup(records: list[bytes], prefix: bytes, replacement: bytes) -> list[bytes]:
@@ -1179,3 +1192,490 @@ def test_probe_grammar_failures_roll_back_partial_state_before_discovery_continu
     assert parser._state._readiness == {}
     summary = parser.finish_probe()
     assert summary.grammar_violation_records == 2
+
+
+def test_probe_result_slot_is_factory_owned_and_idempotently_retains_summary() -> None:
+    secret = f"probe-slot-constructor-{USERNAME}"
+    with pytest.raises(TypeError, match=r"probe result slot is factory-owned$") as error:
+        CoturnProbeResultSlot(secret)
+    assert not _traceback_contains(error.value, secret)
+    assert not _traceback_contains(error.value, USERNAME)
+
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    parser.finish_probe_into()
+    first = coturn_probe_summary_from_slot(slot)
+    parser.finish_probe_into()
+    second = coturn_probe_summary_from_slot(slot)
+
+    assert slot.ready is True
+    assert first is second
+    assert first.grammar_verified is False
+    assert repr(slot) == "CoturnProbeResultSlot()"
+
+
+@pytest.mark.parametrize(
+    ("phase", "error_type", "code"),
+    [
+        ("validated", SystemExit, 19),
+        ("summary-created", SystemExit, 23),
+        ("summary-published", KeyboardInterrupt, None),
+        ("parser-terminal", SystemExit, 37),
+        ("finalizer-released", KeyboardInterrupt, None),
+    ],
+)
+def test_probe_result_slot_survives_finalization_control_after_each_publication_cut(
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    error_type: type[KeyboardInterrupt] | type[SystemExit],
+    code: int | None,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    raised = False
+
+    def interrupt(current: str) -> None:
+        nonlocal raised
+        if current != phase or raised:
+            return
+        raised = True
+        if error_type is KeyboardInterrupt:
+            raise KeyboardInterrupt()
+        raise SystemExit(code)
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", interrupt)
+    with pytest.raises(error_type) as captured:
+        parser.finish_probe_into()
+    if error_type is SystemExit:
+        assert captured.value.code == code
+    assert raised is True
+    assert slot.ready is True
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+    parser.finish_probe_into()
+
+
+def test_probe_result_slot_preserves_first_of_repeated_finalization_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    controls = {
+        "summary-created": 23,
+        "summary-published": 24,
+        "parser-terminal": None,
+    }
+
+    def interrupt(phase: str) -> None:
+        if phase not in controls:
+            return
+        code = controls.pop(phase)
+        if code is None:
+            raise KeyboardInterrupt()
+        raise SystemExit(code)
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", interrupt)
+    with pytest.raises(SystemExit) as captured:
+        parser.finish_probe_into()
+    assert captured.value.code == 23
+    assert controls == {}
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_result_slot_rejects_second_parser_without_replacing_summary() -> None:
+    slot = new_coturn_probe_result_slot()
+    first_parser = _parser(probe=True, result_slot=slot)
+    with pytest.raises(CoturnEvidenceError, match=r"result slot is invalid$"):
+        _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        first_parser.feed(record)
+    first_parser.finish_probe_into()
+    first = coturn_probe_summary_from_slot(slot)
+
+    first_parser.finish_probe_into()
+    assert coturn_probe_summary_from_slot(slot) is first
+
+
+def test_probe_result_read_control_does_not_consume_published_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    parser.finish_probe_into()
+    raised = False
+    secret = f"probe-result-read-{USERNAME}"
+
+    def interrupt(phase: str) -> None:
+        nonlocal raised
+        if phase == "summary-read" and not raised:
+            raised = True
+            try:
+                raise ValueError(secret)
+            except ValueError as cause:
+                raise SystemExit(secret) from cause
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", interrupt)
+    with pytest.raises(SystemExit) as captured:
+        coturn_probe_summary_from_slot(slot)
+    assert captured.value.code == 1
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_result_read_ordinary_failure_is_fixed_and_non_consuming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    parser.finish_probe_into()
+    secret = f"probe-result-read-failure-{USERNAME}"
+
+    def fail(phase: str) -> None:
+        if phase == "summary-read":
+            raise RuntimeError(secret)
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", fail)
+    with pytest.raises(CoturnEvidenceError, match=r"probe result read failed$") as captured:
+        coturn_probe_summary_from_slot(slot)
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    monkeypatch.setattr(
+        coturn_evidence_result_module,
+        "_probe_result_boundary_hook",
+        lambda _phase: None,
+    )
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_staggered_concurrent_probe_finalizers_are_serialized_and_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    first_validated = threading.Event()
+    release_first = threading.Event()
+    second_started = threading.Event()
+    second_finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def pause_first(phase: str) -> None:
+        if phase == "validated" and threading.current_thread().name == "probe-first":
+            first_validated.set()
+            if not release_first.wait(timeout=2):
+                raise RuntimeError("probe finalization test timed out")
+
+    def finish(*, second: bool) -> None:
+        if second:
+            second_started.set()
+        try:
+            parser.finish_probe_into()
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            if second:
+                second_finished.set()
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", pause_first)
+    first = threading.Thread(target=finish, kwargs={"second": False}, name="probe-first")
+    second = threading.Thread(target=finish, kwargs={"second": True}, name="probe-second")
+    first.start()
+    assert first_validated.wait(timeout=1)
+    second.start()
+    assert second_started.wait(timeout=1)
+    assert not second_finished.wait(timeout=0.05)
+    release_first.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert failures == []
+    assert parser._finished is True
+    assert parser._failed is False
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_finalizer_claim_reconciles_control_after_slot_ownership_publication(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    original = CoturnProbeResultSlot._claim_finish
+    raised = False
+
+    def interrupt_after_claim(self: CoturnProbeResultSlot, owner: object, operation: object) -> str:
+        nonlocal raised
+        result = original(self, owner, operation)
+        if not raised:
+            raised = True
+            raise SystemExit(23)
+        return result
+
+    monkeypatch.setattr(CoturnProbeResultSlot, "_claim_finish", interrupt_after_claim)
+    with pytest.raises(SystemExit) as captured:
+        parser.finish_probe_into()
+    assert captured.value.code == 23
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert slot._finisher is None
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_finalizer_release_reconciles_nested_control_and_preserves_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    secret = f"probe-finalizer-release-{USERNAME}"
+    first_raised = False
+    release_raised = False
+    original = CoturnProbeResultSlot._release_finish
+
+    def interrupt_summary(phase: str) -> None:
+        nonlocal first_raised
+        if phase == "summary-created" and not first_raised:
+            first_raised = True
+            raise SystemExit(23)
+
+    def interrupt_after_release(
+        self: CoturnProbeResultSlot,
+        owner: object,
+        operation: object,
+    ) -> bool:
+        nonlocal release_raised
+        result = original(self, owner, operation)
+        if not release_raised:
+            release_raised = True
+            try:
+                raise ValueError(secret)
+            except ValueError as cause:
+                raise SystemExit(secret) from cause
+        return result
+
+    monkeypatch.setattr(
+        coturn_evidence_result_module,
+        "_probe_result_boundary_hook",
+        interrupt_summary,
+    )
+    monkeypatch.setattr(CoturnProbeResultSlot, "_release_finish", interrupt_after_release)
+    with pytest.raises(SystemExit) as captured:
+        parser.finish_probe_into()
+    assert captured.value.code == 23
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    assert slot._finisher is None
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_nonowning_finalizer_claim_failure_does_not_terminalize_active_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    first_validated = threading.Event()
+    release_first = threading.Event()
+    failures: list[BaseException] = []
+    raised = False
+    original = CoturnProbeResultSlot._claim_finish
+
+    def pause_first(phase: str) -> None:
+        if phase == "validated" and threading.current_thread().name == "probe-owner":
+            first_validated.set()
+            if not release_first.wait(timeout=2):
+                raise RuntimeError("probe owner test timed out")
+
+    def fail_waiter_claim(
+        self: CoturnProbeResultSlot,
+        owner: object,
+        operation: object,
+    ) -> str:
+        nonlocal raised
+        if threading.current_thread().name == "probe-waiter" and not raised:
+            raised = True
+            raise RuntimeError("synthetic waiter failure")
+        return original(self, owner, operation)
+
+    def finish() -> None:
+        try:
+            parser.finish_probe_into()
+        except BaseException as error:
+            failures.append(error)
+
+    monkeypatch.setattr(coturn_evidence_result_module, "_probe_result_boundary_hook", pause_first)
+    monkeypatch.setattr(CoturnProbeResultSlot, "_claim_finish", fail_waiter_claim)
+    owner = threading.Thread(target=finish, name="probe-owner")
+    waiter = threading.Thread(target=finish, name="probe-waiter")
+    owner.start()
+    assert first_validated.wait(timeout=1)
+    waiter.start()
+    waiter.join(timeout=1)
+
+    assert not waiter.is_alive()
+    assert len(failures) == 1
+    assert type(failures[0]) is CoturnEvidenceError
+    assert parser._state is not None
+    assert parser._failed is False
+    release_first.set()
+    owner.join(timeout=2)
+
+    assert not owner.is_alive()
+    assert len(failures) == 1
+    assert parser._finished is True
+    assert slot._finisher is None
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_finalization_public_handoff_sanitizes_nested_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    secret = f"probe-finalization-handoff-{USERNAME}"
+    raised = False
+    original = CoturnEvidenceParser._finish_probe_into_owned
+
+    def interrupt_after_return(
+        self: CoturnEvidenceParser,
+        operation: object,
+        control: object,
+    ) -> object:
+        nonlocal raised
+        result = original(self, operation, control)  # type: ignore[arg-type]
+        if not raised:
+            raised = True
+            try:
+                raise ValueError(secret)
+            except ValueError as cause:
+                raise SystemExit(secret) from cause
+        return result
+
+    monkeypatch.setattr(CoturnEvidenceParser, "_finish_probe_into_owned", interrupt_after_return)
+    with pytest.raises(SystemExit) as captured:
+        parser.finish_probe_into()
+    assert captured.value.code == 1
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    assert slot._finisher is None
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_finalization_public_handoff_latches_fixed_ordinary_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    secret = f"probe-finalization-ordinary-{USERNAME}"
+    raised = False
+    original = CoturnEvidenceParser._finish_probe_into_owned
+
+    def fail_after_return(
+        self: CoturnEvidenceParser,
+        operation: object,
+        control: object,
+    ) -> object:
+        nonlocal raised
+        result = original(self, operation, control)  # type: ignore[arg-type]
+        if not raised:
+            raised = True
+            raise RuntimeError(secret)
+        return result
+
+    monkeypatch.setattr(CoturnEvidenceParser, "_finish_probe_into_owned", fail_after_return)
+    with pytest.raises(CoturnEvidenceError, match=r"evidence finalization failed$") as captured:
+        parser.finish_probe_into()
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    assert slot._finisher is None
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_probe_result_read_public_handoff_sanitizes_nested_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    parser.finish_probe_into()
+    secret = f"probe-read-handoff-{USERNAME}"
+    raised = False
+    original = coturn_evidence_result_module._read_probe_result_slot
+
+    def interrupt_after_return(*args: object, **kwargs: object) -> object:
+        nonlocal raised
+        result = original(*args, **kwargs)  # type: ignore[arg-type]
+        if not raised:
+            raised = True
+            try:
+                raise ValueError(secret)
+            except ValueError as cause:
+                raise SystemExit(secret) from cause
+        return result
+
+    monkeypatch.setattr(
+        coturn_evidence_result_module,
+        "_read_probe_result_slot",
+        interrupt_after_return,
+    )
+    with pytest.raises(SystemExit) as captured:
+        coturn_probe_summary_from_slot(slot)
+    assert captured.value.code == 1
+    assert captured.value.__cause__ is None
+    assert captured.value.__context__ is None
+    assert not _traceback_contains(captured.value, secret)
+    assert not _traceback_contains(captured.value, USERNAME)
+    assert coturn_probe_summary_from_slot(slot).grammar_verified is False
+
+
+def test_empty_probe_result_slot_is_nonqualifying_and_unavailable() -> None:
+    slot = new_coturn_probe_result_slot()
+    assert slot.ready is False
+    assert not bool(slot.ready)
+    with pytest.raises(CoturnEvidenceError, match=r"probe result is unavailable$"):
+        coturn_probe_summary_from_slot(slot)
+
+
+def test_probe_result_slot_binding_rejects_hostile_input_without_reflection() -> None:
+    secret = f"probe-slot-{USERNAME}"
+    with pytest.raises(CoturnEvidenceError, match=r"probe result slot is invalid$") as error:
+        CoturnEvidenceParser.for_probe(
+            expected_username=USERNAME,
+            expected_topology=TOPOLOGY,
+            result_slot=secret,
+        )
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert not _traceback_contains(error.value, secret)
+    assert not _traceback_contains(error.value, USERNAME)
