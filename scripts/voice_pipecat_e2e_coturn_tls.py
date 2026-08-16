@@ -6,9 +6,8 @@ import base64
 import hashlib
 import os
 import re
-import stat
+import threading
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from scripts.voice_pipecat_e2e_coturn import (
     COTURN_FIXTURE_PATH,
@@ -23,9 +22,36 @@ from scripts.voice_pipecat_e2e_coturn_host import (
     CommandRunner,
     CoturnRuntimePaths,
     TrustedHostTools,
-    execute_checked,
     require_owned_directory,
-    require_safe_path,
+)
+from scripts.voice_pipecat_e2e_coturn_tls_lifetime import (
+    CoturnTlsCleanupRequired,
+    TlsCleanupAuthority,
+    TlsCombinedCleanupAuthority,
+    TlsMaterialLifetimeAuthority,
+    combine_tls_cleanup_authorities,
+    new_tls_material_lifetime_authority,
+)
+from scripts.voice_pipecat_e2e_coturn_tls_private import (
+    ControlSignal,
+    CoturnTlsError,
+    CoturnTlsPrivateCleanupRequired,
+    PrivateFileCleanupReceipt,
+    cleanup_tls_private_authority,
+    control_signal,
+    execute_tls_checked,
+    private_cleanup_authority,
+    raise_control,
+    raise_tls,
+    read_owned_file,
+    write_owned_file_exclusive,
+    write_owned_file_exclusive_tracked,
+)
+from scripts.voice_pipecat_e2e_coturn_tls_readiness import (
+    OpenSslReadinessReceipt,
+)
+from scripts.voice_pipecat_e2e_coturn_tls_readiness import (
+    parse_openssl_readiness_result as _parse_openssl_readiness_result,
 )
 
 _PEM_PRIVATE_KEY = re.compile(
@@ -45,14 +71,27 @@ _SPKI_B64 = re.compile(r"^[A-Za-z0-9+/]{43}=$")
 _MAX_KEY_BYTES = 16_384
 _MAX_CERTIFICATE_BYTES = 65_536
 _RECEIPT_TOKEN = object()
-
-
-class CoturnTlsError(RuntimeError):
-    """Private material or its TLS relation is malformed or unsafe."""
+_SAFE_TLS_FAILURES = {
+    "Coturn TLS material already exists",
+    "Coturn private-key generation failed",
+    "Coturn certificate generation failed",
+    "Coturn TLS cleanup failed",
+    "Coturn TLS material is invalid",
+    "Coturn TLS validity is invalid",
+    "Coturn private file is unavailable",
+    "Coturn TLS validation failed",
+}
 
 
 class TlsMaterialReceipt:
-    __slots__ = ("_certificate_sha256", "_not_after", "_not_before", "_pin")
+    __slots__ = (
+        "_certificate_sha256",
+        "_lifetime",
+        "_lifetime_lock",
+        "_not_after",
+        "_not_before",
+        "_pin",
+    )
 
     def __init__(
         self,
@@ -77,6 +116,8 @@ class TlsMaterialReceipt:
         self._pin = chromium_spki_sha256_b64
         self._not_before = not_before
         self._not_after = not_after
+        self._lifetime: TlsMaterialLifetimeAuthority | None = None
+        self._lifetime_lock = threading.Lock()
 
     @property
     def certificate_sha256(self) -> str:
@@ -94,6 +135,39 @@ class TlsMaterialReceipt:
     def not_after(self) -> datetime:
         return self._not_after
 
+    @property
+    def has_cleanup_authority(self) -> bool:
+        with self._lifetime_lock:
+            return self._lifetime is not None and self._lifetime.retained
+
+    def _bind_lifetime(self, lifetime: TlsMaterialLifetimeAuthority) -> bool:
+        with self._lifetime_lock:
+            if (
+                self._lifetime is not None
+                or type(lifetime) is not TlsMaterialLifetimeAuthority
+                or not lifetime.retain()
+            ):
+                return False
+            self._lifetime = lifetime
+            return True
+
+    def _cleanup_lifetime(
+        self,
+    ) -> tuple[bool, ControlSignal | None, TlsMaterialLifetimeAuthority | None]:
+        with self._lifetime_lock:
+            if self._lifetime is None:
+                return True, None, None
+            authority = self._lifetime
+            failed, control = authority.cleanup()
+            if not failed:
+                self._lifetime = None
+                authority = None
+            return failed, control, authority
+
+    def _retained_lifetime(self) -> TlsMaterialLifetimeAuthority | None:
+        with self._lifetime_lock:
+            return self._lifetime
+
     def __repr__(self) -> str:
         return "TlsMaterialReceipt()"
 
@@ -109,13 +183,87 @@ def generate_tls_and_config_material(
 ) -> TlsMaterialReceipt:
     """Generate owner-only key/cert/config and validate their exact relation."""
 
+    receipt: TlsMaterialReceipt | None = None
+    message: str | None = None
+    control: ControlSignal | None = None
+    lifetime: TlsMaterialLifetimeAuthority | None = None
+    private_recovery: object | None = None
+    recovery_adopted = False
+    try:
+        lifetime = new_tls_material_lifetime_authority()
+        receipt = _generate_tls_and_config_material(
+            runner=runner,
+            tools=tools,
+            paths=paths,
+            topology=topology,
+            static_auth_secret=static_auth_secret,
+            now=now,
+            lifetime=lifetime,
+        )
+        if not receipt.has_cleanup_authority:
+            raise CoturnTlsError("Coturn TLS cleanup failed")
+        return receipt
+    except (KeyboardInterrupt, SystemExit) as exc:
+        private_recovery = private_cleanup_authority(exc)
+        control = control_signal(exc)
+    except BaseException as exc:
+        private_recovery = private_cleanup_authority(exc)
+        message = _safe_tls_failure(exc, "Coturn TLS material is invalid")
+    cleanup_failed = False
+    cleanup_control: ControlSignal | None = None
+    if lifetime is not None and lifetime.active:
+        if private_recovery is not None:
+            recovery_adopted = lifetime.retain_private_authority(private_recovery)
+        while True:
+            try:
+                cleanup_failed, cleanup_control = lifetime.cleanup(
+                    initial_control=control or cleanup_control,
+                )
+                break
+            except (KeyboardInterrupt, SystemExit) as cleanup_exc:
+                cleanup_control = cleanup_control or control_signal(cleanup_exc)
+            except BaseException:
+                cleanup_failed = True
+                break
+    runner = tools = paths = topology = None  # type: ignore[assignment]
+    static_auth_secret = None
+    unadopted = private_recovery if not recovery_adopted else None
+    if cleanup_failed and lifetime is not None and unadopted is not None:
+        recovery = combine_tls_cleanup_authorities(lifetime, unadopted)
+    elif cleanup_failed:
+        recovery = lifetime
+    else:
+        recovery = unadopted
+    private_recovery = unadopted = None
+    receipt = lifetime = None
+    if control is not None or cleanup_control is not None:
+        raise_control(control or cleanup_control, recovery)
+    if cleanup_failed:
+        if recovery is not None:
+            raise CoturnTlsCleanupRequired(recovery) from None
+        raise_tls("Coturn TLS cleanup failed")
+    if recovery is not None:
+        raise CoturnTlsPrivateCleanupRequired(recovery) from None
+    raise_tls(message or "Coturn TLS material is invalid")
+
+
+def _generate_tls_and_config_material(
+    *,
+    runner: CommandRunner,
+    tools: TrustedHostTools,
+    paths: CoturnRuntimePaths,
+    topology: CoturnBridgeTopology,
+    static_auth_secret: object,
+    now: datetime,
+    lifetime: TlsMaterialLifetimeAuthority,
+) -> TlsMaterialReceipt:
     _require_utc(now)
     require_owned_directory(paths.contract.run_dir)
     require_owned_directory(paths.contract.coturn_dir)
     material = (paths.contract.private_key, paths.contract.cert, paths.contract.config)
     if any(path.exists() or path.is_symlink() for path in material):
         raise CoturnTlsError("Coturn TLS material already exists")
-    key = execute_checked(
+    key = execute_tls_checked(
         runner,
         CommandRequest(
             argv=(
@@ -134,7 +282,7 @@ def generate_tls_and_config_material(
     )
     if key.stderr or not _PEM_PRIVATE_KEY.fullmatch(key.stdout):
         raise CoturnTlsError("Coturn private-key generation failed")
-    certificate = execute_checked(
+    certificate = execute_tls_checked(
         runner,
         CommandRequest(
             argv=(
@@ -166,7 +314,7 @@ def generate_tls_and_config_material(
     )
     if certificate.stderr or not _PEM_CERTIFICATE.fullmatch(certificate.stdout):
         raise CoturnTlsError("Coturn certificate generation failed")
-    created: list[Path] = []
+    cleanup_slot: PrivateFileCleanupReceipt | None = None
     try:
         for path, value, maximum in (
             (paths.contract.private_key, key.stdout, _MAX_KEY_BYTES),
@@ -181,19 +329,120 @@ def generate_tls_and_config_material(
                 8_192,
             ),
         ):
-            write_owned_file_exclusive(path, value, mode=0o400, maximum=maximum)
-            created.append(path)
-        return validate_tls_material(runner=runner, tools=tools, paths=paths, now=now)
-    except BaseException:
-        cleanup_failed = False
-        for path in reversed(created):
+            cleanup_slot = lifetime.new_slot()
+            write_owned_file_exclusive_tracked(
+                path,
+                value,
+                mode=0o400,
+                maximum=maximum,
+                cleanup_receipt=cleanup_slot,
+            )
+            cleanup_slot = None
+        receipt = validate_tls_material(runner=runner, tools=tools, paths=paths, now=now)
+        if not receipt._bind_lifetime(lifetime):
+            raise CoturnTlsError("Coturn TLS cleanup failed")
+        return receipt
+    except BaseException as exc:
+        private_recovery = private_cleanup_authority(exc)
+        recovery_adopted = False
+        original_control = (
+            control_signal(exc) if isinstance(exc, (KeyboardInterrupt, SystemExit)) else None
+        )
+        failure = _safe_tls_failure(exc, "Coturn TLS material is invalid")
+        exc = None
+        if private_recovery is not None:
+            recovery_adopted = lifetime.retain_private_authority(private_recovery)
+        if private_recovery is not None and not recovery_adopted:
+            failure = "Coturn TLS cleanup failed"
+        cleanup_control: ControlSignal | None = None
+        while True:
             try:
-                path.unlink()
-            except OSError:
+                cleanup_failed, observed_control = lifetime.cleanup(
+                    initial_control=original_control or cleanup_control,
+                )
+                cleanup_control = cleanup_control or observed_control
+                break
+            except (KeyboardInterrupt, SystemExit) as cleanup_exc:
+                cleanup_control = cleanup_control or control_signal(cleanup_exc)
+            except BaseException:
                 cleanup_failed = True
-        if cleanup_failed or any(path.exists() or path.is_symlink() for path in created):
+                break
+        key = certificate = None  # type: ignore[assignment]
+        value = b""
+        cleanup_slot = None
+        recovery = private_recovery if not recovery_adopted else None
+        private_recovery = None
+        static_auth_secret = None
+        runner = tools = paths = topology = None  # type: ignore[assignment]
+        lifetime = None  # type: ignore[assignment]
+        material = ()
+        if original_control is not None or cleanup_control is not None:
+            raise_control(
+                original_control or cleanup_control,
+                recovery,
+            )
+        if recovery is not None:
+            raise CoturnTlsPrivateCleanupRequired(recovery) from None
+        if cleanup_failed:
             raise CoturnTlsError("Coturn TLS cleanup failed") from None
-        raise
+        raise CoturnTlsError(failure) from None
+
+
+def cleanup_tls_material(receipt: TlsMaterialReceipt) -> None:
+    """Consume one generated bundle's exact-inode lifetime authority."""
+
+    control: ControlSignal | None = None
+    failed = True
+    authority: TlsMaterialLifetimeAuthority | None = None
+    try:
+        if type(receipt) is TlsMaterialReceipt:
+            failed, control, authority = receipt._cleanup_lifetime()
+    except (KeyboardInterrupt, SystemExit) as exc:
+        control = control_signal(exc)
+    except BaseException:
+        failed = True
+    if authority is None and failed and type(receipt) is TlsMaterialReceipt:
+        authority = receipt._retained_lifetime()
+    receipt = None  # type: ignore[assignment]
+    if control is not None:
+        raise_control(control, authority if failed else None)
+    if failed:
+        if authority is not None:
+            raise CoturnTlsCleanupRequired(authority) from None
+        raise_tls("Coturn TLS cleanup failed")
+
+
+def cleanup_tls_material_authority(authority: TlsCleanupAuthority) -> None:
+    """Retry opaque recovery authority from an interrupted or failed handoff."""
+
+    control: ControlSignal | None = None
+    failed = True
+    try:
+        if (
+            type(authority)
+            in {
+                TlsCombinedCleanupAuthority,
+                TlsMaterialLifetimeAuthority,
+            }
+            and authority.active
+        ):
+            failed, control = authority.cleanup()
+    except (KeyboardInterrupt, SystemExit) as exc:
+        control = control_signal(exc)
+    except BaseException:
+        failed = True
+    retained = (
+        authority
+        if failed and type(authority) in {TlsCombinedCleanupAuthority, TlsMaterialLifetimeAuthority}
+        else None
+    )
+    authority = None  # type: ignore[assignment]
+    if control is not None:
+        raise_control(control, retained)
+    if failed:
+        if retained is not None:
+            raise CoturnTlsCleanupRequired(retained) from None
+        raise_tls("Coturn TLS cleanup failed")
 
 
 def validate_tls_material(
@@ -205,6 +454,35 @@ def validate_tls_material(
 ) -> TlsMaterialReceipt:
     """Validate SAN, validity, key relation, and Chromium's DER-SPKI pin."""
 
+    receipt: TlsMaterialReceipt | None = None
+    message: str | None = None
+    control: ControlSignal | None = None
+    recovery: object | None = None
+    try:
+        receipt = _validate_tls_material(runner=runner, tools=tools, paths=paths, now=now)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        recovery = private_cleanup_authority(exc)
+        control = control_signal(exc)
+    except BaseException as exc:
+        recovery = private_cleanup_authority(exc)
+        message = _safe_tls_failure(exc, "Coturn TLS material is invalid")
+    runner = tools = paths = None  # type: ignore[assignment]
+    if control is not None:
+        raise_control(control, recovery)
+    if recovery is not None:
+        raise CoturnTlsPrivateCleanupRequired(recovery) from None
+    if receipt is None:
+        raise_tls(message or "Coturn TLS material is invalid")
+    return receipt
+
+
+def _validate_tls_material(
+    *,
+    runner: CommandRunner,
+    tools: TrustedHostTools,
+    paths: CoturnRuntimePaths,
+    now: datetime,
+) -> TlsMaterialReceipt:
     _require_utc(now)
     validate_turn_tls_ca_file(paths.contract.cert, expected_run_dir=paths.contract.run_dir)
     certificate = read_owned_file(
@@ -294,126 +572,33 @@ def build_openssl_readiness_request(
     )
 
 
-def read_owned_file(path: Path, *, exact_mode: int, maximum: int) -> bytes:
-    """Read a same-owner file while binding path and fd metadata."""
+def validate_openssl_readiness_result(result: CommandResult) -> OpenSslReadinessReceipt:
+    """Validate only bounded, allowlisted facts from ``s_client -brief``."""
 
-    require_safe_path(path)
+    parsed: OpenSslReadinessReceipt | None = None
+    control: ControlSignal | None = None
+    failed = False
     try:
-        before = path.stat(follow_symlinks=False)
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
-    except OSError:
-        raise CoturnTlsError("Coturn private file is unavailable") from None
-    try:
-        opened = os.fstat(descriptor)
-        if not _safe_file(before, exact_mode, maximum) or not _safe_file(
-            opened,
-            exact_mode,
-            maximum,
-        ):
-            raise OSError("unsafe file")
-        chunks: list[bytes] = []
-        length = 0
-        while True:
-            chunk = os.read(descriptor, min(65_536, maximum + 1 - length))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            length += len(chunk)
-            if length > maximum:
-                raise OSError("oversized file")
-        value = b"".join(chunks)
-        metadata = (before, opened, os.fstat(descriptor), path.stat(follow_symlinks=False))
-        if (
-            any(not _safe_file(item, exact_mode, maximum) for item in metadata)
-            or len({(item.st_dev, item.st_ino) for item in metadata}) != 1
-            or {item.st_size for item in metadata} != {len(value)}
-        ):
-            raise OSError("unsafe file")
-        return value
-    except OSError:
-        raise CoturnTlsError("Coturn private file is unavailable") from None
-    finally:
-        os.close(descriptor)
+        parsed = _parse_openssl_readiness_result(result)
+    except (KeyboardInterrupt, SystemExit) as exc:
+        control = control_signal(exc)
+        failed = True
+    except BaseException:
+        failed = True
+    result = None  # type: ignore[assignment]
+    if control is not None:
+        parsed = None
+        raise_control(control)
+    if failed or type(parsed) is not OpenSslReadinessReceipt:
+        parsed = None
+        _raise_openssl_readiness_error()
+    receipt = parsed
+    parsed = None
+    return receipt
 
 
-def write_owned_file_exclusive(
-    path: Path,
-    value: bytes,
-    *,
-    mode: int,
-    maximum: int,
-) -> None:
-    """Create one owner-only file without following links."""
-
-    if not value or len(value) > maximum or mode not in {0o400, 0o600}:
-        raise CoturnTlsError("Coturn private file content is invalid")
-    require_safe_path(path)
-    require_owned_directory(path.parent)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(path, flags, mode)
-    except OSError:
-        raise CoturnTlsError("Coturn private file creation failed") from None
-    failure: BaseException | None = None
-    written_details: os.stat_result | None = None
-    try:
-        offset = 0
-        while offset < len(value):
-            written = os.write(descriptor, value[offset:])
-            if written <= 0:
-                raise OSError("short write")
-            offset += written
-        os.fchmod(descriptor, mode)
-        os.fsync(descriptor)
-        written_details = os.fstat(descriptor)
-        if not _safe_file(written_details, mode, maximum):
-            raise OSError("unsafe file")
-    except BaseException as exc:
-        failure = exc
-    finally:
-        try:
-            os.close(descriptor)
-        except OSError as exc:
-            failure = exc
-    if failure is not None:
-        try:
-            path.unlink()
-        except OSError:
-            raise CoturnTlsError("Coturn private file cleanup failed") from None
-        if path.exists() or path.is_symlink():
-            raise CoturnTlsError("Coturn private file cleanup failed") from None
-        if isinstance(failure, (KeyboardInterrupt, SystemExit)):
-            raise failure
-        raise CoturnTlsError("Coturn private file creation failed") from None
-    try:
-        details = path.stat(follow_symlinks=False)
-        if (
-            written_details is None
-            or not _safe_file(details, mode, maximum)
-            or details.st_size != len(value)
-            or (details.st_dev, details.st_ino) != (written_details.st_dev, written_details.st_ino)
-        ):
-            raise OSError("unsafe file")
-    except OSError:
-        try:
-            path.unlink()
-        except OSError:
-            raise CoturnTlsError("Coturn private file cleanup failed") from None
-        if path.exists() or path.is_symlink():
-            raise CoturnTlsError("Coturn private file cleanup failed") from None
-        raise CoturnTlsError("Coturn private file creation failed") from None
-
-
-def _safe_file(value: os.stat_result, mode: int, maximum: int) -> bool:
-    return bool(
-        stat.S_ISREG(value.st_mode)
-        and value.st_uid == os.geteuid()
-        and value.st_nlink == 1
-        and stat.S_IMODE(value.st_mode) == mode
-        and 0 <= value.st_size <= maximum
-    )
+def _raise_openssl_readiness_error() -> None:
+    raise CoturnTlsError("Coturn OpenSSL readiness is invalid") from None
 
 
 def _openssl_stdin(
@@ -424,14 +609,19 @@ def _openssl_stdin(
     *arguments: str,
 ) -> CommandResult:
     if command not in {"x509", "pkey"}:
-        raise CoturnTlsError("Coturn OpenSSL request is invalid")
-    return execute_checked(
+        stdin = b""
+        arguments = ()
+        raise_tls("Coturn OpenSSL request is invalid")
+    request = CommandRequest(
+        argv=(os.fspath(tools.openssl), command, "-in", "/dev/stdin", *arguments),
+        stdin=stdin,
+        maximum_output_bytes=65_536,
+    )
+    stdin = b""
+    arguments = ()
+    return execute_tls_checked(
         runner,
-        CommandRequest(
-            argv=(os.fspath(tools.openssl), command, "-in", "/dev/stdin", *arguments),
-            stdin=stdin,
-            maximum_output_bytes=65_536,
-        ),
+        request,
         failure="Coturn TLS validation failed",
     )
 
@@ -457,17 +647,40 @@ def _parse_openssl_dates(value: bytes) -> tuple[datetime, datetime]:
     return before, after
 
 
+def _safe_tls_failure(error: BaseException, default: str) -> str:
+    try:
+        arguments = object.__getattribute__(error, "args")
+    except BaseException:
+        return default
+    if (
+        type(error) is CoturnTlsError
+        and type(arguments) is tuple
+        and len(arguments) == 1
+        and type(arguments[0]) is str
+        and arguments[0] in _SAFE_TLS_FAILURES
+    ):
+        return arguments[0]
+    return default
+
+
 def _require_utc(value: datetime) -> None:
     if value.tzinfo is None or value.utcoffset() != timedelta(0):
         raise CoturnTlsError("Coturn TLS clock is invalid")
 
 
 __all__ = [
+    "CoturnTlsCleanupRequired",
     "CoturnTlsError",
+    "CoturnTlsPrivateCleanupRequired",
+    "OpenSslReadinessReceipt",
     "TlsMaterialReceipt",
     "build_openssl_readiness_request",
+    "cleanup_tls_material",
+    "cleanup_tls_material_authority",
+    "cleanup_tls_private_authority",
     "generate_tls_and_config_material",
     "read_owned_file",
+    "validate_openssl_readiness_result",
     "validate_tls_material",
     "write_owned_file_exclusive",
 ]
