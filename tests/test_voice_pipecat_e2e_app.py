@@ -110,8 +110,8 @@ def _relay_environment(paths: StackPaths) -> tuple[dict[str, str], CoturnContrac
             network="relay-tls",
             turn_configuration_file=coturn.config,
             turn_tls_ca_file=coturn.cert,
+            expected_relay_call_id=EXPECTED_RELAY_CALL_ID,
         )
-        environment["MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID"] = EXPECTED_RELAY_CALL_ID
     except BaseException:
         _strict_relay_cleanup(paths)
         raise
