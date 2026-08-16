@@ -275,28 +275,34 @@ def private_cleanup_authority(
     """Extract only a factory-owned recovery receipt from a caught failure."""
 
     current: BaseException | None = error
+    visited: set[int] = set()
     for _depth in range(4):
         if current is None:
             break
+        identifier = id(current)
+        if identifier in visited:
+            break
+        visited.add(identifier)
         candidate: object | None = None
-        try:
-            if type(current) is CoturnTlsPrivateCleanupRequired:
-                candidate = object.__getattribute__(current, "_cleanup_authority")
-            elif type(current) in {KeyboardInterrupt, SystemExit}:
-                namespace = object.__getattribute__(current, "__dict__")
-                if type(namespace) is dict:
-                    candidate = namespace.get("cleanup_authority")
-            if type(candidate) in {
-                PrivateDescriptorCleanupAuthority,
-                PrivateFileCleanupReceipt,
-            }:
-                return candidate
-            related = object.__getattribute__(current, "__context__")
-            if related is None:
-                related = object.__getattribute__(current, "__cause__")
-            current = related if isinstance(related, BaseException) else None
-        except BaseException:
-            current = None
+        if type(current) is CoturnTlsPrivateCleanupRequired:
+            candidate = object.__getattribute__(current, "_cleanup_authority")
+        elif type(current) in {KeyboardInterrupt, SystemExit}:
+            namespace = object.__getattribute__(current, "__dict__")
+            if type(namespace) is dict:
+                candidate = namespace.get("cleanup_authority")
+        if type(candidate) in {
+            PrivateDescriptorCleanupAuthority,
+            PrivateFileCleanupReceipt,
+        }:
+            return candidate
+        cause = object.__getattribute__(current, "__cause__")
+        if isinstance(cause, BaseException):
+            current = cause
+            continue
+        if cause is not None or object.__getattribute__(current, "__suppress_context__"):
+            break
+        context = object.__getattribute__(current, "__context__")
+        current = context if isinstance(context, BaseException) else None
     return None
 
 

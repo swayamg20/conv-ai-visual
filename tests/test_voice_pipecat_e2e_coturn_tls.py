@@ -81,6 +81,20 @@ def _clear_synthetic_close_quarantine(*descriptors: int) -> None:
             cleanup_module._AMBIGUOUS_DESCRIPTORS.pop(descriptor, None)
 
 
+def _owned_private_descriptor(
+    tmp_path: Path,
+    name: str,
+) -> tuple[receipt_module.PrivateDescriptorCleanupAuthority, int, Path]:
+    target = tmp_path / name
+    target.write_bytes(b"effective-chain-private-sentinel")
+    descriptor = os.open(target, os.O_RDONLY)
+    details = os.fstat(descriptor)
+    authority = receipt_module.new_private_descriptor_cleanup_authority()
+    assert authority.begin()
+    assert authority.publish(((descriptor, (details.st_dev, details.st_ino)),))
+    return authority, descriptor, target
+
+
 def _readiness_transcript(
     protocol: str,
     cipher: str,
@@ -1038,6 +1052,128 @@ def test_validation_discards_certificate_key_and_runner_failure_tracebacks(
     assert not traceback_contains(captured.value, certificate, private_key)
 
 
+def test_private_cleanup_helper_prefers_explicit_cause_over_context() -> None:
+    cause_authority = receipt_module.new_private_file_cleanup_receipt()
+    context_authority = receipt_module.new_private_file_cleanup_receipt()
+    assert cause_authority.mark_unsubmitted_empty()
+    assert context_authority.mark_unsubmitted_empty()
+    outer = RuntimeError("fixed")
+    outer.__context__ = CoturnTlsPrivateCleanupRequired(context_authority)
+    outer.__cause__ = CoturnTlsPrivateCleanupRequired(cause_authority)
+    assert private_module.private_cleanup_authority(outer) is cause_authority
+    cleanup_tls_private_authority(cause_authority)
+    cleanup_tls_private_authority(context_authority)
+
+
+@pytest.mark.parametrize("explicit_cause", [False, True])
+def test_private_cleanup_helper_ignores_suppressed_context(
+    explicit_cause: bool,
+) -> None:
+    authority = receipt_module.new_private_file_cleanup_receipt()
+    assert authority.mark_unsubmitted_empty()
+    outer = RuntimeError("fixed")
+    outer.__context__ = CoturnTlsPrivateCleanupRequired(authority)
+    if explicit_cause:
+        outer.__cause__ = RuntimeError("unrelated cause")
+    else:
+        outer.__suppress_context__ = True
+    assert private_module.private_cleanup_authority(outer) is None
+    cleanup_tls_private_authority(authority)
+
+
+@pytest.mark.parametrize("chain", ["cause", "context"])
+def test_private_cleanup_helper_bounds_exception_cycles(chain: str) -> None:
+    outer = RuntimeError("outer")
+    inner = RuntimeError("inner")
+    if chain == "cause":
+        outer.__cause__ = inner
+        inner.__cause__ = outer
+    else:
+        outer.__context__ = inner
+        inner.__context__ = outer
+    assert private_module.private_cleanup_authority(outer) is None
+
+
+def test_validator_prefers_explicit_private_authority_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    cause, cause_fd, cause_path = _owned_private_descriptor(tmp_path, "validator-cause.bin")
+    context, context_fd, context_path = _owned_private_descriptor(
+        tmp_path,
+        "validator-context.bin",
+    )
+
+    def fail_validation(**_arguments: object) -> object:
+        try:
+            raise CoturnTlsPrivateCleanupRequired(context)
+        except CoturnTlsPrivateCleanupRequired:
+            raise RuntimeError("fixed validator failure") from CoturnTlsPrivateCleanupRequired(
+                cause
+            )
+
+    monkeypatch.setattr(tls_module, "_validate_tls_material", fail_validation)
+    try:
+        with pytest.raises(CoturnTlsPrivateCleanupRequired) as captured:
+            validate_tls_material(
+                runner=QueueRunner([]),
+                tools=_tools(),
+                paths=paths,
+                now=NOW,
+            )
+        assert captured.value.cleanup_authority is cause
+        assert cause.active and context.active
+        assert os.fstat(cause_fd) and os.fstat(context_fd)
+        assert not traceback_contains(
+            captured.value,
+            os.fspath(cause_path),
+            os.fspath(context_path),
+            "effective-chain-private-sentinel",
+        )
+    finally:
+        if cause.active:
+            cleanup_tls_private_authority(cause)
+        if context.active:
+            cleanup_tls_private_authority(context)
+
+
+def test_validator_ignores_suppressed_private_authority_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    authority, descriptor, target = _owned_private_descriptor(
+        tmp_path,
+        "validator-suppressed.bin",
+    )
+
+    def fail_validation(**_arguments: object) -> object:
+        try:
+            raise CoturnTlsPrivateCleanupRequired(authority)
+        except CoturnTlsPrivateCleanupRequired:
+            raise RuntimeError("fixed validator failure") from None
+
+    monkeypatch.setattr(tls_module, "_validate_tls_material", fail_validation)
+    try:
+        with pytest.raises(CoturnTlsError, match=r"^Coturn TLS material is invalid$") as captured:
+            validate_tls_material(
+                runner=QueueRunner([]),
+                tools=_tools(),
+                paths=paths,
+                now=NOW,
+            )
+        assert authority.active and os.fstat(descriptor)
+        assert not traceback_contains(
+            captured.value,
+            os.fspath(target),
+            "effective-chain-private-sentinel",
+        )
+    finally:
+        if authority.active:
+            cleanup_tls_private_authority(authority)
+
+
 @pytest.mark.parametrize("kind", ["ordinary", "keyboard", "exit"])
 def test_validation_preserves_opaque_private_descriptor_recovery(
     tmp_path: Path,
@@ -1150,6 +1286,109 @@ def test_generation_adopts_persistent_validation_descriptor_recovery(
             cleanup_tls_material_authority(lifetime)
         if private_authority.active:
             cleanup_tls_private_authority(private_authority)
+
+
+def test_generator_prefers_explicit_private_authority_cause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    cause, cause_fd, cause_path = _owned_private_descriptor(tmp_path, "generator-cause.bin")
+    context, context_fd, context_path = _owned_private_descriptor(
+        tmp_path,
+        "generator-context.bin",
+    )
+
+    def fail_validation(**_arguments: object) -> object:
+        try:
+            raise CoturnTlsPrivateCleanupRequired(context)
+        except CoturnTlsPrivateCleanupRequired:
+            raise RuntimeError("fixed generator failure") from CoturnTlsPrivateCleanupRequired(
+                cause
+            )
+
+    monkeypatch.setattr(tls_module, "validate_tls_material", fail_validation)
+    runner = QueueRunner([_result(PRIVATE_KEY), _result(CERTIFICATE)])
+    try:
+        with pytest.raises(CoturnTlsError, match=r"^Coturn TLS material is invalid$") as captured:
+            generate_tls_and_config_material(
+                runner=runner,
+                tools=_tools(),
+                paths=paths,
+                topology=TOPOLOGY,
+                static_auth_secret=SECRET,
+                now=NOW,
+            )
+        assert not cause.active
+        with pytest.raises(OSError):
+            os.fstat(cause_fd)
+        assert context.active and os.fstat(context_fd)
+        assert len(runner.requests) == 2
+        assert not any(
+            path.exists()
+            for path in (paths.contract.private_key, paths.contract.cert, paths.contract.config)
+        )
+        assert not traceback_contains(
+            captured.value,
+            SECRET,
+            PRIVATE_KEY,
+            CERTIFICATE,
+            os.fspath(cause_path),
+            os.fspath(context_path),
+            "effective-chain-private-sentinel",
+        )
+    finally:
+        if cause.active:
+            cleanup_tls_private_authority(cause)
+        if context.active:
+            cleanup_tls_private_authority(context)
+
+
+def test_generator_ignores_suppressed_private_authority_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = _paths(tmp_path)
+    authority, descriptor, target = _owned_private_descriptor(
+        tmp_path,
+        "generator-suppressed.bin",
+    )
+
+    def fail_validation(**_arguments: object) -> object:
+        try:
+            raise CoturnTlsPrivateCleanupRequired(authority)
+        except CoturnTlsPrivateCleanupRequired:
+            raise RuntimeError("fixed generator failure") from None
+
+    monkeypatch.setattr(tls_module, "validate_tls_material", fail_validation)
+    runner = QueueRunner([_result(PRIVATE_KEY), _result(CERTIFICATE)])
+    try:
+        with pytest.raises(CoturnTlsError, match=r"^Coturn TLS material is invalid$") as captured:
+            generate_tls_and_config_material(
+                runner=runner,
+                tools=_tools(),
+                paths=paths,
+                topology=TOPOLOGY,
+                static_auth_secret=SECRET,
+                now=NOW,
+            )
+        assert authority.active and os.fstat(descriptor)
+        assert len(runner.requests) == 2
+        assert not any(
+            path.exists()
+            for path in (paths.contract.private_key, paths.contract.cert, paths.contract.config)
+        )
+        assert not traceback_contains(
+            captured.value,
+            SECRET,
+            PRIVATE_KEY,
+            CERTIFICATE,
+            os.fspath(target),
+            "effective-chain-private-sentinel",
+        )
+    finally:
+        if authority.active:
+            cleanup_tls_private_authority(authority)
 
 
 @pytest.mark.parametrize("kind", ["ordinary", "keyboard", "exit"])
