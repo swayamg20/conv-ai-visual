@@ -84,6 +84,11 @@ from tests.test_voice_pipecat_e2e_coturn_docker_network import (  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_host import _paths, _tools  # noqa: E402
 
 
+def test_runtime_facade_exports_symmetric_absence_finalizers() -> None:
+    assert "finalize_container_absence" in runtime_module.__all__
+    assert "finalize_network_absence" in runtime_module.__all__
+
+
 @pytest.mark.parametrize(
     "values",
     [

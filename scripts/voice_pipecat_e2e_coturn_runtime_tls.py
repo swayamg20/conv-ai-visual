@@ -45,6 +45,7 @@ from scripts.voice_pipecat_e2e_coturn_tls_receipt import (
 )
 
 _TLS_TOKEN = object()
+_USE_REVOKED = object()
 _TLS_RECOVERY_TYPES = {
     TlsCombinedCleanupAuthority,
     TlsMaterialLifetimeAuthority,
@@ -73,7 +74,17 @@ class CoturnRuntimeTlsCleanupRequired(CoturnRuntimeError):
 class RuntimeTlsMaterial:
     """Caller-preowned aggregate for one exact run/path/topology TLS lifetime."""
 
-    __slots__ = ("_container_id", "_lock", "_paths", "_slot", "_state", "_topology")
+    __slots__ = (
+        "_cleanup_lock",
+        "_container_id",
+        "_lock",
+        "_openssl_readiness",
+        "_paths",
+        "_probe_owner",
+        "_slot",
+        "_state",
+        "_topology",
+    )
 
     def __init__(
         self,
@@ -89,8 +100,11 @@ class RuntimeTlsMaterial:
         self._topology = topology
         self._slot = slot
         self._container_id: str | None = None
+        self._openssl_readiness: OpenSslReadinessReceipt | None = None
+        self._probe_owner: object | None = None
         self._state = "empty"
         self._lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
 
     @property
     def certificate_sha256(self) -> str:
@@ -115,7 +129,7 @@ class RuntimeTlsMaterial:
 
     def _retained_slot(self) -> TlsMaterialGenerationSlot:
         with self._lock:
-            if self._state not in {"generated", "bound"}:
+            if self._state not in {"generated", "bound"} or self._probe_owner is _USE_REVOKED:
                 raise CoturnRuntimeError("Runtime TLS material is unavailable")
             return self._slot
 
@@ -148,6 +162,7 @@ class RuntimeTlsMaterial:
         with self._lock:
             if (
                 self._state != "generated"
+                or self._probe_owner is _USE_REVOKED
                 or type(authority) is not ContainerCleanupAuthority
                 or authority.plan.paths != self._paths
                 or authority.plan.network.authority.plan.topology != self._topology
@@ -160,6 +175,7 @@ class RuntimeTlsMaterial:
         with self._lock:
             retained = (
                 self._state == "bound"
+                and self._probe_owner is not _USE_REVOKED
                 and self._container_id == running.authority.container_id
                 and running.authority.plan.network.authority.plan.topology == self._topology
             )
@@ -169,47 +185,133 @@ class RuntimeTlsMaterial:
             and self._slot.has_material is True
         )
 
+    def _matches_generated(
+        self,
+        paths: CoturnRuntimePaths,
+        topology: CoturnBridgeTopology,
+    ) -> bool:
+        with self._lock:
+            retained = (
+                self._state in {"generated", "bound"}
+                and self._probe_owner is not _USE_REVOKED
+                and paths == self._paths
+                and topology == self._topology
+            )
+        return bool(retained and self._slot.has_material is True)
+
+    def _bind_probe_owner(self, owner: object) -> None:
+        if type(owner) is not object or self._slot.has_material is not True:
+            raise CoturnRuntimeError("Runtime TLS probe ownership is invalid")
+        with self._lock:
+            if self._state not in {"generated", "bound"}:
+                raise CoturnRuntimeError("Runtime TLS probe ownership is invalid")
+            if self._probe_owner is None:
+                self._probe_owner = owner
+            elif self._probe_owner is not owner:
+                raise CoturnRuntimeError("Runtime TLS probe ownership is invalid")
+
+    def _matches_probe_owner(self, owner: object) -> bool:
+        with self._lock:
+            retained = bool(
+                type(owner) is object
+                and self._state in {"generated", "bound"}
+                and self._probe_owner is owner
+            )
+        return bool(retained and self._slot.has_material is True)
+
+    def _publish_readiness(
+        self,
+        running: ValidatedRunningContainer,
+        receipt: OpenSslReadinessReceipt,
+    ) -> OpenSslReadinessReceipt:
+        if not self._matches_running(running) or type(receipt) is not OpenSslReadinessReceipt:
+            raise CoturnRuntimeError("Runtime TLS readiness ownership is invalid")
+        with self._lock:
+            if self._state != "bound":
+                raise CoturnRuntimeError("Runtime TLS readiness ownership is invalid")
+            if self._openssl_readiness is None:
+                self._openssl_readiness = receipt
+            elif self._openssl_readiness is not receipt:
+                raise CoturnRuntimeError("Runtime TLS readiness ownership is invalid")
+            return self._openssl_readiness
+
+    def _matches_readiness(
+        self,
+        running: ValidatedRunningContainer,
+        receipt: OpenSslReadinessReceipt,
+    ) -> bool:
+        if not self._matches_running(running):
+            return False
+        with self._lock:
+            return (
+                self._state == "bound"
+                and type(receipt) is OpenSslReadinessReceipt
+                and self._openssl_readiness is receipt
+            )
+
     def _cleanup_after_removal(self, removal: ContainerAbsenceReceipt) -> None:
         if not removal._matches_container(self._paths, self._container_id):
             raise CoturnRuntimeError("Runtime TLS cleanup receipt is invalid")
         self._cleanup_slot(allowed_state="bound")
 
     def _cleanup_unpublished(self) -> None:
-        with self._lock:
-            state = self._state
-        allowed_state = state.removeprefix("cleaning:") if state.startswith("cleaning:") else state
-        if allowed_state not in {"generation-failed", "generated"}:
-            raise CoturnRuntimeError("Runtime TLS unpublished cleanup is invalid")
-        if self._slot.has_material is not True:
+        with self._cleanup_lock:
             with self._lock:
-                if self._state not in {allowed_state, f"cleaning:{allowed_state}"}:
-                    raise CoturnRuntimeError("Runtime TLS unpublished cleanup is invalid")
-                self._state = "cleaned"
-            return
-        self._cleanup_slot(allowed_state=allowed_state)
+                state = self._state
+            if state == "cleaned":
+                return
+            allowed_state = (
+                state.removeprefix("cleaning:") if state.startswith("cleaning:") else state
+            )
+            if allowed_state not in {"generation-failed", "generated"}:
+                raise CoturnRuntimeError("Runtime TLS unpublished cleanup is invalid")
+            if self._slot.has_material is not True:
+                with self._lock:
+                    if self._state not in {allowed_state, f"cleaning:{allowed_state}"}:
+                        raise CoturnRuntimeError("Runtime TLS unpublished cleanup is invalid")
+                    self._openssl_readiness = None
+                    self._probe_owner = _USE_REVOKED
+                    self._state = "cleaned"
+                return
+            self._cleanup_slot_locked(allowed_state=allowed_state)
 
     def _cleanup_slot(self, *, allowed_state: str) -> None:
-        with self._lock:
-            if self._state == "cleaned":
-                return
-            cleaning_state = f"cleaning:{allowed_state}"
-            if self._state not in {allowed_state, cleaning_state}:
-                raise CoturnRuntimeError("Runtime TLS cleanup authority is invalid")
-            self._state = cleaning_state
+        with self._cleanup_lock:
+            self._cleanup_slot_locked(allowed_state=allowed_state)
+
+    def _cleanup_slot_locked(self, *, allowed_state: str) -> None:
+        cleaning_state = f"cleaning:{allowed_state}"
         try:
+            with self._lock:
+                if self._state == "cleaned":
+                    return
+                if self._state not in {allowed_state, cleaning_state}:
+                    raise CoturnRuntimeError("Runtime TLS cleanup authority is invalid")
+                self._state = cleaning_state
+                self._openssl_readiness = None
+                self._probe_owner = _USE_REVOKED
             cleanup_tls_material_generation_slot(self._slot)
+            with self._lock:
+                if self._state != cleaning_state:
+                    raise CoturnRuntimeError("Runtime TLS cleanup authority is invalid")
+                self._state = "cleaned"
         except BaseException:
             with self._lock:
                 if self._state == cleaning_state:
                     self._state = allowed_state
             raise
-        with self._lock:
-            if self._state != cleaning_state:
-                raise CoturnRuntimeError("Runtime TLS cleanup authority is invalid")
-            self._state = "cleaned"
 
     def __repr__(self) -> str:
         return "RuntimeTlsMaterial()"
+
+    def __copy__(self) -> None:
+        raise TypeError("Runtime TLS material cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> None:
+        raise TypeError("Runtime TLS material cannot be copied")
+
+    def __reduce__(self) -> None:
+        raise TypeError("Runtime TLS material cannot be serialized")
 
 
 def new_runtime_tls_material(
@@ -364,7 +466,7 @@ def execute_openssl_readiness(
         if cached is not None:
             if type(cached) is not OpenSslReadinessReceipt:
                 raise CoturnRuntimeError("Coturn OpenSSL readiness failed")
-            receipt = cached
+            receipt = tls_material._publish_readiness(running, cached)
         while receipt is None:
             request = readiness_budget._prepare_request(
                 "openssl",
@@ -390,7 +492,7 @@ def execute_openssl_readiness(
                 published = readiness_budget._openssl_ready(tls_material, candidate)
                 if type(published) is not OpenSslReadinessReceipt:
                     raise CoturnRuntimeError("Coturn OpenSSL readiness failed")
-                receipt = published
+                receipt = tls_material._publish_readiness(running, published)
                 published = None
                 candidate = None
     except (KeyboardInterrupt, SystemExit) as error:

@@ -36,6 +36,7 @@ from scripts.voice_pipecat_e2e_coturn_runtime import (  # noqa: E402
 )
 from scripts.voice_pipecat_e2e_coturn_tls import (  # noqa: E402
     cleanup_tls_material_generation_slot,
+    validate_openssl_readiness_result,
 )
 from tests.coturn_traceback_helpers import traceback_contains  # noqa: E402
 from tests.test_voice_pipecat_e2e_coturn_docker_container import (  # noqa: E402
@@ -62,6 +63,7 @@ from tests.test_voice_pipecat_e2e_coturn_tls import (  # noqa: E402
     PRIVATE_KEY,
     SECRET,
     TOPOLOGY,
+    _readiness_transcript,
     _tls_results,
 )
 
@@ -274,6 +276,44 @@ def test_cross_topology_running_proof_cannot_authorize_readiness(tmp_path: Path)
                 tls_material=material,
                 readiness_budget=budget,
             )
+        assert runner.requests == []
+    finally:
+        cleanup_tls_material_generation_slot(material._slot)
+
+
+def test_cached_openssl_success_repairs_interrupted_material_publication(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    material = new_runtime_tls_material(paths=paths, topology=TOPOLOGY)
+    _generate(material, paths)
+    authority = _authority(paths)
+    bind_runtime_tls_material_to_container(material, authority)
+    running = validate_container_running(
+        authority,
+        _container_inspection(authority.plan, running=True),
+    )
+    budget = create_runtime_readiness_budget(
+        absolute_deadline=110.0,
+        clock=lambda: 100.0,
+        wait=lambda _seconds: None,
+    )
+    budget._container_ready(authority, running)
+    candidate = validate_openssl_readiness_result(
+        _result(stderr=_readiness_transcript("TLSv1.3", "TLS_AES_256_GCM_SHA384"))
+    )
+    cached = budget._openssl_ready(material, candidate)
+    runner = QueueRunner([])
+    try:
+        receipt = execute_openssl_readiness(
+            runner=runner,
+            tools=_tools(),
+            running=running,
+            tls_material=material,
+            readiness_budget=budget,
+        )
+        assert receipt is cached
+        assert material._matches_readiness(running, receipt)
         assert runner.requests == []
     finally:
         cleanup_tls_material_generation_slot(material._slot)
