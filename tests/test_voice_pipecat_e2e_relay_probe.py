@@ -48,6 +48,7 @@ from scripts.voice_pipecat_e2e_relay_probe import (
     replacement_relay_backend_environment,
     replacement_relay_playwright_environment,
     replacement_relay_web_environment,
+    revalidate_relay_probe_source,
 )
 from scripts.voice_pipecat_e2e_stack import build_environment, build_web_environment
 from tests.coturn_traceback_helpers import traceback_contains
@@ -479,6 +480,7 @@ def test_tls_cleanup_invalidates_every_projection(
         readiness=readiness,
     )
     cleanup_tls_material_generation_slot(material._slot)
+    assert revalidate_relay_probe_source(run) is None
 
     for project in (
         replacement_relay_backend_environment,
@@ -675,6 +677,147 @@ def test_probe_source_cannot_be_replaced_copied_mutated_or_serialized(
     with pytest.raises(AttributeError, match=r"immutable$"):
         source._commit_sha = "b" * 40
     assert source.commit_sha == SOURCE_SHA
+
+
+def test_probe_source_revalidation_requires_same_clean_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(monkeypatch)
+    run = new_relay_probe_run(runtime_paths=_paths(tmp_path), source=source)
+
+    assert revalidate_relay_probe_source(run) is None
+
+    for observed in (
+        {
+            "commit_sha": "b" * 40,
+            "repository_clean": True,
+            "dirty_state_refused": True,
+        },
+        {
+            "commit_sha": SOURCE_SHA,
+            "repository_clean": False,
+            "dirty_state_refused": True,
+        },
+        {"commit_sha": SOURCE_SHA},
+    ):
+        monkeypatch.setattr(
+            relay_probe_module,
+            "_read_source_provenance",
+            lambda observed=observed: observed,
+        )
+        with pytest.raises(
+            RelayProbeError,
+            match=r"^Relay probe source revalidation failed$",
+        ) as error:
+            revalidate_relay_probe_source(run)
+        assert error.value.__cause__ is None
+        assert error.value.__context__ is None
+        assert not traceback_contains(error.value, SOURCE_SHA, str(tmp_path))
+
+
+def test_probe_source_revalidation_scrubs_reader_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = new_relay_probe_run(
+        runtime_paths=_paths(tmp_path),
+        source=_source(monkeypatch),
+    )
+
+    def fail() -> object:
+        raise RuntimeError(f"source-reader-secret-{tmp_path}")
+
+    monkeypatch.setattr(relay_probe_module, "_read_source_provenance", fail)
+    with pytest.raises(
+        RelayProbeError,
+        match=r"^Relay probe source revalidation failed$",
+    ) as error:
+        revalidate_relay_probe_source(run)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert not traceback_contains(error.value, "source-reader-secret", str(tmp_path))
+
+
+def test_probe_source_revalidation_rejects_hostile_sha_equality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = new_relay_probe_run(
+        runtime_paths=_paths(tmp_path),
+        source=_source(monkeypatch),
+    )
+
+    class SpoofedSha(str):
+        def __eq__(self, _other: object) -> bool:
+            return True
+
+        __hash__ = str.__hash__
+
+    monkeypatch.setattr(
+        relay_probe_module,
+        "_read_source_provenance",
+        lambda: {
+            "commit_sha": SpoofedSha("b" * 40),
+            "repository_clean": True,
+            "dirty_state_refused": True,
+        },
+    )
+    with pytest.raises(
+        RelayProbeError,
+        match=r"^Relay probe source revalidation failed$",
+    ):
+        revalidate_relay_probe_source(run)
+
+    class HostileEquality:
+        def __eq__(self, _other: object) -> bool:
+            raise AssertionError("hostile equality must not execute")
+
+    monkeypatch.setattr(
+        relay_probe_module,
+        "_validate_source_provenance",
+        lambda _value: {
+            "commit_sha": HostileEquality(),
+            "repository_clean": True,
+            "dirty_state_refused": True,
+        },
+    )
+    with pytest.raises(
+        RelayProbeError,
+        match=r"^Relay probe source revalidation failed$",
+    ):
+        revalidate_relay_probe_source(run)
+
+
+@pytest.mark.parametrize("control", [KeyboardInterrupt("source-secret"), SystemExit(23)])
+def test_probe_source_revalidation_preserves_sanitized_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    control: KeyboardInterrupt | SystemExit,
+) -> None:
+    run = new_relay_probe_run(
+        runtime_paths=_paths(tmp_path),
+        source=_source(monkeypatch),
+    )
+
+    def interrupt() -> object:
+        raise control
+
+    monkeypatch.setattr(relay_probe_module, "_read_source_provenance", interrupt)
+    with pytest.raises(type(control)) as error:
+        revalidate_relay_probe_source(run)
+    if type(control) is SystemExit:
+        assert error.value.code == 23
+    else:
+        assert str(error.value) == ""
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    assert not traceback_contains(
+        error.value,
+        "source-secret",
+        SOURCE_SHA,
+        str(tmp_path),
+    )
 
 
 def test_probe_run_and_projection_are_factory_owned_and_fixed(

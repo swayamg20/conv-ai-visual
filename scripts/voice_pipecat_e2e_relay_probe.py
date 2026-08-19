@@ -36,6 +36,7 @@ _WEB_FAILURE = "Relay probe web environment is unavailable"
 _BROWSER_FAILURE = "Relay probe browser environment is unavailable"
 _BACKEND_AUTHORIZATION_FAILURE = "Relay probe backend authorization failed"
 _BROWSER_AUTHORIZATION_FAILURE = "Relay probe browser authorization failed"
+_SOURCE_REVALIDATION_FAILURE = "Relay probe source revalidation failed"
 _WEB_ENVIRONMENT_NAMES = frozenset(
     {
         "CI",
@@ -394,6 +395,38 @@ def capture_relay_probe_source() -> RelayProbeSource:
     return source
 
 
+def revalidate_relay_probe_source(run: RelayProbeRun) -> None:
+    """Require the exact retained clean commit immediately before publication."""
+
+    observed: dict[str, object] | None = None
+    source: RelayProbeSource | None = None
+    control = None
+    valid = False
+    try:
+        if type(run) is not RelayProbeRun:
+            raise RelayProbeError(_SOURCE_REVALIDATION_FAILURE)
+        source = run._source
+        if type(source) is not RelayProbeSource:
+            raise RelayProbeError(_SOURCE_REVALIDATION_FAILURE)
+        observed = _validate_source_provenance(_read_source_provenance())
+        candidate = observed.get("commit_sha")
+        valid = bool(
+            type(candidate) is str
+            and candidate == source.commit_sha
+            and observed.get("repository_clean") is True
+            and observed.get("dirty_state_refused") is True
+        )
+    except (KeyboardInterrupt, SystemExit) as error:
+        control = control_signal(error)
+    except BaseException:
+        pass
+    run = source = observed = candidate = None  # type: ignore[assignment]
+    if control is not None:
+        raise_control(control)
+    if not valid:
+        raise RelayProbeError(_SOURCE_REVALIDATION_FAILURE) from None
+
+
 def new_relay_probe_run(
     *,
     runtime_paths: CoturnRuntimePaths,
@@ -661,4 +694,5 @@ __all__ = [
     "replacement_relay_backend_environment",
     "replacement_relay_playwright_environment",
     "replacement_relay_web_environment",
+    "revalidate_relay_probe_source",
 ]
