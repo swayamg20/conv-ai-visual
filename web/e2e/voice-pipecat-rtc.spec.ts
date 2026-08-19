@@ -743,6 +743,7 @@ function writeResultAtomically(resultPath: string, result: object): void {
   fs.writeFileSync(temporary, `${JSON.stringify(result, null, 2)}\n`, {
     encoding: "utf8",
     flag: "wx",
+    mode: 0o600,
   });
   fs.renameSync(temporary, resultPath);
   expectNoSignalingSecrets(JSON.parse(fs.readFileSync(resultPath, "utf8")));

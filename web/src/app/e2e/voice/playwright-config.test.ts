@@ -223,7 +223,11 @@ describe("Playwright report metadata", () => {
       expect(config.metadata).toEqual({});
       expect(config.captureGitInfo).toEqual({ commit: false, diff: false });
       expect(config.outputDir).toBe(
-        path.join(artifactDir, "relay-ephemeral-output")
+        path.join(
+          artifactDir,
+          "relay-ephemeral-output",
+          "playwright-results"
+        )
       );
       expect(config.preserveOutput).toBe("never");
       expect(config.reporter).toEqual([

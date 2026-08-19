@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import threading
 import uuid
+from collections.abc import Callable
 
 from scripts.voice_pipecat_e2e_coturn import PipecatE2ENetworkMode
 from scripts.voice_pipecat_e2e_coturn_docker_container import ValidatedRunningContainer
@@ -119,6 +120,7 @@ class RelayProbeRun:
 
     __slots__ = (
         "_backend_environment",
+        "_browser_artifact_owner",
         "_browser_environment",
         "_call_id",
         "_lock",
@@ -155,6 +157,7 @@ class RelayProbeRun:
         self._backend_environment: tuple[tuple[str, str], ...] | None = None
         self._web_environment: tuple[tuple[str, str], ...] | None = None
         self._browser_environment: tuple[tuple[str, str], ...] | None = None
+        self._browser_artifact_owner: object | None = None
         self._state = "created"
         self._lock = threading.Lock()
 
@@ -272,6 +275,87 @@ class RelayProbeRun:
             if frozen is None:
                 raise RelayProbeError(_projection_failure(target))
             return dict(frozen)
+
+    def _claim_browser_artifact_owner(
+        self,
+        factory: Callable[
+            [StackPaths, str, RelayProbeSource, Callable[[object], bool]],
+            object,
+        ],
+    ) -> object:
+        """Retain the one exact-call artifact owner before browser effects."""
+
+        with self._lock:
+            current = self._browser_artifact_owner
+            if current is not None:
+                return current
+            tls_material = self._tls_material
+            running = self._running
+            readiness = self._readiness
+            if (
+                self._state != "browser-ready"
+                or type(tls_material) is not RuntimeTlsMaterial
+                or type(running) is not ValidatedRunningContainer
+                or type(readiness) is not OpenSslReadinessReceipt
+                or not tls_material._matches_probe_owner(self._owner_token)
+                or not tls_material._matches_readiness(running, readiness)
+            ):
+                raise RelayProbeError(_BROWSER_AUTHORIZATION_FAILURE)
+            current = factory(
+                self._stack_paths,
+                self._call_id,
+                self._source,
+                self._retain_browser_artifact_owner_unlocked,
+            )
+            if current is None or self._browser_artifact_owner is not current:
+                raise RelayProbeError(_BROWSER_AUTHORIZATION_FAILURE)
+            return current
+
+    def _retain_browser_artifact_owner_unlocked(self, owner: object) -> bool:
+        control = None
+        while True:
+            try:
+                current = self._browser_artifact_owner
+                if current is None:
+                    self._browser_artifact_owner = owner
+                    current = owner
+                retained = current is owner and owner is not None
+                break
+            except (KeyboardInterrupt, SystemExit) as error:
+                control = control or control_signal(error)
+        if control is not None:
+            raise_control(control)
+        return retained
+
+    def _matches_browser_artifact_owner(self, owner: object) -> bool:
+        """Match the retained owner while the exact browser authority is live."""
+
+        with self._lock:
+            tls_material = self._tls_material
+            running = self._running
+            readiness = self._readiness
+            return bool(
+                owner is not None
+                and self._browser_artifact_owner is owner
+                and self._state == "browser-ready"
+                and type(tls_material) is RuntimeTlsMaterial
+                and type(running) is ValidatedRunningContainer
+                and type(readiness) is OpenSslReadinessReceipt
+                and tls_material._matches_probe_owner(self._owner_token)
+                and tls_material._matches_readiness(running, readiness)
+            )
+
+    def _retains_browser_artifact_owner(self, owner: object) -> bool:
+        """Keep cleanup identity usable after browser projection is revoked."""
+
+        with self._lock:
+            return bool(owner is not None and self._browser_artifact_owner is owner)
+
+    def _browser_artifact_cleanup_owner(self) -> object | None:
+        """Return the already-retained cleanup root without reauthorizing use."""
+
+        with self._lock:
+            return self._browser_artifact_owner
 
     def __repr__(self) -> str:
         return "RelayProbeRun()"

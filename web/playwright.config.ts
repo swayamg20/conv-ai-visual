@@ -112,7 +112,11 @@ const launchArguments = [
 validateChromiumCertificateArguments(network, launchArguments, spkiPin);
 
 const directOutputDir = path.join(artifactDir, "test-results");
-const relayOutputDir = path.join(artifactDir, "relay-ephemeral-output");
+const relayOutputDir = path.join(
+  artifactDir,
+  "relay-ephemeral-output",
+  "playwright-results"
+);
 const reportPath = path.join(artifactDir, "report.json");
 const safeReporterPath = path.join(
   process.cwd(),
