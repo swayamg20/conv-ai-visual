@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from typing import Iterable, NoReturn
 
 from scripts import voice_pipecat_e2e_coturn_evidence_result as result_owner
+from scripts.voice_pipecat_e2e_coturn_evidence_destination import (
+    claim_probe_parser_destination,
+    new_probe_parser_destination,
+)
 from scripts.voice_pipecat_e2e_coturn_evidence_result import (
     CoturnEvidenceError,
     CoturnProbeResultSlot,
@@ -39,6 +43,7 @@ _MAX_CONTENT_BYTES = COTURN_MAX_RECORD_BYTES - 1
 _MAX_RECORDS = 8192
 _FACTORY_TOKEN = object()
 _PROBE_TOKEN = object()
+_PROBE_DESTINATION_TOKEN = object()
 
 _ControlSignal = tuple[type[KeyboardInterrupt] | type[SystemExit], int | None]
 
@@ -88,6 +93,7 @@ class CoturnEvidenceParser:
         "_finish_owner",
         "_finished",
         "_line",
+        "_probe_destination_claim",
         "_probe_only",
         "_probe_result_slot",
         "_record_count",
@@ -106,10 +112,10 @@ class CoturnEvidenceParser:
         self._line = bytearray()
         self._record_count = 0
         self._probe_only = _mode is _PROBE_TOKEN
+        self._probe_destination_claim = None
         self._probe_result_slot: CoturnProbeResultSlot | None = None
         self._finish_owner = object()
-        self._finished = False
-        self._failed = False
+        self._finished = self._failed = False
         self._state: CoturnEvidenceState | None = None
         failure: str | None = None
         try:
@@ -131,60 +137,64 @@ class CoturnEvidenceParser:
             failure = "Coturn evidence parser is unavailable"
         except BaseException as error:
             self._terminalize(failed=True)
-            expected_username = None
-            expected_topology = None
-            expected_realm = None
-            _result_slot = None
+            expected_username = expected_topology = expected_realm = _result_slot = None
             _scrub_control_flow_exception(error)
             raise
-        expected_username = None
-        expected_topology = None
-        expected_realm = None
-        _result_slot = None
+        expected_username = expected_topology = expected_realm = _result_slot = None
         if failure is not None:
             self._terminalize(failed=True)
             _raise_public(failure)
 
     @classmethod
-    def for_probe(
+    def _initialize_probe(
         cls,
         *,
         expected_username: object,
         expected_topology: object,
         expected_realm: object = COTURN_REALM,
         result_slot: object = None,
-    ) -> CoturnEvidenceParser:
+        _destination: object = None,
+        _destination_token: object = None,
+    ) -> None:
         parser: CoturnEvidenceParser | None = None
         failure: str | None = None
+        arguments: dict[str, object] = {}
+        owned = False
         try:
-            parser = cls(
+            parser = _destination if type(_destination) is cls else None
+            if parser is None or _destination_token is not _PROBE_DESTINATION_TOKEN:
+                raise CoturnEvidenceError("Coturn evidence parser is unavailable")
+            arguments = dict(
                 expected_username=expected_username,
                 expected_topology=expected_topology,
                 expected_realm=expected_realm,
                 _mode=_PROBE_TOKEN,
                 _result_slot=result_slot,
             )
+            if not claim_probe_parser_destination(parser):
+                raise CoturnEvidenceError("Coturn evidence parser is unavailable")
+            owned = True
+            cls.__init__(parser, **arguments)
         except CoturnEvidenceError as error:
             failure = str(error)
         except Exception:
             failure = "Coturn evidence parser is unavailable"
         except BaseException as error:
-            if parser is not None:
+            if owned and parser is not None:
                 parser._terminalize(failed=True)
-            expected_username = None
-            expected_topology = None
-            expected_realm = None
-            result_slot = None
+            arguments.clear()
+            expected_username = expected_topology = expected_realm = None
+            result_slot = parser = _destination = _destination_token = None
             _scrub_control_flow_exception(error)
             raise
-        expected_username = None
-        expected_topology = None
-        expected_realm = None
-        result_slot = None
+        arguments.clear()
+        expected_username = expected_topology = expected_realm = None
+        result_slot = _destination = _destination_token = None
         if failure is not None:
+            parser = None
             _raise_public(failure)
-        assert parser is not None
-        return parser
+        parser = None
+        return None
 
     def feed(self, chunk: object) -> None:
         """Consume one bytes-like chunk without buffering more than one record."""
@@ -482,9 +492,7 @@ def parse_coturn_evidence(
         )
     finally:
         chunks = ()
-        expected_username = None
-        expected_topology = None
-        expected_realm = None
+        expected_username = expected_topology = expected_realm = None
     if failure is not None:
         _raise_public(failure)
     assert isinstance(result, CoturnEvidence)
@@ -512,9 +520,7 @@ def parse_coturn_probe(
         )
     finally:
         chunks = ()
-        expected_username = None
-        expected_topology = None
-        expected_realm = None
+        expected_username = expected_topology = expected_realm = None
     if failure is not None:
         _raise_public(failure)
     assert isinstance(result, CoturnProbeSummary)
@@ -532,12 +538,21 @@ def _parse_public(
     parser: CoturnEvidenceParser | None = None
     failure: str | None = None
     try:
-        factory = CoturnEvidenceParser.for_probe if probe else CoturnEvidenceParser
-        parser = factory(
-            expected_username=expected_username,
-            expected_topology=expected_topology,
-            expected_realm=expected_realm,
-        )
+        if probe:
+            parser = new_probe_parser_destination(CoturnEvidenceParser)
+            CoturnEvidenceParser._initialize_probe(
+                expected_username=expected_username,
+                expected_topology=expected_topology,
+                expected_realm=expected_realm,
+                _destination=parser,
+                _destination_token=_PROBE_DESTINATION_TOKEN,
+            )
+        else:
+            parser = CoturnEvidenceParser(
+                expected_username=expected_username,
+                expected_topology=expected_topology,
+                expected_realm=expected_realm,
+            )
     except CoturnEvidenceError as error:
         failure = str(error)
     except Exception:
@@ -546,14 +561,10 @@ def _parse_public(
         if parser is not None:
             parser._terminalize(failed=True)
         chunks = ()
-        expected_username = None
-        expected_topology = None
-        expected_realm = None
+        expected_username = expected_topology = expected_realm = None
         _scrub_control_flow_exception(error)
         raise
-    expected_username = None
-    expected_topology = None
-    expected_realm = None
+    expected_username = expected_topology = expected_realm = None
     if failure is not None or parser is None:
         chunks = ()
         return None, failure or "Coturn evidence parser is unavailable"

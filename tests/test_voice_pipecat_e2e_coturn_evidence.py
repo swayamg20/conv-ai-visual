@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+import pickle
 import re
 import sys
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -185,14 +188,20 @@ def _parse(records: list[bytes]) -> CoturnEvidence:
 
 
 def _parser(*, probe: bool = False, result_slot: object = None) -> CoturnEvidenceParser:
-    factory = CoturnEvidenceParser.for_probe if probe else CoturnEvidenceParser
     arguments: dict[str, object] = {
         "expected_username": USERNAME,
         "expected_topology": TOPOLOGY,
     }
-    if probe:
-        arguments["result_slot"] = result_slot
-    return factory(**arguments)
+    if not probe:
+        return CoturnEvidenceParser(**arguments)
+    parser = coturn_evidence_module.new_probe_parser_destination(CoturnEvidenceParser)
+    CoturnEvidenceParser._initialize_probe(
+        **arguments,
+        result_slot=result_slot,
+        _destination=parser,
+        _destination_token=coturn_evidence_module._PROBE_DESTINATION_TOKEN,
+    )
+    return parser
 
 
 def _replace_startup(records: list[bytes], prefix: bytes, replacement: bytes) -> list[bytes]:
@@ -1216,6 +1225,35 @@ def test_probe_result_slot_is_factory_owned_and_idempotently_retains_summary() -
     assert repr(slot) == "CoturnProbeResultSlot()"
 
 
+def test_probe_summary_and_result_slot_are_canonical_immutable_proofs() -> None:
+    slot = new_coturn_probe_result_slot()
+    parser = _parser(probe=True, result_slot=slot)
+    for record in _startup():
+        parser.feed(record)
+    parser.finish_probe_into()
+    summary = coturn_probe_summary_from_slot(slot)
+
+    for operation in (
+        lambda: copy.copy(summary),
+        lambda: copy.deepcopy(summary),
+        lambda: pickle.dumps(summary),
+        lambda: replace(summary, allocation_count=999),
+        lambda: copy.copy(slot),
+        lambda: copy.deepcopy(slot),
+        lambda: pickle.dumps(slot),
+    ):
+        with pytest.raises(TypeError):
+            operation()
+    for name in (*type(summary).__slots__, "allocation_count", "grammar_verified"):
+        with pytest.raises(AttributeError, match="immutable"):
+            setattr(summary, name, 999)
+
+    assert summary.allocation_count == 0
+    assert summary.grammar_verified is False
+    assert not summary
+    assert coturn_probe_summary_from_slot(slot) is summary
+
+
 @pytest.mark.parametrize(
     ("phase", "error_type", "code"),
     [
@@ -1669,11 +1707,14 @@ def test_empty_probe_result_slot_is_nonqualifying_and_unavailable() -> None:
 
 def test_probe_result_slot_binding_rejects_hostile_input_without_reflection() -> None:
     secret = f"probe-slot-{USERNAME}"
+    parser = coturn_evidence_module.new_probe_parser_destination(CoturnEvidenceParser)
     with pytest.raises(CoturnEvidenceError, match=r"probe result slot is invalid$") as error:
-        CoturnEvidenceParser.for_probe(
+        CoturnEvidenceParser._initialize_probe(
             expected_username=USERNAME,
             expected_topology=TOPOLOGY,
             result_slot=secret,
+            _destination=parser,
+            _destination_token=coturn_evidence_module._PROBE_DESTINATION_TOKEN,
         )
     assert error.value.__cause__ is None
     assert error.value.__context__ is None

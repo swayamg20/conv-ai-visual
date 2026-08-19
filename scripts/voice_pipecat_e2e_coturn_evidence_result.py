@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import threading
 import traceback
-from dataclasses import dataclass, field
 from typing import Callable, NoReturn
 
 from scripts.voice_pipecat_e2e_coturn_evidence_state import CoturnStateProbe
@@ -22,24 +21,76 @@ class CoturnEvidenceError(RuntimeError):
         return "CoturnEvidenceError()"
 
 
-@dataclass(frozen=True)
 class CoturnProbeSummary:
     """Sanitized discovery output that can never represent qualification."""
 
-    grammar_verified: bool = field(repr=False)
-    allocation_count: int = field(repr=False)
-    observed_categories: frozenset[CoturnLogCategory] = field(repr=False)
-    unknown_info_records: int = field(repr=False)
-    grammar_violation_records: int = field(repr=False)
-    total_records: int = field(repr=False)
-    _token: object = field(repr=False, compare=False, default=None)
+    __slots__ = (
+        "_allocation_count",
+        "_grammar_verified",
+        "_grammar_violation_records",
+        "_observed_categories",
+        "_total_records",
+        "_unknown_info_records",
+    )
 
-    def __post_init__(self) -> None:
-        if self._token is not _SUMMARY_TOKEN or self.grammar_verified is not False:
+    def __init__(
+        self,
+        *,
+        grammar_verified: bool,
+        allocation_count: int,
+        observed_categories: frozenset[CoturnLogCategory],
+        unknown_info_records: int,
+        grammar_violation_records: int,
+        total_records: int,
+        _token: object = None,
+    ) -> None:
+        if _token is not _SUMMARY_TOKEN or grammar_verified is not False:
             raise TypeError("Coturn probe summary is factory-owned")
+        object.__setattr__(self, "_grammar_verified", grammar_verified)
+        object.__setattr__(self, "_allocation_count", allocation_count)
+        object.__setattr__(self, "_observed_categories", observed_categories)
+        object.__setattr__(self, "_unknown_info_records", unknown_info_records)
+        object.__setattr__(self, "_grammar_violation_records", grammar_violation_records)
+        object.__setattr__(self, "_total_records", total_records)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("Coturn probe summary is immutable")
+
+    @property
+    def grammar_verified(self) -> bool:
+        return self._grammar_verified
+
+    @property
+    def allocation_count(self) -> int:
+        return self._allocation_count
+
+    @property
+    def observed_categories(self) -> frozenset[CoturnLogCategory]:
+        return self._observed_categories
+
+    @property
+    def unknown_info_records(self) -> int:
+        return self._unknown_info_records
+
+    @property
+    def grammar_violation_records(self) -> int:
+        return self._grammar_violation_records
+
+    @property
+    def total_records(self) -> int:
+        return self._total_records
 
     def __bool__(self) -> bool:
         return False
+
+    def __copy__(self) -> CoturnProbeSummary:
+        raise TypeError("Coturn probe summary cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> CoturnProbeSummary:
+        raise TypeError("Coturn probe summary cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn probe summary cannot be serialized")
 
     def __repr__(self) -> str:
         return "CoturnProbeSummary(grammar_verified=False)"
@@ -122,6 +173,15 @@ class CoturnProbeResultSlot:
     def _owned_by(self, owner: object) -> bool:
         with self._lock:
             return self._publication is not None and self._publication[0] is owner
+
+    def __copy__(self) -> CoturnProbeResultSlot:
+        raise TypeError("Coturn probe result slot cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> CoturnProbeResultSlot:
+        raise TypeError("Coturn probe result slot cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn probe result slot cannot be serialized")
 
     def __repr__(self) -> str:
         return "CoturnProbeResultSlot()"

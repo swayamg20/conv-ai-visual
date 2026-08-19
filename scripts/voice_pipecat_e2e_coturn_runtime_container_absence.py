@@ -58,6 +58,15 @@ class ContainerAbsenceReceipt:
             and self._container_id == container_id
         )
 
+    def __copy__(self) -> ContainerAbsenceReceipt:
+        raise TypeError("Coturn container absence receipt cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> ContainerAbsenceReceipt:
+        raise TypeError("Coturn container absence receipt cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn container absence receipt cannot be serialized")
+
     def __repr__(self) -> str:
         return "ContainerAbsenceReceipt()"
 

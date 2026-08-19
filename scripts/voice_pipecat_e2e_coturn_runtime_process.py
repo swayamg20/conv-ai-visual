@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import threading
 
+from scripts import voice_pipecat_e2e_coturn_runtime_process_claims as _claims
 from scripts import voice_pipecat_e2e_coturn_runtime_process_registry as _registry
 from scripts.voice_pipecat_e2e_coturn_docker_container import (
     ContainerCleanupAuthority,
@@ -155,6 +156,15 @@ class CleanCoturnExitReceipt:
     ) -> bool:
         return self._authority is authority and self._process_identity is process_identity
 
+    def __copy__(self) -> CleanCoturnExitReceipt:
+        raise TypeError("Coturn clean-exit receipt cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> CleanCoturnExitReceipt:
+        raise TypeError("Coturn clean-exit receipt cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn clean-exit receipt cannot be serialized")
+
     def __repr__(self) -> str:
         return "CleanCoturnExitReceipt()"
 
@@ -172,9 +182,14 @@ class AttachedCoturnProcess:
         "_maximum_output_bytes",
         "_observed_bytes",
         "_observed_drained",
+        "_pump_claim",
+        "_pump_operation_lock",
+        "_pump_owner",
         "_runner",
         "_runner_settled",
         "_state",
+        "_stop_operation_lock",
+        "_stop_receipt",
         "_terminated",
     )
 
@@ -198,6 +213,11 @@ class AttachedCoturnProcess:
         self._terminated = False
         self._state = "empty"
         self._clean_receipt: CleanCoturnExitReceipt | None = None
+        self._pump_claim = _claims.new_pump_claim()
+        self._pump_operation_lock = threading.RLock()
+        self._pump_owner = object()
+        self._stop_receipt: object | None = None
+        self._stop_operation_lock = threading.Lock()
         self._lock = threading.RLock()
 
     def _publish(
@@ -264,6 +284,24 @@ class AttachedCoturnProcess:
         with self._lock:
             return self._state != "empty"
 
+    def _retire_unstarted_for_drain_cleanup(self) -> bool:
+        """Atomically retire an exact destination that owns no runtime effect."""
+
+        with self._lock:
+            if self._state == "drain-retired":
+                return self._handle is None and self._runner is None
+            if (
+                self._state != "empty"
+                or self._handle is not None
+                or self._runner is not None
+                or self._clean_receipt is not None
+                or self._terminated
+                or _active_run_matches(self._authority, self._identity)
+            ):
+                return False
+            self._state = "drain-retired"
+            return True
+
     def read_chunk(self, *, timeout_seconds: float) -> bytes | None:
         """Return one validated stdout chunk, or ``None`` after a bounded wait."""
 
@@ -321,7 +359,7 @@ class AttachedCoturnProcess:
         control: ControlSignal | None = None
         failed = False
         with self._lock:
-            if self._state in {"terminated", "clean"}:
+            if self._state in {"terminated", "clean", "drain-retired"}:
                 try:
                     _release_active_run(self._authority, self._identity)
                     self._handle = None
@@ -539,6 +577,15 @@ class AttachedCoturnProcess:
     @property
     def _container_authority(self) -> ContainerCleanupAuthority:
         return self._authority
+
+    def __copy__(self) -> AttachedCoturnProcess:
+        raise TypeError("Attached Coturn process cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> AttachedCoturnProcess:
+        raise TypeError("Attached Coturn process cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Attached Coturn process cannot be serialized")
 
     def __repr__(self) -> str:
         return "AttachedCoturnProcess()"

@@ -55,7 +55,13 @@ _RECOVERY_TOKEN = object()
 class StoppedCoturnReceipt:
     """Opaque proof that stop targeted a freshly validated running container."""
 
-    __slots__ = ("_authority", "_process_identity", "_removal_target")
+    __slots__ = (
+        "_authority",
+        "_lock",
+        "_process_identity",
+        "_removal_receipt",
+        "_removal_target",
+    )
 
     def __init__(
         self,
@@ -63,19 +69,43 @@ class StoppedCoturnReceipt:
         *,
         authority: ContainerCleanupAuthority,
         process_identity: object,
-        removal_target: ValidatedContainerRemoval,
+        removal_target: ValidatedContainerRemoval | None = None,
     ) -> None:
         if token is not _STOP_TOKEN:
             raise TypeError("Coturn stop receipt is factory-owned")
         self._authority = authority
         self._process_identity = process_identity
         self._removal_target = removal_target
+        self._removal_receipt: ContainerAbsenceReceipt | None = None
+        self._lock = threading.Lock()
+
+    def _matches_process(
+        self,
+        authority: ContainerCleanupAuthority,
+        process_identity: object,
+    ) -> bool:
+        return self._authority is authority and self._process_identity is process_identity
+
+    def _publish_removal_target(self, target: ValidatedContainerRemoval) -> bool:
+        with self._lock:
+            if self._removal_target is None:
+                self._removal_target = target
+            return self._removal_target is target
 
     def _matches_exit(self, clean_exit: CleanCoturnExitReceipt) -> bool:
         return clean_exit._matches(
             authority=self._authority,
             process_identity=self._process_identity,
         )
+
+    def __copy__(self) -> StoppedCoturnReceipt:
+        raise TypeError("Coturn stop receipt cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> StoppedCoturnReceipt:
+        raise TypeError("Coturn stop receipt cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn stop receipt cannot be serialized")
 
     def __repr__(self) -> str:
         return "StoppedCoturnReceipt()"
@@ -197,6 +227,7 @@ def stop_owned_container(
     removal_target: ValidatedContainerRemoval | None = None
     inspection: object = None
     process_identity: object | None = None
+    candidate: object = None
     try:
         if (
             type(running) is not ValidatedRunningContainer
@@ -207,52 +238,80 @@ def stop_owned_container(
         process_identity = process._lifecycle_identity(authority)
         if process_identity is None:
             raise CoturnRuntimeError("Coturn container stop failed")
-        inspected = execute_checked(
-            runner,
-            build_container_inspect_request(tools, authority.plan, authority.container_id),
-            failure="Coturn container stop inspection failed",
-        )
-        inspection = decode_inspection_result(inspected, label="container")
-        inspected = None
-        cleanup_target = validate_container_cleanup_target(authority, inspection)
-        if cleanup_target.running:
-            target = validate_container_stop_target(authority, inspection)
-            stopped_result = execute_checked(
-                runner,
-                build_container_stop_request(tools, target),
-                failure="Coturn container stop failed",
-            )
-            if (
-                stopped_result.stdout != (authority.container_id + "\n").encode("ascii")
-                or stopped_result.stderr != b""
+        with process._stop_operation_lock:
+            candidate = process._stop_receipt
+            if candidate is None:
+                receipt = StoppedCoturnReceipt(
+                    _STOP_TOKEN,
+                    authority=authority,
+                    process_identity=process_identity,
+                )
+                process._stop_receipt = receipt
+            elif type(candidate) is StoppedCoturnReceipt and candidate._matches_process(
+                authority, process_identity
             ):
+                receipt = candidate
+            else:
                 raise CoturnRuntimeError("Coturn container stop failed")
-            stopped_result = target = inspection = None
-            inspected = execute_checked(
-                runner,
-                build_container_inspect_request(tools, authority.plan, authority.container_id),
-                failure="Coturn stopped container inspection failed",
-            )
-            inspection = decode_inspection_result(inspected, label="container")
-            inspected = None
-        removal_target = validate_container_removal_target(authority, inspection)
-        receipt = StoppedCoturnReceipt(
-            _STOP_TOKEN,
-            authority=authority,
-            process_identity=process_identity,
-            removal_target=removal_target,
-        )
+            if receipt._removal_target is None:
+                inspected = execute_checked(
+                    runner,
+                    build_container_inspect_request(
+                        tools,
+                        authority.plan,
+                        authority.container_id,
+                    ),
+                    failure="Coturn container stop inspection failed",
+                )
+                inspection = decode_inspection_result(inspected, label="container")
+                inspected = None
+                cleanup_target = validate_container_cleanup_target(authority, inspection)
+                if cleanup_target.running:
+                    target = validate_container_stop_target(authority, inspection)
+                    stopped_result = execute_checked(
+                        runner,
+                        build_container_stop_request(tools, target),
+                        failure="Coturn container stop failed",
+                    )
+                    if (
+                        stopped_result.stdout != (authority.container_id + "\n").encode("ascii")
+                        or stopped_result.stderr != b""
+                    ):
+                        raise CoturnRuntimeError("Coturn container stop failed")
+                    stopped_result = target = inspection = None
+                    inspected = execute_checked(
+                        runner,
+                        build_container_inspect_request(
+                            tools,
+                            authority.plan,
+                            authority.container_id,
+                        ),
+                        failure="Coturn stopped container inspection failed",
+                    )
+                    inspection = decode_inspection_result(inspected, label="container")
+                    inspected = None
+                removal_target = validate_container_removal_target(authority, inspection)
+                if not receipt._publish_removal_target(removal_target):
+                    raise CoturnRuntimeError("Coturn container stop failed")
+                removal_target = None
     except (KeyboardInterrupt, SystemExit) as error:
         control = control_signal(error)
     except BaseException:
         pass
-    inspected = stopped_result = target = cleanup_target = removal_target = None
+    valid_receipt = bool(
+        type(receipt) is StoppedCoturnReceipt
+        and type(receipt._removal_target) is ValidatedContainerRemoval
+    )
+    inspected = stopped_result = target = cleanup_target = removal_target = candidate = None
     inspection = process_identity = authority = None
     runner = tools = running = process = None  # type: ignore[assignment]
     if control is not None:
+        receipt = None
         raise_control(control)
-    if receipt is None:
+    if not valid_receipt:
+        receipt = None
         raise CoturnRuntimeError("Coturn container stop failed") from None
+    assert receipt is not None
     return receipt
 
 
@@ -285,46 +344,57 @@ def remove_stopped_owned_container(
             or not stopped._matches_exit(clean_exit)
         ):
             raise CoturnRuntimeError("Coturn stopped container receipt is invalid")
-        target = stopped._removal_target
-        try:
-            inspected = execute_checked(
-                runner,
-                build_container_inspect_request(tools, authority.plan, authority.container_id),
-                failure="Coturn stopped container inspection failed",
-            )
-        except (KeyboardInterrupt, SystemExit):
-            raise
-        except BaseException:
-            inspect_failed = True
-        if not inspect_failed:
-            target = validate_container_removal_target(
-                authority,
-                decode_inspection_result(inspected, label="container"),
-            )
-            inspected = None
-            removed_result = execute_checked(
-                runner,
-                build_container_remove_request(tools, target),
-                failure="Coturn container removal failed",
-            )
-            if (
-                removed_result.stdout != (authority.container_id + "\n").encode("ascii")
-                or removed_result.stderr != b""
-            ):
-                raise CoturnRuntimeError("Coturn container removal failed")
-            removed_result = None
-        absence = execute_checked(
-            runner,
-            build_container_absence_request(tools, target),
-            failure="Coturn container absence check failed",
-        )
-        if absence.stdout != b"" or absence.stderr != b"":
-            raise CoturnRuntimeError("Coturn container removal was not confirmed")
-        _release_active_run(authority, stopped._process_identity)
-        receipt = _persist_container_absence(
-            plan=authority.plan,
-            container_id=authority.container_id,
-        )
+        with stopped._lock:
+            if stopped._removal_receipt is not None:
+                if type(stopped._removal_receipt) is not ContainerAbsenceReceipt:
+                    raise CoturnRuntimeError("Coturn stopped container receipt is invalid")
+                receipt = stopped._removal_receipt
+            else:
+                target = stopped._removal_target
+                try:
+                    inspected = execute_checked(
+                        runner,
+                        build_container_inspect_request(
+                            tools,
+                            authority.plan,
+                            authority.container_id,
+                        ),
+                        failure="Coturn stopped container inspection failed",
+                    )
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException:
+                    inspect_failed = True
+                if not inspect_failed:
+                    target = validate_container_removal_target(
+                        authority,
+                        decode_inspection_result(inspected, label="container"),
+                    )
+                    inspected = None
+                    removed_result = execute_checked(
+                        runner,
+                        build_container_remove_request(tools, target),
+                        failure="Coturn container removal failed",
+                    )
+                    if (
+                        removed_result.stdout != (authority.container_id + "\n").encode("ascii")
+                        or removed_result.stderr != b""
+                    ):
+                        raise CoturnRuntimeError("Coturn container removal failed")
+                    removed_result = None
+                absence = execute_checked(
+                    runner,
+                    build_container_absence_request(tools, target),
+                    failure="Coturn container absence check failed",
+                )
+                if absence.stdout != b"" or absence.stderr != b"":
+                    raise CoturnRuntimeError("Coturn container removal was not confirmed")
+                _release_active_run(authority, stopped._process_identity)
+                receipt = _persist_container_absence(
+                    plan=authority.plan,
+                    container_id=authority.container_id,
+                )
+                stopped._removal_receipt = receipt
     except (KeyboardInterrupt, SystemExit) as error:
         control = control_signal(error)
         capture.capture_control(error)

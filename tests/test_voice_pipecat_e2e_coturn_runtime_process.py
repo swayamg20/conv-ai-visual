@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import inspect
+import pickle
 import sys
 import threading
 from dataclasses import dataclass, field
@@ -915,3 +917,24 @@ def test_clean_exit_receipt_has_no_public_constructor(tmp_path: Path) -> None:
             authority=receipt._authority,
             process_identity=object(),
         )
+
+
+def test_process_and_clean_exit_receipt_reject_copy_and_serialization(
+    tmp_path: Path,
+) -> None:
+    process = _process(tmp_path, FakeAttached(returncode=0, drain_state=True))
+    for operation in (
+        lambda: copy.copy(process),
+        lambda: copy.deepcopy(process),
+        lambda: pickle.dumps(process),
+    ):
+        with pytest.raises(TypeError, match="cannot be"):
+            operation()
+    receipt = confirm_attached_coturn_clean_exit(process)
+    for operation in (
+        lambda: copy.copy(receipt),
+        lambda: copy.deepcopy(receipt),
+        lambda: pickle.dumps(receipt),
+    ):
+        with pytest.raises(TypeError, match="cannot be"):
+            operation()

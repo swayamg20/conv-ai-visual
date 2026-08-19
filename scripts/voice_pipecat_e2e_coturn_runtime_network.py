@@ -111,6 +111,15 @@ class NetworkAbsenceReceipt:
         with self._lock:
             return self._finalized
 
+    def __copy__(self) -> NetworkAbsenceReceipt:
+        raise TypeError("Coturn network absence receipt cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> NetworkAbsenceReceipt:
+        raise TypeError("Coturn network absence receipt cannot be copied")
+
+    def __reduce__(self) -> object:
+        raise TypeError("Coturn network absence receipt cannot be serialized")
+
     def __repr__(self) -> str:
         return "NetworkAbsenceReceipt()"
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import pickle
 import stat
 import sys
 import threading
@@ -124,6 +126,14 @@ def test_network_removal_commits_durable_absence_before_finalizing_receipts(
     assert marker["state"] == "absent"
     assert paths.network_receipt.exists()
     assert paths.network_plan_receipt.exists()
+
+    for operation in (
+        lambda: copy.copy(absence),
+        lambda: copy.deepcopy(absence),
+        lambda: pickle.dumps(absence),
+    ):
+        with pytest.raises(TypeError, match="cannot be"):
+            operation()
 
     finalize_network_absence(absence)
     assert absence.finalization_complete

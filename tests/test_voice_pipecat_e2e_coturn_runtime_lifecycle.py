@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import copy
+import pickle
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -690,7 +692,135 @@ def test_stop_commit_before_receipt_is_reconciled_without_a_second_stop(
         process=process,
     )
     assert repr(stopped) == "StoppedCoturnReceipt()"
+    assert stopped is process._stop_receipt
     assert [request.argv[5:7] for request in retry.requests] == [("container", "inspect")]
+
+
+def test_concurrent_stop_calls_publish_one_receipt_and_one_stop(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    authority, process, running, _validated, _budget = _container(paths, FakeAttached())
+    values = [
+        _json(container_inspection(authority.plan, running=True)),
+        CommandResult(0, (CONTAINER_ID + "\n").encode(), b""),
+        _json(container_inspection(authority.plan)),
+    ]
+    runners = [LifecycleRunner(list(values)), LifecycleRunner(list(values))]
+    barrier = threading.Barrier(2)
+    outcomes: list[object] = []
+
+    def stop(runner: LifecycleRunner) -> None:
+        barrier.wait()
+        try:
+            outcomes.append(
+                stop_owned_container(
+                    runner=runner,
+                    tools=_tools(),
+                    running=running,  # type: ignore[arg-type]
+                    process=process,
+                )
+            )
+        except BaseException as error:
+            outcomes.append(error)
+
+    threads = [threading.Thread(target=stop, args=(runner,)) for runner in runners]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(1.0)
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(outcomes) == 2
+    assert outcomes[0] is outcomes[1] is process._stop_receipt
+    assert sorted(len(runner.requests) for runner in runners) == [0, 3]
+
+
+def test_stop_receipt_publication_and_return_loss_recover_exact_identity(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    authority, process, running, _validated, _budget = _container(paths, FakeAttached())
+    empty = LifecycleRunner([])
+    line = _source_line(stop_owned_container, "if receipt._removal_target is None:")
+    with pytest.raises(KeyboardInterrupt) as first:
+        _interrupt_before_line(
+            target_code=stop_owned_container.__code__,
+            line_number=line,
+            operation=lambda: stop_owned_container(
+                runner=empty,
+                tools=_tools(),
+                running=running,  # type: ignore[arg-type]
+                process=process,
+            ),
+        )
+    assert str(first.value) == ""
+    canonical = process._stop_receipt
+    assert type(canonical) is lifecycle_module.StoppedCoturnReceipt
+    assert canonical._removal_target is None
+    assert empty.requests == []
+
+    runner = LifecycleRunner(
+        [
+            _json(container_inspection(authority.plan, running=True)),
+            CommandResult(0, (CONTAINER_ID + "\n").encode(), b""),
+            _json(container_inspection(authority.plan)),
+        ]
+    )
+    with pytest.raises(KeyboardInterrupt) as second:
+        _interrupt_on_return(
+            target_code=stop_owned_container.__code__,
+            operation=lambda: stop_owned_container(
+                runner=runner,
+                tools=_tools(),
+                running=running,  # type: ignore[arg-type]
+                process=process,
+            ),
+        )
+    assert str(second.value) == "untrusted-return-publication-cut"
+    retry = LifecycleRunner([])
+    recovered = stop_owned_container(
+        runner=retry,
+        tools=_tools(),
+        running=running,  # type: ignore[arg-type]
+        process=process,
+    )
+    assert recovered is canonical
+    assert retry.requests == []
+
+
+def test_stop_target_publication_return_cut_recovers_same_receipt(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    authority, process, running, _validated, _budget = _container(paths, FakeAttached())
+    runner = LifecycleRunner(
+        [
+            _json(container_inspection(authority.plan, running=True)),
+            CommandResult(0, (CONTAINER_ID + "\n").encode(), b""),
+            _json(container_inspection(authority.plan)),
+        ]
+    )
+    with pytest.raises(KeyboardInterrupt) as error:
+        _interrupt_on_return(
+            target_code=lifecycle_module.StoppedCoturnReceipt._publish_removal_target.__code__,
+            operation=lambda: stop_owned_container(
+                runner=runner,
+                tools=_tools(),
+                running=running,  # type: ignore[arg-type]
+                process=process,
+            ),
+        )
+    assert str(error.value) == ""
+    canonical = process._stop_receipt
+    assert type(canonical) is lifecycle_module.StoppedCoturnReceipt
+    assert type(canonical._removal_target).__name__ == "ValidatedContainerRemoval"
+    retry = LifecycleRunner([])
+    recovered = stop_owned_container(
+        runner=retry,
+        tools=_tools(),
+        running=running,  # type: ignore[arg-type]
+        process=process,
+    )
+    assert recovered is canonical
+    assert retry.requests == []
 
 
 def test_stop_then_terminal_drain_then_clean_exit_gates_removal(tmp_path: Path) -> None:
@@ -734,6 +864,113 @@ def test_stop_then_terminal_drain_then_clean_exit_gates_removal(tmp_path: Path) 
         ("container", "rm"),
         ("container", "ls"),
     ]
+
+
+def test_stop_receipt_rejects_copy_and_serialization(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    attached = FakeAttached(returncode=0, drain_state=True)
+    authority, process, running, _validated, _budget = _container(paths, attached)
+    stopped, _runner = _stop(
+        running,
+        process,
+        container_inspection(authority.plan, running=True),
+    )
+    for operation in (
+        lambda: copy.copy(stopped),
+        lambda: copy.deepcopy(stopped),
+        lambda: pickle.dumps(stopped),
+    ):
+        with pytest.raises(TypeError, match="cannot be"):
+            operation()
+    removed, _runner = _remove(
+        stopped=stopped,
+        clean_exit=confirm_attached_coturn_clean_exit(process),
+        stopped_inspection=container_inspection(authority.plan),
+    )
+    for operation in (
+        lambda: copy.copy(removed),
+        lambda: copy.deepcopy(removed),
+        lambda: pickle.dumps(removed),
+    ):
+        with pytest.raises(TypeError, match="cannot be"):
+            operation()
+    finalize_container_absence(removed)
+
+
+def test_same_stop_receipt_serializes_removal_and_caches_exact_outcome(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    attached = FakeAttached(returncode=0, drain_state=True)
+    authority, process, running, _validated, _budget = _container(paths, attached)
+    stopped, _runner = _stop(
+        running,
+        process,
+        container_inspection(authority.plan, running=True),
+    )
+    clean = confirm_attached_coturn_clean_exit(process)
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingRunner(LifecycleRunner):
+        def run(self, request: CommandRequest) -> CommandResult:
+            if not self.requests:
+                entered.set()
+                assert release.wait(1.0)
+            return super().run(request)
+
+    first = BlockingRunner(
+        [
+            _json(container_inspection(authority.plan)),
+            CommandResult(0, (CONTAINER_ID + "\n").encode(), b""),
+            CommandResult(0, b"", b""),
+        ]
+    )
+    second = LifecycleRunner([])
+    outcomes: list[object] = []
+
+    def remove(runner: LifecycleRunner) -> None:
+        try:
+            outcomes.append(
+                remove_stopped_owned_container(
+                    runner=runner,
+                    tools=_tools(),
+                    stopped=stopped,
+                    clean_exit=clean,
+                )
+            )
+        except BaseException as error:
+            outcomes.append(error)
+
+    first_thread = threading.Thread(target=lambda: remove(first))
+    second_thread = threading.Thread(target=lambda: remove(second))
+    first_thread.start()
+    assert entered.wait(1.0)
+    second_thread.start()
+    release.set()
+    first_thread.join(1.0)
+    second_thread.join(1.0)
+
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert len(outcomes) == 2
+    assert type(outcomes[0]) is type(outcomes[1])
+    assert repr(outcomes[0]) == "ContainerAbsenceReceipt()"
+    assert outcomes[0] is outcomes[1]
+    assert [request.argv[5:7] for request in first.requests] == [
+        ("container", "inspect"),
+        ("container", "rm"),
+        ("container", "ls"),
+    ]
+    assert second.requests == []
+    cached = remove_stopped_owned_container(
+        runner=LifecycleRunner([]),
+        tools=_tools(),
+        stopped=stopped,
+        clean_exit=clean,
+    )
+    assert cached is outcomes[0]
+    finalize_container_absence(cached)
 
 
 def test_clean_exit_from_an_earlier_attached_run_cannot_remove_a_later_run(
