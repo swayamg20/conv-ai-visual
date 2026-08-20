@@ -50,11 +50,14 @@ def _drive_relay_linux_build_worker(kernel_token: object) -> None:
                 _fail_controller(kernel_token)
                 return
             outcome = driver._step()
-            if outcome == "quarantined":
+            if outcome == "active":
+                continue
+            if outcome in {"waiting", "quarantined"}:
                 controller = driver._controller_value()
                 if controller is None:
                     return
                 controller._wait(0.05)
+                driver._wait_completed()
                 continue
             terminal = driver._terminal_values()
             ownership = driver._kernel_claim()
@@ -101,6 +104,7 @@ def _wait_retry(driver: _LocalBuildWorkerDriver) -> None:
     controller = driver._controller_value()
     if controller is not None:
         controller._wait(0.05)
+        driver._wait_completed()
 
 
 def _capture_outer_control(

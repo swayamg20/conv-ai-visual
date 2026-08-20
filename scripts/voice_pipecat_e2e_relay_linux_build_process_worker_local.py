@@ -1,9 +1,4 @@
-"""Private local state for the sole relay Linux build worker.
-
-Construction is deliberately data-only.  The driver may acquire the build
-specification and raw-process destination only after the atomic registry has
-bound the exact current registered thread to its worker claim.
-"""
+"""Claim-bound spawn owner for the sole relay Linux build worker."""
 
 from __future__ import annotations
 
@@ -11,6 +6,10 @@ import threading
 
 from scripts.voice_pipecat_e2e_relay_linux_build_process_registry import (
     _BuildWorkerKernelTake,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_process_worker_process_local import (
+    _ALL_HANDLES,
+    _LocalBuildProcessMixin,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_process_worker_state import (
     _BuildWorkerClaim,
@@ -23,37 +22,84 @@ from scripts.voice_pipecat_e2e_relay_linux_build_spawn_local import (
 _DRIVER_TOKEN = object()
 
 
-class _LocalBuildWorkerDriver:
-    """One worker-local, initially authority-free build lifecycle record."""
+class _LocalBuildWorkerDriver(_LocalBuildProcessMixin):
+    """Initially authority-free state retained only by the registered worker."""
 
     __slots__ = (
         "_claim",
+        "_close_intents",
+        "_closed_handles",
         "_controller",
+        "_group_absent",
+        "_handle",
+        "_handle_name",
         "_kernel",
+        "_kill_deadline",
+        "_kill_intended",
+        "_kill_sent",
+        "_pgid",
+        "_pid",
         "_process",
+        "_query_epoch",
+        "_query_inflight",
+        "_raw_clear_intended",
+        "_raw_cleared",
         "_raw_destination",
+        "_reaped",
+        "_returncode",
+        "_signal_revoked",
         "_spawn_intended",
-        "_spawn_returned",
         "_spec",
         "_state",
+        "_term_ambiguous",
+        "_term_deadline",
+        "_term_intended",
+        "_term_sent",
+        "_terminal_latched",
+        "_yield_required",
     )
 
     def __init__(self, token: object) -> None:
         if token is not _DRIVER_TOKEN:
             raise TypeError("Relay Linux build worker driver is factory-owned")
-        object.__setattr__(self, "_kernel", None)
-        object.__setattr__(self, "_claim", None)
-        object.__setattr__(self, "_controller", None)
-        object.__setattr__(self, "_spec", None)
-        object.__setattr__(self, "_raw_destination", None)
-        object.__setattr__(self, "_process", None)
-        object.__setattr__(self, "_spawn_intended", False)
-        object.__setattr__(self, "_spawn_returned", False)
-        object.__setattr__(self, "_state", "unbound")
+        values = {
+            "_kernel": None,
+            "_claim": None,
+            "_controller": None,
+            "_spec": None,
+            "_raw_destination": None,
+            "_process": None,
+            "_spawn_intended": False,
+            "_pid": None,
+            "_pgid": None,
+            "_returncode": None,
+            "_reaped": False,
+            "_group_absent": False,
+            "_signal_revoked": False,
+            "_query_epoch": 0,
+            "_query_inflight": None,
+            "_term_intended": False,
+            "_term_sent": False,
+            "_term_ambiguous": False,
+            "_term_deadline": None,
+            "_kill_intended": False,
+            "_kill_sent": False,
+            "_kill_deadline": None,
+            "_closed_handles": 0,
+            "_close_intents": 0,
+            "_handle_name": None,
+            "_handle": None,
+            "_raw_clear_intended": False,
+            "_raw_cleared": False,
+            "_yield_required": False,
+            "_terminal_latched": None,
+            "_state": "unbound",
+        }
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        values.clear()
 
     def _bind(self, take: _BuildWorkerKernelTake) -> bool:
-        """Adopt raw authority only for the canonical current worker claim."""
-
         if type(take) is not _BuildWorkerKernelTake or take.status != "claimed":
             return False
         kernel = take.kernel
@@ -68,12 +114,7 @@ class _LocalBuildWorkerDriver:
         valid_phase = (
             transition.phase == "claimed"
             if initially_unbound
-            else transition.phase
-            in {
-                "claimed",
-                "reported",
-                "settled",
-            }
+            else transition.phase in {"claimed", "reported", "settled"}
         )
         if (
             owner._thread_destination._read() is not worker
@@ -101,38 +142,37 @@ class _LocalBuildWorkerDriver:
         )
 
     def _step(self) -> str:
-        """Advance once without ever retrying a possibly-started spawn."""
-
         controller = self._controller
         if type(controller) is not _BuildWorkerController or not self._authority_is_current():
             return "invalid"
+        if not self._recover_inflight():
+            return self._state
+        self._reconcile_signal_state()
+        if self._yield_required:
+            return "waiting"
         if self._state in {"terminal", "quarantined"}:
             return self._state
         if self._state != "ready":
-            return "invalid"
+            return self._process_step()
         if controller._termination_requested() and not self._spawn_intended:
             controller._fail()
+            object.__setattr__(self, "_raw_cleared", True)
             object.__setattr__(self, "_state", "terminal")
             return self._state
         if not self._spawn_intended:
-            # The intent is durable before either the phase transition or the
-            # registered-before-init factory can run.  Any return loss therefore
-            # reconciles the raw destination and never issues a second spawn.
             object.__setattr__(self, "_spawn_intended", True)
             if not controller._transition("spawning"):
                 controller._fail()
                 object.__setattr__(self, "_state", "terminal")
                 return self._state
             _spawn_registered_relay_linux_build(self._spec, self._raw_destination)
-            object.__setattr__(self, "_spawn_returned", True)
         process = self._raw_destination._read(self._spec)
         if process is not None:
             object.__setattr__(self, "_process", process)
-            controller._fail()
-            controller._transition("quarantined")
-            object.__setattr__(self, "_state", "quarantined")
-            return self._state
+            object.__setattr__(self, "_state", "identity")
+            return "active"
         controller._fail()
+        object.__setattr__(self, "_raw_cleared", True)
         object.__setattr__(self, "_state", "terminal")
         return self._state
 
@@ -158,20 +198,46 @@ class _LocalBuildWorkerDriver:
         )
 
     def _note_failure(self) -> None:
-        """Make a caught failure observable without discarding retained raw state."""
-
+        object.__setattr__(self, "_yield_required", True)
         controller = self._controller
         if type(controller) is _BuildWorkerController:
             controller._fail()
 
+    def _wait_completed(self) -> None:
+        if self._authority_is_current():
+            object.__setattr__(self, "_yield_required", False)
+
     def _terminal_values(self) -> tuple[int | None, bool] | None:
+        latched = self._terminal_latched
+        if type(latched) is tuple:
+            return latched
+        if self._state != "terminal" or self._process is not None or not self._raw_cleared:
+            return None
+        if type(self._claim) is not _BuildWorkerClaim:
+            return None
+        returncode = self._returncode
+        if returncode is None:
+            terminal = (None, False)
+            object.__setattr__(self, "_terminal_latched", terminal)
+            return terminal
+        controller = self._controller
         if (
-            self._state == "terminal"
-            and self._process is None
-            and type(self._claim) is _BuildWorkerClaim
+            type(returncode) is not int
+            or not self._reaped
+            or not self._group_absent
+            or self._closed_handles != _ALL_HANDLES
+            or type(controller) is not _BuildWorkerController
         ):
-            return None, False
-        return None
+            return None
+        succeeded = bool(
+            returncode == 0
+            and not controller._failed()
+            and not controller._termination_requested()
+            and controller._control_value() is None
+        )
+        terminal = (returncode, succeeded)
+        object.__setattr__(self, "_terminal_latched", terminal)
+        return terminal
 
     def _kernel_claim(self) -> tuple[object, _BuildWorkerClaim] | None:
         claim = self._claim
@@ -203,8 +269,6 @@ class _LocalBuildWorkerDriver:
 
 
 def _new_local_build_worker_driver() -> _LocalBuildWorkerDriver:
-    """Return a data-only driver carrying no raw, process, or callable authority."""
-
     return _LocalBuildWorkerDriver(_DRIVER_TOKEN)
 
 
