@@ -924,12 +924,6 @@ def test_registered_thread_factory_publishes_before_init_with_exact_options(
     def target(_token: object) -> None:
         return None
 
-    monkeypatch.setattr(
-        thread_module.threading.Thread,
-        "__new__",
-        staticmethod(lambda _kind: thread),
-    )
-
     def initialize(
         candidate: object,
         *,
@@ -941,7 +935,16 @@ def test_registered_thread_factory_publishes_before_init_with_exact_options(
         assert published == [candidate]
         initialized.append((candidate, target, args, name, daemon))
 
-    monkeypatch.setattr(thread_module.threading.Thread, "__init__", initialize)
+    class SyntheticThread:
+        def __new__(cls) -> object:
+            return thread
+
+        __init__ = initialize
+
+    # Replace the module attribute as one unit. Patching inherited
+    # ``Thread.__new__`` directly would make pytest restore ``object.__new__``
+    # as a concrete class attribute and corrupt later Thread construction.
+    monkeypatch.setattr(thread_module.threading, "Thread", SyntheticThread)
     returned = thread_module._registered_thread_factory(
         owner_register=published.append,
         target=target,
