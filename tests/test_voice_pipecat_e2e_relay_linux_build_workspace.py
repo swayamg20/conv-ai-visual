@@ -40,6 +40,7 @@ def test_factory_preowns_exact_inert_graph_without_filesystem_effect(tmp_path: P
     assert not source.exists() and not parent.exists() and not node.exists()
     assert not destination and not request and not owner
     assert not owner._cleanup_authority and not owner._receipt_destination
+    assert not owner._worker_bundle_destination
     assert destination._owner is owner
     assert owner._request is request
     assert owner._cleanup_authority._matches(request)
@@ -117,6 +118,7 @@ def test_all_graph_values_are_falsey_immutable_noncopyable_and_nonserializable(
         owner,
         owner._cleanup_authority,
         owner._receipt_destination,
+        owner._worker_bundle_destination,
     )
 
     for value in values:

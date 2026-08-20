@@ -22,6 +22,7 @@ _AUTHORITY_TOKEN = object()
 _OWNER_TOKEN = object()
 _DESTINATION_TOKEN = object()
 _RECEIPT_DESTINATION_TOKEN = object()
+_WORKER_BUNDLE_DESTINATION_TOKEN = object()
 _FAILURE = "Relay Linux build workspace preparation contract is invalid"
 _RUN_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,48}$")
 _PATH_TYPE = type(Path("/"))
@@ -55,6 +56,79 @@ class _RelayLinuxBuildWorkspaceContractError(RuntimeError):
 
     def __repr__(self) -> str:
         return "_RelayLinuxBuildWorkspaceContractError()"
+
+
+class _WorkspaceWorkerBundleDestination:
+    """Owner-preowned single-assignment slot for one later worker bundle."""
+
+    __slots__ = (
+        "_lock",
+        "_owner_token",
+        "_prepared_destination",
+        "_request",
+        "_value",
+    )
+
+    def __init__(
+        self,
+        token: object,
+        *,
+        request: _RelayLinuxBuildWorkspaceRequest,
+        owner_token: object,
+        prepared_destination: _WorkspacePreparationReceiptDestination,
+    ) -> None:
+        if (
+            token is not _WORKER_BUNDLE_DESTINATION_TOKEN
+            or owner_token is None
+            or prepared_destination is None
+        ):
+            raise TypeError("Relay Linux workspace worker bundle slot is factory-owned")
+        object.__setattr__(self, "_request", request)
+        object.__setattr__(self, "_owner_token", owner_token)
+        object.__setattr__(self, "_prepared_destination", prepared_destination)
+        object.__setattr__(self, "_value", None)
+        object.__setattr__(self, "_lock", threading.Lock())
+
+    def _publish(self, request: _RelayLinuxBuildWorkspaceRequest, value: object) -> object:
+        if request is not self._request or value is None:
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
+            _WorkspaceWorkerBundle,
+        )
+
+        if type(value) is not _WorkspaceWorkerBundle or not value._matches(
+            self._owner_token,
+            self._prepared_destination,
+        ):
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        with self._lock:
+            if self._value is None:
+                object.__setattr__(self, "_value", value)
+            return self._value
+
+    def _read(self, request: _RelayLinuxBuildWorkspaceRequest) -> object | None:
+        if request is not self._request:
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        with self._lock:
+            return self._value
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "_WorkspaceWorkerBundleDestination()"
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("Relay Linux workspace worker bundle slot is immutable")
+
+    def __copy__(self) -> None:
+        raise TypeError("Relay Linux workspace worker bundle slot cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> None:
+        raise TypeError("Relay Linux workspace worker bundle slot cannot be copied")
+
+    def __reduce__(self) -> None:
+        raise TypeError("Relay Linux workspace worker bundle slot cannot be serialized")
 
 
 class _RelayLinuxBuildWorkspaceRequest:
@@ -240,7 +314,12 @@ class _WorkspacePreparationReceiptDestination:
 class _RelayLinuxBuildWorkspaceOwner:
     """Preowned graph root; it owns no filesystem node in this checkpoint."""
 
-    __slots__ = ("_cleanup_authority", "_receipt_destination", "_request")
+    __slots__ = (
+        "_cleanup_authority",
+        "_receipt_destination",
+        "_request",
+        "_worker_bundle_destination",
+    )
 
     def __init__(
         self,
@@ -266,6 +345,16 @@ class _RelayLinuxBuildWorkspaceOwner:
             _WorkspacePreparationReceiptDestination(
                 _RECEIPT_DESTINATION_TOKEN,
                 request=request,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_worker_bundle_destination",
+            _WorkspaceWorkerBundleDestination(
+                _WORKER_BUNDLE_DESTINATION_TOKEN,
+                request=request,
+                owner_token=self._cleanup_authority._key,
+                prepared_destination=self._receipt_destination,
             ),
         )
 
