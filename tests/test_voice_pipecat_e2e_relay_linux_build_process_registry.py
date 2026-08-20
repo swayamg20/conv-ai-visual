@@ -178,11 +178,25 @@ def test_structural_fields_trusted_by_registry_are_immutable(tmp_path: Path) -> 
             "_raw_destination": object(),
             "_owner_token": object(),
             "_cleanup_authority": object(),
+            "_controller_destination": object(),
             "_thread_destination": object(),
             "_kernel_destination": object(),
             "_result_destination": object(),
         },
-        kernel: {"_owner": object(), "_token": object()},
+        kernel: {
+            "_cancelled": True,
+            "_claim": object(),
+            "_owner": object(),
+            "_terminal": object(),
+            "_token": object(),
+            "_transition": object(),
+            "_worker": object(),
+        },
+        owner._controller_destination: {
+            "_kind": "thread",
+            "_lock": object(),
+            "_value": object(),
+        },
         owner._thread_destination: {
             "_kind": "kernel",
             "_lock": object(),
@@ -368,9 +382,8 @@ def test_concurrent_preown_and_kernel_reservation_retain_one_identity(
     assert len(registry_module._KERNELS) == 1
 
 
-def test_slice_has_no_worker_spawn_take_completion_or_release_surface() -> None:
+def test_slice_has_no_spawn_facade_completion_or_release_surface() -> None:
     for name in (
-        "_take_worker_kernel",
         "_complete_worker_kernel",
         "_release_terminal_owner",
         "_run_build",

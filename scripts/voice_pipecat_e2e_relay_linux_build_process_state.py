@@ -33,7 +33,12 @@ class _RelayLinuxBuildCleanupAuthority:
 
     __slots__ = ("_authentic", "_key")
 
-    def __init__(self, token: object, *, key: object) -> None:
+    def __init__(
+        self,
+        token: object,
+        *,
+        key: object,
+    ) -> None:
         if token is not _AUTHORITY_TOKEN or key is None:
             raise TypeError("Relay Linux build cleanup authority is factory-owned")
         object.__setattr__(self, "_authentic", _AUTHORITY_TOKEN)
@@ -139,7 +144,7 @@ class _IdentityDestination:
     __slots__ = ("_kind", "_lock", "_value")
 
     def __init__(self, token: object, *, kind: str) -> None:
-        if token is not _DESTINATION_TOKEN or kind not in {"thread", "kernel"}:
+        if token is not _DESTINATION_TOKEN or kind not in {"controller", "thread", "kernel"}:
             raise TypeError("Relay Linux build identity destination is factory-owned")
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_value", None)
@@ -205,6 +210,7 @@ class _RelayLinuxBuildProcessOwner:
 
     __slots__ = (
         "_cleanup_authority",
+        "_controller_destination",
         "_kernel_destination",
         "_owner_token",
         "_raw_destination",
@@ -231,6 +237,11 @@ class _RelayLinuxBuildProcessOwner:
             self,
             "_cleanup_authority",
             _RelayLinuxBuildCleanupAuthority(_AUTHORITY_TOKEN, key=cleanup_key),
+        )
+        object.__setattr__(
+            self,
+            "_controller_destination",
+            _IdentityDestination(_DESTINATION_TOKEN, kind="controller"),
         )
         object.__setattr__(
             self,
