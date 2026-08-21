@@ -37,7 +37,9 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_thread as th
 def _isolated_build_contract() -> None:
     mappings = (
         build_values._COMMANDS,
+        build_values._COMMAND_CONTROLLERS,
         build_values._COMMAND_GATES,
+        build_values._CONTROLLER_COMMANDS,
         build_values._PROCESS_ASSOCIATIONS,
         build_receipt._BUILT_LEASES,
         build_receipt._BUILT_BY_COMMAND,
@@ -92,6 +94,24 @@ def _claim(values: tuple[object, object, object, object, float]) -> float:
     )
 
 
+def _bind_controller(
+    values: tuple[object, object, object, object, float],
+) -> state_module._WorkspaceWorkerController:
+    owner_token, record_token, _prepared, command, deadline = values
+    controller = state_module._WorkspaceWorkerController(
+        state_module._CONTROLLER_TOKEN,
+        owner_token=owner_token,
+    )
+    assert build_values._bind_workspace_build_command_controller(
+        command,
+        controller=controller,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
+    return controller
+
+
 def _bundle(tmp_path: Path):
     destination = workspace_module._new_relay_linux_build_workspace_destination(
         source_root=(tmp_path / "source").resolve(),
@@ -115,6 +135,7 @@ def test_command_and_built_values_are_opaque_and_nonserializable(
     values = _prepared_command()
     owner_token, record_token, _prepared, command, deadline = values
     assert _claim(values) == deadline
+    _controller = _bind_controller(values)
     assert not command
     assert repr(command) == "_WorkspaceBuildCommand()"
     for operation in (copy, deepcopy, pickle.dumps):
@@ -216,6 +237,7 @@ def test_cancellation_linearizes_before_process_start() -> None:
     values = _prepared_command()
     owner_token, record_token, _prepared, command, deadline = values
     assert _claim(values) == deadline
+    _controller = _bind_controller(values)
 
     assert build_values._request_workspace_build_command_cancel(
         command,
@@ -270,12 +292,175 @@ def test_driver_rejects_wrong_controller_or_deadline_before_process_construction
     assert constructed == 0
 
 
+@pytest.mark.parametrize("cancel_before_permit", [True, False])
+def test_actual_driver_linearizes_outer_cancel_with_the_sole_start_permit(
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_before_permit: bool,
+) -> None:
+    values = _prepared_command()
+    owner_token, record_token, _prepared, command, deadline = values
+    assert _claim(values) == deadline
+    controller = state_module._WorkspaceWorkerController(
+        state_module._CONTROLLER_TOKEN,
+        owner_token=owner_token,
+    )
+    authority = object()
+
+    class Candidate:
+        _cleanup_authority = authority
+
+    candidate = Candidate()
+
+    class Destination:
+        def _read(self) -> object:
+            return candidate
+
+    class Request:
+        _next_cli = object()
+        _node = object()
+        _run_id = "cancel-race"
+        _workspace = object()
+
+        def _environment_values(self) -> dict[str, str]:
+            return {}
+
+    reached = threading.Event()
+    resume = threading.Event()
+    starts = 0
+    failures: list[BaseException] = []
+    original_acquire = build_values._acquire_workspace_build_process_start
+
+    def acquire(*args: object, **kwargs: object) -> object:
+        if cancel_before_permit:
+            reached.set()
+            assert resume.wait(2.0)
+        return original_acquire(*args, **kwargs)
+
+    def start(_owner: object, *, run_deadline: float) -> None:
+        nonlocal starts
+        assert run_deadline == deadline
+        starts += 1
+        if not cancel_before_permit:
+            reached.set()
+            assert resume.wait(2.0)
+
+    monkeypatch.setattr(build_process, "_new_relay_linux_build_spec", lambda **_kw: object())
+    monkeypatch.setattr(build_process, "_new_raw_build_process_destination", lambda _s: object())
+    monkeypatch.setattr(
+        build_process,
+        "_new_build_owner_destination",
+        lambda _s, _r: Destination(),
+    )
+    monkeypatch.setattr(
+        build_process,
+        "_intend_workspace_build_process_association",
+        lambda *args, **kwargs: authority,
+    )
+    monkeypatch.setattr(build_process, "_preown_build_process", lambda **_kw: candidate)
+    monkeypatch.setattr(
+        build_process,
+        "_associate_workspace_build_process",
+        lambda *args, **kwargs: authority,
+    )
+    monkeypatch.setattr(
+        build_process,
+        "_workspace_build_process_association_matches",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(build_process, "_acquire_workspace_build_process_start", acquire)
+    monkeypatch.setattr(build_process, "_start_relay_linux_build_process", start)
+    monkeypatch.setattr(build_process, "_resolve_build_process_owner", lambda _value: None)
+    monkeypatch.setattr(
+        build_process,
+        "_complete_failed_workspace_build_process",
+        lambda _command: True,
+    )
+
+    def drive() -> None:
+        try:
+            build_process._drive_workspace_build_process(
+                command=command,
+                request=Request(),
+                controller=controller,
+                owner_token=owner_token,
+                record_token=record_token,
+                build_deadline=deadline,
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    worker = threading.Thread(target=drive)
+    worker.start()
+    assert reached.wait(1.0)
+    controller._request_cancel()
+    resume.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert type(failures[0]) is build_values._WorkspaceBuildHandoffError
+    assert starts == (0 if cancel_before_permit else 1)
+    assert controller._cancellation_requested() is True
+
+
+def test_actual_driver_rejects_cancel_in_flight_before_command_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _prepared_command()
+    owner_token, record_token, _prepared, command, deadline = values
+    assert _claim(values) == deadline
+    controller = state_module._WorkspaceWorkerController(
+        state_module._CONTROLLER_TOKEN,
+        owner_token=owner_token,
+    )
+    latch_entered = threading.Event()
+    resume = threading.Event()
+    original_latch = state_module._latch_build_command_cancel
+    first = True
+
+    def hold_first_latch(value: object) -> object:
+        nonlocal first
+        if first:
+            first = False
+            latch_entered.set()
+            assert resume.wait(2.0)
+        return original_latch(value)
+
+    monkeypatch.setattr(state_module, "_latch_build_command_cancel", hold_first_latch)
+    canceller = threading.Thread(target=controller._request_cancel)
+    canceller.start()
+    assert latch_entered.wait(1.0)
+    starts = 0
+
+    def forbidden_start(*_args: object, **_kwargs: object) -> None:
+        nonlocal starts
+        starts += 1
+
+    monkeypatch.setattr(build_process, "_start_relay_linux_build_process", forbidden_start)
+    with pytest.raises(build_values._WorkspaceBuildHandoffError):
+        build_process._drive_workspace_build_process(
+            command=command,
+            request=object(),
+            controller=controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=deadline,
+        )
+    resume.set()
+    canceller.join(2.0)
+
+    assert not canceller.is_alive()
+    assert starts == 0
+    assert controller._cancellation_requested() is True
+
+
 def test_losing_built_candidate_never_matches_or_replaces_canonical_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     values = _prepared_command()
     owner_token, record_token, _prepared, command, deadline = values
     assert _claim(values) == deadline
+    _controller = _bind_controller(values)
     assert build_values._intend_workspace_build_process_start(
         command,
         owner_token=owner_token,
@@ -334,6 +519,7 @@ def test_built_activation_repairs_stored_effect_return_loss(
     values = _prepared_command()
     owner_token, record_token, _prepared, command, deadline = values
     assert _claim(values) == deadline
+    _controller = _bind_controller(values)
     assert build_values._intend_workspace_build_process_start(
         command,
         owner_token=owner_token,
@@ -588,6 +774,17 @@ def _associated_process(tmp_path: Path):
         )
         == deadline
     )
+    controller = state_module._WorkspaceWorkerController(
+        state_module._CONTROLLER_TOKEN,
+        owner_token=owner_token,
+    )
+    assert build_values._bind_workspace_build_command_controller(
+        command,
+        controller=controller,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
     raw = spawn_module._new_raw_build_process_destination(spec)
     destination = process_registry._new_build_owner_destination(spec, raw)
     candidate = destination._read()
@@ -618,7 +815,7 @@ def _associated_process(tmp_path: Path):
         )
         is candidate._cleanup_authority
     )
-    return command, process_owner
+    return command, process_owner, controller
 
 
 @pytest.mark.parametrize("stored", [False, True])
@@ -629,7 +826,7 @@ def test_cancel_store_fault_still_releases_exact_associated_process(
     stored: bool,
     control: bool,
 ) -> None:
-    command, process_owner = _associated_process(tmp_path)
+    command, process_owner, _controller = _associated_process(tmp_path)
     original = build_values._store_command_state
     faulted = False
 
@@ -675,7 +872,7 @@ def test_cancel_clock_control_still_releases_associated_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    command, process_owner = _associated_process(tmp_path)
+    command, process_owner, _controller = _associated_process(tmp_path)
     deadline = _future()
     original = build_process.time.monotonic
     interrupted = False
@@ -706,7 +903,7 @@ def test_cancel_clock_control_still_releases_associated_process(
 def test_held_start_permit_and_process_release_linearize_cancellation(
     tmp_path: Path,
 ) -> None:
-    command, process_owner = _associated_process(tmp_path)
+    command, process_owner, _controller = _associated_process(tmp_path)
     state = build_values._COMMANDS[command]
     permit = build_values._acquire_workspace_build_process_start(
         command,
@@ -960,6 +1157,74 @@ def _settle_cancelled_command(
         record_token,
         object(),
     )
+
+
+@pytest.mark.parametrize("missing", ["forward", "reverse"])
+def test_command_forget_repairs_each_one_sided_controller_binding(missing: str) -> None:
+    values = _prepared_command()
+    _owner_token, record_token, _prepared, command, _deadline = values
+    assert _claim(values) == values[4]
+    controller = _bind_controller(values)
+    assert build_values._request_workspace_build_command_cancel(
+        command,
+        cleanup_deadline=_future(),
+    )
+    if missing == "forward":
+        build_values._COMMAND_CONTROLLERS.pop(command)
+    else:
+        build_values._CONTROLLER_COMMANDS.pop(controller)
+
+    assert build_values._forget_workspace_build_command(command, record_token)
+    assert command not in build_values._COMMAND_CONTROLLERS
+    assert controller not in build_values._CONTROLLER_COMMANDS
+
+
+@pytest.mark.parametrize(
+    "helper",
+    [
+        "_remove_controller_command_binding",
+        "_remove_command_controller_binding",
+    ],
+)
+@pytest.mark.parametrize("stored", [False, True])
+@pytest.mark.parametrize("control", [False, True])
+def test_command_binding_forget_retries_every_pop_return_loss(
+    monkeypatch: pytest.MonkeyPatch,
+    helper: str,
+    stored: bool,
+    control: bool,
+) -> None:
+    values = _prepared_command()
+    _owner_token, record_token, _prepared, command, _deadline = values
+    assert _claim(values) == values[4]
+    controller = _bind_controller(values)
+    assert build_values._request_workspace_build_command_cancel(
+        command,
+        cleanup_deadline=_future(),
+    )
+    original = getattr(build_values, helper)
+    faulted = False
+
+    def lose_return(*args: object, **kwargs: object) -> None:
+        nonlocal faulted
+        if not faulted:
+            faulted = True
+            if stored:
+                original(*args, **kwargs)
+            if control:
+                raise KeyboardInterrupt()
+            raise OSError("synthetic binding-pop return loss")
+        original(*args, **kwargs)
+
+    monkeypatch.setattr(build_values, helper, lose_return)
+    expected = KeyboardInterrupt if control else OSError
+    with pytest.raises(expected):
+        build_values._forget_workspace_build_command(command, record_token)
+
+    assert build_values._forget_workspace_build_command(command, record_token)
+    assert faulted is True
+    assert command not in build_values._COMMAND_CONTROLLERS
+    assert controller not in build_values._CONTROLLER_COMMANDS
 
 
 def test_build_state_forget_requires_revocation_and_filesystem_settlement(

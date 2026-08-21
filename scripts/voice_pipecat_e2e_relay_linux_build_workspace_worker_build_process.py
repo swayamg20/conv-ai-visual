@@ -35,6 +35,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _acquire_workspace_build_process_start,
+    _bind_workspace_build_command_controller,
     _complete_workspace_build_process_start,
     _release_workspace_build_process_start,
     _request_workspace_build_command_cancel,
@@ -82,6 +83,14 @@ def _drive_workspace_build_process(
                 record_token=record_token,
                 build_deadline=build_deadline,
             )
+        ):
+            raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
+        if not _bind_workspace_build_command_controller(
+            command,
+            controller=controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
         ):
             raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
         spec = _new_relay_linux_build_spec(

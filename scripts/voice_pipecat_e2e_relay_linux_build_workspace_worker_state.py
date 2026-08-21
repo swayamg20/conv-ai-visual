@@ -61,7 +61,13 @@ class _WorkspaceWorkerControlSignal:
 class _WorkspaceWorkerController:
     """Sanitized cancellation state carrying no path or filesystem authority."""
 
-    __slots__ = ("_cancel_requested", "_condition", "_control", "_owner_token")
+    __slots__ = (
+        "__weakref__",
+        "_cancel_requested",
+        "_condition",
+        "_control",
+        "_owner_token",
+    )
 
     def __init__(self, token: object, *, owner_token: object) -> None:
         if token is not _CONTROLLER_TOKEN or owner_token is None:
@@ -76,18 +82,27 @@ class _WorkspaceWorkerController:
 
     def _request_cancel(self) -> None:
         object.__setattr__(self, "_cancel_requested", True)
+        control = _latch_build_command_cancel(self)
         if not self._condition.acquire(blocking=False):
+            if control is not None:
+                self._capture_control(control)
             return
         try:
             self._condition.notify_all()
         finally:
             self._condition.release()
+        if control is not None:
+            self._capture_control(control)
 
     def _cancellation_requested(self) -> bool:
         return self._cancel_requested
 
     def _capture_control(self, error: KeyboardInterrupt | SystemExit) -> None:
+        object.__setattr__(self, "_cancel_requested", True)
         retained: list[BaseException] = [error]
+        nested = _latch_build_command_cancel(self)
+        if nested is not None:
+            retained.append(nested)
         signal: _WorkspaceWorkerControlSignal | None = None
         fallback = False
         while signal is None:
@@ -468,6 +483,22 @@ def _default_control_signal(
     if isinstance(error, KeyboardInterrupt):
         return _WorkspaceWorkerControlSignal(_CONTROL_TOKEN, kind="keyboard", code=None)
     return _WorkspaceWorkerControlSignal(_CONTROL_TOKEN, kind="system-exit", code=1)
+
+
+def _latch_build_command_cancel(
+    controller: _WorkspaceWorkerController,
+) -> KeyboardInterrupt | SystemExit | None:
+    try:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+            _latch_workspace_build_controller_cancel,
+        )
+
+        _latch_workspace_build_controller_cancel(controller)
+    except (KeyboardInterrupt, SystemExit) as control:
+        return control
+    except BaseException as error:
+        _scrub_control_minimal(error)
+    return None
 
 
 def _scrub_control(error: BaseException) -> None:

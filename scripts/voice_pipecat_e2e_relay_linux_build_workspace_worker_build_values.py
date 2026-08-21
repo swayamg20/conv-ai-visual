@@ -12,6 +12,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract im
     _workspace_prepared_build_matches,
     _WorkspacePreparedReceipt,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
+    _WorkspaceWorkerController,
+)
 
 _COMMAND_TOKEN = object()
 _FAILURE = "Relay Linux workspace build handoff is invalid"
@@ -27,6 +30,14 @@ _PROCESS_ASSOCIATIONS: weakref.WeakKeyDictionary[
 _COMMAND_GATES: weakref.WeakKeyDictionary[
     _WorkspaceBuildCommand,
     _WorkspaceBuildCommandGate,
+] = weakref.WeakKeyDictionary()
+_COMMAND_CONTROLLERS: weakref.WeakKeyDictionary[
+    _WorkspaceBuildCommand,
+    weakref.ReferenceType[_WorkspaceWorkerController],
+] = weakref.WeakKeyDictionary()
+_CONTROLLER_COMMANDS: weakref.WeakKeyDictionary[
+    _WorkspaceWorkerController,
+    weakref.ReferenceType[_WorkspaceBuildCommand],
 ] = weakref.WeakKeyDictionary()
 
 
@@ -278,6 +289,66 @@ def _workspace_build_command_failed(command: _WorkspaceBuildCommand) -> None:
         _COMMANDS[command] = (*state[:4], "failed", state[5])
 
 
+def _bind_workspace_build_command_controller(
+    command: _WorkspaceBuildCommand,
+    *,
+    controller: _WorkspaceWorkerController,
+    owner_token: object,
+    record_token: object,
+    build_deadline: float,
+) -> bool:
+    """Bind outer cancellation into the sole command start/cancel gate."""
+
+    gate = _acquire_command_gate(command, build_deadline)
+    try:
+        state = _COMMANDS.get(command)
+        controller_reference = _COMMAND_CONTROLLERS.get(command)
+        command_reference = _CONTROLLER_COMMANDS.get(controller)
+        current_controller = controller_reference() if controller_reference is not None else None
+        current_command = command_reference() if command_reference is not None else None
+        if (
+            type(controller) is not _WorkspaceWorkerController
+            or not controller._matches(owner_token)
+            or type(state) is not tuple
+            or len(state) != 6
+            or state[0] is not owner_token
+            or state[1] is not record_token
+            or state[3] != build_deadline
+            or state[4] not in {"building", "start-intended"}
+            or current_controller not in {None, controller}
+            or current_command not in {None, command}
+        ):
+            return False
+        _COMMAND_CONTROLLERS[command] = weakref.ref(controller)
+        _CONTROLLER_COMMANDS[controller] = weakref.ref(command)
+        if controller._cancellation_requested() is True:
+            gate.cancel_requested = True
+        return not gate.cancel_requested
+    finally:
+        gate.lock.release()
+
+
+def _latch_workspace_build_controller_cancel(
+    controller: _WorkspaceWorkerController,
+) -> bool:
+    """Nonblocking half of outer-cancel versus held-start linearization."""
+
+    if type(controller) is not _WorkspaceWorkerController:
+        return False
+    command_reference = _CONTROLLER_COMMANDS.get(controller)
+    command = command_reference() if command_reference is not None else None
+    if command is None:
+        return True
+    controller_reference = _COMMAND_CONTROLLERS.get(command)
+    if controller_reference is None or controller_reference() is not controller:
+        return False
+    gate = _COMMAND_GATES.get(command)
+    if type(gate) is not _WorkspaceBuildCommandGate:
+        return False
+    gate.cancel_requested = True
+    return True
+
+
 def _workspace_build_command_authorizes_process(
     command: _WorkspaceBuildCommand,
     *,
@@ -334,6 +405,9 @@ def _acquire_workspace_build_process_start(
     gate = _acquire_command_gate(command, build_deadline)
     try:
         state = _COMMANDS.get(command)
+        controller_reference = _COMMAND_CONTROLLERS.get(command)
+        controller = controller_reference() if controller_reference is not None else None
+        command_reference = _CONTROLLER_COMMANDS.get(controller) if controller is not None else None
         if (
             type(state) is not tuple
             or len(state) != 6
@@ -341,6 +415,10 @@ def _acquire_workspace_build_process_start(
             or state[1] is not record_token
             or state[3] != build_deadline
             or state[4] not in {"building", "start-intended"}
+            or type(controller) is not _WorkspaceWorkerController
+            or command_reference is None
+            or command_reference() is not command
+            or controller._cancellation_requested() is True
             or gate.cancel_requested
             or time.monotonic() >= build_deadline
         ):
@@ -471,9 +549,60 @@ def _forget_workspace_build_command(
         or command in _PROCESS_ASSOCIATIONS
     ):
         return False
+    controller, coherent = _resolve_command_controller_binding(command)
+    if not coherent:
+        return False
+    if controller is not None:
+        _remove_controller_command_binding(controller, command)
+        command_reference = _CONTROLLER_COMMANDS.get(controller)
+        if command_reference is not None and command_reference() is command:
+            return False
+    _remove_command_controller_binding(command, controller)
+    if command in _COMMAND_CONTROLLERS:
+        return False
     _COMMAND_GATES.pop(command, None)
     _COMMANDS.pop(command, None)
-    return command not in _COMMANDS and command not in _COMMAND_GATES
+    return bool(
+        command not in _COMMANDS
+        and command not in _COMMAND_GATES
+        and command not in _COMMAND_CONTROLLERS
+        and (controller is None or controller not in _CONTROLLER_COMMANDS)
+    )
+
+
+def _resolve_command_controller_binding(
+    command: _WorkspaceBuildCommand,
+) -> tuple[_WorkspaceWorkerController | None, bool]:
+    reference = _COMMAND_CONTROLLERS.get(command)
+    forward = reference() if reference is not None else None
+    reverse = None
+    for controller, command_reference in _CONTROLLER_COMMANDS.items():
+        if command_reference() is command:
+            if reverse is not None and reverse is not controller:
+                return None, False
+            reverse = controller
+    if forward is not None and reverse is not None and forward is not reverse:
+        return None, False
+    controller = forward if forward is not None else reverse
+    return controller, controller is None or type(controller) is _WorkspaceWorkerController
+
+
+def _remove_controller_command_binding(
+    controller: _WorkspaceWorkerController,
+    command: _WorkspaceBuildCommand,
+) -> None:
+    reference = _CONTROLLER_COMMANDS.get(controller)
+    if reference is not None and reference() is command:
+        _CONTROLLER_COMMANDS.pop(controller, None)
+
+
+def _remove_command_controller_binding(
+    command: _WorkspaceBuildCommand,
+    controller: _WorkspaceWorkerController | None,
+) -> None:
+    reference = _COMMAND_CONTROLLERS.get(command)
+    if reference is not None and (controller is None or reference() is controller):
+        _COMMAND_CONTROLLERS.pop(command, None)
 
 
 def _workspace_build_command_matches_exact(
