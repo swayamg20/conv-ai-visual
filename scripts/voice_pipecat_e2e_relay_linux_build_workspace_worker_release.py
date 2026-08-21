@@ -27,6 +27,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_lifecycle impo
     _WorkspaceWorkerTerminalReceipt,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
+    _DESTINATION_TOKEN,
     _WorkspaceWorkerBundle,
 )
 
@@ -199,44 +200,46 @@ def _release_workspace_worker_thread(
                             object.__setattr__(raw, "_workspace_control_token", None)
                         object.__setattr__(coordinator, "_release_phase", "scrubbed")
                         call_scrub_hook = True
-        if missing_record:
-            return _complete_missing_record_release(
-                binding,
-                construction,
-                terminal,
-                coordinator,
-                deadline,
-            )
-        if call_scrub_hook:
-            _workspace_worker_thread_scrubbed()
-        with _workspace_worker_ownership_locked(deadline):
-            with _locked_before(registry._REGISTRY_LOCK, deadline):
-                record = registry._RECORDS.get(bundle)
-                if record is None:
-                    missing_record = True
-                else:
-                    with _locked_before(record._lock, deadline):
-                        if (
-                            record._lifecycle is not coordinator
-                            or coordinator._release_phase != "scrubbed"
-                        ):
-                            raise TypeError(_FAILURE)
-                        del registry._RECORDS[bundle]
-            if missing_record:
-                return _complete_missing_record_release(
-                    binding,
-                    construction,
-                    terminal,
-                    coordinator,
-                    deadline,
-                )
-            _release_workspace_worker_pin(record._record_token, bundle)
-            if _workspace_worker_active_root_occupied(record._record_token, deadline):
-                return False
-            object.__setattr__(coordinator, "_release_phase", "complete")
-            coordinator._notify()
+        if not missing_record:
+            if call_scrub_hook:
+                _workspace_worker_thread_scrubbed()
+            with _workspace_worker_ownership_locked(deadline):
+                with _locked_before(registry._REGISTRY_LOCK, deadline):
+                    record = registry._RECORDS.get(bundle)
+                    if record is None:
+                        missing_record = True
+                    else:
+                        with _locked_before(record._lock, deadline):
+                            if (
+                                record._lifecycle is not coordinator
+                                or coordinator._release_phase != "scrubbed"
+                            ):
+                                raise TypeError(_FAILURE)
+                            del registry._RECORDS[bundle]
+                if not missing_record:
+                    _release_workspace_worker_pin(record._record_token, bundle)
+                    if _workspace_worker_active_root_occupied(
+                        record._record_token,
+                        deadline,
+                    ):
+                        return False
+                    object.__setattr__(coordinator, "_release_phase", "complete")
+                    coordinator._notify()
+    if missing_record:
+        return _complete_missing_record_release(
+            binding,
+            construction,
+            terminal,
+            coordinator,
+            deadline,
+        )
     _workspace_worker_record_released()
-    return _forget_filesystem_state(construction._record_token)
+    return _forget_filesystem_state(
+        binding._owner_token,
+        bundle,
+        construction._record_token,
+        deadline,
+    )
 
 
 def _complete_missing_record_release(
@@ -246,23 +249,31 @@ def _complete_missing_record_release(
     coordinator: object,
     deadline: float,
 ) -> bool:
+    bundle = binding._bundle_ref()
     if (
-        type(coordinator) is not _WorkspaceWorkerCoordinator
-        or not coordinator._matches(binding._owner_token, construction._record_token)
-        or coordinator._terminal is not terminal
-        or terminal._release_intended is not True
-        or coordinator._release_phase not in {"intended", "scrubbed", "complete"}
+        type(bundle) is not _WorkspaceWorkerBundle
+        or type(coordinator) is not _WorkspaceWorkerCoordinator
     ):
         raise TypeError(_FAILURE)
-    bundle = binding._bundle_ref()
-    if type(bundle) is not _WorkspaceWorkerBundle:
-        raise TypeError(_FAILURE)
-    _release_workspace_worker_pin(construction._record_token, bundle)
-    if _workspace_worker_active_root_occupied(construction._record_token, deadline):
-        return False
-    object.__setattr__(coordinator, "_release_phase", "complete")
-    coordinator._notify()
-    return _forget_filesystem_state(construction._record_token)
+    with _locked_before(coordinator._release_lock, deadline):
+        if (
+            not coordinator._matches(binding._owner_token, construction._record_token)
+            or coordinator._terminal is not terminal
+            or terminal._release_intended is not True
+            or coordinator._release_phase not in {"intended", "scrubbed", "complete"}
+        ):
+            raise TypeError(_FAILURE)
+        _release_workspace_worker_pin(construction._record_token, bundle)
+        if _workspace_worker_active_root_occupied(construction._record_token, deadline):
+            return False
+        object.__setattr__(coordinator, "_release_phase", "complete")
+        coordinator._notify()
+    return _forget_filesystem_state(
+        binding._owner_token,
+        bundle,
+        construction._record_token,
+        deadline,
+    )
 
 
 def _release_liveness_is_coherent(
@@ -316,14 +327,53 @@ def _release_liveness_is_coherent(
     )
 
 
-def _forget_filesystem_state(record_token: object) -> bool:
+def _forget_filesystem_state(
+    owner_token: object,
+    bundle: _WorkspaceWorkerBundle,
+    record_token: object,
+    deadline: float,
+) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_forget import (
+        _complete_workspace_build_state_forget,
+        _forget_workspace_build_state,
+    )
     from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
         _forget_workspace_filesystem_settlement,
         _workspace_filesystem_state_is_forgotten,
     )
 
+    command, acquired = bundle._command_destination._read_before(owner_token, deadline)
+    if not acquired:
+        return False
+    built, acquired = bundle._built_destination._read_before(owner_token, deadline)
+    if not acquired or not _forget_workspace_build_state(
+        command,
+        owner_token=owner_token,
+        record_token=record_token,
+    ):
+        return False
     _forget_workspace_filesystem_settlement(record_token)
-    return _workspace_filesystem_state_is_forgotten(record_token)
+    if not _workspace_filesystem_state_is_forgotten(record_token):
+        return False
+    return bool(
+        bundle._built_destination._retire_before(
+            _DESTINATION_TOKEN,
+            owner_token,
+            built,
+            deadline,
+        )
+        and bundle._command_destination._retire_before(
+            _DESTINATION_TOKEN,
+            owner_token,
+            command,
+            deadline,
+        )
+        and _complete_workspace_build_state_forget(
+            command,
+            owner_token=owner_token,
+            record_token=record_token,
+        )
+    )
 
 
 def _workspace_worker_join_returned() -> None:

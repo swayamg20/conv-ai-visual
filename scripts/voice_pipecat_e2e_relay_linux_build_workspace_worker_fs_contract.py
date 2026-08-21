@@ -12,6 +12,10 @@ _LEASES: weakref.WeakKeyDictionary[
     _WorkspacePreparedReceipt,
     tuple[object, object, bytes, str],
 ] = weakref.WeakKeyDictionary()
+_PREPARED_BUILDS: weakref.WeakKeyDictionary[
+    _WorkspacePreparedReceipt,
+    tuple[object, object, object, float, str],
+] = weakref.WeakKeyDictionary()
 _SETTLEMENTS: dict[object, tuple[object, object]] = {}
 _CLAIMS: dict[object, tuple[object, object]] = {}
 
@@ -206,6 +210,158 @@ def _activate_workspace_prepared_receipt(
     return receipt._matches(owner_token, record_token, require_active=True)
 
 
+def _claim_workspace_prepared_receipt_for_build(
+    receipt: _WorkspacePreparedReceipt,
+    owner_token: object,
+    record_token: object,
+    command: object,
+    build_deadline: float,
+) -> bool:
+    """Consume the active lease without yet authorizing filesystem cleanup."""
+
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+        _WorkspaceBuildCommand,
+    )
+
+    if (
+        type(receipt) is not _WorkspacePreparedReceipt
+        or type(command) is not _WorkspaceBuildCommand
+        or type(build_deadline) is not float
+    ):
+        raise _WorkspaceFilesystemError(_FAILURE)
+    state = _LEASES.get(receipt)
+    association = _PREPARED_BUILDS.get(receipt)
+    candidate = (owner_token, record_token, command, build_deadline)
+    if (
+        type(state) is tuple
+        and len(state) == 4
+        and state[0] is owner_token
+        and state[1] is record_token
+        and state[3] == "building"
+        and type(association) is tuple
+        and len(association) == 5
+        and association[:4] == candidate
+        and association[4] == "building"
+    ):
+        return True
+    if (
+        type(state) is tuple
+        and len(state) == 4
+        and state[0] is owner_token
+        and state[1] is record_token
+        and state[3] == "building"
+        and type(association) is tuple
+        and len(association) == 5
+        and association[:4] == candidate
+        and association[4] == "intended"
+    ):
+        bound = (*candidate, "building")
+        try:
+            _store_prepared_build(receipt, bound)
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            if _PREPARED_BUILDS.get(receipt) != bound:
+                raise
+        return _workspace_prepared_build_matches(
+            receipt,
+            owner_token,
+            record_token,
+            command,
+            build_deadline,
+        )
+    if (
+        type(state) is not tuple
+        or len(state) != 4
+        or state[0] is not owner_token
+        or state[1] is not record_token
+        or state[3] != "active"
+        or (
+            association is not None
+            and (
+                type(association) is not tuple
+                or len(association) != 5
+                or association[:4] != candidate
+                or association[4] != "intended"
+            )
+        )
+    ):
+        raise _WorkspaceFilesystemError(_FAILURE)
+    if association is None:
+        _store_prepared_build(receipt, (*candidate, "intended"))
+    object.__setattr__(receipt, "_lease_active", False)
+    _store_prepared_lease(receipt, (state[0], state[1], state[2], "building"))
+    bound = (*candidate, "building")
+    try:
+        _store_prepared_build(receipt, bound)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        if _PREPARED_BUILDS.get(receipt) != bound:
+            raise
+    return _workspace_prepared_build_matches(
+        receipt,
+        owner_token,
+        record_token,
+        command,
+        build_deadline,
+    )
+
+
+def _workspace_prepared_receipt_is_building(
+    receipt: _WorkspacePreparedReceipt,
+    owner_token: object,
+    record_token: object,
+) -> bool:
+    state = _LEASES.get(receipt)
+    return bool(
+        type(receipt) is _WorkspacePreparedReceipt
+        and type(state) is tuple
+        and len(state) == 4
+        and state[0] is owner_token
+        and state[1] is record_token
+        and state[3] == "building"
+    )
+
+
+def _workspace_prepared_build_matches(
+    receipt: _WorkspacePreparedReceipt,
+    owner_token: object,
+    record_token: object,
+    command: object,
+    build_deadline: float,
+) -> bool:
+    association = _PREPARED_BUILDS.get(receipt)
+    return bool(
+        _workspace_prepared_receipt_is_building(receipt, owner_token, record_token)
+        and type(association) is tuple
+        and len(association) == 5
+        and association[0] is owner_token
+        and association[1] is record_token
+        and association[2] is command
+        and association[3] == build_deadline
+        and association[4] == "building"
+    )
+
+
+def _store_prepared_lease(
+    receipt: _WorkspacePreparedReceipt,
+    value: tuple[object, object, bytes, str],
+) -> None:
+    """Deterministic state-store cut used by return-loss tests."""
+
+    _LEASES[receipt] = value
+
+
+def _store_prepared_build(
+    receipt: _WorkspacePreparedReceipt,
+    value: tuple[object, object, object, float, str],
+) -> None:
+    """Deterministic association-store cut used by return-loss tests."""
+
+    _PREPARED_BUILDS[receipt] = value
+
+
 def _workspace_prepared_receipt_is_revoked(
     receipt: _WorkspacePreparedReceipt,
     owner_token: object,
@@ -220,6 +376,33 @@ def _workspace_prepared_receipt_is_revoked(
         and state[1] is record_token
         and state[3] == "revoked"
     )
+
+
+def _forget_workspace_prepared_build(
+    receipt: _WorkspacePreparedReceipt,
+    command: object,
+) -> bool:
+    """Forget only an exact revoked prepared-to-build association."""
+
+    state = _LEASES.get(receipt)
+    association = _PREPARED_BUILDS.get(receipt)
+    if association is None:
+        return True
+    if (
+        type(receipt) is not _WorkspacePreparedReceipt
+        or type(state) is not tuple
+        or len(state) != 4
+        or state[3] != "revoked"
+        or type(association) is not tuple
+        or len(association) != 5
+        or association[0] is not state[0]
+        or association[1] is not state[1]
+        or association[2] is not command
+        or association[4] != "building"
+    ):
+        return False
+    _PREPARED_BUILDS.pop(receipt, None)
+    return receipt not in _PREPARED_BUILDS
 
 
 def _publish_workspace_filesystem_settlement(
@@ -271,6 +454,10 @@ def _workspace_filesystem_is_settled(
         and type(claim_token) is object
         and _SETTLEMENTS.get(record_token) == (owner_token, claim_token)
     )
+
+
+def _workspace_filesystem_record_is_settled(record_token: object) -> bool:
+    return bool(type(record_token) is object and record_token in _SETTLEMENTS)
 
 
 def _workspace_filesystem_state_is_forgotten(record_token: object) -> bool:

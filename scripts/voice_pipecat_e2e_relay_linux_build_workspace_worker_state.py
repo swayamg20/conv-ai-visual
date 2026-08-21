@@ -173,7 +173,7 @@ class _WorkspaceWorkerDestination:
     ) -> None:
         if (
             token is not _DESTINATION_TOKEN
-            or kind not in {"thread", "built", "terminal"}
+            or kind not in {"thread", "command", "built", "terminal"}
             or owner_token is None
         ):
             raise TypeError("Relay Linux workspace worker destination is factory-owned")
@@ -276,6 +276,35 @@ class _WorkspaceWorkerDestination:
     def _matches(self, owner_token: object, kind: str) -> bool:
         return self._owner_token is owner_token and self._kind == kind
 
+    def _retire_before(
+        self,
+        token: object,
+        owner_token: object,
+        value: object | None,
+        deadline: float,
+    ) -> bool:
+        if (
+            token is not _DESTINATION_TOKEN
+            or owner_token is not self._owner_token
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise TypeError("Relay Linux workspace worker destination is invalid")
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return False
+        try:
+            if self._value is value:
+                object.__setattr__(self, "_value", None)
+            return self._value is None
+        finally:
+            self._lock.release()
+
     def __bool__(self) -> bool:
         return False
 
@@ -301,6 +330,7 @@ class _WorkspaceWorkerBundle:
     __slots__ = (
         "__weakref__",
         "_built_destination",
+        "_command_destination",
         "_controller",
         "_lifecycle",
         "_owner_token",
@@ -328,6 +358,7 @@ class _WorkspaceWorkerBundle:
         object.__setattr__(self, "_prepared_destination", prepared_destination)
         for field, kind in (
             ("_thread_destination", "thread"),
+            ("_command_destination", "command"),
             ("_built_destination", "built"),
             ("_terminal_destination", "terminal"),
         ):
@@ -347,6 +378,7 @@ class _WorkspaceWorkerBundle:
             and prepared_destination is self._prepared_destination
             and self._controller._matches(owner_token)
             and self._thread_destination._matches(owner_token, "thread")
+            and self._command_destination._matches(owner_token, "command")
             and self._built_destination._matches(owner_token, "built")
             and self._terminal_destination._matches(owner_token, "terminal")
         )

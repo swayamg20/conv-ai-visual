@@ -58,6 +58,18 @@ def _workspace_worker_destination_value_matches(
         return bool(
             type(value) is _WorkspaceWorkerTerminalReceipt and value._owner_token is owner_token
         )
+    if kind in {"command", "built"}:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+            _WorkspaceBuildCommand,
+        )
+
+        if kind == "command":
+            return bool(type(value) is _WorkspaceBuildCommand and value._matches(owner_token))
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt import (
+            _WorkspaceBuiltReceipt,
+        )
+
+        return bool(type(value) is _WorkspaceBuiltReceipt and value._matches(owner_token))
     return False
 
 

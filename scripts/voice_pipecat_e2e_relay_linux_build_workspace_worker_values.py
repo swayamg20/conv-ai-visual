@@ -188,8 +188,10 @@ class _WorkspaceWorkerClaim:
     """Exact worker-local path claim, scrubbed before terminal publication."""
 
     __slots__ = (
+        "_built_destination",
         "_bundle",
         "_claim_token",
+        "_command_destination",
         "_controller",
         "_coordinator",
         "_owner_token",
@@ -231,12 +233,16 @@ class _WorkspaceWorkerClaim:
         object.__setattr__(self, "_coordinator", coordinator)
         object.__setattr__(self, "_controller", controller)
         object.__setattr__(self, "_bundle", bundle)
+        object.__setattr__(self, "_command_destination", bundle._command_destination)
+        object.__setattr__(self, "_built_destination", bundle._built_destination)
         object.__setattr__(self, "_request", request)
         object.__setattr__(self, "_prepared_destination", prepared_destination)
         object.__setattr__(self, "_paths_cleared", False)
 
     def _scrub_paths(self) -> None:
         object.__setattr__(self, "_bundle", None)
+        object.__setattr__(self, "_command_destination", None)
+        object.__setattr__(self, "_built_destination", None)
         object.__setattr__(self, "_request", None)
         object.__setattr__(self, "_prepared_destination", None)
         object.__setattr__(self, "_paths_cleared", True)
