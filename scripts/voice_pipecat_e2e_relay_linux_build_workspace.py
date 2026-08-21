@@ -8,8 +8,10 @@ must consume.  In particular, these values cannot authorize a process spawn.
 
 from __future__ import annotations
 
+import math
 import re
 import threading
+import time
 from pathlib import Path
 
 from scripts.voice_pipecat_e2e_relay_linux_build_spawn import (
@@ -111,6 +113,30 @@ class _WorkspaceWorkerBundleDestination:
             raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
         with self._lock:
             return self._value
+
+    def _read_before(
+        self,
+        request: _RelayLinuxBuildWorkspaceRequest,
+        deadline: float,
+    ) -> tuple[object | None, bool]:
+        if (
+            request is not self._request
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return None, False
+        try:
+            return self._value, True
+        finally:
+            self._lock.release()
 
     def __bool__(self) -> bool:
         return False

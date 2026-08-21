@@ -1,10 +1,4 @@
-"""Private registry for one dormant relay workspace worker thread per owner.
-
-The registry, rather than the workspace bundle or its caller-visible
-destinations, owns the raw ``threading.Thread``.  Construction initializes the
-thread but never starts or joins it.  The record and receipt retain opaque keys
-only; neither retains the workspace request or its path graph.
-"""
+"""Private registry owning one opaque dormant workspace worker thread."""
 
 from __future__ import annotations
 
@@ -13,6 +7,25 @@ import weakref
 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace import (
     _RelayLinuxBuildWorkspaceOwner,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_active import (
+    _workspace_worker_active_capacity_occupied,
+    _workspace_worker_ownership_locked,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_control import (
+    _bind_workspace_worker_control_bridge,
+    _clear_workspace_worker_control_bridge_raw,
+    _new_workspace_worker_control_bridge,
+    _workspace_worker_control_bridge_belongs,
+    _workspace_worker_control_bridge_controller,
+    _workspace_worker_control_bridge_matches,
+    _workspace_worker_thread_configuration_is_complete,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_raw import (
+    _THREAD_NAME,
+    _THREAD_TOKEN,
+    _inert_workspace_worker_target,
+    _WorkspaceWorkerThread,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
     _scrub_control_minimal,
@@ -23,15 +36,13 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
 _BINDING_TOKEN = object()
 _RECEIPT_TOKEN = object()
 _RECORD_TOKEN = object()
-_THREAD_TOKEN = object()
 _REGISTERED = "registered"
 _INITIALIZING = "initializing"
 _INITIALIZED = "initialized"
 _FAILED = "failed"
 _POISONED = "poisoned"
-_THREAD_NAME = "relay-linux-build-workspace-worker"
 _MAX_LIVE_RECORDS = 1
-_REGISTRY_LOCK = threading.Lock()
+_REGISTRY_LOCK = threading.RLock()
 _CAPTURE_CONTROL = _WorkspaceWorkerController._capture_control
 _RECORDS: weakref.WeakKeyDictionary[
     _WorkspaceWorkerBundle,
@@ -143,100 +154,75 @@ class _WorkspaceWorkerThreadReceipt:
         raise TypeError("Relay Linux workspace worker receipt cannot be serialized")
 
 
-class _WorkspaceWorkerThread(threading.Thread):
-    """Sealed raw thread whose lifecycle remains registry-private."""
-
-    _CONFIGURATION_FIELDS = frozenset(
-        {
-            "_args",
-            "_context",
-            "_daemonic",
-            "_kwargs",
-            "_name",
-            "_target",
-            "daemon",
-            "name",
-        }
-    )
-
-    def __new__(cls, token: object) -> _WorkspaceWorkerThread:
-        if cls is not _WorkspaceWorkerThread or token is not _THREAD_TOKEN:
-            raise TypeError("Relay Linux workspace worker thread is registry-owned")
-        value = super().__new__(cls)
-        object.__setattr__(value, "_workspace_sealed", True)
-        return value
-
-    def __init__(self, token: object) -> None:
-        if token is not _THREAD_TOKEN:
-            raise TypeError("Relay Linux workspace worker thread is registry-owned")
-
-    def __init_subclass__(cls, **_kwargs: object) -> None:
-        del cls
-        raise TypeError("Relay Linux workspace worker thread cannot be subclassed")
-
-    def start(self) -> None:
-        raise RuntimeError("Relay Linux workspace worker lifecycle is not installed")
-
-    def join(self, timeout: float | None = None) -> None:
-        del timeout
-        raise RuntimeError("Relay Linux workspace worker lifecycle is not installed")
-
-    def run(self) -> None:
-        raise RuntimeError("Relay Linux workspace worker lifecycle is not installed")
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __repr__(self) -> str:
-        return "_WorkspaceWorkerThread()"
-
-    def __setattr__(self, name: str, value: object) -> None:
-        if name == "_workspace_sealed" or (
-            name in self._CONFIGURATION_FIELDS
-            and object.__getattribute__(self, "_workspace_sealed")
-        ):
-            raise AttributeError("Relay Linux workspace worker thread is sealed")
-        object.__setattr__(self, name, value)
-
-    def __delattr__(self, name: str) -> None:
-        if name == "_workspace_sealed" or (
-            name in self._CONFIGURATION_FIELDS
-            and object.__getattribute__(self, "_workspace_sealed")
-        ):
-            raise AttributeError("Relay Linux workspace worker thread is sealed")
-        object.__delattr__(self, name)
-
-    def __copy__(self) -> None:
-        raise TypeError("Relay Linux workspace worker thread cannot be copied")
-
-    def __deepcopy__(self, _memo: object) -> None:
-        raise TypeError("Relay Linux workspace worker thread cannot be copied")
-
-    def __reduce__(self) -> None:
-        raise TypeError("Relay Linux workspace worker thread cannot be serialized")
-
-    def __reduce_ex__(self, _protocol: int) -> None:
-        raise TypeError("Relay Linux workspace worker thread cannot be serialized")
-
-
 class _WorkspaceWorkerThreadRecord:
     """Registry-owned canonical record; its raw thread never leaves this module."""
 
-    __slots__ = ("_entry", "_lock", "_owner_token", "_record_token")
+    __slots__ = (
+        "_control_bridge",
+        "_control_token",
+        "_entry",
+        "_lifecycle",
+        "_lock",
+        "_owner_token",
+        "_record_token",
+    )
 
-    def __init__(self, token: object, *, owner_token: object) -> None:
-        if token is not _RECORD_TOKEN or type(owner_token) is not object:
+    def __init__(
+        self,
+        token: object,
+        *,
+        owner_token: object,
+        controller: _WorkspaceWorkerController,
+    ) -> None:
+        if (
+            token is not _RECORD_TOKEN
+            or type(owner_token) is not object
+            or type(controller) is not _WorkspaceWorkerController
+            or not controller._matches(owner_token)
+        ):
             raise TypeError("Relay Linux workspace worker record is registry-owned")
         object.__setattr__(self, "_owner_token", owner_token)
         object.__setattr__(self, "_record_token", object())
+        object.__setattr__(self, "_control_token", object())
+        object.__setattr__(
+            self,
+            "_control_bridge",
+            _new_workspace_worker_control_bridge(
+                self._record_token,
+                self._control_token,
+                owner_token,
+                controller,
+            ),
+        )
         object.__setattr__(self, "_entry", None)
+        object.__setattr__(self, "_lifecycle", None)
         object.__setattr__(self, "_lock", threading.RLock())
 
     def _matches(self, binding: _WorkspaceWorkerThreadBinding) -> bool:
+        bridge = self._control_bridge
+        controller = binding._controller
+        release_phase = getattr(self._lifecycle, "_release_phase", None)
         return bool(
             type(binding) is _WorkspaceWorkerThreadBinding
             and binding._owner_token is self._owner_token
-            and binding._controller._matches(self._owner_token)
+            and controller._matches(self._owner_token)
+            and (
+                _workspace_worker_control_bridge_matches(
+                    bridge,
+                    self._record_token,
+                    self._control_token,
+                    controller,
+                )
+                or (
+                    release_phase in {"intended", "scrubbed", "complete"}
+                    and _workspace_worker_control_bridge_belongs(
+                        bridge,
+                        self._record_token,
+                        self._control_token,
+                    )
+                    and bridge._state is None
+                )
+            )
         )
 
     def _advance(
@@ -245,7 +231,13 @@ class _WorkspaceWorkerThreadRecord:
     ) -> tuple[_WorkspaceWorkerThreadReceipt, bool]:
         if not self._matches(binding):
             raise TypeError("Relay Linux workspace worker record binding is invalid")
-        with self._lock:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_binding import (
+            _workspace_worker_locked_before,
+            _workspace_worker_operation_deadline,
+        )
+
+        deadline = _workspace_worker_operation_deadline(None)
+        with _workspace_worker_locked_before(self._lock, deadline):
             entry = self._entry
             if entry is None:
                 candidate = _WorkspaceWorkerThread.__new__(
@@ -267,14 +259,26 @@ class _WorkspaceWorkerThreadRecord:
                         state == _INITIALIZED
                         and (
                             receipt._coherent is not True
-                            or not _thread_initialization_is_complete(candidate)
+                            or not _thread_initialization_is_complete(
+                                candidate,
+                                self._record_token,
+                                self._control_bridge,
+                                self._control_token,
+                                binding._controller,
+                            )
                         )
                     )
                     or (
                         state == _FAILED
                         and (
                             receipt._coherent is not False
-                            or _thread_initialization_is_complete(candidate)
+                            or _thread_initialization_is_complete(
+                                candidate,
+                                self._record_token,
+                                self._control_bridge,
+                                self._control_token,
+                                binding._controller,
+                            )
                         )
                     )
                     or (
@@ -305,6 +309,14 @@ class _WorkspaceWorkerThreadRecord:
             if state != _REGISTERED or type(candidate) is not _WorkspaceWorkerThread:
                 raise TypeError("Relay Linux workspace worker record is invalid")
 
+            worker_token = _bind_workspace_worker_control_bridge(
+                self._control_bridge,
+                self._record_token,
+                self._control_token,
+                binding._controller,
+                candidate,
+            )
+            object.__setattr__(candidate, "_workspace_control_token", worker_token)
             object.__setattr__(
                 self,
                 "_entry",
@@ -316,6 +328,7 @@ class _WorkspaceWorkerThreadRecord:
                     candidate,
                     target=_inert_workspace_worker_target,
                     name=_THREAD_NAME,
+                    args=(self._control_bridge,),
                     daemon=False,
                 )
             except (KeyboardInterrupt, SystemExit) as control:
@@ -333,8 +346,19 @@ class _WorkspaceWorkerThreadRecord:
         self,
         candidate: _WorkspaceWorkerThread,
     ) -> tuple[_WorkspaceWorkerThreadReceipt, bool]:
-        coherent = _thread_initialization_is_complete(candidate)
         object.__setattr__(candidate, "_workspace_sealed", True)
+        controller = _workspace_worker_control_bridge_controller(
+            self._control_bridge,
+            self._record_token,
+            self._control_token,
+        )
+        coherent = _thread_initialization_is_complete(
+            candidate,
+            self._record_token,
+            self._control_bridge,
+            self._control_token,
+            controller,
+        )
         receipt = _WorkspaceWorkerThreadReceipt(
             _RECEIPT_TOKEN,
             owner_token=self._owner_token,
@@ -377,7 +401,13 @@ class _WorkspaceWorkerThreadRecord:
                             self._record_token,
                         )
                         or entry[2]._coherent is not (entry[0] == _INITIALIZED)
-                        or _thread_initialization_is_complete(candidate)
+                        or _thread_initialization_is_complete(
+                            candidate,
+                            self._record_token,
+                            self._control_bridge,
+                            self._control_token,
+                            binding._controller,
+                        )
                         is not (entry[0] == _INITIALIZED)
                     ):
                         raise TypeError("Relay Linux workspace worker record is invalid")
@@ -392,7 +422,13 @@ class _WorkspaceWorkerThreadRecord:
     ) -> _WorkspaceWorkerThreadReceipt:
         if not self._matches(binding):
             raise TypeError("Relay Linux workspace worker record binding is invalid")
-        with self._lock:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_binding import (
+            _workspace_worker_locked_before,
+            _workspace_worker_operation_deadline,
+        )
+
+        deadline = _workspace_worker_operation_deadline(None)
+        with _workspace_worker_locked_before(self._lock, deadline):
             entry = self._entry
             if entry is not None and entry[0] == _POISONED:
                 receipt = entry[2]
@@ -401,8 +437,12 @@ class _WorkspaceWorkerThreadRecord:
                 return receipt
             candidate = None if entry is None else entry[1]
             if type(candidate) is _WorkspaceWorkerThread:
-                object.__setattr__(candidate, "_target", None)
+                _scrub_workspace_worker_no_effect(self, candidate)
                 object.__setattr__(candidate, "_workspace_sealed", True)
+            elif candidate is not None:
+                raise TypeError("Relay Linux workspace worker record is invalid")
+            else:
+                _scrub_workspace_worker_no_effect(self, None)
             receipt = None if entry is None else entry[2]
             if type(receipt) is not _WorkspaceWorkerThreadReceipt or not receipt._matches(
                 self._owner_token,
@@ -453,39 +493,20 @@ class _WorkspaceWorkerThreadRecord:
 def _resolve_workspace_worker_thread_binding(
     owner: _RelayLinuxBuildWorkspaceOwner,
     bundle: _WorkspaceWorkerBundle,
+    deadline: float | None = None,
 ) -> _WorkspaceWorkerThreadBinding:
     """Resolve the exact canonical owner/bundle without retaining its paths."""
 
-    try:
-        if (
-            type(owner) is not _RelayLinuxBuildWorkspaceOwner
-            or type(bundle) is not _WorkspaceWorkerBundle
-            or not owner._cleanup_authority._matches(owner._request)
-        ):
-            raise TypeError
-        owner_token = owner._cleanup_authority._key
-        if (
-            type(owner_token) is not object
-            or owner._worker_bundle_destination._read(owner._request) is not bundle
-            or not bundle._matches(owner_token, owner._receipt_destination)
-            or type(bundle._controller) is not _WorkspaceWorkerController
-        ):
-            raise TypeError
-        return _WorkspaceWorkerThreadBinding(
-            _BINDING_TOKEN,
-            owner_token=owner_token,
-            controller=bundle._controller,
-            bundle=bundle,
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as error:
-        _scrub_control_minimal(error)
-        raise TypeError("Relay Linux workspace worker owner binding is invalid") from None
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_binding import (
+        _resolve_workspace_worker_thread_binding as resolve,
+    )
+
+    return resolve(owner, bundle, deadline)
 
 
 def _advance_workspace_worker_thread(
     binding: _WorkspaceWorkerThreadBinding,
+    deadline: float | None = None,
 ) -> tuple[_WorkspaceWorkerThreadReceipt, bool]:
     """Initialize, but never start, the binding's one registry-owned thread."""
 
@@ -499,20 +520,39 @@ def _advance_workspace_worker_thread(
     bundle = binding._bundle_ref()
     if type(bundle) is not _WorkspaceWorkerBundle:
         raise TypeError("Relay Linux workspace worker bundle is no longer owned")
-    with _REGISTRY_LOCK:
-        record = _RECORDS.get(bundle)
-        if record is None:
-            if len(_RECORDS) >= _MAX_LIVE_RECORDS:
-                raise RuntimeError("Relay Linux workspace worker registry is occupied")
-            candidate = _WorkspaceWorkerThreadRecord(
-                _RECORD_TOKEN,
-                owner_token=binding._owner_token,
-            )
-            _RECORDS[bundle] = candidate
-            record = _RECORDS[bundle]
-        if type(record) is not _WorkspaceWorkerThreadRecord or not record._matches(binding):
-            raise TypeError("Relay Linux workspace worker registry is invalid")
-    return record._advance(binding)
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_binding import (
+        _workspace_worker_binding_deadline,
+        _workspace_worker_locked_before,
+        _workspace_worker_operation_deadline,
+    )
+
+    deadline = _workspace_worker_operation_deadline(deadline)
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_contract import (
+        _workspace_worker_bundle_allows_record,
+    )
+
+    with _workspace_worker_binding_deadline(deadline):
+        with _workspace_worker_ownership_locked(deadline):
+            occupied = _workspace_worker_active_capacity_occupied(deadline)
+            with _workspace_worker_locked_before(_REGISTRY_LOCK, deadline):
+                if not _workspace_worker_bundle_allows_record(bundle, binding._owner_token):
+                    raise RuntimeError("Relay Linux workspace worker lifecycle is complete")
+                record = _RECORDS.get(bundle)
+                if record is None:
+                    if occupied:
+                        raise RuntimeError("Relay Linux workspace worker registry is occupied")
+                    if len(_RECORDS) >= _MAX_LIVE_RECORDS:
+                        raise RuntimeError("Relay Linux workspace worker registry is occupied")
+                    candidate = _WorkspaceWorkerThreadRecord(
+                        _RECORD_TOKEN,
+                        owner_token=binding._owner_token,
+                        controller=binding._controller,
+                    )
+                    _RECORDS[bundle] = candidate
+                    record = _RECORDS[bundle]
+                if type(record) is not _WorkspaceWorkerThreadRecord or not record._matches(binding):
+                    raise TypeError("Relay Linux workspace worker registry is invalid")
+                return record._advance(binding)
 
 
 def _is_registered_workspace_worker_thread(
@@ -535,6 +575,7 @@ def _is_registered_workspace_worker_thread(
 
 def _poison_workspace_worker_thread(
     binding: _WorkspaceWorkerThreadBinding,
+    deadline: float | None = None,
 ) -> _WorkspaceWorkerThreadReceipt:
     """Fail closed after cancellation-state failure without exposing the raw thread."""
 
@@ -543,19 +584,38 @@ def _poison_workspace_worker_thread(
     bundle = binding._bundle_ref()
     if type(bundle) is not _WorkspaceWorkerBundle:
         raise TypeError("Relay Linux workspace worker bundle is no longer owned")
-    with _REGISTRY_LOCK:
-        record = _RECORDS.get(bundle)
-        if record is None:
-            if len(_RECORDS) >= _MAX_LIVE_RECORDS:
-                raise RuntimeError("Relay Linux workspace worker registry is occupied")
-            record = _WorkspaceWorkerThreadRecord(
-                _RECORD_TOKEN,
-                owner_token=binding._owner_token,
-            )
-            _RECORDS[bundle] = record
-        if type(record) is not _WorkspaceWorkerThreadRecord or not record._matches(binding):
-            raise TypeError("Relay Linux workspace worker registry is invalid")
-    return record._poison(binding)
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_binding import (
+        _workspace_worker_binding_deadline,
+        _workspace_worker_locked_before,
+        _workspace_worker_operation_deadline,
+    )
+
+    deadline = _workspace_worker_operation_deadline(deadline)
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_contract import (
+        _workspace_worker_bundle_allows_record,
+    )
+
+    with _workspace_worker_binding_deadline(deadline):
+        with _workspace_worker_ownership_locked(deadline):
+            occupied = _workspace_worker_active_capacity_occupied(deadline)
+            with _workspace_worker_locked_before(_REGISTRY_LOCK, deadline):
+                if not _workspace_worker_bundle_allows_record(bundle, binding._owner_token):
+                    raise RuntimeError("Relay Linux workspace worker lifecycle is complete")
+                record = _RECORDS.get(bundle)
+                if record is None:
+                    if occupied:
+                        raise RuntimeError("Relay Linux workspace worker registry is occupied")
+                    if len(_RECORDS) >= _MAX_LIVE_RECORDS:
+                        raise RuntimeError("Relay Linux workspace worker registry is occupied")
+                    record = _WorkspaceWorkerThreadRecord(
+                        _RECORD_TOKEN,
+                        owner_token=binding._owner_token,
+                        controller=binding._controller,
+                    )
+                    _RECORDS[bundle] = record
+                if type(record) is not _WorkspaceWorkerThreadRecord or not record._matches(binding):
+                    raise TypeError("Relay Linux workspace worker registry is invalid")
+                return record._poison(binding)
 
 
 def _capture_workspace_worker_control(
@@ -572,46 +632,50 @@ def _capture_workspace_worker_control(
     _CAPTURE_CONTROL(controller, control)
 
 
-def _inert_workspace_worker_target() -> None:
-    """Hardcoded dormant target; this checkpoint exposes no way to run it."""
-
-
-def _thread_initialization_is_complete(candidate: object) -> bool:
+def _thread_initialization_is_complete(
+    candidate: object,
+    record_token: object,
+    control_bridge: object,
+    bridge_token: object,
+    controller: _WorkspaceWorkerController,
+) -> bool:
     """Recognize only the full CPython ``Thread.__init__`` postcondition."""
 
-    try:
-        if type(candidate) is not _WorkspaceWorkerThread:
-            return False
-        values = vars(candidate)
-        started = values.get("_started")
-        name = values.get("_name")
-        args = values.get("_args")
-        kwargs = values.get("_kwargs")
-        return bool(
-            values.get("_initialized") is True
-            and values.get("_target") is _inert_workspace_worker_target
-            and type(name) is str
-            and name == _THREAD_NAME
-            and type(args) is tuple
-            and not args
-            and type(kwargs) is dict
-            and not kwargs
-            and values.get("_daemonic") is False
-            and values.get("_ident") is None
-            and values.get("_native_id") is None
-            and type(started) is threading.Event
-            and not started.is_set()
-            and values.get("_is_stopped", False) is False
-            and values.get("_tstate_lock") is None
-            and ("_tstate_lock" in values or "_os_thread_handle" in values)
-            and "_stderr" in values
-            and callable(values.get("_invoke_excepthook"))
-            and candidate in threading._dangling
-        )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        return False
+    return _workspace_worker_thread_configuration_is_complete(
+        candidate,
+        thread_type=_WorkspaceWorkerThread,
+        target=_inert_workspace_worker_target,
+        name=_THREAD_NAME,
+        record_token=record_token,
+        bridge_token=bridge_token,
+        control_bridge=control_bridge,
+        controller=controller,
+    )
+
+
+def _scrub_workspace_worker_no_effect(
+    record: _WorkspaceWorkerThreadRecord,
+    raw: _WorkspaceWorkerThread | None,
+) -> None:
+    """Clear the exact never-started raw configuration and weak bridge binding."""
+
+    if type(record) is not _WorkspaceWorkerThreadRecord or (
+        raw is not None and type(raw) is not _WorkspaceWorkerThread
+    ):
+        raise TypeError("Relay Linux workspace worker record is invalid")
+    _clear_workspace_worker_control_bridge_raw(
+        record._control_bridge,
+        record._record_token,
+        record._control_token,
+        raw,
+    )
+    if raw is not None:
+        object.__setattr__(raw, "_target", None)
+        object.__setattr__(raw, "_args", ())
+        object.__setattr__(raw, "_kwargs", {})
+        object.__setattr__(raw, "_workspace_control_token", None)
+        for shadow in {"is_alive", "join", "run", "start"}.intersection(vars(raw)):
+            object.__delattr__(raw, shadow)
 
 
 __all__: list[str] = []

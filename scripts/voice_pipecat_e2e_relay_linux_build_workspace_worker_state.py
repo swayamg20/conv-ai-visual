@@ -7,7 +7,9 @@ destinations which later reviewed worker slices may consume.
 
 from __future__ import annotations
 
+import math
 import threading
+import time
 import traceback
 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace import (
@@ -73,13 +75,16 @@ class _WorkspaceWorkerController:
         return owner_token is self._owner_token
 
     def _request_cancel(self) -> None:
-        with self._condition:
-            object.__setattr__(self, "_cancel_requested", True)
+        object.__setattr__(self, "_cancel_requested", True)
+        if not self._condition.acquire(blocking=False):
+            return
+        try:
             self._condition.notify_all()
+        finally:
+            self._condition.release()
 
     def _cancellation_requested(self) -> bool:
-        with self._condition:
-            return self._cancel_requested
+        return self._cancel_requested
 
     def _capture_control(self, error: KeyboardInterrupt | SystemExit) -> None:
         retained: list[BaseException] = [error]
@@ -101,11 +106,16 @@ class _WorkspaceWorkerController:
         while True:
             try:
                 if not latched:
-                    with self._condition:
+                    acquired = self._condition.acquire(blocking=False)
+                    try:
                         if self._control is None:
                             object.__setattr__(self, "_control", signal)
                         object.__setattr__(self, "_cancel_requested", True)
-                        self._condition.notify_all()
+                        if acquired:
+                            self._condition.notify_all()
+                    finally:
+                        if acquired:
+                            self._condition.release()
                     latched = True
                 if not retained:
                     return
@@ -125,12 +135,10 @@ class _WorkspaceWorkerController:
                     _scrub_control_minimal(retained.pop())
 
     def _control_value(self) -> _WorkspaceWorkerControlSignal | None:
-        with self._condition:
-            return self._control
+        return self._control
 
     def _wait(self, timeout: float) -> None:
-        with self._condition:
-            self._condition.wait(timeout)
+        time.sleep(min(max(0.0, timeout), 0.05))
 
     def __bool__(self) -> bool:
         return False
@@ -152,9 +160,9 @@ class _WorkspaceWorkerController:
 
 
 class _WorkspaceWorkerDestination:
-    """Empty exact-purpose slot; this checkpoint exposes no publisher."""
+    """Exact-purpose single-assignment slot for path-free lifecycle values."""
 
-    __slots__ = ("_kind", "_owner_token", "_value")
+    __slots__ = ("_kind", "_lock", "_owner_token", "_value")
 
     def __init__(
         self,
@@ -172,11 +180,98 @@ class _WorkspaceWorkerDestination:
         object.__setattr__(self, "_kind", kind)
         object.__setattr__(self, "_owner_token", owner_token)
         object.__setattr__(self, "_value", None)
+        object.__setattr__(self, "_lock", threading.Lock())
 
-    def _read(self, owner_token: object) -> None:
+    def _read(self, owner_token: object) -> object | None:
         if owner_token is not self._owner_token:
             raise TypeError("Relay Linux workspace worker destination is invalid")
-        return self._value
+        with self._lock:
+            return self._value
+
+    def _read_before(
+        self,
+        owner_token: object,
+        deadline: float,
+    ) -> tuple[object | None, bool]:
+        if (
+            owner_token is not self._owner_token
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise TypeError("Relay Linux workspace worker destination is invalid")
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return None, False
+        try:
+            return self._value, True
+        finally:
+            self._lock.release()
+
+    def _publish(self, token: object, owner_token: object, value: object) -> object:
+        if token is not _DESTINATION_TOKEN or owner_token is not self._owner_token:
+            raise TypeError("Relay Linux workspace worker destination is invalid")
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_contract import (
+            _workspace_worker_destination_value_matches,
+        )
+
+        if not _workspace_worker_destination_value_matches(
+            value,
+            owner_token,
+            self._kind,
+        ):
+            raise TypeError("Relay Linux workspace worker destination value is invalid")
+        with self._lock:
+            if self._value is None:
+                object.__setattr__(self, "_value", value)
+            if self._value is not value:
+                raise TypeError("Relay Linux workspace worker destination changed")
+            return self._value
+
+    def _publish_before(
+        self,
+        token: object,
+        owner_token: object,
+        value: object,
+        deadline: float,
+    ) -> tuple[object | None, bool]:
+        if (
+            token is not _DESTINATION_TOKEN
+            or owner_token is not self._owner_token
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise TypeError("Relay Linux workspace worker destination is invalid")
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_contract import (
+            _workspace_worker_destination_value_matches,
+        )
+
+        if not _workspace_worker_destination_value_matches(
+            value,
+            owner_token,
+            self._kind,
+        ):
+            raise TypeError("Relay Linux workspace worker destination value is invalid")
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return None, False
+        try:
+            if self._value is None:
+                object.__setattr__(self, "_value", value)
+            if self._value is not value:
+                raise TypeError("Relay Linux workspace worker destination changed")
+            return self._value, True
+        finally:
+            self._lock.release()
 
     def _matches(self, owner_token: object, kind: str) -> bool:
         return self._owner_token is owner_token and self._kind == kind
@@ -207,6 +302,7 @@ class _WorkspaceWorkerBundle:
         "__weakref__",
         "_built_destination",
         "_controller",
+        "_lifecycle",
         "_owner_token",
         "_prepared_destination",
         "_terminal_destination",
@@ -223,6 +319,7 @@ class _WorkspaceWorkerBundle:
         if token is not _BUNDLE_TOKEN or owner_token is None or prepared_destination is None:
             raise TypeError("Relay Linux workspace worker bundle is factory-owned")
         object.__setattr__(self, "_owner_token", owner_token)
+        object.__setattr__(self, "_lifecycle", None)
         object.__setattr__(
             self,
             "_controller",
