@@ -132,6 +132,16 @@ def _transfer_workspace_worker_claim(
     with _root_locked(_deadline(deadline)):
         root = _ACTIVE_ROOT
         if (
+            root is not None
+            and root._record_token is record_token
+            and root._bundle is None
+            and root._record is record
+            and root._terminal_destination is terminal_destination
+            and root._controller is controller
+            and root._owner_token is owner_token
+        ):
+            return
+        if (
             root is None
             or root._record_token is not record_token
             or root._bundle is not bundle

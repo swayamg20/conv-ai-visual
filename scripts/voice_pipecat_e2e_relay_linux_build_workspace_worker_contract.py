@@ -129,9 +129,41 @@ def _stage_settled_worker_terminal_locked(
     settlement_token = coordinator._settlement_token
     entry = record._entry
     started = vars(raw).get("_started") if raw is not None else None
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _workspace_filesystem_was_claimed,
+    )
+
+    if (
+        coordinator._phase == "start-intended"
+        and coordinator._claim_token is None
+        and not _workspace_filesystem_was_claimed(record._record_token)
+        and type(raw) is registry._WorkspaceWorkerThread
+        and type(started) is threading.Event
+        and _EVENT_IS_SET(started)
+        and not _THREAD_IS_ALIVE(raw)
+    ):
+        object.__setattr__(coordinator, "_workspace_settled", True)
+    if coordinator._phase == "claimed" and type(coordinator._claim_token) is object:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+            _workspace_filesystem_is_settled,
+        )
+
+        canonical_workspace_settled = _workspace_filesystem_is_settled(
+            record._owner_token,
+            record._record_token,
+            coordinator._claim_token,
+        )
+    else:
+        canonical_workspace_settled = bool(
+            coordinator._phase == "start-intended"
+            and coordinator._claim_token is None
+            and coordinator._workspace_settled is True
+            and not _workspace_filesystem_was_claimed(record._record_token)
+        )
     if (
         coordinator._phase not in {"start-intended", "claimed"}
         or coordinator._effect_phase not in {"entered", "returned"}
+        or not canonical_workspace_settled
         or coordinator._release_phase != "none"
         or type(settlement_token) is not object
         or (coordinator._phase == "start-intended" and claim_token is not None)
@@ -226,12 +258,30 @@ def _exact_start_rejection(raw: object) -> bool:
 def _wait_for_worker_handoff(
     coordinator: _WorkspaceWorkerCoordinator,
     deadline: float,
+    prepared_destination: object,
+    request: object,
+    owner_token: object,
+    record_token: object,
 ) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _WorkspacePreparedReceipt,
+    )
+
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0.0:
             return False
         if coordinator._phase == "terminal":
+            return True
+        receipt, acquired = prepared_destination._read_before(
+            request,
+            min(deadline, time.monotonic() + _TAKE_WAIT_SECONDS),
+        )
+        if (
+            acquired
+            and type(receipt) is _WorkspacePreparedReceipt
+            and receipt._matches(owner_token, record_token, require_active=True)
+        ):
             return True
         time.sleep(min(_TAKE_WAIT_SECONDS, remaining))
 

@@ -296,27 +296,90 @@ class _RelayLinuxBuildWorkspaceCleanupAuthority:
 
 
 class _WorkspacePreparationReceiptDestination:
-    """Caller-preowned empty slot; there is deliberately no publisher yet."""
+    """Caller-preowned single-assignment slot for one opaque prepared receipt."""
 
-    __slots__ = ("_lock", "_receipt", "_request")
+    __slots__ = ("_lock", "_owner_token", "_receipt", "_request")
 
     def __init__(
         self,
         token: object,
         *,
         request: _RelayLinuxBuildWorkspaceRequest,
+        owner_token: object,
     ) -> None:
-        if token is not _RECEIPT_DESTINATION_TOKEN:
+        if token is not _RECEIPT_DESTINATION_TOKEN or type(owner_token) is not object:
             raise TypeError("Relay Linux build workspace receipt destination is factory-owned")
         object.__setattr__(self, "_request", request)
+        object.__setattr__(self, "_owner_token", owner_token)
         object.__setattr__(self, "_receipt", None)
         object.__setattr__(self, "_lock", threading.Lock())
 
-    def _read(self, request: _RelayLinuxBuildWorkspaceRequest) -> None:
+    def _read(self, request: _RelayLinuxBuildWorkspaceRequest) -> object | None:
         if request is not self._request:
             raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
         with self._lock:
             return self._receipt
+
+    def _read_before(
+        self,
+        request: _RelayLinuxBuildWorkspaceRequest,
+        deadline: float,
+    ) -> tuple[object | None, bool]:
+        if (
+            request is not self._request
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return None, False
+        try:
+            return self._receipt, True
+        finally:
+            self._lock.release()
+
+    def _publish_before(
+        self,
+        request: _RelayLinuxBuildWorkspaceRequest,
+        owner_token: object,
+        receipt: object,
+        deadline: float,
+    ) -> tuple[object | None, bool]:
+        from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+            _WorkspacePreparedReceipt,
+        )
+
+        if (
+            request is not self._request
+            or owner_token is not self._owner_token
+            or type(receipt) is not _WorkspacePreparedReceipt
+            or not receipt._matches(owner_token)
+            or type(deadline) is not float
+            or not math.isfinite(deadline)
+        ):
+            raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+        remaining = max(0.0, deadline - time.monotonic())
+        acquired = (
+            self._lock.acquire(blocking=False)
+            if remaining <= 0.0
+            else self._lock.acquire(timeout=remaining)
+        )
+        if not acquired:
+            return None, False
+        try:
+            if self._receipt is None:
+                object.__setattr__(self, "_receipt", receipt)
+            if self._receipt is not receipt:
+                raise _RelayLinuxBuildWorkspaceContractError(_FAILURE)
+            return self._receipt, True
+        finally:
+            self._lock.release()
 
     def __bool__(self) -> bool:
         return False
@@ -371,6 +434,7 @@ class _RelayLinuxBuildWorkspaceOwner:
             _WorkspacePreparationReceiptDestination(
                 _RECEIPT_DESTINATION_TOKEN,
                 request=request,
+                owner_token=self._cleanup_authority._key,
             ),
         )
         object.__setattr__(

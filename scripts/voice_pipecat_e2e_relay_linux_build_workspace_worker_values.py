@@ -137,6 +137,7 @@ class _WorkspaceWorkerCoordinator:
         "_start_deadline",
         "_start_receipt",
         "_terminal",
+        "_workspace_settled",
     )
 
     def __init__(self, token: object, *, owner_token: object, record_token: object) -> None:
@@ -155,6 +156,7 @@ class _WorkspaceWorkerCoordinator:
         object.__setattr__(self, "_start_receipt", None)
         object.__setattr__(self, "_start_deadline", None)
         object.__setattr__(self, "_terminal", None)
+        object.__setattr__(self, "_workspace_settled", False)
         object.__setattr__(self, "_joined", False)
         object.__setattr__(self, "_release_phase", "none")
         object.__setattr__(self, "_release_deadline", None)

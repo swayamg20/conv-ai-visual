@@ -221,7 +221,14 @@ def _start_workspace_worker_thread(
         return receipt, False
     if start_returned_now:
         _workspace_worker_start_returned()
-    terminal = _wait_for_worker_handoff(coordinator, deadline)
+    terminal = _wait_for_worker_handoff(
+        coordinator,
+        deadline,
+        bundle._prepared_destination,
+        bundle._prepared_destination._request,
+        owner_token,
+        record._record_token,
+    )
     if not terminal:
         object.__setattr__(coordinator, "_handoff_expired", True)
         binding._controller._request_cancel()
@@ -340,23 +347,73 @@ def _take_workspace_worker_claim(record_token: object) -> _WorkspaceWorkerClaim 
                     request=bundle._prepared_destination._request,
                     prepared_destination=bundle._prepared_destination,
                 )
+                from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+                    _publish_workspace_filesystem_claim,
+                    _workspace_filesystem_claim_matches,
+                )
+
+                published = False
+                try:
+                    published = _publish_workspace_filesystem_claim(
+                        record._owner_token,
+                        record._record_token,
+                        settlement_token,
+                    )
+                except (KeyboardInterrupt, SystemExit) as control:
+                    if not _workspace_filesystem_claim_matches(
+                        record._owner_token,
+                        record._record_token,
+                        settlement_token,
+                    ):
+                        raise
+                    registry._capture_workspace_worker_control(bundle._controller, control)
+                    published = True
+                except BaseException as error:
+                    if not _workspace_filesystem_claim_matches(
+                        record._owner_token,
+                        record._record_token,
+                        settlement_token,
+                    ):
+                        raise
+                    _scrub_control_minimal(error)
+                    published = True
+                if not published or not _workspace_filesystem_claim_matches(
+                    record._owner_token,
+                    record._record_token,
+                    settlement_token,
+                ):
+                    return None
                 object.__setattr__(coordinator, "_claim_token", settlement_token)
                 object.__setattr__(coordinator, "_phase", "claimed")
                 coordinator._notify()
-        _transfer_workspace_worker_claim(
-            record._record_token,
-            bundle,
-            record=record,
-            terminal_destination=bundle._terminal_destination,
-            controller=bundle._controller,
-            owner_token=record._owner_token,
-            deadline=deadline,
-        )
+        retry_delay = 0.01
+        while True:
+            try:
+                _transfer_workspace_worker_claim(
+                    record._record_token,
+                    bundle,
+                    record=record,
+                    terminal_destination=bundle._terminal_destination,
+                    controller=bundle._controller,
+                    owner_token=record._owner_token,
+                    deadline=time.monotonic() + _DESTINATION_WAIT_SECONDS,
+                )
+                break
+            except (KeyboardInterrupt, SystemExit) as control:
+                registry._capture_workspace_worker_control(bundle._controller, control)
+            except BaseException as error:
+                _scrub_control_minimal(error)
+            bundle._controller._wait(retry_delay)
+            retry_delay = min(_DESTINATION_WAIT_SECONDS, retry_delay * 2.0)
         return claim
 
 
 def _run_inert_workspace_worker(control_bridge: object) -> None:
-    """Take, scrub, and publish only the fixed synthetic worker terminal."""
+    """Run the exact worker-local filesystem transaction before terminal."""
+
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_transaction import (
+        _run_workspace_filesystem_transaction,
+    )
 
     claim: _WorkspaceWorkerClaim | None = None
     record_token = _workspace_worker_control_bridge_record_token(control_bridge)
@@ -366,6 +423,9 @@ def _run_inert_workspace_worker(control_bridge: object) -> None:
         if claim is not None:
             try:
                 _workspace_worker_claim_taken(claim)
+                settled = _run_workspace_filesystem_transaction(claim)
+                if settled is True:
+                    object.__setattr__(claim._coordinator, "_workspace_settled", True)
             except (KeyboardInterrupt, SystemExit) as control:
                 registry._capture_workspace_worker_control(claim._controller, control)
             except BaseException as error:
@@ -399,132 +459,11 @@ def _publish_workspace_worker_terminal_for_token(
     record_token: object,
     claim: _WorkspaceWorkerClaim | None,
 ) -> _WorkspaceWorkerTerminalReceipt | None:
-    current = threading.current_thread()
-    if (
-        type(record_token) is not object
-        or type(current) is not registry._WorkspaceWorkerThread
-        or (claim is not None and claim._paths_cleared is not True)
-        or (claim is not None and claim._coordinator._settlement_token is not claim._claim_token)
-    ):
-        return None
-    settlement_deadline = time.monotonic() + _DESTINATION_WAIT_SECONDS
-    destination = None
-    controller = None
-    owner_token = None
-    terminal = None
-    exact_record = None
-    with _locked_before(registry._REGISTRY_LOCK, settlement_deadline):
-        for bundle, record in tuple(registry._RECORDS.items()):
-            if record._record_token is record_token and record._entry[1] is current:
-                with _locked_before(record._lock, settlement_deadline):
-                    coordinator = record._lifecycle
-                    if (
-                        type(coordinator) is not _WorkspaceWorkerCoordinator
-                        or type(coordinator._settlement_token) is not object
-                        or coordinator._phase
-                        not in {"start-intended", "claimed", "terminal-pending", "terminal"}
-                        or (
-                            claim is not None
-                            and (
-                                coordinator._claim_token is not claim._claim_token
-                                or record._owner_token is not claim._owner_token
-                            )
-                        )
-                    ):
-                        return None
-                    terminal = coordinator._terminal
-                    if terminal is None:
-                        terminal = _WorkspaceWorkerTerminalReceipt(
-                            _TERMINAL_TOKEN,
-                            owner_token=record._owner_token,
-                            record_token=record._record_token,
-                            started=True,
-                        )
-                        object.__setattr__(coordinator, "_terminal", terminal)
-                        object.__setattr__(coordinator, "_phase", "terminal-pending")
-                    destination = bundle._terminal_destination
-                    controller = bundle._controller
-                    owner_token = record._owner_token
-                    exact_record = record
-                    break
-    if destination is None:
-        active = _resolve_workspace_worker_active_record(
-            record_token,
-            settlement_deadline,
-        )
-        if active is None:
-            return None
-        record, destination, controller, owner_token = active
-        if (
-            type(record) is not registry._WorkspaceWorkerThreadRecord
-            or record._entry is None
-            or record._entry[1] is not current
-        ):
-            return None
-        with _locked_before(record._lock, settlement_deadline):
-            coordinator = record._lifecycle
-            if (
-                type(coordinator) is not _WorkspaceWorkerCoordinator
-                or type(coordinator._settlement_token) is not object
-            ):
-                return None
-            terminal = coordinator._terminal
-            if terminal is None:
-                terminal = _WorkspaceWorkerTerminalReceipt(
-                    _TERMINAL_TOKEN,
-                    owner_token=owner_token,
-                    record_token=record_token,
-                    started=True,
-                )
-                object.__setattr__(coordinator, "_terminal", terminal)
-                object.__setattr__(coordinator, "_phase", "terminal-pending")
-            exact_record = record
-    if destination is None or controller is None or terminal is None:
-        return None
-    committed = _publish_terminal_candidate(
-        destination,
-        owner_token,
-        terminal,
-        controller,
-        settlement_deadline,
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_terminal import (
+        _publish_workspace_worker_terminal_for_token_impl,
     )
-    if not committed:
-        return None
-    active_commit = _resolve_workspace_worker_active_record(
-        record_token,
-        settlement_deadline,
-    )
-    with _locked_before(registry._REGISTRY_LOCK, settlement_deadline):
-        finished = False
-        for _bundle, record in tuple(registry._RECORDS.items()):
-            if record is exact_record and record._record_token is record_token:
-                with _locked_before(record._lock, settlement_deadline):
-                    coordinator = record._lifecycle
-                    if coordinator._terminal is not terminal:
-                        return None
-                    object.__setattr__(coordinator, "_phase", "terminal")
-                    coordinator._notify()
-                    finished = True
-                    break
-        if not finished:
-            if active_commit is None or active_commit[0] is not exact_record:
-                return None
-            with _locked_before(exact_record._lock, settlement_deadline):
-                coordinator = exact_record._lifecycle
-                if coordinator._terminal is not terminal:
-                    return None
-                object.__setattr__(coordinator, "_phase", "terminal")
-                coordinator._notify()
-                finished = True
-        if not finished:
-            return None
-    try:
-        _workspace_worker_terminal_published()
-    except (KeyboardInterrupt, SystemExit) as control:
-        registry._capture_workspace_worker_control(controller, control)
-    except BaseException as error:
-        _scrub_control_minimal(error)
-    return terminal
+
+    return _publish_workspace_worker_terminal_for_token_impl(record_token, claim)
 
 
 def _reconcile_workspace_worker_terminal(
@@ -665,6 +604,7 @@ def _terminalize_no_effect_locked(
         object.__setattr__(coordinator, "_terminal", terminal)
         object.__setattr__(coordinator, "_phase", "terminal-pending")
         object.__setattr__(coordinator, "_joined", True)
+        object.__setattr__(coordinator, "_workspace_settled", True)
     coordinator._notify()
     return terminal
 

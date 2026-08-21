@@ -236,7 +236,7 @@ def _release_workspace_worker_thread(
             object.__setattr__(coordinator, "_release_phase", "complete")
             coordinator._notify()
     _workspace_worker_record_released()
-    return True
+    return _forget_filesystem_state(construction._record_token)
 
 
 def _complete_missing_record_release(
@@ -262,7 +262,7 @@ def _complete_missing_record_release(
         return False
     object.__setattr__(coordinator, "_release_phase", "complete")
     coordinator._notify()
-    return True
+    return _forget_filesystem_state(construction._record_token)
 
 
 def _release_liveness_is_coherent(
@@ -271,6 +271,21 @@ def _release_liveness_is_coherent(
     coordinator: _WorkspaceWorkerCoordinator,
     terminal: _WorkspaceWorkerTerminalReceipt,
 ) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _workspace_filesystem_is_settled,
+        _workspace_filesystem_was_claimed,
+    )
+
+    was_claimed = _workspace_filesystem_was_claimed(record._record_token)
+    if terminal.started is True and was_claimed:
+        if not _workspace_filesystem_is_settled(
+            record._owner_token,
+            record._record_token,
+            coordinator._claim_token,
+        ):
+            return False
+    elif terminal.started is False and was_claimed:
+        return False
     state = record._entry[0]
     if state == registry._INITIALIZED:
         if (
@@ -299,6 +314,16 @@ def _release_liveness_is_coherent(
         and coordinator._effect_phase in {"none", "rejected"}
         and coordinator._joined
     )
+
+
+def _forget_filesystem_state(record_token: object) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _forget_workspace_filesystem_settlement,
+        _workspace_filesystem_state_is_forgotten,
+    )
+
+    _forget_workspace_filesystem_settlement(record_token)
+    return _workspace_filesystem_state_is_forgotten(record_token)
 
 
 def _workspace_worker_join_returned() -> None:
