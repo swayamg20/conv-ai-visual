@@ -204,6 +204,7 @@ class _WorkspaceWorkerBundle:
     """One canonical inert graph; only its prepared slot retains the request."""
 
     __slots__ = (
+        "__weakref__",
         "_built_destination",
         "_controller",
         "_owner_token",
