@@ -105,7 +105,7 @@ def _snapshot_workspace_copy(
     node_modules_target: str,
     descriptors: _WorkspaceDescriptorSet,
     controller: _WorkspaceWorkerController,
-) -> tuple[tuple[tuple[str, ...], str, int, bytes | None], ...]:
+) -> tuple[_WorkspaceSourceNode, ...]:
     workspace_device = _WorkspaceFilesystemIdentity.from_stat(os.fstat(workspace_fd)).device
     expected_names: dict[tuple[str, ...], set[str]] = {(): {"node_modules"}}
     by_path = {node.relative: node for node in expected}
@@ -113,7 +113,7 @@ def _snapshot_workspace_copy(
         expected_names.setdefault(node.relative[:-1], set()).add(node.relative[-1])
         if node.kind == "directory":
             expected_names.setdefault(node.relative, set())
-    observed: list[tuple[tuple[str, ...], str, int, bytes | None]] = []
+    observed: list[_WorkspaceSourceNode] = []
 
     def visit(parent_fd: int, relative: tuple[str, ...]) -> None:
         names = _bounded_names(parent_fd, len(expected_names.get(relative, ())) + 1)
@@ -151,7 +151,7 @@ def _snapshot_workspace_copy(
                     details = os.fstat(child)
                     if details.st_uid != os.geteuid() or stat.S_IMODE(identity.mode) != 0o700:
                         raise _WorkspaceFilesystemError(_FAILURE)
-                    observed.append((path, "directory", 0, None))
+                    observed.append(_WorkspaceSourceNode(path, "directory", identity, None))
                     visit(child, path)
                     if (
                         _require_named_identity(
@@ -195,7 +195,9 @@ def _snapshot_workspace_copy(
                         != identity
                     ):
                         raise _WorkspaceFilesystemError(_FAILURE)
-                    observed.append((path, "file", size, digest))
+                    if size != identity.size:
+                        raise _WorkspaceFilesystemError(_FAILURE)
+                    observed.append(_WorkspaceSourceNode(path, "file", identity, digest))
                 finally:
                     if not descriptors.close(child):
                         raise _WorkspaceFilesystemError(_FAILURE)

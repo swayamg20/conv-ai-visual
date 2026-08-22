@@ -50,6 +50,13 @@ def _resolve_build_process_owner(
         return retained
 
 
+def _build_process_registries_are_empty() -> bool:
+    """Prove the capacity-one owner and kernel registries are both empty."""
+
+    with _registry._LOCK:
+        return not _registry._OWNERS and not _registry._KERNELS
+
+
 def _registered_cleanup_authority(
     owner: object,
 ) -> _RelayLinuxBuildCleanupAuthority | None:

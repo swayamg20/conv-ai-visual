@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _COMMANDS,
@@ -271,6 +272,100 @@ def _workspace_build_process_association_phase(
 ) -> str | None:
     state = _PROCESS_ASSOCIATIONS.get(command)
     return state[6] if type(state) is tuple and len(state) == 7 else None
+
+
+def _workspace_build_process_released_for_cleanup(
+    command: _WorkspaceBuildCommand,
+    *,
+    owner_token: object,
+    record_token: object,
+    prepared: object,
+    build_deadline: float,
+    expected_spawn_fingerprint: bytes,
+) -> bool:
+    """Prove the exact command-associated process graph is canonically absent."""
+
+    from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
+        _build_process_registries_are_empty,
+        _resolve_build_process_owner,
+    )
+    from scripts.voice_pipecat_e2e_relay_linux_build_process_state import (
+        _RelayLinuxBuildCleanupAuthority,
+        _RelayLinuxBuildProcessReceipt,
+    )
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _WorkspacePreparedReceipt,
+    )
+
+    if (
+        type(command) is not _WorkspaceBuildCommand
+        or type(owner_token) is not object
+        or type(record_token) is not object
+        or type(prepared) is not _WorkspacePreparedReceipt
+        or type(build_deadline) is not float
+        or not math.isfinite(build_deadline)
+        or type(expected_spawn_fingerprint) is not bytes
+        or len(expected_spawn_fingerprint) != 32
+    ):
+        return False
+    command_state = _COMMANDS.get(command)
+    association = _PROCESS_ASSOCIATIONS.get(command)
+    if (
+        type(command_state) is not tuple
+        or len(command_state) != 6
+        or command_state[0] is not owner_token
+        or command_state[1] is not record_token
+        or command_state[2] is not prepared
+        or type(command_state[3]) is not float
+        or not math.isfinite(command_state[3])
+        or command_state[3] != build_deadline
+        or type(command_state[4]) is not str
+        or command_state[4] not in {"built", "cancelled", "failed"}
+        or type(command_state[5]) is not bytes
+        or len(command_state[5]) != 32
+        or command_state[5] != expected_spawn_fingerprint
+        or type(association) is not tuple
+        or len(association) != 7
+        or association[0] is not owner_token
+        or association[1] is not record_token
+        or type(association[2]) is not object
+        or type(association[3]) is not _RelayLinuxBuildCleanupAuthority
+        or not association[3]._matches_owner_token(association[2])
+        or type(association[4]) is not bytes
+        or len(association[4]) != 32
+        or association[4] != expected_spawn_fingerprint
+        or type(association[6]) is not str
+        or association[6] not in {"released-zero", "released-failed"}
+    ):
+        return False
+    if association[6] == "released-zero":
+        receipt = association[5]
+        if type(receipt) is not _RelayLinuxBuildProcessReceipt:
+            return False
+        try:
+            receipt_owner = object.__getattribute__(receipt, "_owner_token")
+            receipt_status = object.__getattribute__(receipt, "status")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return False
+        if not (
+            receipt_owner is association[2]
+            and type(receipt_status) is str
+            and receipt_status == "build-process-exited-zero"
+        ):
+            return False
+    elif association[5] is not None:
+        return False
+    try:
+        return bool(
+            _resolve_build_process_owner(association[3]) is None
+            and _build_process_registries_are_empty()
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
 
 
 def _forget_workspace_build_process(command: _WorkspaceBuildCommand) -> bool:

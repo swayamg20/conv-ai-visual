@@ -8,6 +8,7 @@ graph which a later dedicated worker slice may consume.
 from __future__ import annotations
 
 import threading
+import weakref
 
 from scripts.voice_pipecat_e2e_relay_linux_build_spawn import (
     _RawBuildProcessDestination,
@@ -20,6 +21,10 @@ _RECEIPT_TOKEN = object()
 _DESTINATION_TOKEN = object()
 _FACADE_TOKEN = object()
 _FAILURE = "Relay Linux build process state is invalid"
+_AUTHORITY_BINDINGS: weakref.WeakKeyDictionary[
+    _RelayLinuxBuildCleanupAuthority,
+    tuple[object, object],
+] = weakref.WeakKeyDictionary()
 
 _FACADE_TRANSITIONS: dict[str, frozenset[str]] = {
     "new": frozenset({"thread-ready", "cancelled", "released"}),
@@ -42,22 +47,49 @@ class _RelayLinuxBuildProcessError(RuntimeError):
 class _RelayLinuxBuildCleanupAuthority:
     """Stable opaque key for one retained build owner graph."""
 
-    __slots__ = ("_authentic", "_key")
+    __slots__ = ("__weakref__", "_authentic", "_key", "_owner_token")
 
     def __init__(
         self,
         token: object,
         *,
         key: object,
+        owner_token: object,
     ) -> None:
-        if token is not _AUTHORITY_TOKEN or key is None:
+        if (
+            token is not _AUTHORITY_TOKEN
+            or type(key) is not object
+            or type(owner_token) is not object
+        ):
             raise TypeError("Relay Linux build cleanup authority is factory-owned")
         object.__setattr__(self, "_authentic", _AUTHORITY_TOKEN)
         object.__setattr__(self, "_key", key)
+        object.__setattr__(self, "_owner_token", owner_token)
+        _AUTHORITY_BINDINGS[self] = (key, owner_token)
 
     def _is_authentic(self) -> bool:
         try:
-            return object.__getattribute__(self, "_authentic") is _AUTHORITY_TOKEN
+            binding = _AUTHORITY_BINDINGS.get(self)
+            return bool(
+                type(binding) is tuple
+                and len(binding) == 2
+                and object.__getattribute__(self, "_authentic") is _AUTHORITY_TOKEN
+                and object.__getattribute__(self, "_key") is binding[0]
+                and object.__getattribute__(self, "_owner_token") is binding[1]
+            )
+        except BaseException:
+            return False
+
+    def _matches_owner_token(self, owner_token: object) -> bool:
+        try:
+            binding = _AUTHORITY_BINDINGS.get(self)
+            return bool(
+                type(owner_token) is object
+                and type(binding) is tuple
+                and len(binding) == 2
+                and binding[1] is owner_token
+                and self._is_authentic()
+            )
         except BaseException:
             return False
 
@@ -391,7 +423,11 @@ class _RelayLinuxBuildProcessOwner:
         object.__setattr__(
             self,
             "_cleanup_authority",
-            _RelayLinuxBuildCleanupAuthority(_AUTHORITY_TOKEN, key=cleanup_key),
+            _RelayLinuxBuildCleanupAuthority(
+                _AUTHORITY_TOKEN,
+                key=cleanup_key,
+                owner_token=owner_token,
+            ),
         )
         object.__setattr__(
             self,

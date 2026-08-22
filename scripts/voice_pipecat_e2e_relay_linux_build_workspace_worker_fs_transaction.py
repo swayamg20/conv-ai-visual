@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 import threading
 import time
-from pathlib import Path
 
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry as registry
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_binding import (
@@ -33,7 +31,6 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract im
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_copy import (
     _copy_workspace_source,
-    _hash_descriptor,
     _manifest_digest,
     _snapshot_workspace_copy,
     _snapshot_workspace_source,
@@ -53,6 +50,13 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_open import
     _WorkspaceCreationIntent,
     _WorkspaceDescriptorSet,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_provenance import (
+    _fingerprint,
+    _open_absolute_regular,
+    _open_relative_regular,
+    _revalidate_named_anchors,
+    _snapshot_tools,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
     _scrub_control_minimal,
 )
@@ -60,13 +64,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_values import 
     _WorkspaceWorkerClaim,
 )
 
-_NODE_FILE_LIMIT = 256 * 1024 * 1024
-_NEXT_FILE_LIMIT = 32 * 1024 * 1024
-_METADATA_FILE_LIMIT = 16 * 1024 * 1024
 _PUBLISH_SECONDS = 0.05
 _HOLD_SECONDS = 0.01
 _RETRY_MAX_SECONDS = 0.05
-_FINGERPRINT_DOMAIN = b"murmur-relay-linux-workspace-prepared-v1\x00"
 
 
 def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
@@ -201,14 +201,14 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
         if second_source != first_source:
             raise _WorkspaceFilesystemError(_FAILURE)
         source_signature = _source_signature(first_source)
-        copied_signature = _snapshot_workspace_copy(
+        copied_nodes = _snapshot_workspace_copy(
             workspace_fd=workspace_fd,
             expected=first_source,
             node_modules_target=str(request._node_modules),
             descriptors=descriptors,
             controller=controller,
         )
-        if copied_signature != source_signature:
+        if _source_signature(copied_nodes) != source_signature:
             raise _WorkspaceFilesystemError(_FAILURE)
         if _bounded_names(run_root_fd, 2) != (request._workspace.name,):
             raise _WorkspaceFilesystemError(_FAILURE)
@@ -513,169 +513,6 @@ def _reconcile_pending_directory_intent(
     if not identity.is_directory() or stat.S_IMODE(identity.mode) != 0o700:
         raise _WorkspaceFilesystemError(_FAILURE)
     intent.reconcile_returned(identity)
-
-
-def _open_absolute_regular(
-    path: Path,
-    descriptors: _WorkspaceDescriptorSet,
-    *,
-    executable: bool,
-) -> int:
-    parent = _open_absolute_directory(path.parent, descriptors)
-    try:
-        child = _open_regular_at(parent, path.name, descriptors, executable=executable)
-        _require_cooperative_node(child, directory=False, executable=executable)
-        return child
-    finally:
-        if not descriptors.close(parent):
-            raise _WorkspaceFilesystemError(_FAILURE)
-
-
-def _open_relative_regular(
-    root: int,
-    components: tuple[str, ...],
-    descriptors: _WorkspaceDescriptorSet,
-    *,
-    executable: bool,
-) -> int:
-    parent = root
-    owned_parent = False
-    try:
-        for component in components[:-1]:
-            child = _open_directory_at(parent, component, descriptors)
-            _require_cooperative_node(child, directory=True)
-            if owned_parent and not descriptors.close(parent):
-                raise _WorkspaceFilesystemError(_FAILURE)
-            parent = child
-            owned_parent = True
-        result = _open_regular_at(
-            parent,
-            components[-1],
-            descriptors,
-            executable=executable,
-        )
-        _require_cooperative_node(result, directory=False, executable=executable)
-        return result
-    finally:
-        if owned_parent and not descriptors.close(parent):
-            raise _WorkspaceFilesystemError(_FAILURE)
-
-
-def _snapshot_tools(
-    *,
-    node_fd: int,
-    next_fd: int,
-    node_lock_fd: int,
-    next_package_fd: int,
-    node_modules_identity: _WorkspaceFilesystemIdentity,
-    controller: object,
-) -> tuple[object, ...]:
-    values: list[object] = [node_modules_identity]
-    for descriptor, limit in zip(
-        (node_fd, next_fd, node_lock_fd, next_package_fd),
-        (
-            _NODE_FILE_LIMIT,
-            _NEXT_FILE_LIMIT,
-            _METADATA_FILE_LIMIT,
-            _METADATA_FILE_LIMIT,
-        ),
-        strict=True,
-    ):
-        identity = _WorkspaceFilesystemIdentity.from_stat(os.fstat(descriptor))
-        if not identity.is_regular():
-            raise _WorkspaceFilesystemError(_FAILURE)
-        digest, size = _hash_descriptor(descriptor, limit, controller)
-        if size != identity.size:
-            raise _WorkspaceFilesystemError(_FAILURE)
-        values.extend((identity, digest))
-    return tuple(values)
-
-
-def _revalidate_named_anchors(
-    *,
-    request: object,
-    source_identity: _WorkspaceFilesystemIdentity,
-    run_parent_identity: _WorkspaceFilesystemIdentity,
-    tool_values: tuple[object, ...],
-    descriptors: _WorkspaceDescriptorSet,
-    controller: object,
-) -> None:
-    source_probe = run_parent_probe = node_probe = node_modules_probe = None
-    next_probe = node_lock_probe = next_package_probe = None
-    try:
-        source_probe = _open_absolute_directory(request._source_root, descriptors)
-        if _require_cooperative_node(source_probe, directory=True) != source_identity:
-            raise _WorkspaceFilesystemError(_FAILURE)
-        run_parent_probe = _open_absolute_directory(request._run_parent, descriptors)
-        current_parent = _require_private_parent(run_parent_probe)
-        if _stable_binding(current_parent) != _stable_binding(run_parent_identity):
-            raise _WorkspaceFilesystemError(_FAILURE)
-        node_probe = _open_absolute_regular(request._node, descriptors, executable=True)
-        node_modules_probe = _open_directory_at(source_probe, "node_modules", descriptors)
-        current_modules = _require_cooperative_node(node_modules_probe, directory=True)
-        next_probe = _open_relative_regular(
-            node_modules_probe,
-            ("next", "dist", "bin", "next"),
-            descriptors,
-            executable=True,
-        )
-        node_lock_probe = _open_regular_at(
-            node_modules_probe,
-            ".package-lock.json",
-            descriptors,
-        )
-        next_package_probe = _open_relative_regular(
-            node_modules_probe,
-            ("next", "package.json"),
-            descriptors,
-            executable=False,
-        )
-        if (
-            _snapshot_tools(
-                node_fd=node_probe,
-                next_fd=next_probe,
-                node_lock_fd=node_lock_probe,
-                next_package_fd=next_package_probe,
-                node_modules_identity=current_modules,
-                controller=controller,
-            )
-            != tool_values
-        ):
-            raise _WorkspaceFilesystemError(_FAILURE)
-    finally:
-        for descriptor in (
-            next_package_probe,
-            node_lock_probe,
-            next_probe,
-            node_modules_probe,
-            node_probe,
-            run_parent_probe,
-            source_probe,
-        ):
-            if descriptor is not None and not descriptors.close(descriptor):
-                raise _WorkspaceFilesystemError(_FAILURE)
-
-
-def _fingerprint(manifest: bytes, tools: tuple[object, ...]) -> bytes:
-    digest = hashlib.sha256(_FINGERPRINT_DOMAIN)
-    digest.update(manifest)
-    for value in tools:
-        if type(value) is bytes:
-            digest.update(value)
-        elif type(value) is _WorkspaceFilesystemIdentity:
-            for number in (
-                value.device,
-                value.inode,
-                value.mode,
-                value.links,
-                value.size,
-                value.modified_ns,
-                value.changed_ns,
-            ):
-                digest.update(number.to_bytes(16, "big"))
-        else:
-            raise _WorkspaceFilesystemError(_FAILURE)
-    return digest.digest()
 
 
 __all__: list[str] = []

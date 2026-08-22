@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import stat
 import weakref
 from dataclasses import dataclass
@@ -342,6 +343,108 @@ def _workspace_prepared_build_matches(
         and association[3] == build_deadline
         and association[4] == "building"
     )
+
+
+def _workspace_revoked_prepared_build_matches(
+    receipt: _WorkspacePreparedReceipt,
+    owner_token: object,
+    record_token: object,
+    command: object,
+    build_deadline: float,
+) -> bool:
+    """Prove revocation retained the exact prepared-to-command association."""
+
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+        _COMMANDS,
+        _WorkspaceBuildCommand,
+    )
+
+    if (
+        type(receipt) is not _WorkspacePreparedReceipt
+        or type(owner_token) is not object
+        or type(record_token) is not object
+        or type(command) is not _WorkspaceBuildCommand
+        or type(build_deadline) is not float
+        or not math.isfinite(build_deadline)
+    ):
+        return False
+    state = _LEASES.get(receipt)
+    association = _PREPARED_BUILDS.get(receipt)
+    command_state = _COMMANDS.get(command)
+    try:
+        internal_owner = object.__getattribute__(receipt, "_owner_token")
+        internal_record = object.__getattribute__(receipt, "_record_token")
+        internal_fingerprint = object.__getattribute__(receipt, "_fingerprint")
+        internal_active = object.__getattribute__(receipt, "_lease_active")
+        status = object.__getattribute__(receipt, "status")
+        command_owner = object.__getattribute__(command, "_owner_token")
+        command_record = object.__getattribute__(command, "_record_token")
+        command_prepared = object.__getattribute__(command, "_prepared")
+        command_deadline = object.__getattribute__(command, "_build_deadline")
+        command_status = object.__getattribute__(command, "status")
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
+    if not (
+        type(state) is tuple
+        and len(state) == 4
+        and state[0] is owner_token
+        and state[1] is record_token
+        and type(state[2]) is bytes
+        and len(state[2]) == 32
+        and type(state[3]) is str
+        and state[3] == "revoked"
+        and internal_owner is owner_token
+        and internal_record is record_token
+        and type(internal_fingerprint) is bytes
+        and internal_fingerprint == state[2]
+        and internal_active is False
+        and type(status) is str
+        and status == "workspace-prepared"
+        and type(command_state) is tuple
+        and len(command_state) == 6
+        and command_state[0] is owner_token
+        and command_state[1] is record_token
+        and command_state[2] is receipt
+        and type(command_state[3]) is float
+        and math.isfinite(command_state[3])
+        and command_state[3] == build_deadline
+        and type(command_state[4]) is str
+        and command_state[4] in {"built", "cancelled", "failed"}
+        and type(command_state[5]) is bytes
+        and len(command_state[5]) == 32
+        and command_owner is owner_token
+        and command_record is record_token
+        and command_prepared is receipt
+        and type(command_deadline) is float
+        and math.isfinite(command_deadline)
+        and command_deadline == build_deadline
+        and type(command_status) is str
+        and command_status == "workspace-build-command"
+        and type(association) is tuple
+        and len(association) == 5
+        and association[0] is owner_token
+        and association[1] is record_token
+        and association[2] is command
+        and type(association[3]) is float
+        and math.isfinite(association[3])
+        and association[3] == build_deadline
+        and type(association[4]) is str
+        and association[4] == "building"
+    ):
+        return False
+    if len(_LEASES) != 1 or len(_PREPARED_BUILDS) != 1:
+        return False
+    matches: list[_WorkspacePreparedReceipt] = []
+    for candidate, candidate_association in _PREPARED_BUILDS.items():
+        if (
+            type(candidate_association) is tuple
+            and len(candidate_association) >= 3
+            and candidate_association[2] is command
+        ):
+            matches.append(candidate)
+    return len(matches) == 1 and matches[0] is receipt
 
 
 def _store_prepared_lease(
