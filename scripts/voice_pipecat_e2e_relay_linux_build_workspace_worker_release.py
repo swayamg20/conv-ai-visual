@@ -14,6 +14,10 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_active import 
     _workspace_worker_active_root_occupied,
     _workspace_worker_ownership_locked,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_consumer import (
+    _workspace_worker_consumer_blocks_release_locked,
+    _workspace_worker_graph_is_empty,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_contract import (
     _record_parts_locked,
 )
@@ -183,6 +187,11 @@ def _release_workspace_worker_thread(
                         )
                     ):
                         return False
+                    if _workspace_worker_consumer_blocks_release_locked(
+                        bundle,
+                        construction,
+                    ):
+                        return False
                     if coordinator._release_phase == "none":
                         object.__setattr__(coordinator, "_release_phase", "intended")
                         object.__setattr__(terminal, "_release_intended", True)
@@ -215,6 +224,11 @@ def _release_workspace_worker_thread(
                                 or coordinator._release_phase != "scrubbed"
                             ):
                                 raise TypeError(_FAILURE)
+                            if _workspace_worker_consumer_blocks_release_locked(
+                                bundle,
+                                construction,
+                            ):
+                                return False
                             del registry._RECORDS[bundle]
                 if not missing_record:
                     _release_workspace_worker_pin(record._record_token, bundle)
@@ -226,6 +240,8 @@ def _release_workspace_worker_thread(
                     object.__setattr__(coordinator, "_release_phase", "complete")
                     coordinator._notify()
     if missing_record:
+        if _workspace_worker_graph_is_empty(bundle, deadline) is not True:
+            return False
         return _complete_missing_record_release(
             binding,
             construction,
@@ -234,6 +250,8 @@ def _release_workspace_worker_thread(
             deadline,
         )
     _workspace_worker_record_released()
+    if _workspace_worker_graph_is_empty(bundle, deadline) is not True:
+        return False
     return _forget_filesystem_state(
         binding._owner_token,
         bundle,
@@ -298,6 +316,8 @@ def _release_liveness_is_coherent(
     elif terminal.started is False and was_claimed:
         return False
     state = record._entry[0]
+    if type(state) is not str:
+        return False
     if state == registry._INITIALIZED:
         if (
             type(raw) is not registry._WorkspaceWorkerThread

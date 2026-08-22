@@ -91,10 +91,19 @@ def _record_parts_locked(
     if type(record) is not registry._WorkspaceWorkerThreadRecord or not record._matches(binding):
         raise TypeError(_FAILURE)
     state, raw, canonical = record._entry
-    initialized = bool(state == registry._INITIALIZED and construction._coherent is True)
-    failed = bool(allow_failed and state == registry._FAILED and construction._coherent is False)
+    exact_state = type(state) is str
+    initialized = bool(
+        exact_state and state == registry._INITIALIZED and construction._coherent is True
+    )
+    failed = bool(
+        allow_failed
+        and exact_state
+        and state == registry._FAILED
+        and construction._coherent is False
+    )
     poisoned = bool(
         allow_failed
+        and exact_state
         and state == registry._POISONED
         and type(construction._coherent) is bool
         and (
@@ -182,6 +191,7 @@ def _stage_settled_worker_terminal_locked(
         or (coordinator._phase == "claimed" and claim_token is not settlement_token)
         or type(raw) is not registry._WorkspaceWorkerThread
         or entry is None
+        or type(entry[0]) is not str
         or entry[0] != registry._INITIALIZED
         or entry[1] is not raw
         or record._lifecycle is not coordinator
@@ -215,6 +225,8 @@ def _workspace_worker_no_effect_is_proven(
     ):
         return False
     state = record._entry[0]
+    if type(state) is not str:
+        return False
     if state in {registry._FAILED, registry._POISONED}:
         return True
     if state != registry._INITIALIZED or type(raw) is not registry._WorkspaceWorkerThread:
