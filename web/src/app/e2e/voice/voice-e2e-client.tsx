@@ -32,6 +32,7 @@ const SNAPSHOT_INTERVAL_MS = 80;
 interface VoiceE2EClientProps {
   readonly agentId: string;
   readonly apiUrl: string;
+  readonly initialVoiceCallId?: string;
   readonly network: BrowserRtcNetworkMode;
   readonly sessionId: string;
 }
@@ -173,6 +174,7 @@ function createAnalyser(context: AudioContext): AnalyserNode {
 export function VoiceE2EClient({
   agentId,
   apiUrl,
+  initialVoiceCallId,
   network,
   sessionId,
 }: VoiceE2EClientProps) {
@@ -186,7 +188,9 @@ export function VoiceE2EClient({
   const samplerTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const snapshotTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const rtcDiagnosticsRef = useRef<BrowserRtcDiagnostics | null>(null);
-  const rtcEvidenceRef = useRef<BrowserRtcEvidence>(emptyBrowserRtcEvidence());
+  const rtcEvidenceRef = useRef<BrowserRtcEvidence>(
+    emptyBrowserRtcEvidence(network)
+  );
   const localSamplesRef = useRef<AudioSample[]>([]);
   const remoteSamplesRef = useRef<AudioSample[]>([]);
   const eventsRef = useRef<ObservedEvent[]>([]);
@@ -319,6 +323,7 @@ export function VoiceE2EClient({
     apiUrl,
     agentId,
     sessionId,
+    initialVoiceCallId,
     authHeaderProvider: e2eAuthHeader,
     onEvent: observeEvent,
     onError: observeError,
@@ -489,8 +494,10 @@ export function VoiceE2EClient({
     };
   }, []);
 
-  const [snapshot, setSnapshot] =
-    useState<VoiceE2ESnapshot>(INITIAL_SNAPSHOT);
+  const [snapshot, setSnapshot] = useState<VoiceE2ESnapshot>(() => ({
+    ...INITIAL_SNAPSHOT,
+    rtc: emptyBrowserRtcEvidence(network),
+  }));
 
   const stopTimers = useCallback(() => {
     if (samplerTimerRef.current !== null) {
@@ -542,7 +549,7 @@ export function VoiceE2EClient({
     errorsRef.current = [];
     logsRef.current = [];
     connectionGesturesRef.current = [{ sequence: 1, action: "prepare" }];
-    rtcEvidenceRef.current = emptyBrowserRtcEvidence();
+    rtcEvidenceRef.current = emptyBrowserRtcEvidence(network);
     assignmentEvidenceRef.current = null;
     localTrackEvidenceRef.current = null;
     remoteTrackEvidenceRef.current = null;
