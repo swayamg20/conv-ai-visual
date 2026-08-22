@@ -9,6 +9,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _COMMANDS,
     _FAILURE,
     _PROCESS_ASSOCIATIONS,
+    _workspace_build_command_cancel_requested,
     _WorkspaceBuildCommand,
     _WorkspaceBuildHandoffError,
 )
@@ -66,7 +67,7 @@ def _associate_workspace_build_process(
     existing = _PROCESS_ASSOCIATIONS.get(command)
     if existing not in {intended, candidate}:
         raise _WorkspaceBuildHandoffError(_FAILURE)
-    _PROCESS_ASSOCIATIONS[command] = candidate
+    _store_workspace_build_process_association(command, candidate)
     if _PROCESS_ASSOCIATIONS.get(command) != candidate:
         raise _WorkspaceBuildHandoffError(_FAILURE)
     return process_owner._cleanup_authority
@@ -193,7 +194,7 @@ def _observe_workspace_build_process_zero(
     if terminal is None or terminal.returncode != 0 or terminal.succeeded is not True:
         raise _WorkspaceBuildHandoffError(_FAILURE)
     observed = (*state[:5], process_receipt, "zero-observed")
-    _PROCESS_ASSOCIATIONS[command] = observed
+    _store_workspace_build_process_association(command, observed)
     return _PROCESS_ASSOCIATIONS.get(command) == observed
 
 
@@ -221,7 +222,7 @@ def _complete_workspace_build_process(
     ):
         raise _WorkspaceBuildHandoffError(_FAILURE)
     completed = (*state[:5], process_receipt, "released-zero")
-    _PROCESS_ASSOCIATIONS[command] = completed
+    _store_workspace_build_process_association(command, completed)
     return _PROCESS_ASSOCIATIONS.get(command) == completed
 
 
@@ -235,36 +236,200 @@ def _workspace_build_process_cleanup_authority(
 def _workspace_build_process_completed_zero(
     command: _WorkspaceBuildCommand,
     process_receipt: object,
+    *,
+    owner_token: object,
+    record_token: object,
+    build_deadline: float,
 ) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
+        _build_process_registries_are_empty,
+        _resolve_build_process_owner,
+    )
+    from scripts.voice_pipecat_e2e_relay_linux_build_process_state import (
+        _RelayLinuxBuildCleanupAuthority,
+        _RelayLinuxBuildProcessReceipt,
+    )
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _WorkspacePreparedReceipt,
+    )
+
+    if (
+        type(command) is not _WorkspaceBuildCommand
+        or type(owner_token) is not object
+        or type(record_token) is not object
+        or type(build_deadline) is not float
+        or not math.isfinite(build_deadline)
+    ):
+        return False
+    command_state = _COMMANDS.get(command)
     state = _PROCESS_ASSOCIATIONS.get(command)
-    return bool(
-        type(state) is tuple
+    try:
+        command_owner = object.__getattribute__(command, "_owner_token")
+        command_record = object.__getattribute__(command, "_record_token")
+        command_prepared = object.__getattribute__(command, "_prepared")
+        command_deadline = object.__getattribute__(command, "_build_deadline")
+        command_status = object.__getattribute__(command, "status")
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
+    if not (
+        type(command_state) is tuple
+        and len(command_state) == 6
+        and command_state[0] is owner_token
+        and command_state[1] is record_token
+        and type(command_state[2]) is _WorkspacePreparedReceipt
+        and type(command_state[3]) is float
+        and math.isfinite(command_state[3])
+        and command_state[3] == build_deadline
+        and command_state[4] in {"running", "built"}
+        and type(command_state[5]) is bytes
+        and len(command_state[5]) == 32
+        and command_owner is owner_token
+        and command_record is record_token
+        and command_prepared is command_state[2]
+        and type(command_deadline) is float
+        and math.isfinite(command_deadline)
+        and command_deadline == build_deadline
+        and type(command_status) is str
+        and command_status == "workspace-build-command"
+        and not _workspace_build_command_cancel_requested(command)
+        and type(state) is tuple
         and len(state) == 7
+        and state[0] is owner_token
+        and state[1] is record_token
+        and type(state[2]) is object
+        and type(state[3]) is _RelayLinuxBuildCleanupAuthority
+        and state[3]._matches_owner_token(state[2])
+        and state[4] == command_state[5]
         and state[5] is process_receipt
         and state[6] == "released-zero"
-    )
+        and type(process_receipt) is _RelayLinuxBuildProcessReceipt
+    ):
+        return False
+    try:
+        receipt_owner = object.__getattribute__(process_receipt, "_owner_token")
+        receipt_status = object.__getattribute__(process_receipt, "status")
+        return bool(
+            receipt_owner is state[2]
+            and type(receipt_status) is str
+            and receipt_status == "build-process-exited-zero"
+            and _resolve_build_process_owner(state[3]) is None
+            and _build_process_registries_are_empty()
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
 
 
 def _complete_failed_workspace_build_process(
     command: _WorkspaceBuildCommand,
 ) -> bool:
     from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
+        _build_process_registries_are_empty,
         _resolve_build_process_owner,
     )
+    from scripts.voice_pipecat_e2e_relay_linux_build_process_state import (
+        _RelayLinuxBuildCleanupAuthority,
+        _RelayLinuxBuildProcessReceipt,
+    )
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _WorkspacePreparedReceipt,
+    )
 
+    if type(command) is not _WorkspaceBuildCommand:
+        return False
+    command_state = _COMMANDS.get(command)
     state = _PROCESS_ASSOCIATIONS.get(command)
     if state is None:
-        return True
+        return _build_process_registries_are_empty()
+    try:
+        command_owner = object.__getattribute__(command, "_owner_token")
+        command_record = object.__getattribute__(command, "_record_token")
+        command_prepared = object.__getattribute__(command, "_prepared")
+        command_deadline = object.__getattribute__(command, "_build_deadline")
+        command_status = object.__getattribute__(command, "status")
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
     if (
-        type(state) is not tuple
+        type(command_state) is not tuple
+        or len(command_state) != 6
+        or type(command_state[0]) is not object
+        or type(command_state[1]) is not object
+        or type(command_state[2]) is not _WorkspacePreparedReceipt
+        or type(command_state[3]) is not float
+        or not math.isfinite(command_state[3])
+        or type(command_state[4]) is not str
+        or type(command_state[5]) is not bytes
+        or len(command_state[5]) != 32
+        or command_owner is not command_state[0]
+        or command_record is not command_state[1]
+        or command_prepared is not command_state[2]
+        or type(command_deadline) is not float
+        or not math.isfinite(command_deadline)
+        or command_deadline != command_state[3]
+        or type(command_status) is not str
+        or command_status != "workspace-build-command"
+        or type(state) is not tuple
         or len(state) != 7
-        or state[6] not in {"preown-intended", "associated", "released-failed"}
-        or _resolve_build_process_owner(state[3]) is not None
+        or state[0] is not command_state[0]
+        or state[1] is not command_state[1]
+        or type(state[2]) is not object
+        or type(state[3]) is not _RelayLinuxBuildCleanupAuthority
+        or not state[3]._matches_owner_token(state[2])
+        or state[4] != command_state[5]
+        or type(state[6]) is not str
     ):
         return False
+    phase = state[6]
+    if phase not in {
+        "preown-intended",
+        "associated",
+        "zero-observed",
+        "released-zero",
+        "released-failed",
+    }:
+        return False
+    if (
+        _resolve_build_process_owner(state[3]) is not None
+        or not _build_process_registries_are_empty()
+    ):
+        return False
+    if phase in {"zero-observed", "released-zero"}:
+        if type(state[5]) is not _RelayLinuxBuildProcessReceipt:
+            return False
+        try:
+            receipt_owner = object.__getattribute__(state[5], "_owner_token")
+            receipt_status = object.__getattribute__(state[5], "status")
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException:
+            return False
+        if not (
+            receipt_owner is state[2]
+            and type(receipt_status) is str
+            and receipt_status == "build-process-exited-zero"
+        ):
+            return False
+    elif state[5] is not None:
+        return False
+    if phase == "released-failed":
+        return True
     released = (*state[:5], None, "released-failed")
-    _PROCESS_ASSOCIATIONS[command] = released
+    _store_workspace_build_process_association(command, released)
     return _PROCESS_ASSOCIATIONS.get(command) == released
+
+
+def _store_workspace_build_process_association(
+    command: _WorkspaceBuildCommand,
+    value: tuple[object, object, object, object, bytes, object | None, str],
+) -> None:
+    """Deterministic association store cut for result return-loss tests."""
+
+    _PROCESS_ASSOCIATIONS[command] = value
 
 
 def _workspace_build_process_association_phase(

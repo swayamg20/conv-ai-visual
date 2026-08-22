@@ -44,11 +44,12 @@ _CONTROLLER_COMMANDS: weakref.WeakKeyDictionary[
 class _WorkspaceBuildCommandGate:
     """Module-owned start/cancel linearization for one path-free command."""
 
-    __slots__ = ("cancel_requested", "lock")
+    __slots__ = ("cancel_requested", "lock", "publication_lock")
 
     def __init__(self) -> None:
         self.cancel_requested = False
         self.lock = threading.Lock()
+        self.publication_lock = threading.Lock()
 
 
 class _WorkspaceBuildHandoffError(RuntimeError):
@@ -664,6 +665,30 @@ def _acquire_command_gate(
         gate.lock.acquire(blocking=False)
         if remaining <= 0.0
         else gate.lock.acquire(timeout=remaining)
+    )
+    if not acquired:
+        raise _WorkspaceBuildHandoffError(_FAILURE)
+    return gate
+
+
+def _acquire_command_publication_gate(
+    command: _WorkspaceBuildCommand,
+    deadline: float,
+) -> _WorkspaceBuildCommandGate:
+    if (
+        type(command) is not _WorkspaceBuildCommand
+        or type(deadline) is not float
+        or not math.isfinite(deadline)
+    ):
+        raise _WorkspaceBuildHandoffError(_FAILURE)
+    gate = _COMMAND_GATES.get(command)
+    if type(gate) is not _WorkspaceBuildCommandGate:
+        raise _WorkspaceBuildHandoffError(_FAILURE)
+    remaining = max(0.0, deadline - time.monotonic())
+    acquired = (
+        gate.publication_lock.acquire(blocking=False)
+        if remaining <= 0.0
+        else gate.publication_lock.acquire(timeout=remaining)
     )
     if not acquired:
         raise _WorkspaceBuildHandoffError(_FAILURE)

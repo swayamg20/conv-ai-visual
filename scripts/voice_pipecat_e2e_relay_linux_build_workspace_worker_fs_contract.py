@@ -332,16 +332,61 @@ def _workspace_prepared_build_matches(
     command: object,
     build_deadline: float,
 ) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+        _WorkspaceBuildCommand,
+    )
+
+    if (
+        type(receipt) is not _WorkspacePreparedReceipt
+        or type(owner_token) is not object
+        or type(record_token) is not object
+        or type(command) is not _WorkspaceBuildCommand
+        or type(build_deadline) is not float
+        or not math.isfinite(build_deadline)
+    ):
+        return False
+    state = _LEASES.get(receipt)
     association = _PREPARED_BUILDS.get(receipt)
+    try:
+        internal_owner = object.__getattribute__(receipt, "_owner_token")
+        internal_record = object.__getattribute__(receipt, "_record_token")
+        internal_fingerprint = object.__getattribute__(receipt, "_fingerprint")
+        internal_active = object.__getattribute__(receipt, "_lease_active")
+        status = object.__getattribute__(receipt, "status")
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
     return bool(
-        _workspace_prepared_receipt_is_building(receipt, owner_token, record_token)
+        type(state) is tuple
+        and len(state) == 4
+        and state[0] is owner_token
+        and state[1] is record_token
+        and type(state[2]) is bytes
+        and len(state[2]) == 32
+        and type(state[3]) is str
+        and state[3] == "building"
+        and internal_owner is owner_token
+        and internal_record is record_token
+        and type(internal_fingerprint) is bytes
+        and internal_fingerprint == state[2]
+        and internal_active is False
+        and type(status) is str
+        and status == "workspace-prepared"
         and type(association) is tuple
         and len(association) == 5
         and association[0] is owner_token
         and association[1] is record_token
         and association[2] is command
+        and type(association[3]) is float
+        and math.isfinite(association[3])
         and association[3] == build_deadline
+        and type(association[4]) is str
         and association[4] == "building"
+        and len(_LEASES) == 1
+        and next(iter(_LEASES)) is receipt
+        and len(_PREPARED_BUILDS) == 1
+        and next(iter(_PREPARED_BUILDS)) is receipt
     )
 
 

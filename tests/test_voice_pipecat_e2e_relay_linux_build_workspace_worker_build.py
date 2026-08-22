@@ -145,7 +145,7 @@ def test_command_and_built_values_are_opaque_and_nonserializable(
     monkeypatch.setattr(
         process_contract,
         "_workspace_build_process_completed_zero",
-        lambda _command, _receipt: True,
+        lambda *_args, **_kwargs: True,
     )
     assert build_values._intend_workspace_build_process_start(
         command,
@@ -476,7 +476,7 @@ def test_losing_built_candidate_never_matches_or_replaces_canonical_receipt(
     monkeypatch.setattr(
         process_contract,
         "_workspace_build_process_completed_zero",
-        lambda _command, _receipt: True,
+        lambda *_args, **_kwargs: True,
     )
     retained: list[object] = []
 
@@ -535,7 +535,7 @@ def test_built_activation_repairs_stored_effect_return_loss(
     monkeypatch.setattr(
         process_contract,
         "_workspace_build_process_completed_zero",
-        lambda _command, _receipt: True,
+        lambda *_args, **_kwargs: True,
     )
     process_receipt = object()
     built = build_receipt._new_workspace_built_receipt(
@@ -587,6 +587,10 @@ def test_built_activation_repairs_stored_effect_return_loss(
                 record_token,
                 operation_deadline=deadline,
             )
+        assert lost is True
+        assert build_receipt._BUILT_LEASES[built][5] == "revoked"
+        assert not built._matches(owner_token, record_token, require_active=True)
+        return
     assert build_receipt._activate_workspace_built_receipt(
         built,
         owner_token,

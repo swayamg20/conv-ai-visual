@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+import weakref
 
 from scripts.voice_pipecat_e2e_relay_linux_build_process_facade import (
     _join_relay_linux_build_process,
@@ -34,12 +35,16 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_
     _workspace_build_process_cleanup_authority,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
+    _COMMAND_CONTROLLERS,
+    _COMMANDS,
+    _CONTROLLER_COMMANDS,
     _acquire_workspace_build_process_start,
     _bind_workspace_build_command_controller,
     _complete_workspace_build_process_start,
     _release_workspace_build_process_start,
     _request_workspace_build_command_cancel,
     _workspace_build_command_authorizes_process,
+    _workspace_build_command_cancel_requested,
     _WorkspaceBuildCommand,
     _WorkspaceBuildHandoffError,
 )
@@ -50,6 +55,72 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
 
 _WAIT_SECONDS = 0.05
 _CLEANUP_SECONDS = 5.0
+_FAILURE = "Relay Linux workspace build is invalid"
+
+
+def _require_live_workspace_build_result(
+    command: _WorkspaceBuildCommand,
+    controller: _WorkspaceWorkerController,
+    *,
+    owner_token: object,
+    record_token: object,
+    build_deadline: float,
+) -> float:
+    """Return a fresh time only for the exact uncancelled running command."""
+
+    state = _COMMANDS.get(command)
+    controller_reference = _COMMAND_CONTROLLERS.get(command)
+    command_reference = _CONTROLLER_COMMANDS.get(controller)
+    try:
+        command_owner = object.__getattribute__(command, "_owner_token")
+        command_record = object.__getattribute__(command, "_record_token")
+        command_prepared = object.__getattribute__(command, "_prepared")
+        command_deadline = object.__getattribute__(command, "_build_deadline")
+        command_status = object.__getattribute__(command, "status")
+        now = time.monotonic()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as error:
+        _scrub_control_minimal(error)
+        raise _WorkspaceBuildHandoffError(_FAILURE) from None
+    if not (
+        type(command) is _WorkspaceBuildCommand
+        and type(controller) is _WorkspaceWorkerController
+        and controller._matches(owner_token)
+        and type(owner_token) is object
+        and type(record_token) is object
+        and type(build_deadline) is float
+        and math.isfinite(build_deadline)
+        and type(state) is tuple
+        and len(state) == 6
+        and state[0] is owner_token
+        and state[1] is record_token
+        and state[2] is command_prepared
+        and type(state[3]) is float
+        and math.isfinite(state[3])
+        and state[3] == build_deadline
+        and state[4] == "running"
+        and type(state[5]) is bytes
+        and len(state[5]) == 32
+        and command_owner is owner_token
+        and command_record is record_token
+        and type(command_deadline) is float
+        and math.isfinite(command_deadline)
+        and command_deadline == build_deadline
+        and type(command_status) is str
+        and command_status == "workspace-build-command"
+        and type(controller_reference) is weakref.ReferenceType
+        and controller_reference() is controller
+        and type(command_reference) is weakref.ReferenceType
+        and command_reference() is command
+        and type(now) is float
+        and math.isfinite(now)
+        and now < build_deadline
+        and controller._cancellation_requested() is False
+        and not _workspace_build_command_cancel_requested(command)
+    ):
+        raise _WorkspaceBuildHandoffError(_FAILURE)
+    return now
 
 
 def _drive_workspace_build_process(
@@ -171,6 +242,13 @@ def _drive_workspace_build_process(
         while True:
             status = _build_process_worker_status(process_owner)
             if status == "settled":
+                _require_live_workspace_build_result(
+                    command,
+                    controller,
+                    owner_token=owner_token,
+                    record_token=record_token,
+                    build_deadline=build_deadline,
+                )
                 break
             if status != "started":
                 raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
@@ -178,26 +256,66 @@ def _drive_workspace_build_process(
             if remaining <= 0.0 or controller._cancellation_requested() is True:
                 raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
             controller._wait(min(_WAIT_SECONDS, remaining))
-        if controller._cancellation_requested() is True:
-            raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
-        join_deadline = min(build_deadline, time.monotonic() + _CLEANUP_SECONDS)
+        now = _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
+        join_deadline = min(build_deadline, now + _CLEANUP_SECONDS)
         _join_relay_linux_build_process(process_owner, join_deadline=join_deadline)
+        _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
         process_receipt = _relay_linux_build_process_result(process_owner)
+        _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
         if not _observe_workspace_build_process_zero(
             command,
             process_owner=process_owner,
             process_receipt=process_receipt,
         ):
             raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
+        _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
         _release_relay_linux_build_process(
             cleanup_value,
             cleanup_deadline=time.monotonic() + _CLEANUP_SECONDS,
+        )
+        _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
         )
         if not _complete_workspace_build_process(
             command,
             process_receipt=process_receipt,
         ):
             raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
+        _require_live_workspace_build_result(
+            command,
+            controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
         succeeded = True
         return process_receipt
     except (KeyboardInterrupt, SystemExit) as control:
