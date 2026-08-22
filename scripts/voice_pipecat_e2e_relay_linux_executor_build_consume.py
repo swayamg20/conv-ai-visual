@@ -288,6 +288,12 @@ def _release_relay_linux_executor_built_use(
         return False
     if not _cleanup_evidence_matches(evidence):
         return False
+    from scripts.voice_pipecat_e2e_relay_linux_executor_inner_state import (
+        _inner_settlement_matches_build,
+    )
+
+    if not _inner_settlement_matches_build(evidence):
+        return False
     if _workspace_built_consumer_is_in_use(evidence.built, evidence.consumer):
         if not _release_workspace_built_consumer_use(
             evidence.built,

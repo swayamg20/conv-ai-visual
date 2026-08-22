@@ -30,6 +30,11 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry impor
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
     _WorkspaceWorkerBundle,
 )
+from scripts.voice_pipecat_e2e_relay_linux_executor_inner_anchor import (
+    _new_executor_inner_authority_anchor,
+    _register_original_executor_inner_anchor,
+    _RelayLinuxExecutorInnerAuthorityAnchor,
+)
 from scripts.voice_pipecat_e2e_relay_linux_executor_worker_contract import (
     _workspace_worker_receipt_is_current,
 )
@@ -136,6 +141,7 @@ class _RelayLinuxExecutorOwner:
         "__weakref__",
         "_cleanup_authority",
         "_destination",
+        "_inner_authority_anchor",
         "_relay_owner_destination",
         "_source",
         "_workspace_destination",
@@ -150,6 +156,7 @@ class _RelayLinuxExecutorOwner:
         source: RelayProbeSource,
         workspace_destination: _RelayLinuxBuildWorkspaceDestination,
         relay_owner_destination: RelayProbeOwnerDestination,
+        inner_authority_anchor: _RelayLinuxExecutorInnerAuthorityAnchor,
     ) -> None:
         if (
             token is not _OWNER_TOKEN
@@ -157,6 +164,8 @@ class _RelayLinuxExecutorOwner:
             or type(source) is not RelayProbeSource
             or type(workspace_destination) is not _RelayLinuxBuildWorkspaceDestination
             or type(relay_owner_destination) is not RelayProbeOwnerDestination
+            or type(inner_authority_anchor) is not _RelayLinuxExecutorInnerAuthorityAnchor
+            or not inner_authority_anchor._is_authentic()
         ):
             raise TypeError(_FAILURE)
         workspace_owner = workspace_destination._read(workspace_destination._request)
@@ -167,6 +176,7 @@ class _RelayLinuxExecutorOwner:
         object.__setattr__(self, "_workspace_destination", workspace_destination)
         object.__setattr__(self, "_workspace_owner", workspace_owner)
         object.__setattr__(self, "_relay_owner_destination", relay_owner_destination)
+        object.__setattr__(self, "_inner_authority_anchor", inner_authority_anchor)
         object.__setattr__(
             self,
             "_cleanup_authority",
@@ -198,7 +208,13 @@ class _RelayLinuxExecutorOwner:
 class _RelayLinuxExecutorDestination:
     """Caller-preowned destination holding the exact inert outer owner."""
 
-    __slots__ = ("__weakref__", "_owner", "_source", "_workspace_destination")
+    __slots__ = (
+        "__weakref__",
+        "_inner_authority_anchor",
+        "_owner",
+        "_source",
+        "_workspace_destination",
+    )
 
     def __init__(
         self,
@@ -215,6 +231,8 @@ class _RelayLinuxExecutorDestination:
             raise TypeError(_FAILURE)
         object.__setattr__(self, "_source", source)
         object.__setattr__(self, "_workspace_destination", workspace_destination)
+        inner_authority_anchor = _new_executor_inner_authority_anchor()
+        object.__setattr__(self, "_inner_authority_anchor", inner_authority_anchor)
         object.__setattr__(
             self,
             "_owner",
@@ -224,10 +242,18 @@ class _RelayLinuxExecutorDestination:
                 source=source,
                 workspace_destination=workspace_destination,
                 relay_owner_destination=new_relay_probe_owner_destination(),
+                inner_authority_anchor=inner_authority_anchor,
             ),
         )
         owner = self._owner
         key = owner._cleanup_authority._key
+        if not _register_original_executor_inner_anchor(
+            key,
+            owner,
+            self,
+            inner_authority_anchor,
+        ):
+            raise TypeError(_FAILURE)
         with _LOCK:
             _DESTINATION_KEYS[self] = key
             _OWNER_KEYS[owner] = key
@@ -335,6 +361,12 @@ def _release_unstarted_relay_linux_executor(
         return False
     key = _AUTHORITY_KEYS.get(authority)
     if type(key) is not _RelayLinuxExecutorKey:
+        return False
+    from scripts.voice_pipecat_e2e_relay_linux_executor_inner_state import (
+        _inner_live_evidence_is_absent,
+    )
+
+    if not _inner_live_evidence_is_absent(key):
         return False
     released_graph: (
         tuple[
@@ -444,6 +476,9 @@ def _executor_value_matches(
         or owner._destination is not destination
         or owner._source is not destination._source
         or owner._workspace_destination is not destination._workspace_destination
+        or type(owner._inner_authority_anchor) is not _RelayLinuxExecutorInnerAuthorityAnchor
+        or owner._inner_authority_anchor is not destination._inner_authority_anchor
+        or not owner._inner_authority_anchor._is_authentic()
         or owner._workspace_owner
         is not destination._workspace_destination._read(destination._workspace_destination._request)
         or type(owner._relay_owner_destination) is not RelayProbeOwnerDestination

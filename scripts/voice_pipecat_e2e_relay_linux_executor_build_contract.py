@@ -445,6 +445,17 @@ def _retire_released_executor_built_state(key: object) -> bool:
     )
 
 
+def _executor_built_registries_are_empty() -> bool:
+    with _LOCK:
+        return bool(
+            not _BUILD_RETIREMENTS
+            and not _RELEASE_BINDINGS
+            and not _EVIDENCE_BY_KEY
+            and not _KEYS_BY_BINDING
+            and not _BINDINGS_BY_BUILT
+        )
+
+
 def _released_retirement_evidence_matches(
     key: _RelayLinuxExecutorKey,
     evidence: object,

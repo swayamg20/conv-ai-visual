@@ -37,6 +37,7 @@ import scripts.voice_pipecat_e2e_relay_linux_executor_build_binding as executor_
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_consume as executor_consume
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_contract as executor_contract
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_linearize as executor_linearize
+import scripts.voice_pipecat_e2e_relay_linux_executor_inner_state as executor_inner_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_state as executor_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_workspace as executor_workspace
 import scripts.voice_pipecat_e2e_relay_probe as relay_probe
@@ -84,12 +85,25 @@ def _isolated_consume_state() -> None:
         executor_state._OWNER_KEYS,
         executor_state._SOURCE_EVIDENCE,
         executor_state._WORKSPACE_RELEASES,
+        executor_inner_state._INNER_RECORDS,
+        executor_inner_state._INNER_RESULTS,
+        executor_inner_state._INNER_TERMINALS,
+        executor_inner_state._INNER_AUTHORITIES,
     )
     for mapping in mappings:
         mapping.clear()
     yield
     for mapping in mappings:
         mapping.clear()
+
+
+@pytest.fixture
+def _synthetic_inner_settlement(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        executor_inner_state,
+        "_inner_settlement_matches_build",
+        lambda _build: True,
+    )
 
 
 def _source() -> RelayProbeSource:
@@ -1062,6 +1076,7 @@ def test_use_release_reconciles_outer_phase_return_loss(
     monkeypatch: pytest.MonkeyPatch,
     effect_first: bool,
     error_factory,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1118,6 +1133,7 @@ def test_acknowledgment_reconciles_generic_phase_return_loss(
     monkeypatch: pytest.MonkeyPatch,
     effect_first: bool,
     error_factory,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1179,6 +1195,7 @@ def test_acknowledgment_reconciles_generic_phase_return_loss(
 def test_consumed_build_survives_expiry_and_cancel_until_release_acknowledgment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1244,6 +1261,7 @@ def test_consumed_build_survives_expiry_and_cancel_until_release_acknowledgment(
 def test_worker_holds_active_only_before_deadline_but_consumed_until_use_release(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1313,6 +1331,7 @@ def test_worker_holds_active_only_before_deadline_but_consumed_until_use_release
 def test_worker_reconciles_revoked_lease_with_use_released_consumer(
     tmp_path: Path,
     error_factory,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1438,6 +1457,7 @@ def test_consume_rejects_poisoned_cleanup_evidence(
 def test_consumer_rejects_crosswired_canonical_state(
     tmp_path: Path,
     crosswire: str,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1492,6 +1512,7 @@ def test_built_retirement_rejects_marker_tamper_after_lease_map_pops(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tamper: str,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1702,6 +1723,7 @@ def test_executor_build_retirement_reconciles_every_effect_return_loss(
     monkeypatch: pytest.MonkeyPatch,
     cut: str,
     error_factory,
+    _synthetic_inner_settlement: None,
 ) -> None:
     executor, destination, bundle, construction = _bound_executor(tmp_path)
     active = _active_build(executor, bundle, construction)
@@ -1770,6 +1792,7 @@ def test_executor_build_retirement_reconciles_every_effect_return_loss(
 def test_started_worker_keeps_consumed_output_until_outer_release_then_reuses_capacity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    _synthetic_inner_settlement: None,
 ) -> None:
     retained: list[object] = []
     real_scope_cleanup = fs_build_transaction._cleanup_workspace_build_scope
