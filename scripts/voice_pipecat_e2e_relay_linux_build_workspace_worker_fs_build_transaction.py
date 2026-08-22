@@ -9,6 +9,13 @@ import time
 from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
     _build_process_registries_are_empty,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer import (
+    _record_workspace_built_consumer_revoked,
+    _workspace_built_consumer_allows_revocation,
+    _workspace_built_consumer_cleanup_is_acknowledged,
+    _workspace_built_consumer_holds_worker,
+    _workspace_built_consumer_registries_are_empty,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process import (
     _cancel_associated_workspace_build_process,
     _drive_workspace_build_process,
@@ -206,10 +213,12 @@ def _run_workspace_build_transaction(
             operation_deadline=build_deadline,
         )
         _revoke_prepared_after_built(claim, prepared, built)
-        while claim._controller._cancellation_requested() is False and built._matches(
+        while _workspace_built_consumer_holds_worker(
+            built,
             claim._owner_token,
             claim._record_token,
-            require_active=True,
+            controller=claim._controller,
+            lock_deadline=time.monotonic() + _SLOT_SECONDS,
         ):
             claim._controller._wait(_RETRY_SECONDS)
         if claim._controller._cancellation_requested() is False:
@@ -322,6 +331,8 @@ def _settle_workspace_build_transaction(
                 ):
                     raise _WorkspaceFilesystemError(_FAILURE)
                 if built is not None:
+                    if not _workspace_built_consumer_allows_revocation(built):
+                        raise _WorkspaceFilesystemError(_FAILURE)
                     _revoke_workspace_built_receipt(
                         built,
                         claim._owner_token,
@@ -332,6 +343,11 @@ def _settle_workspace_build_transaction(
                         built,
                         claim._owner_token,
                         claim._record_token,
+                    ):
+                        raise _WorkspaceFilesystemError(_FAILURE)
+                    if not (
+                        _record_workspace_built_consumer_revoked(built)
+                        and _workspace_built_consumer_cleanup_is_acknowledged(built)
                     ):
                         raise _WorkspaceFilesystemError(_FAILURE)
                 elif not _complete_failed_workspace_build_process(command):
@@ -510,6 +526,7 @@ def _workspace_build_state_is_absent(
         )
         and not _BUILT_BY_COMMAND
         and not _BUILT_LEASES
+        and _workspace_built_consumer_registries_are_empty()
         and _build_process_registries_are_empty()
         and claim._controller._cancellation_requested()
     )
@@ -552,6 +569,7 @@ def _workspace_command_without_process_is_safe(
         and not _PROCESS_ASSOCIATIONS
         and not _BUILT_BY_COMMAND
         and not _BUILT_LEASES
+        and _workspace_built_consumer_registries_are_empty()
         and (
             (bindings_absent and not _COMMAND_CONTROLLERS and not _CONTROLLER_COMMANDS)
             or (

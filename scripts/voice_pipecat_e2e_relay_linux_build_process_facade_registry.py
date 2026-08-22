@@ -24,6 +24,106 @@ from scripts.voice_pipecat_e2e_relay_linux_build_process_worker_state import (
 )
 
 _FAILURE = "Relay Linux build process facade registry is unavailable"
+_ABSENCE_TOKEN = object()
+
+
+class _BuildProcessAbsenceReservation:
+    """Opaque cap-one exclusion retained across the build-consume cut."""
+
+    __slots__ = ("_authentic", "_key")
+
+    def __init__(self, token: object, key: object) -> None:
+        if token is not _ABSENCE_TOKEN or key is None:
+            raise TypeError(_FAILURE)
+        object.__setattr__(self, "_authentic", _ABSENCE_TOKEN)
+        object.__setattr__(self, "_key", key)
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("build process absence reservation is immutable")
+
+
+def _reserve_build_process_absence(key: object) -> _BuildProcessAbsenceReservation:
+    """Prevent a new process owner while one built lease is consumed."""
+
+    if key is None:
+        raise _RelayLinuxBuildProcessError(_FAILURE)
+    with _registry._LOCK:
+        existing = _registry._ABSENCE_RESERVATIONS.get(key)
+        if existing is not None:
+            if (
+                type(existing) is _BuildProcessAbsenceReservation
+                and existing._authentic is _ABSENCE_TOKEN
+                and existing._key is key
+                and len(_registry._ABSENCE_RESERVATIONS) == 1
+            ):
+                return existing
+            raise _RelayLinuxBuildProcessError(_FAILURE)
+        if _registry._OWNERS or _registry._KERNELS or _registry._ABSENCE_RESERVATIONS:
+            raise _RelayLinuxBuildProcessError(_FAILURE)
+        reservation = _BuildProcessAbsenceReservation(_ABSENCE_TOKEN, key)
+        _registry._ABSENCE_RESERVATIONS[key] = reservation
+        return reservation
+
+
+def _release_build_process_absence(
+    reservation: _BuildProcessAbsenceReservation,
+) -> bool:
+    if type(reservation) is not _BuildProcessAbsenceReservation:
+        return False
+    key = reservation._key
+    if not _build_process_absence_reservation_matches(reservation, key):
+        return False
+    with _registry._LOCK:
+        existing = _registry._ABSENCE_RESERVATIONS.get(key)
+        if existing is None:
+            return not _registry._ABSENCE_RESERVATIONS
+        if existing is not reservation or len(_registry._ABSENCE_RESERVATIONS) != 1:
+            return False
+        _registry._ABSENCE_RESERVATIONS.pop(key, None)
+        return not _registry._ABSENCE_RESERVATIONS
+
+
+def _build_process_absence_reservation_matches(
+    reservation: object,
+    key: object,
+) -> bool:
+    return bool(
+        type(reservation) is _BuildProcessAbsenceReservation
+        and reservation._authentic is _ABSENCE_TOKEN
+        and reservation._key is key
+    )
+
+
+def _resolve_build_process_absence_reservation(
+    key: object,
+) -> _BuildProcessAbsenceReservation | None:
+    """Recover the exact reserved absence after factory return loss."""
+
+    with _registry._LOCK:
+        reservation = _registry._ABSENCE_RESERVATIONS.get(key)
+        return (
+            reservation
+            if _build_process_absence_reservation_matches(reservation, key)
+            and len(_registry._ABSENCE_RESERVATIONS) == 1
+            and not _registry._OWNERS
+            and not _registry._KERNELS
+            else None
+        )
+
+
+def _build_process_absence_reservation_is_active(
+    reservation: object,
+    key: object,
+) -> bool:
+    """Nonblocking final predicate used only while the owner retains admission."""
+
+    return bool(
+        _build_process_absence_reservation_matches(reservation, key)
+        and _registry._ABSENCE_RESERVATIONS.get(key) is reservation
+        and len(_registry._ABSENCE_RESERVATIONS) == 1
+        and not _registry._OWNERS
+        and not _registry._KERNELS
+    )
 
 
 def _resolve_build_process_owner(
@@ -51,10 +151,12 @@ def _resolve_build_process_owner(
 
 
 def _build_process_registries_are_empty() -> bool:
-    """Prove the capacity-one owner and kernel registries are both empty."""
+    """Prove every process owner, kernel, and absence reservation is empty."""
 
     with _registry._LOCK:
-        return not _registry._OWNERS and not _registry._KERNELS
+        return bool(
+            not _registry._OWNERS and not _registry._KERNELS and not _registry._ABSENCE_RESERVATIONS
+        )
 
 
 def _registered_cleanup_authority(

@@ -640,21 +640,11 @@ def _workspace_built_lease_is_revoked_or_absent(
 def _forget_workspace_built_receipt(command: _WorkspaceBuildCommand) -> bool:
     """Drop the command lease only after exact built revocation."""
 
-    receipt = _BUILT_BY_COMMAND.get(command)
-    if receipt is None:
-        return True
-    state = _BUILT_LEASES.get(receipt)
-    if (
-        type(receipt) is not _WorkspaceBuiltReceipt
-        or type(state) is not tuple
-        or len(state) != 6
-        or state[2] is not command
-        or state[5] != "revoked"
-    ):
-        return False
-    _BUILT_BY_COMMAND.pop(command, None)
-    _BUILT_LEASES.pop(receipt, None)
-    return command not in _BUILT_BY_COMMAND and receipt not in _BUILT_LEASES
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt_forget import (
+        _forget_workspace_built_receipt_state,
+    )
+
+    return _forget_workspace_built_receipt_state(command)
 
 
 def _store_built_lease(

@@ -388,6 +388,12 @@ def _release_unstarted_relay_linux_executor(
             or _workspace_worker_registries_are_empty(time.monotonic() + 0.05) is not True
         ):
             return False
+        from scripts.voice_pipecat_e2e_relay_linux_executor_build_consume import (
+            _retire_released_executor_built_state,
+        )
+
+        if not _retire_released_executor_built_state(key):
+            return False
     elif _workspace_worker_registries_are_empty(time.monotonic() + 0.05) is not True:
         return False
     with _LOCK:
@@ -474,6 +480,38 @@ def _source_evidence_matches(
         and evidence[1] == commit_sha
         and evidence[2] is WEB_ROOT
     )
+
+
+def _executor_source_evidence_graph_matches(
+    key: object,
+    owner: object,
+    destination: object,
+) -> bool:
+    """Reject any source entry not owned by this executor or a retired key."""
+
+    if (
+        type(key) is not _RelayLinuxExecutorKey
+        or type(owner) is not _RelayLinuxExecutorOwner
+        or type(destination) is not _RelayLinuxExecutorDestination
+        or not _source_evidence_matches(key, owner, destination)
+    ):
+        return False
+    try:
+        return all(
+            type(candidate) is _RelayLinuxExecutorKey
+            and (candidate is key or candidate in _RETIRED_KEYS)
+            and type(evidence) is tuple
+            and len(evidence) == 3
+            and type(evidence[0]) is RelayProbeSource
+            and type(evidence[1]) is str
+            and evidence[1] is object.__getattribute__(evidence[0], "_commit_sha")
+            and evidence[2] is WEB_ROOT
+            for candidate, evidence in _SOURCE_EVIDENCE.items()
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
 
 
 def _executor_record_matches(

@@ -234,6 +234,12 @@ def _complete_relay_linux_executor_workspace_release(
         or _workspace_worker_registries_are_empty(time.monotonic() + 0.05) is not True
     ):
         return False
+    from scripts.voice_pipecat_e2e_relay_linux_executor_build_consume import (
+        _executor_released_build_is_forgotten,
+    )
+
+    if not _executor_released_build_is_forgotten(key):
+        return False
     with _LOCK:
         if _EXECUTORS.get(key) is not record:
             return False
@@ -324,6 +330,7 @@ def _resolve_releasing_record(
     key = _AUTHORITY_KEYS.get(authority)
     if type(key) is not _RelayLinuxExecutorKey:
         return None
+    consumed_binding: object | None = None
     with _LOCK:
         record = _EXECUTORS.get(key)
         if (
@@ -335,7 +342,45 @@ def _resolve_releasing_record(
                 "workspace-pin-intended",
                 "workspace-bound",
                 "workspace-releasing",
+                "build-revoked-acknowledged",
             }
+        ):
+            return None
+        owner, destination, bundle, construction = record[:4]
+        if not (
+            type(owner) is _RelayLinuxExecutorOwner
+            and type(destination) is _RelayLinuxExecutorDestination
+            and type(bundle) is _WorkspaceWorkerBundle
+            and type(construction) is _WorkspaceWorkerThreadReceipt
+            and _OWNER_KEYS.get(owner) is key
+            and _DESTINATION_KEYS.get(destination) is key
+            and _AUTHORITY_KEYS.get(authority) is key
+        ):
+            return None
+        if record[5] == "build-revoked-acknowledged":
+            consumed_binding = record[4]
+    if consumed_binding is not None:
+        from scripts.voice_pipecat_e2e_relay_linux_executor_build_consume import (
+            _executor_consumed_build_allows_workspace_release,
+        )
+
+        if not _executor_consumed_build_allows_workspace_release(consumed_binding):
+            return None
+    with _LOCK:
+        record = _EXECUTORS.get(key)
+        if (
+            type(record) is not tuple
+            or len(record) != 6
+            or type(record[5]) is not str
+            or record[5]
+            not in {
+                "workspace-pin-intended",
+                "workspace-bound",
+                "workspace-releasing",
+                "build-revoked-acknowledged",
+            }
+            or (consumed_binding is not None and record[4] is not consumed_binding)
+            or ((record[5] == "build-revoked-acknowledged") is not (consumed_binding is not None))
         ):
             return None
         owner, destination, bundle, construction = record[:4]
@@ -352,7 +397,7 @@ def _resolve_releasing_record(
         if record[5] == "workspace-releasing":
             releasing = record
         else:
-            releasing = (*record[:5], "workspace-releasing")
+            releasing = (*record[:4], None, "workspace-releasing")
             _store_executor_record(key, releasing)
         if _EXECUTORS.get(key) is not releasing:
             return None

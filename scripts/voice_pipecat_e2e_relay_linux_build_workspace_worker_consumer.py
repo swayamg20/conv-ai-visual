@@ -112,6 +112,25 @@ def _workspace_worker_consumer_matches(
         return None
 
 
+def _workspace_worker_consumer_is_active(
+    bundle: object,
+    receipt: object,
+    consumer_key: object,
+) -> bool:
+    """Nonlocking final predicate used only while the exact pin is retained."""
+
+    state = _CONSUMERS.get(bundle)
+    return bool(
+        type(bundle) is _WorkspaceWorkerBundle
+        and type(receipt) is _WorkspaceWorkerThreadReceipt
+        and type(state) is tuple
+        and len(state) == 2
+        and state[0] is receipt
+        and state[1] is consumer_key
+        and len(_CONSUMERS) == 1
+    )
+
+
 def _clear_workspace_worker_consumer(
     owner: _RelayLinuxBuildWorkspaceOwner,
     bundle: _WorkspaceWorkerBundle,

@@ -34,6 +34,7 @@ _KERNEL_TOKEN = object()
 _LOCK = threading.RLock()
 _OWNERS: dict[object, _RelayLinuxBuildProcessOwner] = {}
 _KERNELS: dict[object, _BuildWorkerKernel] = {}
+_ABSENCE_RESERVATIONS: dict[object, object] = {}
 _FAILURE = "Relay Linux build process registry is unavailable"
 _TAKE_TOKEN = object()
 _TRANSITION_TOKEN = object()
@@ -284,7 +285,7 @@ def _preown_build_process(
         key = owner._cleanup_authority._key
         registered = _OWNERS.get(key)
         if registered is None:
-            if _OWNERS:
+            if _OWNERS or _ABSENCE_RESERVATIONS:
                 raise _RelayLinuxBuildProcessError(_FAILURE)
             _OWNERS[key] = owner
         elif registered is not owner:

@@ -5,6 +5,9 @@ from __future__ import annotations
 from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
     _build_process_registries_are_empty,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer import (
+    _workspace_built_consumer_registries_are_empty,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_contract import (
     _forget_workspace_build_process,
 )
@@ -12,6 +15,10 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt 
     _BUILT_BY_COMMAND,
     _BUILT_LEASES,
     _forget_workspace_built_receipt,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt_forget import (
+    _RETIREMENT_AUTHORITIES,
+    _RETIREMENTS,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _COMMAND_CONTROLLERS,
@@ -91,9 +98,9 @@ def _forget_workspace_build_state(
     ):
         return False
     prepared = state[2]
-    if not _forget_workspace_build_process(command):
-        return False
     if not _forget_workspace_built_receipt(command):
+        return False
+    if not _forget_workspace_build_process(command):
         return False
     if not _workspace_prepared_receipt_is_revoked(
         prepared,
@@ -217,6 +224,9 @@ def _workspace_build_graph_is_empty() -> bool:
         and not _CONTROLLER_COMMANDS
         and not _BUILT_LEASES
         and not _BUILT_BY_COMMAND
+        and not _RETIREMENTS
+        and not _RETIREMENT_AUTHORITIES
+        and _workspace_built_consumer_registries_are_empty()
         and not _PREPARED_BUILDS
         and not _LEASES
         and _build_process_registries_are_empty()
@@ -237,6 +247,9 @@ def _workspace_build_graph_has_only_prepared(
         and not _CONTROLLER_COMMANDS
         and not _BUILT_LEASES
         and not _BUILT_BY_COMMAND
+        and not _RETIREMENTS
+        and not _RETIREMENT_AUTHORITIES
+        and _workspace_built_consumer_registries_are_empty()
         and not _PREPARED_BUILDS
         and _workspace_revoked_prepared_lease_can_retire(
             prepared,
