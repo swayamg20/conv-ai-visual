@@ -501,7 +501,7 @@ def _request_workspace_build_command_cancel(
     if type(cleanup_deadline) is not float or not math.isfinite(cleanup_deadline):
         raise _WorkspaceBuildHandoffError(_FAILURE)
     if not gate.lock.acquire(blocking=False):
-        return True
+        return False
     try:
         state = _COMMANDS.get(command)
         if type(state) is tuple and len(state) == 6 and state[4] != "cancelled":

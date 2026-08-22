@@ -28,6 +28,7 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace as workspace_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_contract as process_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt as build_receipt
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values as build_values
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_scope_cleanup as fs_scope_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract as fs_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_open as fs_open
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output as fs_output
@@ -873,6 +874,212 @@ def _repeat_output_cleanup_factory(values: tuple[object, ...], state: object) ->
     )
 
 
+def _scope_cleanup_state(values: tuple[object, ...]) -> object:
+    output_state = _output_cleanup_state(values)
+    request = values[10]
+    descriptors = values[4]
+    run_parent_fd = fs_open._open_absolute_directory(request._run_parent, descriptors)
+    run_root_fd = fs_open._open_absolute_directory(request._run_root, descriptors)
+    return fs_scope_cleanup._new_workspace_build_scope_cleanup_state(
+        output_state=output_state,
+        run_parent_fd=run_parent_fd,
+        run_name=request._run_root.name,
+        run_root_fd=run_root_fd,
+        run_identity=_WorkspaceFilesystemIdentity.from_stat(os.fstat(run_root_fd)),
+        workspace_name=request._workspace.name,
+        descriptors=descriptors,
+    )
+
+
+def _finish_scope_cleanup(state: object, *, attempts: int = 16) -> int:
+    for attempt in range(1, attempts + 1):
+        if fs_scope_cleanup._cleanup_workspace_build_scope(state):
+            return attempt
+    raise AssertionError("build-scope cleanup did not converge")
+
+
+def test_build_scope_cleanup_unlinks_special_leaves_without_following_targets(
+    tmp_path: Path,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    workspace = values[0]
+    request = values[10]
+    descriptors = values[4]
+    external = tmp_path / "external"
+    external.write_bytes(b"retained")
+    (workspace / "external-link").symlink_to(external)
+    os.link(external, workspace / "external-hardlink")
+    os.mkfifo(workspace / "build.fifo", mode=0o600)
+    endpoint = socket.socket(socket.AF_UNIX)
+    socket_alias = Path(tempfile.mkdtemp(prefix="relay-scope-")) / "root"
+    socket_alias.symlink_to(request._run_root, target_is_directory=True)
+    endpoint.bind(str(socket_alias / "build.socket"))
+    (request._run_root / "outside-workspace-link").symlink_to(external)
+    state = _scope_cleanup_state(values)
+    try:
+        assert _finish_scope_cleanup(state) >= 1
+        assert list(workspace.iterdir()) == []
+        assert sorted(path.name for path in request._run_root.iterdir()) == [workspace.name]
+        assert external.read_bytes() == b"retained"
+        assert external.stat().st_nlink == 1
+    finally:
+        endpoint.close()
+        socket_alias.unlink()
+        socket_alias.parent.rmdir()
+        assert descriptors.close_all()
+
+
+def test_build_scope_cleanup_progresses_across_wide_workspace_and_run_root(
+    tmp_path: Path,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    workspace = values[0]
+    request = values[10]
+    descriptors = values[4]
+    total = fs_scope_cleanup._CLEANUP_BUDGET * 2 + 1
+    wide = workspace / "wide"
+    wide.mkdir(mode=0o700)
+    for index in range(total):
+        (wide / f"w{index:05d}").touch(mode=0o600)
+    run_wide = request._run_root / "run-wide"
+    run_wide.mkdir(mode=0o700)
+    for index in range(total):
+        (run_wide / f"r{index:05d}").touch(mode=0o600)
+    state = _scope_cleanup_state(values)
+    try:
+        first = fs_scope_cleanup._cleanup_workspace_build_scope(state)
+        assert first is False
+        assert 0 < sum(1 for _ in wide.iterdir()) < total
+        assert _finish_scope_cleanup(state, attempts=12) >= 1
+        assert list(workspace.iterdir()) == []
+        assert sorted(path.name for path in request._run_root.iterdir()) == [workspace.name]
+    finally:
+        assert descriptors.close_all()
+
+
+def test_build_scope_cleanup_uses_bounded_descriptors_beyond_fd_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    workspace = values[0]
+    request = values[10]
+    descriptors = values[4]
+    for root in (workspace / "deep", request._run_root / "run-deep"):
+        root.mkdir(mode=0o700)
+        current_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for _depth in range(300):
+                os.mkdir("d", mode=0o700, dir_fd=current_fd)
+                child_fd = os.open("d", os.O_RDONLY | os.O_DIRECTORY, dir_fd=current_fd)
+                os.close(current_fd)
+                current_fd = child_fd
+            leaf_fd = os.open(
+                "leaf",
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o600,
+                dir_fd=current_fd,
+            )
+            os.close(leaf_fd)
+        finally:
+            os.close(current_fd)
+    state = _scope_cleanup_state(values)
+    baseline_count = len(descriptors._descriptors)
+    high_water = baseline_count
+    original_open = fs_scope_cleanup._open_directory_at
+
+    def counted_open(*args: object, **kwargs: object) -> int:
+        nonlocal high_water
+        descriptor = original_open(*args, **kwargs)
+        high_water = max(high_water, len(descriptors._descriptors))
+        return descriptor
+
+    monkeypatch.setattr(fs_scope_cleanup, "_open_directory_at", counted_open)
+    try:
+        assert _finish_scope_cleanup(state, attempts=4) >= 1
+        assert high_water - baseline_count <= fs_scope_cleanup._OPEN_WINDOW + 1
+        assert list(workspace.iterdir()) == []
+        assert sorted(path.name for path in request._run_root.iterdir()) == [workspace.name]
+    finally:
+        assert descriptors.close_all()
+
+
+def test_build_scope_cleanup_never_scans_after_reopen_spends_last_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    workspace = values[0]
+    descriptors = values[4]
+    (workspace / "budget-dir").mkdir(mode=0o700)
+    (workspace / "budget-dir" / "leaf").touch(mode=0o600)
+    state = _scope_cleanup_state(values)
+    limits: list[int] = []
+    original_scan = fs_scope_cleanup._scan_names
+
+    def record_scan(descriptor: int, limit: int) -> tuple[str, ...]:
+        limits.append(limit)
+        return original_scan(descriptor, limit)
+
+    monkeypatch.setattr(fs_scope_cleanup, "_CLEANUP_BUDGET", 1)
+    monkeypatch.setattr(fs_scope_cleanup, "_scan_names", record_scan)
+    try:
+        assert _finish_scope_cleanup(state, attempts=128) >= 1
+        assert limits and all(limit > 0 for limit in limits)
+        assert list(workspace.iterdir()) == []
+    finally:
+        assert descriptors.close_all()
+
+
+@pytest.mark.parametrize("location", ["workspace", "run-root"])
+@pytest.mark.parametrize(
+    "error_factory",
+    (
+        lambda: OSError("synthetic rmdir readback loss"),
+        lambda: KeyboardInterrupt("synthetic rmdir control"),
+        lambda: SystemExit("synthetic rmdir exit"),
+    ),
+    ids=("ordinary", "keyboard", "system-exit"),
+)
+def test_build_scope_cleanup_reconciles_rmdir_return_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+    error_factory,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    workspace = values[0]
+    request = values[10]
+    descriptors = values[4]
+    root = workspace if location == "workspace" else request._run_root
+    victim = root / "rmdir-loss"
+    victim.mkdir(mode=0o700)
+    state = _scope_cleanup_state(values)
+    original_missing = fs_scope_cleanup._missing
+    faulted = False
+
+    def lose_readback(parent_fd: int, name: str) -> bool:
+        nonlocal faulted
+        missing = original_missing(parent_fd, name)
+        if name == victim.name and missing and not faulted:
+            faulted = True
+            raise error_factory()
+        return missing
+
+    monkeypatch.setattr(fs_scope_cleanup, "_missing", lose_readback)
+    expected = type(error_factory())
+    try:
+        with pytest.raises(expected):
+            fs_scope_cleanup._cleanup_workspace_build_scope(state)
+        monkeypatch.setattr(fs_scope_cleanup, "_missing", original_missing)
+        assert faulted
+        assert _finish_scope_cleanup(state, attempts=16) >= 1
+        assert list(workspace.iterdir()) == []
+        assert sorted(path.name for path in request._run_root.iterdir()) == [workspace.name]
+    finally:
+        assert descriptors.close_all()
+
+
 def test_rejected_output_cleanup_requires_canonical_process_absence(
     tmp_path: Path,
 ) -> None:
@@ -957,10 +1164,7 @@ def test_output_cleanup_accepts_only_the_exact_revoked_built_mapping(
 @pytest.mark.parametrize(
     "corruption",
     [
-        "status",
         "registry-fingerprint",
-        "internal-fingerprint",
-        "lease-active",
         "duplicate-association",
         "foreign-orphan",
     ],
@@ -972,15 +1176,9 @@ def test_output_cleanup_rejects_malformed_prepared_revocation(
     values = _workspace_fixture(tmp_path)
     descriptors = values[4]
     state = _output_cleanup_state(values)
-    if corruption == "status":
-        object.__setattr__(state.prepared, "status", "wrong")
-    elif corruption == "registry-fingerprint":
+    if corruption == "registry-fingerprint":
         lease = fs_contract._LEASES[state.prepared]
         fs_contract._LEASES[state.prepared] = (*lease[:2], object(), lease[3])
-    elif corruption == "internal-fingerprint":
-        object.__setattr__(state.prepared, "_fingerprint", b"x" * 32)
-    elif corruption == "lease-active":
-        object.__setattr__(state.prepared, "_lease_active", True)
     elif corruption == "duplicate-association":
         duplicate = fs_contract._new_workspace_prepared_receipt(
             owner_token=state.owner_token,
@@ -1007,6 +1205,32 @@ def test_output_cleanup_rejects_malformed_prepared_revocation(
         with pytest.raises(_WorkspaceFilesystemError):
             fs_output_cleanup._cleanup_workspace_build_output(state)
         assert (values[0] / ".next-voice-e2e").is_dir()
+    finally:
+        assert descriptors.close_all()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "caller-tampered"),
+        ("_owner_token", object()),
+        ("_fingerprint", b"x" * 32),
+        ("_lease_active", True),
+    ],
+)
+def test_output_cleanup_ignores_caller_mutable_prepared_fields(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    values = _workspace_fixture(tmp_path)
+    descriptors = values[4]
+    state = _output_cleanup_state(values)
+    object.__setattr__(state.prepared, field, value)
+    try:
+        assert _repeat_output_cleanup_factory(values, state)
+        assert fs_output_cleanup._cleanup_workspace_build_output(state)
+        assert not (values[0] / ".next-voice-e2e").exists()
     finally:
         assert descriptors.close_all()
 

@@ -133,6 +133,45 @@ def _workspace_build_process_association_matches(
     expected_raw_destination: object,
     build_deadline: float,
 ) -> bool:
+    return _workspace_build_process_association_matches_phase(
+        command,
+        process_owner=process_owner,
+        expected_spec=expected_spec,
+        expected_raw_destination=expected_raw_destination,
+        build_deadline=build_deadline,
+        expected_phase="building",
+    )
+
+
+def _workspace_build_process_start_intended_association_matches(
+    command: _WorkspaceBuildCommand,
+    *,
+    process_owner: object,
+    expected_spec: object,
+    expected_raw_destination: object,
+    build_deadline: float,
+) -> bool:
+    """Prove the same association after the held start permit linearizes."""
+
+    return _workspace_build_process_association_matches_phase(
+        command,
+        process_owner=process_owner,
+        expected_spec=expected_spec,
+        expected_raw_destination=expected_raw_destination,
+        build_deadline=build_deadline,
+        expected_phase="start-intended",
+    )
+
+
+def _workspace_build_process_association_matches_phase(
+    command: _WorkspaceBuildCommand,
+    *,
+    process_owner: object,
+    expected_spec: object,
+    expected_raw_destination: object,
+    build_deadline: float,
+    expected_phase: str,
+) -> bool:
     from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
         _resolve_build_process_owner,
     )
@@ -147,8 +186,10 @@ def _workspace_build_process_association_matches(
         and len(state) == 7
         and type(command_state) is tuple
         and len(command_state) == 6
+        and command_state[0] is state[0]
+        and command_state[1] is state[1]
         and command_state[3] == build_deadline
-        and command_state[4] == "building"
+        and command_state[4] == expected_phase
         and command_state[5] == state[4]
         and type(process_owner) is _RelayLinuxBuildProcessOwner
         and process_owner._owner_token is state[2]

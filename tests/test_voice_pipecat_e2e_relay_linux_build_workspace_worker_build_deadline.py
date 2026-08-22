@@ -184,6 +184,7 @@ def _driver_harness(monkeypatch: pytest.MonkeyPatch):
             return {}
 
     present = [True]
+    prestart = object()
     calls: list[str] = []
     clock = _Clock(deadline - 10.0)
     monkeypatch.setattr(build_process, "time", SimpleNamespace(monotonic=clock.monotonic))
@@ -235,7 +236,17 @@ def _driver_harness(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(build_process, "_associate_workspace_build_process", associate)
     monkeypatch.setattr(
         build_process,
+        "_revalidate_workspace_build_prestart",
+        lambda value, **_kwargs: value is prestart,
+    )
+    monkeypatch.setattr(
+        build_process,
         "_workspace_build_process_association_matches",
+        lambda *_args, **_kwargs: True,
+    )
+    monkeypatch.setattr(
+        build_process,
+        "_workspace_build_process_start_intended_association_matches",
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(build_process, "_start_relay_linux_build_process", lambda *_a, **_k: None)
@@ -267,6 +278,7 @@ def _driver_harness(monkeypatch: pytest.MonkeyPatch):
         "deadline": deadline,
         "owner": owner,
         "present": present,
+        "prestart": prestart,
         "process_receipt": process_receipt,
         "record": record,
         "request": Request(),
@@ -298,6 +310,7 @@ def test_driver_rejects_each_late_result_boundary_and_releases_process(
             owner_token=context["owner"],
             record_token=context["record"],
             build_deadline=context["deadline"],
+            prestart_authority=context["prestart"],
         )
 
     association = build_values._PROCESS_ASSOCIATIONS[context["command"]]
@@ -335,6 +348,7 @@ def test_cancellation_after_zero_observation_clears_receipt_and_releases(
             owner_token=context["owner"],
             record_token=context["record"],
             build_deadline=context["deadline"],
+            prestart_authority=context["prestart"],
         )
 
     association = build_values._PROCESS_ASSOCIATIONS[context["command"]]
@@ -371,6 +385,7 @@ def test_completion_return_crossing_final_boundary_never_succeeds(
             owner_token=context["owner"],
             record_token=context["record"],
             build_deadline=context["deadline"],
+            prestart_authority=context["prestart"],
         )
 
     association = build_values._PROCESS_ASSOCIATIONS[context["command"]]
@@ -401,6 +416,7 @@ def test_process_release_stored_absence_then_raised_still_settles_failed(
             owner_token=context["owner"],
             record_token=context["record"],
             build_deadline=context["deadline"],
+            prestart_authority=context["prestart"],
         )
 
     association = build_values._PROCESS_ASSOCIATIONS[context["command"]]
@@ -458,6 +474,7 @@ def test_released_zero_store_return_loss_converges_failed_and_preserves_first_co
             owner_token=context["owner"],
             record_token=context["record"],
             build_deadline=context["deadline"],
+            prestart_authority=context["prestart"],
         )
 
     association = build_values._PROCESS_ASSOCIATIONS[context["command"]]

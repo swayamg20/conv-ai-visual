@@ -84,6 +84,7 @@ class _WorkspacePreparedReceipt:
         "__weakref__",
         "_fingerprint",
         "_lease_active",
+        "_lease_retired",
         "_owner_token",
         "_record_token",
         "status",
@@ -109,6 +110,7 @@ class _WorkspacePreparedReceipt:
         object.__setattr__(self, "_record_token", record_token)
         object.__setattr__(self, "_fingerprint", fingerprint)
         object.__setattr__(self, "_lease_active", False)
+        object.__setattr__(self, "_lease_retired", None)
         object.__setattr__(self, "status", "workspace-prepared")
         _LEASES[self] = (owner_token, record_token, fingerprint, "pending")
 
@@ -352,6 +354,7 @@ def _workspace_prepared_build_matches(
         internal_record = object.__getattribute__(receipt, "_record_token")
         internal_fingerprint = object.__getattribute__(receipt, "_fingerprint")
         internal_active = object.__getattribute__(receipt, "_lease_active")
+        internal_retired = object.__getattribute__(receipt, "_lease_retired")
         status = object.__getattribute__(receipt, "status")
     except (KeyboardInterrupt, SystemExit):
         raise
@@ -371,6 +374,7 @@ def _workspace_prepared_build_matches(
         and type(internal_fingerprint) is bytes
         and internal_fingerprint == state[2]
         and internal_active is False
+        and internal_retired is None
         and type(status) is str
         and status == "workspace-prepared"
         and type(association) is tuple
@@ -421,6 +425,7 @@ def _workspace_revoked_prepared_build_matches(
         internal_record = object.__getattribute__(receipt, "_record_token")
         internal_fingerprint = object.__getattribute__(receipt, "_fingerprint")
         internal_active = object.__getattribute__(receipt, "_lease_active")
+        internal_retired = object.__getattribute__(receipt, "_lease_retired")
         status = object.__getattribute__(receipt, "status")
         command_owner = object.__getattribute__(command, "_owner_token")
         command_record = object.__getattribute__(command, "_record_token")
@@ -445,6 +450,7 @@ def _workspace_revoked_prepared_build_matches(
         and type(internal_fingerprint) is bytes
         and internal_fingerprint == state[2]
         and internal_active is False
+        and internal_retired is None
         and type(status) is str
         and status == "workspace-prepared"
         and type(command_state) is tuple

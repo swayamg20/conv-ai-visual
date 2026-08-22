@@ -27,6 +27,7 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_proces
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_contract as process_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt as build_receipt
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values as build_values
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_claim_cleanup as claim_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract as fs_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_release as release_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state as state_module
@@ -287,6 +288,7 @@ def test_driver_rejects_wrong_controller_or_deadline_before_process_construction
             owner_token=owner_token,
             record_token=record_token,
             build_deadline=supplied_deadline,
+            prestart_authority=object(),
         )
 
     assert constructed == 0
@@ -305,6 +307,7 @@ def test_actual_driver_linearizes_outer_cancel_with_the_sole_start_permit(
         owner_token=owner_token,
     )
     authority = object()
+    prestart = object()
 
     class Candidate:
         _cleanup_authority = authority
@@ -367,6 +370,16 @@ def test_actual_driver_linearizes_outer_cancel_with_the_sole_start_permit(
         "_workspace_build_process_association_matches",
         lambda *args, **kwargs: True,
     )
+    monkeypatch.setattr(
+        build_process,
+        "_workspace_build_process_start_intended_association_matches",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
+        build_process,
+        "_revalidate_workspace_build_prestart",
+        lambda value, **_kwargs: value is prestart,
+    )
     monkeypatch.setattr(build_process, "_acquire_workspace_build_process_start", acquire)
     monkeypatch.setattr(build_process, "_start_relay_linux_build_process", start)
     monkeypatch.setattr(build_process, "_resolve_build_process_owner", lambda _value: None)
@@ -385,6 +398,7 @@ def test_actual_driver_linearizes_outer_cancel_with_the_sole_start_permit(
                 owner_token=owner_token,
                 record_token=record_token,
                 build_deadline=deadline,
+                prestart_authority=prestart,
             )
         except BaseException as error:
             failures.append(error)
@@ -445,6 +459,7 @@ def test_actual_driver_rejects_cancel_in_flight_before_command_binding(
             owner_token=owner_token,
             record_token=record_token,
             build_deadline=deadline,
+            prestart_authority=object(),
         )
     resume.set()
     canceller.join(2.0)
@@ -601,6 +616,64 @@ def test_built_activation_repairs_stored_effect_return_loss(
     assert built._matches(owner_token, record_token, require_active=True)
 
 
+def test_active_built_lease_survives_only_exact_prepared_revocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values = _prepared_command()
+    owner_token, record_token, prepared, command, deadline = values
+    assert _claim(values) == deadline
+    _controller = _bind_controller(values)
+    assert build_values._intend_workspace_build_process_start(
+        command,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
+    assert build_values._complete_workspace_build_process_start(
+        command,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
+    monkeypatch.setattr(
+        process_contract,
+        "_workspace_build_process_completed_zero",
+        lambda *_args, **_kwargs: True,
+    )
+    built = build_receipt._new_workspace_built_receipt(
+        command=command,
+        owner_token=owner_token,
+        record_token=record_token,
+        output_digest=b"o" * 32,
+        process_receipt=object(),
+        operation_deadline=deadline,
+    )
+    assert build_receipt._activate_workspace_built_receipt(
+        built,
+        owner_token,
+        record_token,
+        operation_deadline=deadline,
+    )
+    assert built._matches(owner_token, record_token, require_active=True)
+
+    assert fs_contract._revoke_workspace_prepared_receipt(
+        prepared,
+        owner_token,
+        record_token,
+    )
+    assert built._matches(owner_token, record_token, require_active=True)
+
+    association = fs_contract._PREPARED_BUILDS[prepared]
+    fs_contract._PREPARED_BUILDS[prepared] = (
+        association[0],
+        association[1],
+        association[2],
+        association[3] + 1.0,
+        association[4],
+    )
+    assert not built._matches(owner_token, record_token, require_active=True)
+
+
 @pytest.mark.parametrize("preown_control", [False, True])
 @pytest.mark.parametrize("resolver_control", [False, True])
 def test_preown_return_loss_retains_cleanup_authority_through_resolver_faults(
@@ -687,6 +760,7 @@ def test_preown_return_loss_retains_cleanup_authority_through_resolver_faults(
             owner_token=owner_token,
             record_token=record_token,
             build_deadline=deadline,
+            prestart_authority=object(),
         )
 
     assert resolver_faulted is True
@@ -904,6 +978,56 @@ def test_cancel_clock_control_still_releases_associated_process(
     )
 
 
+@pytest.mark.parametrize("seam", ["authority", "phase"])
+def test_cancel_preserves_first_control_across_cleanup_read_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+) -> None:
+    command, process_owner, _controller = _associated_process(tmp_path)
+    original_store = build_values._store_command_state
+    original_read = getattr(
+        build_process,
+        f"_workspace_build_process_{'cleanup_authority' if seam == 'authority' else 'association_phase'}",
+    )
+    store_faulted = False
+    read_faulted = False
+
+    def lose_cancel_store(*args: object, **kwargs: object) -> None:
+        nonlocal store_faulted
+        original_store(*args, **kwargs)
+        if not store_faulted:
+            store_faulted = True
+            raise KeyboardInterrupt("first cancel control")
+
+    def second_control(*args: object, **kwargs: object) -> object:
+        nonlocal read_faulted
+        if not read_faulted:
+            read_faulted = True
+            raise SystemExit(9)
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(build_values, "_store_command_state", lose_cancel_store)
+    monkeypatch.setattr(
+        build_process,
+        f"_workspace_build_process_{'cleanup_authority' if seam == 'authority' else 'association_phase'}",
+        second_control,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first cancel control"):
+        build_process._cancel_associated_workspace_build_process(
+            command,
+            cleanup_deadline=_future(),
+        )
+
+    assert store_faulted and read_faulted
+    assert (
+        process_facade_registry._resolve_build_process_owner(
+            process_owner._cleanup_authority,
+        )
+        is None
+    )
+
+
 def test_held_start_permit_and_process_release_linearize_cancellation(
     tmp_path: Path,
 ) -> None:
@@ -917,11 +1041,21 @@ def test_held_start_permit_and_process_release_linearize_cancellation(
     )
     assert permit is not None
 
+    assert not build_process._cancel_associated_workspace_build_process(
+        command,
+        cleanup_deadline=_future(),
+    )
+    assert (
+        process_facade_registry._resolve_build_process_owner(
+            process_owner._cleanup_authority,
+        )
+        is process_owner
+    )
+    build_values._release_workspace_build_process_start(permit)
     assert build_process._cancel_associated_workspace_build_process(
         command,
         cleanup_deadline=_future(),
     )
-    build_values._release_workspace_build_process_start(permit)
 
     assert build_values._workspace_build_command_cancel_requested(command)
     assert not build_values._complete_workspace_build_process_start(
@@ -1115,6 +1249,13 @@ def _published_cancelled_command(tmp_path: Path):
         owner_token,
         record_token,
     )
+    stored, acquired = owner._receipt_destination._publish_before(
+        owner._request,
+        owner_token,
+        prepared,
+        _future(),
+    )
+    assert acquired and stored is prepared
     deadline = _future()
     command = build_values._new_workspace_build_command(
         owner_token=owner_token,
@@ -1242,6 +1383,7 @@ def test_build_state_forget_requires_revocation_and_filesystem_settlement(
 
     assert not build_forget._forget_workspace_build_state(
         command,
+        prepared=prepared,
         owner_token=owner_token,
         record_token=record_token,
     )
@@ -1252,6 +1394,7 @@ def test_build_state_forget_requires_revocation_and_filesystem_settlement(
     )
     assert not build_forget._forget_workspace_build_state(
         command,
+        prepared=prepared,
         owner_token=owner_token,
         record_token=record_token,
     )
@@ -1275,6 +1418,111 @@ def test_build_state_forget_requires_revocation_and_filesystem_settlement(
     assert prepared not in fs_contract._PREPARED_BUILDS
     assert record_token not in build_forget._FORGOTTEN_RECORDS
     assert fs_contract._workspace_filesystem_state_is_forgotten(record_token)
+
+
+def test_no_command_forget_rejects_orphan_canonical_build_state() -> None:
+    owner_token = object()
+    record_token = object()
+    prepared = fs_contract._new_workspace_prepared_receipt(
+        owner_token=owner_token,
+        record_token=record_token,
+        fingerprint=b"p" * 32,
+    )
+    assert fs_contract._activate_workspace_prepared_receipt(
+        prepared,
+        owner_token,
+        record_token,
+    )
+    orphan = build_values._new_workspace_build_command(
+        owner_token=owner_token,
+        record_token=record_token,
+        prepared=prepared,
+        build_deadline=_future(),
+        expected_spawn_fingerprint=b"s" * 32,
+    )
+
+    assert not build_forget._forget_workspace_build_state(
+        None,
+        prepared=prepared,
+        owner_token=owner_token,
+        record_token=record_token,
+    )
+    assert orphan in build_values._COMMANDS
+
+
+def test_no_command_forget_rejects_an_orphan_prepared_lease() -> None:
+    owner_token = object()
+    record_token = object()
+    prepared = fs_contract._new_workspace_prepared_receipt(
+        owner_token=owner_token,
+        record_token=record_token,
+        fingerprint=b"p" * 32,
+    )
+    assert fs_contract._revoke_workspace_prepared_receipt(
+        prepared,
+        owner_token,
+        record_token,
+    )
+    orphan = fs_contract._new_workspace_prepared_receipt(
+        owner_token=object(),
+        record_token=object(),
+        fingerprint=b"o" * 32,
+    )
+
+    assert not build_forget._forget_workspace_build_state(
+        None,
+        prepared=prepared,
+        owner_token=owner_token,
+        record_token=record_token,
+    )
+    assert orphan in fs_contract._LEASES
+
+
+def test_no_command_forget_never_infers_retirement_from_bare_lease_absence() -> None:
+    owner_token = object()
+    record_token = object()
+    prepared = fs_contract._new_workspace_prepared_receipt(
+        owner_token=owner_token,
+        record_token=record_token,
+        fingerprint=b"p" * 32,
+    )
+    fs_contract._LEASES.pop(prepared)
+
+    assert not build_forget._forget_workspace_build_state(
+        None,
+        prepared=prepared,
+        owner_token=owner_token,
+        record_token=record_token,
+    )
+    assert object.__getattribute__(prepared, "_lease_retired") is None
+
+
+def test_cleanup_reconciles_a_post_command_tampered_prepared_claim() -> None:
+    owner_token, record_token, prepared, command, build_deadline = _prepared_command()
+    build_values._workspace_build_command_failed(command)
+    assert fs_contract._revoke_workspace_prepared_receipt(
+        prepared,
+        owner_token,
+        record_token,
+    )
+    object.__setattr__(prepared, "_owner_token", object())
+    object.__setattr__(prepared, "_lease_active", True)
+    object.__setattr__(prepared, "status", "caller-tampered")
+
+    assert claim_cleanup._reconcile_revoked_prepared_build_for_cleanup(
+        prepared,
+        owner_token,
+        record_token,
+        command,
+        build_deadline,
+    )
+    assert claim_cleanup._workspace_revoked_prepared_build_for_cleanup_matches(
+        prepared,
+        owner_token,
+        record_token,
+        command,
+        build_deadline,
+    )
 
 
 def test_forget_retries_after_filesystem_forget_return_loss(
@@ -1321,6 +1569,76 @@ def test_forget_retries_after_filesystem_forget_return_loss(
     assert lost is True
     assert bundle._command_destination._read(owner_token) is None
     assert record_token not in build_forget._FORGOTTEN_RECORDS
+
+
+@pytest.mark.parametrize("seam", ["marker", "lease-pop"])
+@pytest.mark.parametrize("stored", [False, True])
+@pytest.mark.parametrize(
+    "error_factory",
+    (
+        lambda: OSError("synthetic prepared retirement loss"),
+        lambda: KeyboardInterrupt("synthetic prepared retirement control"),
+        lambda: SystemExit("synthetic prepared retirement exit"),
+    ),
+    ids=("ordinary", "keyboard", "system-exit"),
+)
+def test_prepared_lease_retirement_reconciles_every_durable_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seam: str,
+    stored: bool,
+    error_factory,
+) -> None:
+    owner, _bundle, construction, prepared, command = _published_cancelled_command(
+        tmp_path,
+    )
+    _settle_cancelled_command(owner, construction, prepared)
+    owner_token = owner._cleanup_authority._key
+    record_token = construction._record_token
+    helper_name = (
+        "_store_forgotten_workspace_build"
+        if seam == "marker"
+        else "_forget_workspace_prepared_lease"
+    )
+    original = getattr(build_forget, helper_name)
+    faulted = False
+
+    def lose_return(*args: object, **kwargs: object) -> object:
+        nonlocal faulted
+        if not faulted:
+            faulted = True
+            if stored:
+                original(*args, **kwargs)
+            raise error_factory()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(build_forget, helper_name, lose_return)
+    with pytest.raises(type(error_factory())):
+        build_forget._forget_workspace_build_state(
+            command,
+            prepared=prepared,
+            owner_token=owner_token,
+            record_token=record_token,
+        )
+    assert faulted
+    if seam == "lease-pop" and stored:
+        object.__setattr__(prepared, "_lease_retired", None)
+    for _ in range(3):
+        assert build_forget._forget_workspace_build_state(
+            command,
+            prepared=prepared,
+            owner_token=owner_token,
+            record_token=record_token,
+        )
+    assert prepared not in fs_contract._LEASES
+    marker = build_forget._FORGOTTEN_RECORDS[record_token]
+    assert marker[2] is prepared and type(marker[3]) is bytes and len(marker[3]) == 32
+    assert build_forget._complete_workspace_build_state_forget(
+        command,
+        prepared=prepared,
+        owner_token=owner_token,
+        record_token=record_token,
+    )
 
 
 @pytest.mark.parametrize("kind", ["command", "built", "post-forget-command"])

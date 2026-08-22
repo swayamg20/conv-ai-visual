@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -16,12 +17,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry as process_facade_registry
+import scripts.voice_pipecat_e2e_relay_linux_build_process_state as process_state
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace as workspace_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_active as active_module
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_facade as build_facade
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values as build_values
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_transaction as fs_build_transaction
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_cleanup as fs_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract as fs_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_copy as fs_copy
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_open as fs_open
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_contract as fs_output_contract
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values as fs_output_values
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_transaction as fs_transaction
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_lifecycle as lifecycle_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry as registry_module
@@ -38,6 +46,24 @@ def _valid_graph(tmp_path: Path, run_id: str = "filesystem-worker"):
         if name in workspace_module._SOURCE_DIRECTORY_ENTRIES:
             target.mkdir(mode=0o700)
             (target / "fixture.txt").write_bytes(f"{name}\n".encode())
+        elif name == "next-env.d.ts":
+            target.write_bytes(fs_output_contract._STANDARD_NEXT_ENV)
+        elif name == "tsconfig.json":
+            target.write_bytes(
+                json.dumps(
+                    {
+                        "compilerOptions": {"strict": True},
+                        "exclude": ["node_modules"],
+                        "include": [
+                            "next-env.d.ts",
+                            "**/*.ts",
+                            "**/*.tsx",
+                            ".next/types/**/*.ts",
+                        ],
+                    },
+                    separators=(",", ":"),
+                ).encode()
+            )
         else:
             target.write_bytes(f"{name}\n".encode())
     node_modules = source / "node_modules"
@@ -102,6 +128,264 @@ def _cancel_join_release(owner: object, bundle: object, construction: object):
         terminal,
     )
     return terminal
+
+
+def test_worker_hands_one_synthetic_zero_build_to_caller_then_cleans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner, bundle, construction = _valid_graph(tmp_path, "integrated-zero")
+    prepared = _start_prepared(owner, bundle, construction)
+    events: list[str] = []
+
+    def fake_process_driver(
+        *,
+        command,
+        request,
+        controller,
+        owner_token,
+        record_token,
+        build_deadline,
+        prestart_authority,
+    ):
+        assert request is owner._request
+        assert prestart_authority.claim._bundle is bundle
+        assert build_values._bind_workspace_build_command_controller(
+            command,
+            controller=controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
+        state = build_values._COMMANDS[command]
+        build_values._store_command_state(
+            command,
+            (*state[:4], "running", state[5]),
+        )
+        process_owner_token = object()
+        authority = process_state._RelayLinuxBuildCleanupAuthority(
+            process_state._AUTHORITY_TOKEN,
+            key=object(),
+            owner_token=process_owner_token,
+        )
+        receipt = process_state._RelayLinuxBuildProcessReceipt(
+            process_state._RECEIPT_TOKEN,
+            owner_token=process_owner_token,
+        )
+        build_values._PROCESS_ASSOCIATIONS[command] = (
+            owner_token,
+            record_token,
+            process_owner_token,
+            authority,
+            state[5],
+            receipt,
+            "released-zero",
+        )
+        events.append("process-absent")
+        return receipt
+
+    snapshot: fs_output_values._WorkspaceBuildOutputSnapshot | None = None
+
+    def fake_validate_output(**kwargs):
+        nonlocal snapshot
+        assert process_facade_registry._build_process_registries_are_empty()
+        assert events and events[0] == "process-absent"
+        workspace = owner._request._workspace
+        parent = workspace / ".next-voice-e2e"
+        dist = parent / owner._request._run_id
+        if snapshot is None:
+            parent.mkdir(mode=0o700)
+            dist.mkdir(mode=0o700)
+            (dist / "synthetic-output").write_bytes(b"validated")
+            snapshot = fs_output_values._WorkspaceBuildOutputSnapshot(
+                digest=b"d" * 32,
+                dist_parent_identity=fs_contract._WorkspaceFilesystemIdentity.from_stat(
+                    parent.stat(follow_symlinks=False)
+                ),
+                dist_root_identity=fs_contract._WorkspaceFilesystemIdentity.from_stat(
+                    dist.stat(follow_symlinks=False)
+                ),
+                dist_nodes=(),
+                node_modules_identity=kwargs["baseline"].node_modules_identity,
+                workspace_nodes=(),
+            )
+        events.append("validated")
+        return snapshot
+
+    original_revoke = fs_build_transaction._revoke_prepared_after_built
+
+    def record_revoke(claim, exact_prepared, built):
+        assert built._matches(
+            owner._cleanup_authority._key,
+            construction._record_token,
+            require_active=True,
+        )
+        events.append("built-active")
+        original_revoke(claim, exact_prepared, built)
+        events.append("prepared-revoked")
+
+    original_scope_cleanup = fs_build_transaction._cleanup_workspace_build_scope
+
+    def record_scope_cleanup(state):
+        assert process_facade_registry._build_process_registries_are_empty()
+        assert fs_contract._workspace_prepared_receipt_is_revoked(
+            prepared,
+            owner._cleanup_authority._key,
+            construction._record_token,
+        )
+        events.append("scope-cleanup")
+        return original_scope_cleanup(state)
+
+    monkeypatch.setattr(fs_build_transaction, "_drive_workspace_build_process", fake_process_driver)
+    monkeypatch.setattr(
+        fs_build_transaction, "_validate_workspace_build_output", fake_validate_output
+    )
+    monkeypatch.setattr(fs_build_transaction, "_revoke_prepared_after_built", record_revoke)
+    monkeypatch.setattr(
+        fs_build_transaction, "_cleanup_workspace_build_scope", record_scope_cleanup
+    )
+
+    built, coherent = build_facade._build_relay_linux_workspace(
+        owner,
+        bundle,
+        construction,
+        prepared,
+        build_deadline=time.monotonic() + 3.0,
+    )
+    assert coherent is True and built is not None
+    assert events[:5] == [
+        "process-absent",
+        "validated",
+        "validated",
+        "built-active",
+        "prepared-revoked",
+    ]
+    assert built._matches(
+        owner._cleanup_authority._key,
+        construction._record_token,
+        require_active=True,
+    )
+    raw = registry_module._RECORDS[bundle]._entry[1]
+    assert release_module._THREAD_IS_ALIVE(raw)
+    assert owner._request._run_root.is_dir()
+
+    terminal = _cancel_join_release(owner, bundle, construction)
+    assert terminal is not None
+    assert "scope-cleanup" in events
+    assert not owner._request._run_root.exists()
+
+
+def test_no_command_cleanup_waits_for_globally_empty_build_graph(tmp_path: Path) -> None:
+    owner, bundle, construction = _valid_graph(tmp_path, "no-command-orphan")
+    prepared = _start_prepared(owner, bundle, construction)
+    orphan = build_values._new_workspace_build_command(
+        owner_token=owner._cleanup_authority._key,
+        record_token=construction._record_token,
+        prepared=prepared,
+        build_deadline=float(time.monotonic() + 2.0),
+        expected_spawn_fingerprint=b"o" * 32,
+    )
+    thread_module._cancel_relay_linux_build_workspace_worker(owner, bundle, construction)
+    terminal, joined = thread_module._join_relay_linux_build_workspace_worker(
+        owner,
+        bundle,
+        construction,
+        0.15,
+    )
+    assert terminal is None and joined is False
+    assert owner._request._run_root.is_dir()
+    assert orphan in build_values._COMMANDS
+
+    build_values._COMMANDS.clear()
+    build_values._COMMAND_GATES.clear()
+    terminal, joined = thread_module._join_relay_linux_build_workspace_worker(
+        owner,
+        bundle,
+        construction,
+        2.0,
+    )
+    assert terminal is not None and joined is True
+    assert not owner._request._run_root.exists()
+    assert thread_module._release_relay_linux_build_workspace_worker(
+        owner,
+        bundle,
+        construction,
+        terminal,
+    )
+
+
+def test_release_retires_prepared_capacity_while_first_owner_is_retained(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first_root.mkdir()
+    second_root.mkdir()
+    first = _valid_graph(first_root, "prepared-retire-a")
+    first_owner, first_bundle, first_construction = first
+    first_prepared = _start_prepared(*first)
+    _cancel_join_release(*first)
+    assert first_prepared not in fs_contract._LEASES
+
+    second = _valid_graph(second_root, "prepared-retire-b")
+    second_owner, second_bundle, second_construction = second
+    second_prepared = _start_prepared(*second)
+    assert len(fs_contract._LEASES) == 1
+    assert next(iter(fs_contract._LEASES)) is second_prepared
+    _cancel_join_release(*second)
+    assert second_prepared not in fs_contract._LEASES
+    assert first_owner is not second_owner
+    assert first_bundle is not second_bundle
+    assert first_construction is not second_construction
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    (
+        lambda: OSError("synthetic cleanup wait failure"),
+        lambda: KeyboardInterrupt("synthetic cleanup wait control"),
+        lambda: SystemExit("synthetic cleanup wait exit"),
+    ),
+    ids=("ordinary", "keyboard", "system-exit"),
+)
+def test_build_settlement_wait_fault_cannot_escape_process_first_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_factory,
+) -> None:
+    owner, bundle, construction = _valid_graph(tmp_path, "settle-wait")
+    _start_prepared(owner, bundle, construction)
+    entered = threading.Event()
+    absence_calls = 0
+    wait_faults = 0
+    original_absent = fs_build_transaction._reserved_output_parent_is_absent
+    original_wait = state_module._WorkspaceWorkerController._wait
+
+    def fail_absence_once(workspace_fd: int) -> bool:
+        nonlocal absence_calls
+        absence_calls += 1
+        if absence_calls == 1:
+            entered.set()
+            raise OSError("synthetic settlement retry")
+        return original_absent(workspace_fd)
+
+    def fail_wait_once(self, delay: float) -> None:
+        nonlocal wait_faults
+        if self is bundle._controller and entered.is_set() and wait_faults == 0:
+            wait_faults += 1
+            raise error_factory()
+        original_wait(self, delay)
+
+    monkeypatch.setattr(
+        fs_build_transaction,
+        "_reserved_output_parent_is_absent",
+        fail_absence_once,
+    )
+    monkeypatch.setattr(state_module._WorkspaceWorkerController, "_wait", fail_wait_once)
+    _cancel_join_release(owner, bundle, construction)
+    assert absence_calls >= 2
+    assert wait_faults == 1
+    assert not owner._request._run_root.exists()
 
 
 def test_worker_prepares_holds_and_cleans_exact_workspace(tmp_path: Path) -> None:
@@ -543,11 +827,8 @@ def test_receipt_tamper_cannot_resurrect_or_skip_cleanup(tmp_path: Path) -> None
     object.__setattr__(receipt, "_owner_token", object())
     _cancel_join_release(owner, bundle, construction)
 
-    assert fs_contract._workspace_prepared_receipt_is_revoked(
-        receipt,
-        owner._cleanup_authority._key,
-        construction._record_token,
-    )
+    assert receipt not in fs_contract._LEASES
+    assert type(object.__getattribute__(receipt, "_lease_retired")) is tuple
     assert not owner._request._run_root.exists()
 
 
@@ -560,6 +841,11 @@ def test_fake_revoke_success_cannot_clean_or_terminalize_active_receipt(
     original = fs_transaction._revoke_workspace_prepared_receipt
     monkeypatch.setattr(
         fs_transaction,
+        "_revoke_workspace_prepared_receipt",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        fs_build_transaction,
         "_revoke_workspace_prepared_receipt",
         lambda *_args: True,
     )
@@ -579,6 +865,11 @@ def test_fake_revoke_success_cannot_clean_or_terminalize_active_receipt(
     )
     assert owner._request._run_root.is_dir()
     monkeypatch.setattr(fs_transaction, "_revoke_workspace_prepared_receipt", original)
+    monkeypatch.setattr(
+        fs_build_transaction,
+        "_revoke_workspace_prepared_receipt",
+        original,
+    )
     terminal, joined = thread_module._join_relay_linux_build_workspace_worker(
         owner,
         bundle,

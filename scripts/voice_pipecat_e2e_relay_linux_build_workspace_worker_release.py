@@ -346,10 +346,22 @@ def _forget_filesystem_state(
     if not acquired:
         return False
     built, acquired = bundle._built_destination._read_before(owner_token, deadline)
-    if not acquired or not _forget_workspace_build_state(
-        command,
-        owner_token=owner_token,
-        record_token=record_token,
+    if not acquired:
+        return False
+    prepared_destination = bundle._prepared_destination
+    prepared, acquired = prepared_destination._read_before(
+        prepared_destination._request,
+        deadline,
+    )
+    if (
+        not acquired
+        or (command is None and built is not None)
+        or not _forget_workspace_build_state(
+            command,
+            prepared=prepared,
+            owner_token=owner_token,
+            record_token=record_token,
+        )
     ):
         return False
     _forget_workspace_filesystem_settlement(record_token)
@@ -370,6 +382,7 @@ def _forget_filesystem_state(
         )
         and _complete_workspace_build_state_forget(
             command,
+            prepared=prepared,
             owner_token=owner_token,
             record_token=record_token,
         )

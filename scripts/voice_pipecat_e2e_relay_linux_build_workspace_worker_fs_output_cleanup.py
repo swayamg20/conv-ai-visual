@@ -25,9 +25,11 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _WorkspaceBuildCommand,
     _WorkspaceBuildCommandGate,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_claim_cleanup import (
+    _workspace_revoked_prepared_build_for_cleanup_matches,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
     _FAILURE,
-    _workspace_revoked_prepared_build_matches,
     _WorkspaceFilesystemError,
     _WorkspaceFilesystemIdentity,
     _WorkspacePreparedReceipt,
@@ -226,7 +228,7 @@ def _new_workspace_build_output_cleanup_state(
             build_deadline=command_state[3],
             expected_spawn_fingerprint=expected_spawn_fingerprint,
         )
-        or not _workspace_revoked_prepared_build_matches(
+        or not _workspace_revoked_prepared_build_for_cleanup_matches(
             prepared,
             owner_token,
             record_token,
@@ -289,7 +291,7 @@ def _cleanup_workspace_build_output(state: _WorkspaceBuildOutputCleanupState) ->
         raise _WorkspaceFilesystemError(_FAILURE) from None
     if not process_released:
         raise _WorkspaceFilesystemError(_FAILURE)
-    if not _workspace_revoked_prepared_build_matches(
+    if not _workspace_revoked_prepared_build_for_cleanup_matches(
         state.prepared,
         state.owner_token,
         state.record_token,

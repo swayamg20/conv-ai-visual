@@ -13,6 +13,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_process_facade import (
     _start_relay_linux_build_process,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
+    _build_process_registries_are_empty,
     _build_process_worker_status,
     _resolve_build_process_owner,
 )
@@ -33,6 +34,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_
     _workspace_build_process_association_matches,
     _workspace_build_process_association_phase,
     _workspace_build_process_cleanup_authority,
+    _workspace_build_process_start_intended_association_matches,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _COMMAND_CONTROLLERS,
@@ -47,6 +49,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _workspace_build_command_cancel_requested,
     _WorkspaceBuildCommand,
     _WorkspaceBuildHandoffError,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_prestart import (
+    _revalidate_workspace_build_prestart,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
     _scrub_control_minimal,
@@ -131,6 +136,7 @@ def _drive_workspace_build_process(
     owner_token: object,
     record_token: object,
     build_deadline: float,
+    prestart_authority: object,
 ) -> object:
     """Return the canonical zero receipt only after process-registry absence."""
 
@@ -207,6 +213,16 @@ def _drive_workspace_build_process(
             expected_raw_destination=raw_destination,
         )
         cleanup_value = process_owner._cleanup_authority
+        if not _revalidate_workspace_build_prestart(
+            prestart_authority,
+            command=command,
+            expected_spec=spec,
+            controller=controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        ):
+            raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
         if (
             time.monotonic() >= build_deadline
             or controller._cancellation_requested() is True
@@ -228,6 +244,14 @@ def _drive_workspace_build_process(
         if start_permit is None:
             raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
         try:
+            if not _workspace_build_process_start_intended_association_matches(
+                command,
+                process_owner=process_owner,
+                expected_spec=spec,
+                expected_raw_destination=raw_destination,
+                build_deadline=build_deadline,
+            ):
+                raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
             _start_relay_linux_build_process(process_owner, run_deadline=build_deadline)
         finally:
             _release_workspace_build_process_start(start_permit)
@@ -316,6 +340,8 @@ def _drive_workspace_build_process(
             record_token=record_token,
             build_deadline=build_deadline,
         )
+        if not _build_process_registries_are_empty():
+            raise _WorkspaceBuildHandoffError("Relay Linux workspace build is invalid")
         succeeded = True
         return process_receipt
     except (KeyboardInterrupt, SystemExit) as control:
@@ -365,16 +391,40 @@ def _cancel_associated_workspace_build_process(
         else:
             _scrub_control_minimal(control)
 
-    try:
-        _request_workspace_build_command_cancel(
-            command,
-            cleanup_deadline=cleanup_deadline,
-        )
-    except (KeyboardInterrupt, SystemExit) as control:
-        retain_control(control)
-    except BaseException as error:
-        _scrub_control_minimal(error)
-    authority = _workspace_build_process_cleanup_authority(command)
+    cancel_committed = False
+    attempts = 0
+    while not cancel_committed and attempts < 64:
+        attempts += 1
+        try:
+            cancel_committed = _request_workspace_build_command_cancel(
+                command,
+                cleanup_deadline=cleanup_deadline,
+            )
+            break
+        except (KeyboardInterrupt, SystemExit) as control:
+            retain_control(control)
+        except BaseException as error:
+            _scrub_control_minimal(error)
+    if not cancel_committed:
+        if first_control is not None:
+            raise first_control from None
+        return False
+    authority_resolved = False
+    authority = None
+    attempts = 0
+    while not authority_resolved and attempts < 64:
+        attempts += 1
+        try:
+            authority = _workspace_build_process_cleanup_authority(command)
+            authority_resolved = True
+        except (KeyboardInterrupt, SystemExit) as control:
+            retain_control(control)
+        except BaseException as error:
+            _scrub_control_minimal(error)
+    if not authority_resolved:
+        if first_control is not None:
+            raise first_control from None
+        return False
     if authority is None:
         completed = True
     else:
@@ -416,7 +466,20 @@ def _cancel_associated_workspace_build_process(
                 retain_control(control)
             except BaseException as error:
                 _scrub_control_minimal(error)
-    phase = _workspace_build_process_association_phase(command)
+    phase_resolved = False
+    phase = None
+    attempts = 0
+    while not phase_resolved and attempts < 64:
+        attempts += 1
+        try:
+            phase = _workspace_build_process_association_phase(command)
+            phase_resolved = True
+        except (KeyboardInterrupt, SystemExit) as control:
+            retain_control(control)
+        except BaseException as error:
+            _scrub_control_minimal(error)
+    if not phase_resolved:
+        completed = False
     if phase == "preown-intended":
         completed = False
     if first_control is not None:

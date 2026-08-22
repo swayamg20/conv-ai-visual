@@ -11,6 +11,12 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry as 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_binding import (
     _workspace_worker_claim_state,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_prestart import (
+    _new_workspace_build_prestart_authority,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_transaction import (
+    _run_workspace_build_transaction,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_cleanup import (
     _cleanup_empty_root,
     _cleanup_workspace_root,
@@ -49,6 +55,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_open import
     _stable_binding,
     _WorkspaceCreationIntent,
     _WorkspaceDescriptorSet,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_workspace import (
+    _snapshot_workspace_build_inputs,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_provenance import (
     _fingerprint,
@@ -234,6 +243,17 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
         )
         if controller._cancellation_requested() is True:
             raise _WorkspaceFilesystemError(_FAILURE)
+        baseline = _snapshot_workspace_build_inputs(
+            workspace_fd=workspace_fd,
+            owner_token=claim._owner_token,
+            record_token=claim._record_token,
+            run_id=request._run_id,
+            expected_destination=copied_nodes,
+            expected_node_modules=node_modules_link,
+            node_modules_target=str(request._node_modules),
+            descriptors=descriptors,
+            controller=controller,
+        )
         fingerprint = _fingerprint(_manifest_digest(source_signature), tool_values)
         receipt = _new_workspace_prepared_receipt(
             owner_token=claim._owner_token,
@@ -241,8 +261,41 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
             fingerprint=fingerprint,
         )
         _publish_prepared_receipt(claim, request, receipt, current)
-        while controller._cancellation_requested() is not True:
-            controller._wait(_HOLD_SECONDS)
+        prestart = _new_workspace_build_prestart_authority(
+            claim=claim,
+            current=current,
+            prepared=receipt,
+            source_fd=source_fd,
+            source_identity=source_identity,
+            source_nodes=first_source,
+            run_parent_fd=run_parent_fd,
+            run_parent_identity=run_parent_identity,
+            run_root_fd=run_root_fd,
+            run_identity=run_identity,
+            workspace_fd=workspace_fd,
+            workspace_identity=workspace_identity,
+            node_fd=node_fd,
+            next_fd=next_fd,
+            node_lock_fd=node_lock_fd,
+            next_package_fd=next_package_fd,
+            node_modules_identity=node_modules_identity,
+            tool_values=tool_values,
+            baseline=baseline,
+            descriptors=descriptors,
+        )
+        if not _run_workspace_build_transaction(
+            claim=claim,
+            prepared=receipt,
+            baseline=baseline,
+            prestart=prestart,
+            run_parent_fd=run_parent_fd,
+            run_root_fd=run_root_fd,
+            run_identity=run_identity,
+            workspace_fd=workspace_fd,
+            workspace_identity=workspace_identity,
+            descriptors=descriptors,
+        ):
+            raise _WorkspaceFilesystemError(_FAILURE)
     except (KeyboardInterrupt, SystemExit) as control:
         controller._capture_control(control)
     except BaseException as error:

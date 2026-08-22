@@ -12,6 +12,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_
     _workspace_request_spawn_fingerprint,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt import (
+    _workspace_built_receipt_is_stable_handoff,
     _WorkspaceBuiltReceipt,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
@@ -121,7 +122,11 @@ def _build_relay_linux_workspace(
             if (
                 acquired
                 and type(built) is _WorkspaceBuiltReceipt
-                and built._matches(owner_token, record_token, require_active=True)
+                and _workspace_built_receipt_is_stable_handoff(
+                    built,
+                    owner_token,
+                    record_token,
+                )
             ):
                 succeeded = True
                 return built, True

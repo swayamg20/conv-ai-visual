@@ -460,6 +460,43 @@ def _workspace_built_receipt_is_revoked(
     )
 
 
+def _workspace_built_receipt_is_stable_handoff(
+    receipt: _WorkspaceBuiltReceipt,
+    owner_token: object,
+    record_token: object,
+) -> bool:
+    """Expose active output only after the prepared lease is exactly revoked."""
+
+    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
+        _workspace_revoked_prepared_build_matches,
+    )
+
+    state = _BUILT_LEASES.get(receipt)
+    if (
+        type(receipt) is not _WorkspaceBuiltReceipt
+        or type(state) is not tuple
+        or len(state) != 6
+        or state[0] is not owner_token
+        or state[1] is not record_token
+        or state[5] != "active"
+    ):
+        return False
+    command = state[2]
+    command_state = _COMMANDS.get(command)
+    return bool(
+        type(command_state) is tuple
+        and len(command_state) == 6
+        and _workspace_revoked_prepared_build_matches(
+            command_state[2],
+            owner_token,
+            record_token,
+            command,
+            command_state[3],
+        )
+        and receipt._matches(owner_token, record_token, require_active=True)
+    )
+
+
 def _workspace_built_lease_is_revoked_or_absent(
     command: _WorkspaceBuildCommand,
     owner_token: object,

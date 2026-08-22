@@ -78,6 +78,7 @@ def _require_live_workspace_built_command(
 ) -> tuple[object, object, object, float, str, bytes]:
     from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
         _workspace_prepared_build_matches,
+        _workspace_revoked_prepared_build_matches,
     )
 
     canonical_deadline = _canonical_workspace_built_deadline(
@@ -94,12 +95,24 @@ def _require_live_workspace_built_command(
         and state[1] is record_token
         and state[3] == canonical_deadline
         and state[4] in allowed_phases
-        and _workspace_prepared_build_matches(
-            state[2],
-            owner_token,
-            record_token,
-            command,
-            canonical_deadline,
+        and (
+            _workspace_prepared_build_matches(
+                state[2],
+                owner_token,
+                record_token,
+                command,
+                canonical_deadline,
+            )
+            or (
+                state[4] == "built"
+                and _workspace_revoked_prepared_build_matches(
+                    state[2],
+                    owner_token,
+                    record_token,
+                    command,
+                    canonical_deadline,
+                )
+            )
         )
     ):
         raise _WorkspaceBuildHandoffError(_FAILURE)
