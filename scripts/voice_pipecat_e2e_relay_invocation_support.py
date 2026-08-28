@@ -246,6 +246,7 @@ def _child_request(
     cwd: Path,
     environment: Mapping[str, str],
     completion: str,
+    absolute_deadline: float | None = None,
 ) -> RelayChildRequest:
     expected_completion = "started" if role == "browser" else "ready"
     if (
@@ -265,6 +266,7 @@ def _child_request(
         cwd=cwd,
         environment=environment,
         completion=completion,
+        absolute_deadline=absolute_deadline,
     )
 
 

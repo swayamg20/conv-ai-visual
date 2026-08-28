@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,6 +11,7 @@ _REQUEST_TOKEN = object()
 _EXIT_DESTINATION_TOKEN = object()
 _EXIT_RECEIPT_TOKEN = object()
 _FINISH_TOKEN = object()
+_STOP_TOKEN = object()
 
 _FAILURE = "Relay invocation failed"
 _EXIT_KEYS = frozenset({"status", "returncode"})
@@ -22,7 +24,14 @@ class RelayInvocationError(RuntimeError):
 class RelayChildRequest:
     """Immutable exact command/environment request with discarded output."""
 
-    __slots__ = ("_command", "_completion", "_cwd", "_environment", "_role")
+    __slots__ = (
+        "_absolute_deadline",
+        "_command",
+        "_completion",
+        "_cwd",
+        "_environment",
+        "_role",
+    )
 
     def __init__(
         self,
@@ -33,14 +42,23 @@ class RelayChildRequest:
         cwd: Path,
         environment: Mapping[str, str],
         completion: str,
+        absolute_deadline: float | None = None,
     ) -> None:
-        if token is not _REQUEST_TOKEN:
+        if token is not _REQUEST_TOKEN or (
+            absolute_deadline is not None
+            and (
+                type(absolute_deadline) is not float
+                or not math.isfinite(absolute_deadline)
+                or absolute_deadline <= 0.0
+            )
+        ):
             raise TypeError("Relay child request is factory-owned")
         object.__setattr__(self, "_role", role)
         object.__setattr__(self, "_command", command)
         object.__setattr__(self, "_cwd", cwd)
         object.__setattr__(self, "_environment", tuple(sorted(environment.items())))
         object.__setattr__(self, "_completion", completion)
+        object.__setattr__(self, "_absolute_deadline", absolute_deadline)
 
     @property
     def role(self) -> str:
@@ -63,6 +81,10 @@ class RelayChildRequest:
         return self._completion
 
     @property
+    def absolute_deadline(self) -> float | None:
+        return self._absolute_deadline
+
+    @property
     def output_policy(self) -> str:
         return "discard"
 
@@ -70,6 +92,7 @@ class RelayChildRequest:
         object.__setattr__(self, "_command", ())
         object.__setattr__(self, "_cwd", Path("."))
         object.__setattr__(self, "_environment", ())
+        object.__setattr__(self, "_absolute_deadline", None)
 
     def __setattr__(self, _name: str, _value: object) -> None:
         raise AttributeError("Relay child request is immutable")
@@ -151,6 +174,49 @@ class RelayFinishRequest:
 
     def __reduce__(self) -> None:
         raise TypeError("Relay finish request cannot be serialized")
+
+
+class RelayStopRequest:
+    """Immutable cleanup deadline bound to one private concrete pair."""
+
+    __slots__ = ("_absolute_deadline", "_pair_key")
+
+    def __init__(self, token: object, *, pair_key: object, absolute_deadline: float) -> None:
+        if (
+            token is not _STOP_TOKEN
+            or type(pair_key) is not object
+            or type(absolute_deadline) is not float
+            or not math.isfinite(absolute_deadline)
+            or absolute_deadline <= 0.0
+        ):
+            raise TypeError("Relay stop request is factory-owned")
+        object.__setattr__(self, "_pair_key", pair_key)
+        object.__setattr__(self, "_absolute_deadline", absolute_deadline)
+
+    @property
+    def absolute_deadline(self) -> float:
+        return self._absolute_deadline
+
+    def _matches(self, pair_key: object) -> bool:
+        return self._pair_key is pair_key
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "RelayStopRequest()"
+
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("Relay stop request is immutable")
+
+    def __copy__(self) -> None:
+        raise TypeError("Relay stop request cannot be copied")
+
+    def __deepcopy__(self, _memo: object) -> None:
+        raise TypeError("Relay stop request cannot be copied")
+
+    def __reduce__(self) -> None:
+        raise TypeError("Relay stop request cannot be serialized")
 
 
 class RelayPlaywrightExitDestination:
