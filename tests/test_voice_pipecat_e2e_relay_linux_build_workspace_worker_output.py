@@ -51,6 +51,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_cont
     _validate_workspace_build_inputs,
     _validate_workspace_build_output_documents,
 )
+from tests.relay_linux_runtime_proof import synthetic_runtime_proof_from_snapshots
 
 RUN_ID = "output-contract"
 WORKSPACE = "/private/relay-linux-output-contract/web-workspace"
@@ -825,6 +826,12 @@ def _output_cleanup_state(
         assert process_contract._complete_failed_workspace_build_process(command)
         build_values._workspace_build_command_failed(command)
     if built_status is not None:
+        runtime_proof = synthetic_runtime_proof_from_snapshots(
+            owner_token,
+            record_token,
+            baseline=baseline,
+            output=_validate_fixture(values),
+        )
         built = build_receipt._WorkspaceBuiltReceipt(
             build_receipt._BUILT_TOKEN,
             owner_token=owner_token,
@@ -834,7 +841,7 @@ def _output_cleanup_state(
             owner_token,
             record_token,
             command,
-            b"o" * 32,
+            runtime_proof,
             process_receipt,
             built_status,
         )

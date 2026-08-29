@@ -27,6 +27,25 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receip
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values as build_values
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract as fs_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state as state_module
+from tests.relay_linux_runtime_proof import synthetic_runtime_proof_for
+
+
+def _with_runtime_proof(values: dict[str, object]) -> dict[str, object]:
+    values["runtime_proof"] = synthetic_runtime_proof_for(
+        values["command"],
+        values["owner_token"],
+        values["record_token"],
+        digest=values["output_digest"],
+    )
+    return values
+
+
+def _new_built_receipt(**values: object):
+    return build_receipt._new_workspace_built_receipt(**_with_runtime_proof(values))
+
+
+def _publish_built_receipt(**values: object):
+    return build_publication._publish_workspace_built_receipt(**_with_runtime_proof(values))
 
 
 @pytest.fixture(autouse=True)
@@ -626,7 +645,7 @@ def test_built_creation_requires_exact_single_prepared_association(
         )
 
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,
@@ -641,7 +660,7 @@ def test_built_creation_requires_exact_single_prepared_association(
 def test_active_built_receipt_fails_closed_after_prepared_association_drift() -> None:
     context, _clock, owner, record, command, deadline, process_receipt = _built_context()
     prepared = context[2]
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -708,7 +727,7 @@ def test_built_create_rejects_process_proof_crossing_canonical_deadline(
         deadline=deadline,
     )
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,
@@ -727,7 +746,7 @@ def test_built_activation_rejects_process_proof_crossing_canonical_deadline(
 ) -> None:
     _context, clock, owner, record, command, deadline, process_receipt = _built_context()
     _patch_built_clock(monkeypatch, clock)
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -767,7 +786,7 @@ def test_built_activation_rejects_controller_cancel_latched_by_final_clock(
 ) -> None:
     context, _clock, owner, record, command, deadline, process_receipt = _built_context()
     controller = context[5]
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -854,7 +873,7 @@ def test_built_publication_rejects_final_proof_crossing_canonical_deadline(
         deadline=deadline,
     )
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_publication._publish_workspace_built_receipt(
+        _publish_built_receipt(
             bundle=bundle,
             command=command,
             owner_token=owner,
@@ -875,7 +894,7 @@ def test_built_create_and_existing_replay_reject_canonical_expiry(
 ) -> None:
     _context, clock, owner, record, command, deadline, process_receipt = _built_context()
     _patch_built_clock(monkeypatch, clock)
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -886,7 +905,7 @@ def test_built_create_and_existing_replay_reject_canonical_expiry(
     clock.now = deadline
 
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,
@@ -905,7 +924,7 @@ def test_built_create_after_canonical_expiry_has_no_candidate(
     _patch_built_clock(monkeypatch, clock)
     clock.now = deadline
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,
@@ -941,7 +960,7 @@ def test_built_create_store_crossing_deadline_discards_unpublished_candidate(
         else build_values._WorkspaceBuildHandoffError
     )
     with pytest.raises(expected):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,
@@ -1001,7 +1020,7 @@ def test_built_publication_each_slot_boundary_rejects_expiry(
         monkeypatch.setattr(build_receipt, "_store_built_lease", expire_activation)
 
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_publication._publish_workspace_built_receipt(
+        _publish_built_receipt(
             bundle=bundle,
             command=command,
             owner_token=owner,
@@ -1049,7 +1068,7 @@ def test_built_slot_failure_revokes_candidate_and_preserves_fault(
         else fault
     )
     with pytest.raises(expected):
-        build_publication._publish_workspace_built_receipt(
+        _publish_built_receipt(
             bundle=bundle,
             command=command,
             owner_token=owner,
@@ -1097,7 +1116,7 @@ def test_built_read_stored_effect_return_loss_is_reconciled_or_revoked(
         read_then_raise,
     )
     if fault is OSError:
-        built = build_publication._publish_workspace_built_receipt(
+        built = _publish_built_receipt(
             bundle=bundle,
             command=command,
             owner_token=owner,
@@ -1109,7 +1128,7 @@ def test_built_read_stored_effect_return_loss_is_reconciled_or_revoked(
         assert built._matches(owner, record, require_active=True)
     else:
         with pytest.raises(fault):
-            build_publication._publish_workspace_built_receipt(
+            _publish_built_receipt(
                 bundle=bundle,
                 command=command,
                 owner_token=owner,
@@ -1138,7 +1157,7 @@ def test_active_publication_replay_fault_never_revokes_committed_receipt(
     )
     context = _running_command(owner_token=owner, record_token=record)
     command, deadline, process_receipt = context[3], context[4], context[7]
-    built = build_publication._publish_workspace_built_receipt(
+    built = _publish_built_receipt(
         bundle=bundle,
         command=command,
         owner_token=owner,
@@ -1160,7 +1179,7 @@ def test_active_publication_replay_fault_never_revokes_committed_receipt(
         fail_exact_slot,
     )
     with pytest.raises(fault):
-        build_publication._publish_workspace_built_receipt(
+        _publish_built_receipt(
             bundle=bundle,
             command=command,
             owner_token=owner,
@@ -1229,7 +1248,7 @@ def test_overlapping_publication_replay_cannot_rollback_winner(
             second_started.set()
         try:
             results.append(
-                build_publication._publish_workspace_built_receipt(
+                _publish_built_receipt(
                     bundle=bundle,
                     command=command,
                     owner_token=owner,
@@ -1270,7 +1289,7 @@ def test_direct_activation_control_return_loss_revokes_unconfirmed_candidate(
 ) -> None:
     _context, clock, owner, record, command, deadline, process_receipt = _built_context()
     _patch_built_clock(monkeypatch, clock)
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -1305,7 +1324,7 @@ def test_direct_active_replay_control_preserves_committed_receipt(
 ) -> None:
     _context, clock, owner, record, command, deadline, process_receipt = _built_context()
     _patch_built_clock(monkeypatch, clock)
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner,
         record_token=record,
@@ -1352,7 +1371,7 @@ def test_built_creation_rejects_caller_deadline_beyond_canonical(
     _context, clock, owner, record, command, deadline, process_receipt = _built_context()
     _patch_built_clock(monkeypatch, clock)
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner,
             record_token=record,

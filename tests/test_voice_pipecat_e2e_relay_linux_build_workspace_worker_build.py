@@ -29,9 +29,14 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receip
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values as build_values
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_build_claim_cleanup as claim_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract as fs_contract
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values as fs_output_values
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_release as release_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state as state_module
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_thread as thread_module
+from tests.relay_linux_runtime_proof import (
+    synthetic_runtime_proof,
+    synthetic_runtime_proof_for,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +64,16 @@ def _isolated_build_contract() -> None:
 
 def _future(seconds: float = 2.0) -> float:
     return float(time.monotonic() + seconds)
+
+
+def _new_built_receipt(**values: object):
+    values["runtime_proof"] = synthetic_runtime_proof_for(
+        values["command"],
+        values["owner_token"],
+        values["record_token"],
+        digest=values["output_digest"],
+    )
+    return build_receipt._new_workspace_built_receipt(**values)
 
 
 def _prepared_command(*, deadline: float | None = None):
@@ -113,6 +128,31 @@ def _bind_controller(
     return controller
 
 
+def _runtime_proof_ready_command(monkeypatch: pytest.MonkeyPatch):
+    values = _prepared_command()
+    owner_token, record_token, _prepared, command, deadline = values
+    assert _claim(values) == deadline
+    _controller = _bind_controller(values)
+    assert build_values._intend_workspace_build_process_start(
+        command,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
+    assert build_values._complete_workspace_build_process_start(
+        command,
+        owner_token=owner_token,
+        record_token=record_token,
+        build_deadline=deadline,
+    )
+    monkeypatch.setattr(
+        process_contract,
+        "_workspace_build_process_completed_zero",
+        lambda *_args, **_kwargs: True,
+    )
+    return values
+
+
 def _bundle(tmp_path: Path):
     destination = workspace_module._new_relay_linux_build_workspace_destination(
         source_root=(tmp_path / "source").resolve(),
@@ -160,7 +200,7 @@ def test_command_and_built_values_are_opaque_and_nonserializable(
         record_token=record_token,
         build_deadline=deadline,
     )
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner_token,
         record_token=record_token,
@@ -469,6 +509,146 @@ def test_actual_driver_rejects_cancel_in_flight_before_command_binding(
     assert controller._cancellation_requested() is True
 
 
+@pytest.mark.parametrize(
+    "proof_case",
+    [
+        "wrong-owner",
+        "wrong-record",
+        "wrong-digest",
+        "wrong-type",
+        "malformed-exact-type",
+    ],
+)
+def test_runtime_proof_mismatch_or_wrong_shape_fails_before_any_store(
+    monkeypatch: pytest.MonkeyPatch,
+    proof_case: str,
+) -> None:
+    values = _runtime_proof_ready_command(monkeypatch)
+    owner_token, record_token, _prepared, command, deadline = values
+    output_digest = b"o" * 32
+    if proof_case == "wrong-owner":
+        runtime_proof: object = synthetic_runtime_proof(
+            object(),
+            record_token,
+            digest=output_digest,
+        )
+    elif proof_case == "wrong-record":
+        runtime_proof = synthetic_runtime_proof(
+            owner_token,
+            object(),
+            digest=output_digest,
+        )
+    elif proof_case == "wrong-digest":
+        runtime_proof = synthetic_runtime_proof(
+            owner_token,
+            record_token,
+            digest=b"x" * 32,
+        )
+    elif proof_case == "wrong-type":
+        runtime_proof = object()
+    else:
+        runtime_proof = object.__new__(fs_output_values._WorkspaceBuiltRuntimeProof)
+    command_state = build_values._COMMANDS[command]
+
+    with pytest.raises(build_values._WorkspaceBuildHandoffError):
+        build_receipt._new_workspace_built_receipt(
+            command=command,
+            owner_token=owner_token,
+            record_token=record_token,
+            output_digest=output_digest,
+            runtime_proof=runtime_proof,
+            process_receipt=object(),
+            operation_deadline=deadline,
+        )
+
+    assert build_values._COMMANDS.get(command) is command_state
+    assert len(build_receipt._BUILT_LEASES) == 0
+    assert len(build_receipt._BUILT_BY_COMMAND) == 0
+
+
+@pytest.mark.parametrize(
+    "store_name",
+    ["_store_built_lease", "_store_built_for_command"],
+)
+def test_runtime_proof_return_loss_retains_exact_identity_and_rejects_distinct_replay(
+    monkeypatch: pytest.MonkeyPatch,
+    store_name: str,
+) -> None:
+    values = _runtime_proof_ready_command(monkeypatch)
+    owner_token, record_token, _prepared, command, deadline = values
+    output_digest = b"o" * 32
+    runtime_proof = synthetic_runtime_proof(
+        owner_token,
+        record_token,
+        digest=output_digest,
+    )
+    process_receipt = object()
+    original_store = getattr(build_receipt, store_name)
+    lost = False
+
+    def store_then_raise(*args: object, **kwargs: object) -> None:
+        nonlocal lost
+        original_store(*args, **kwargs)
+        if not lost:
+            lost = True
+            raise OSError("synthetic runtime-proof store return loss")
+
+    monkeypatch.setattr(build_receipt, store_name, store_then_raise)
+    built = build_receipt._new_workspace_built_receipt(
+        command=command,
+        owner_token=owner_token,
+        record_token=record_token,
+        output_digest=output_digest,
+        runtime_proof=runtime_proof,
+        process_receipt=process_receipt,
+        operation_deadline=deadline,
+    )
+    canonical_lease = build_receipt._BUILT_LEASES[built]
+    command_state = build_values._COMMANDS[command]
+
+    assert lost is True
+    assert canonical_lease[3] is runtime_proof
+    assert build_receipt._BUILT_BY_COMMAND.get(command) is built
+    assert len(build_receipt._BUILT_LEASES) == 1
+    assert len(build_receipt._BUILT_BY_COMMAND) == 1
+    assert (
+        build_receipt._new_workspace_built_receipt(
+            command=command,
+            owner_token=owner_token,
+            record_token=record_token,
+            output_digest=output_digest,
+            runtime_proof=runtime_proof,
+            process_receipt=process_receipt,
+            operation_deadline=deadline,
+        )
+        is built
+    )
+
+    distinct_proof = synthetic_runtime_proof(
+        owner_token,
+        record_token,
+        digest=output_digest,
+    )
+    assert distinct_proof is not runtime_proof
+    with pytest.raises(build_values._WorkspaceBuildHandoffError):
+        build_receipt._new_workspace_built_receipt(
+            command=command,
+            owner_token=owner_token,
+            record_token=record_token,
+            output_digest=output_digest,
+            runtime_proof=distinct_proof,
+            process_receipt=process_receipt,
+            operation_deadline=deadline,
+        )
+
+    assert build_values._COMMANDS.get(command) is command_state
+    assert build_receipt._BUILT_BY_COMMAND.get(command) is built
+    assert build_receipt._BUILT_LEASES.get(built) is canonical_lease
+    assert canonical_lease[3] is runtime_proof
+    assert len(build_receipt._BUILT_LEASES) == 1
+    assert len(build_receipt._BUILT_BY_COMMAND) == 1
+
+
 def test_losing_built_candidate_never_matches_or_replaces_canonical_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -502,7 +682,7 @@ def test_losing_built_candidate_never_matches_or_replaces_canonical_receipt(
 
     monkeypatch.setattr(build_receipt, "_store_built_for_command", reject_before_store)
     with pytest.raises(OSError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner_token,
             record_token=record_token,
@@ -553,7 +733,7 @@ def test_built_activation_repairs_stored_effect_return_loss(
         lambda *_args, **_kwargs: True,
     )
     process_receipt = object()
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner_token,
         record_token=record_token,
@@ -562,7 +742,7 @@ def test_built_activation_repairs_stored_effect_return_loss(
         operation_deadline=deadline,
     )
     assert (
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner_token,
             record_token=record_token,
@@ -573,7 +753,7 @@ def test_built_activation_repairs_stored_effect_return_loss(
         is built
     )
     with pytest.raises(build_values._WorkspaceBuildHandoffError):
-        build_receipt._new_workspace_built_receipt(
+        _new_built_receipt(
             command=command,
             owner_token=owner_token,
             record_token=record_token,
@@ -640,7 +820,7 @@ def test_active_built_lease_survives_only_exact_prepared_revocation(
         "_workspace_build_process_completed_zero",
         lambda *_args, **_kwargs: True,
     )
-    built = build_receipt._new_workspace_built_receipt(
+    built = _new_built_receipt(
         command=command,
         owner_token=owner_token,
         record_token=record_token,

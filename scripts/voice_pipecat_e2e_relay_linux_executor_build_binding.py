@@ -16,6 +16,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _WorkspaceBuildCommand,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry import (
     _WorkspaceWorkerThreadReceipt,
 )
@@ -83,6 +86,7 @@ class _RelayLinuxExecutorBuiltEvidence:
         "request",
         "request_values",
         "reservation",
+        "runtime_proof",
         "source",
         "source_commit",
     )
@@ -105,6 +109,7 @@ class _RelayLinuxExecutorBuiltEvidence:
         record_token: object,
         reservation: object,
         digest: bytes,
+        runtime_proof: _WorkspaceBuiltRuntimeProof,
         process_receipt: object,
         request: _RelayLinuxBuildWorkspaceRequest,
         request_values: tuple[object, ...],

@@ -12,6 +12,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _WorkspaceBuildCommand,
     _WorkspaceBuildHandoffError,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 
 
 def _canonical_workspace_built_deadline(
@@ -156,8 +159,11 @@ def _workspace_built_candidate_is_fresh(
         or state[0] is not owner_token
         or (record_token is not None and state[1] is not record_token)
         or type(state[2]) is not _WorkspaceBuildCommand
-        or type(state[3]) is not bytes
-        or len(state[3]) != 32
+        or type(state[3]) is not _WorkspaceBuiltRuntimeProof
+        or not state[3]._matches_canonical(
+            owner_token=state[0],
+            record_token=state[1],
+        )
         or type(state[5]) is not str
         or state[5] not in {"pending", "active"}
         or (require_active and state[5] != "active")

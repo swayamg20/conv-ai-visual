@@ -40,6 +40,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_contract import (
     _workspace_revoked_prepared_build_matches,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry import (
     _WorkspaceWorkerThreadReceipt,
 )
@@ -62,6 +65,7 @@ def _consumer_state(
 ) -> _WorkspaceBuiltConsumerState | None:
     request = owner._request
     controller = bundle._controller
+    proof = lease[3]
     try:
         fingerprint = _workspace_request_spawn_fingerprint(request)
     except (KeyboardInterrupt, SystemExit):
@@ -73,6 +77,8 @@ def _consumer_state(
         or type(controller) is not _WorkspaceWorkerController
         or type(fingerprint) is not bytes
         or len(fingerprint) != 32
+        or type(proof) is not _WorkspaceBuiltRuntimeProof
+        or (digest := proof._canonical_digest()) is None
         or type(lease[4]) is not _RelayLinuxBuildProcessReceipt
     ):
         return None
@@ -80,7 +86,7 @@ def _consumer_state(
         lease[0],
         lease[1],
         lease[2],
-        lease[3],
+        digest,
         lease[4],
         consumer,
         consumer_key,
@@ -240,8 +246,11 @@ def _active_lease_shape(receipt: object, lease: object) -> bool:
         and type(lease[0]) is object
         and type(lease[1]) is object
         and type(lease[2]) is _WorkspaceBuildCommand
-        and type(lease[3]) is bytes
-        and len(lease[3]) == 32
+        and type(lease[3]) is _WorkspaceBuiltRuntimeProof
+        and lease[3]._matches_canonical(
+            owner_token=lease[0],
+            record_token=lease[1],
+        )
         and type(lease[4]) is _RelayLinuxBuildProcessReceipt
         and type(lease[5]) is str
         and lease[5] == "active"
@@ -278,8 +287,12 @@ def _lease_identity_matches(
         and lease[0] is state[0]
         and lease[1] is state[1]
         and lease[2] is state[2]
-        and type(lease[3]) is bytes
-        and lease[3] == state[3]
+        and type(lease[3]) is _WorkspaceBuiltRuntimeProof
+        and lease[3]._matches(
+            owner_token=state[0],
+            record_token=state[1],
+            output_digest=state[3],
+        )
         and lease[4] is state[4]
         and type(lease[5]) is str
         and _BUILT_BY_COMMAND.get(state[2]) is receipt

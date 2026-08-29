@@ -29,6 +29,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
 
 _NODE_FILE_LIMIT = 256 * 1024 * 1024
 _NEXT_FILE_LIMIT = 32 * 1024 * 1024
+_PLAYWRIGHT_FILE_LIMIT = 32 * 1024 * 1024
 _METADATA_FILE_LIMIT = 16 * 1024 * 1024
 _FINGERPRINT_DOMAIN = b"murmur-relay-linux-workspace-prepared-v1\x00"
 
@@ -83,17 +84,28 @@ def _snapshot_tools(
     *,
     node_fd: int,
     next_fd: int,
+    playwright_fd: int,
     node_lock_fd: int,
     next_package_fd: int,
+    playwright_package_fd: int,
     node_modules_identity: _WorkspaceFilesystemIdentity,
     controller: _WorkspaceWorkerController,
 ) -> tuple[object, ...]:
     values: list[object] = [node_modules_identity]
     for descriptor, limit in zip(
-        (node_fd, next_fd, node_lock_fd, next_package_fd),
+        (
+            node_fd,
+            next_fd,
+            playwright_fd,
+            node_lock_fd,
+            next_package_fd,
+            playwright_package_fd,
+        ),
         (
             _NODE_FILE_LIMIT,
             _NEXT_FILE_LIMIT,
+            _PLAYWRIGHT_FILE_LIMIT,
+            _METADATA_FILE_LIMIT,
             _METADATA_FILE_LIMIT,
             _METADATA_FILE_LIMIT,
         ),
@@ -119,7 +131,8 @@ def _revalidate_named_anchors(
     controller: _WorkspaceWorkerController,
 ) -> None:
     source_probe = run_parent_probe = node_probe = node_modules_probe = None
-    next_probe = node_lock_probe = next_package_probe = None
+    next_probe = playwright_probe = node_lock_probe = next_package_probe = None
+    playwright_package_probe = None
     try:
         source_probe = _open_absolute_directory(request._source_root, descriptors)
         if _require_cooperative_node(source_probe, directory=True) != source_identity:
@@ -137,6 +150,12 @@ def _revalidate_named_anchors(
             descriptors,
             executable=True,
         )
+        playwright_probe = _open_relative_regular(
+            node_modules_probe,
+            ("@playwright", "test", "cli.js"),
+            descriptors,
+            executable=False,
+        )
         node_lock_probe = _open_regular_at(
             node_modules_probe,
             ".package-lock.json",
@@ -148,12 +167,20 @@ def _revalidate_named_anchors(
             descriptors,
             executable=False,
         )
+        playwright_package_probe = _open_relative_regular(
+            node_modules_probe,
+            ("@playwright", "test", "package.json"),
+            descriptors,
+            executable=False,
+        )
         if (
             _snapshot_tools(
                 node_fd=node_probe,
                 next_fd=next_probe,
+                playwright_fd=playwright_probe,
                 node_lock_fd=node_lock_probe,
                 next_package_fd=next_package_probe,
+                playwright_package_fd=playwright_package_probe,
                 node_modules_identity=current_modules,
                 controller=controller,
             )
@@ -162,8 +189,10 @@ def _revalidate_named_anchors(
             raise _WorkspaceFilesystemError(_FAILURE)
     finally:
         for descriptor in (
+            playwright_package_probe,
             next_package_probe,
             node_lock_probe,
+            playwright_probe,
             next_probe,
             node_modules_probe,
             node_probe,

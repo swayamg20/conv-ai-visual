@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ import scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry as pr
 import scripts.voice_pipecat_e2e_relay_linux_build_process_registry as process_registry
 import scripts.voice_pipecat_e2e_relay_linux_build_process_state as process_state
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer as build_consumer
+import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer_contract as consumer_contract
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer_values as consumer_values
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_facade as build_facade
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_process_contract as process_contract
@@ -33,16 +35,31 @@ import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_va
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry as worker_registry
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state as worker_state
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_thread as worker_thread
+import scripts.voice_pipecat_e2e_relay_linux_executor as executor_facade
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_binding as executor_binding
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_consume as executor_consume
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_contract as executor_contract
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_linearize as executor_linearize
+import scripts.voice_pipecat_e2e_relay_linux_executor_build_release as executor_release
+import scripts.voice_pipecat_e2e_relay_linux_executor_cleanup as executor_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_executor_inner_state as executor_inner_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_state as executor_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_workspace as executor_workspace
+import scripts.voice_pipecat_e2e_relay_owner_state as relay_owner_state
 import scripts.voice_pipecat_e2e_relay_probe as relay_probe
+from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
 from scripts.voice_pipecat_e2e_relay_probe import RelayProbeSource
 from scripts.voice_pipecat_e2e_stack import WEB_ROOT
+from tests.relay_linux_runtime_proof import synthetic_runtime_proof
+from tests.test_voice_pipecat_e2e_coturn_host import _tools
+from tests.test_voice_pipecat_e2e_relay_linux_executor import _consumed_running_executor
+from tests.test_voice_pipecat_e2e_relay_owner import (
+    SECRET,
+    _BridgeProbe,
+    _install_synthetic_lifecycle,
+    _object,
+    _Runner,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -89,6 +106,7 @@ def _isolated_consume_state() -> None:
         executor_inner_state._INNER_RESULTS,
         executor_inner_state._INNER_TERMINALS,
         executor_inner_state._INNER_AUTHORITIES,
+        relay_owner_state._REGISTRY,
     )
     for mapping in mappings:
         mapping.clear()
@@ -207,6 +225,11 @@ def _active_build(executor, bundle, construction):
         owner_token=owner_token,
         record_token=record_token,
         output_digest=b"d" * 32,
+        runtime_proof=synthetic_runtime_proof(
+            owner_token,
+            record_token,
+            digest=b"d" * 32,
+        ),
         process_receipt=process_receipt,
         operation_deadline=deadline,
     )
@@ -242,6 +265,7 @@ def _active_build(executor, bundle, construction):
         prepared=prepared,
         process_receipt=process_receipt,
         record_token=record_token,
+        runtime_proof=build_receipt._BUILT_LEASES[built][3],
     )
 
 
@@ -292,6 +316,7 @@ def _forgotten_consumed_build(executor, destination, active):
         binding,
         cleanup_deadline=cleanup_deadline,
     )
+    assert build_receipt._BUILT_LEASES[active.built][3] is active.runtime_proof
     assert executor_consume._executor_consumed_build_allows_workspace_release(binding)
     assert build_receipt._forget_workspace_built_receipt(active.command)
     assert build_consumer._workspace_built_consumer_is_forgotten(
@@ -325,14 +350,203 @@ def test_consume_is_one_shot_and_returns_only_an_opaque_binding(tmp_path: Path) 
     assert repr(binding) == "_RelayLinuxExecutorBuiltBinding()"
     assert not any(
         hasattr(binding, name)
-        for name in ("request", "workspace", "dist_path", "digest", "owner", "executor")
+        for name in (
+            "request",
+            "workspace",
+            "dist_path",
+            "digest",
+            "runtime_proof",
+            "owner",
+            "executor",
+        )
     )
+    assert evidence.runtime_proof is active.runtime_proof
+    assert build_receipt._BUILT_LEASES[active.built][3] is active.runtime_proof
     assert build_receipt._BUILT_LEASES[active.built][5] == "consumed"
     assert build_consumer._workspace_built_consumer_is_in_use(
         active.built,
         evidence.consumer,
     )
     assert executor_state._EXECUTORS[evidence.key][5] == "build-consumed"
+
+
+def test_consumed_binding_rejects_a_distinct_runtime_proof_identity(
+    tmp_path: Path,
+    _synthetic_inner_settlement: None,
+) -> None:
+    executor, destination, bundle, construction = _bound_executor(tmp_path)
+    active = _active_build(executor, bundle, construction)
+    binding = executor_consume._consume_relay_linux_executor_built_lease(
+        executor=executor,
+        destination=destination,
+        built=active.built,
+        operation_deadline=active.deadline,
+    )
+    evidence = _evidence(binding)
+    canonical = build_receipt._BUILT_LEASES[active.built]
+    replacement = synthetic_runtime_proof(
+        active.owner_token,
+        active.record_token,
+        digest=evidence.digest,
+    )
+    assert replacement is not active.runtime_proof
+    assert replacement._matches(
+        owner_token=active.owner_token,
+        record_token=active.record_token,
+        output_digest=evidence.digest,
+    )
+
+    build_receipt._BUILT_LEASES[active.built] = (
+        *canonical[:3],
+        replacement,
+        *canonical[4:],
+    )
+    assert not executor_consume._consumed_binding_matches(evidence)
+    assert not executor_consume._release_relay_linux_executor_built_use(
+        binding,
+        cleanup_deadline=time.monotonic() + 1.0,
+    )
+
+    build_receipt._BUILT_LEASES[active.built] = canonical
+    assert executor_consume._consumed_binding_matches(evidence)
+
+
+def test_settled_inner_cleanup_rejects_crosswired_proof_before_release_and_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_synthetic_lifecycle(monkeypatch, events)
+    executor, destination, built, binding = _consumed_running_executor(
+        tmp_path,
+        monkeypatch,
+        events,
+    )
+    evidence = _evidence(binding)
+    rejected = {"release": 0, "ack": 0}
+    original_release = executor_cleanup._release_relay_linux_executor_built_use
+    original_ack = executor_cleanup._acknowledge_relay_linux_executor_built_revoked
+
+    def crosswire_once(phase: str, operation, cleanup_deadline: float) -> bool:
+        canonical = build_receipt._BUILT_LEASES[built]
+        assert canonical[3] is evidence.runtime_proof and canonical[5] == phase
+        replacement = synthetic_runtime_proof(
+            evidence.owner_token,
+            evidence.record_token,
+            digest=evidence.digest,
+        )
+        build_receipt._BUILT_LEASES[built] = (
+            *canonical[:3],
+            replacement,
+            *canonical[4:],
+        )
+        try:
+            assert not operation(binding, cleanup_deadline=cleanup_deadline)
+        finally:
+            build_receipt._BUILT_LEASES[built] = canonical
+        rejected["release" if phase == "consumed" else "ack"] += 1
+        return operation(binding, cleanup_deadline=cleanup_deadline)
+
+    def release_with_crosswire(candidate, *, cleanup_deadline: float) -> bool:
+        assert candidate is binding
+        assert executor_inner_state._inner_settlement_matches_build(evidence)
+        if rejected["release"] == 0:
+            return crosswire_once("consumed", original_release, cleanup_deadline)
+        return original_release(candidate, cleanup_deadline=cleanup_deadline)
+
+    def ack_with_crosswire(candidate, *, cleanup_deadline: float) -> bool:
+        assert candidate is binding
+        if rejected["ack"] == 0:
+            return crosswire_once("revoked", original_ack, cleanup_deadline)
+        return original_ack(candidate, cleanup_deadline=cleanup_deadline)
+
+    monkeypatch.setattr(
+        executor_cleanup,
+        "_release_relay_linux_executor_built_use",
+        release_with_crosswire,
+    )
+    monkeypatch.setattr(
+        executor_cleanup,
+        "_acknowledge_relay_linux_executor_built_revoked",
+        ack_with_crosswire,
+    )
+
+    executor_facade._run_consumed_relay_linux_executor(
+        executor=executor,
+        destination=destination,
+        binding=binding,
+        runner=_Runner(events),
+        bridge_probe=_BridgeProbe(events),
+        tools=_tools(),
+        invocation_driver=_object(RelayInvocationDriver),
+        static_auth_secret=SECRET,
+        now=datetime(2026, 8, 29),
+        browser_timeout_seconds=5.0,
+        runtime_timeout_seconds=5.0,
+        cleanup_timeout_seconds=15.0,
+    )
+
+    assert rejected == {"release": 1, "ack": 1}
+    assert built not in build_receipt._BUILT_LEASES
+    assert not executor_binding._EVIDENCE_BY_KEY
+    assert not executor_binding._RELEASE_BINDINGS
+    assert not executor_inner_state._INNER_RECORDS
+    assert not relay_owner_state._REGISTRY
+    assert not executor._workspace_owner._request._run_root.exists()
+
+
+def test_malformed_stored_runtime_proof_fails_closed_through_revoke_and_forget(
+    tmp_path: Path,
+) -> None:
+    executor, _destination, bundle, construction = _bound_executor(tmp_path)
+    active = _active_build(executor, bundle, construction)
+    canonical = build_receipt._BUILT_LEASES[active.built]
+    malformed = object.__new__(fs_output_values._WorkspaceBuiltRuntimeProof)
+    build_receipt._BUILT_LEASES[active.built] = (
+        *canonical[:3],
+        malformed,
+        *canonical[4:],
+    )
+
+    assert malformed._canonical_digest() is None
+    assert not malformed._matches_canonical(
+        owner_token=active.owner_token,
+        record_token=active.record_token,
+    )
+    assert not active.built._matches(
+        active.owner_token,
+        active.record_token,
+        require_active=True,
+    )
+    assert not build_receipt._workspace_built_receipt_is_stable_handoff(
+        active.built,
+        active.owner_token,
+        active.record_token,
+    )
+    assert not consumer_contract._active_lease_shape(
+        active.built,
+        build_receipt._BUILT_LEASES[active.built],
+    )
+    assert not build_receipt._revoke_workspace_built_receipt(
+        active.built,
+        active.owner_token,
+        active.record_token,
+        cleanup_deadline=time.monotonic() + 1.0,
+    )
+    assert build_receipt._BUILT_LEASES[active.built][5] == "revoked"
+    assert not build_receipt._workspace_built_receipt_is_revoked(
+        active.built,
+        active.owner_token,
+        active.record_token,
+    )
+    assert not build_receipt._workspace_built_lease_is_revoked_or_absent(
+        active.command,
+        active.owner_token,
+        active.record_token,
+    )
+    assert not build_receipt._forget_workspace_built_receipt(active.command)
+    assert build_receipt._BUILT_BY_COMMAND.get(active.command) is active.built
+    assert build_receipt._BUILT_LEASES[active.built][3] is malformed
 
 
 def test_consume_rejects_at_the_canonical_deadline_without_changing_the_lease(
@@ -439,6 +653,8 @@ def test_consumed_store_return_loss_replays_after_deadline(
         operation_deadline=active.deadline,
     )
     evidence = _evidence(binding)
+    assert evidence.runtime_proof is active.runtime_proof
+    assert build_receipt._BUILT_LEASES[active.built][3] is active.runtime_proof
     assert build_consumer._workspace_built_consumer_is_in_use(
         active.built,
         evidence.consumer,
@@ -1049,6 +1265,8 @@ def test_consume_publication_return_loss_repairs_exact_maps(
         operation_deadline=active.deadline,
     )
     evidence = _evidence(binding)
+    assert evidence.runtime_proof is active.runtime_proof
+    assert build_receipt._BUILT_LEASES[active.built][3] is active.runtime_proof
     assert len(executor_binding._EVIDENCE_BY_KEY) == 1
     assert executor_binding._EVIDENCE_BY_KEY.get(evidence.key) is evidence
     assert len(executor_binding._KEYS_BY_BINDING) == 1
@@ -1087,7 +1305,7 @@ def test_use_release_reconciles_outer_phase_return_loss(
         operation_deadline=active.deadline,
     )
     evidence = _evidence(binding)
-    original_store = executor_consume._store_outer_phase
+    original_store = executor_release._store_outer_phase
     error = error_factory()
     raised = False
 
@@ -1100,7 +1318,7 @@ def test_use_release_reconciles_outer_phase_return_loss(
             raise error
         return original_store(*args, **kwargs)
 
-    monkeypatch.setattr(executor_consume, "_store_outer_phase", store_with_loss)
+    monkeypatch.setattr(executor_release, "_store_outer_phase", store_with_loss)
     with pytest.raises(type(error)) as captured:
         executor_consume._release_relay_linux_executor_built_use(
             binding,
@@ -1156,7 +1374,7 @@ def test_acknowledgment_reconciles_generic_phase_return_loss(
         cleanup_deadline=cleanup_deadline,
     )
     assert build_consumer._record_workspace_built_consumer_revoked(active.built)
-    original_acknowledge = build_consumer._acknowledge_workspace_built_consumer_revoked
+    original_acknowledge = executor_release._acknowledge_workspace_built_consumer_revoked
     error = error_factory()
     raised = False
 
@@ -1170,7 +1388,7 @@ def test_acknowledgment_reconciles_generic_phase_return_loss(
         return original_acknowledge(*args, **kwargs)
 
     monkeypatch.setattr(
-        build_consumer,
+        executor_release,
         "_acknowledge_workspace_built_consumer_revoked",
         acknowledge_with_loss,
     )
@@ -1556,6 +1774,8 @@ def test_built_retirement_rejects_marker_tamper_after_lease_map_pops(
     assert active.command not in build_receipt._BUILT_BY_COMMAND
     assert active.built not in build_receipt._BUILT_LEASES
     exact_marker = retirement_markers[active.command]
+    assert exact_marker[1] == active.runtime_proof.output.digest
+    assert all(value is not active.runtime_proof for value in exact_marker)
     malformed = list(exact_marker)
     malformed[1 if tamper == "digest" else 2] = b"z" * 32 if tamper == "digest" else object()
     retirement_markers[active.command] = tuple(malformed)
@@ -1583,6 +1803,7 @@ def test_unconsumed_retirement_rejects_rebuilt_marker_after_lease_map_pops(
         active.record_token,
         cleanup_deadline=cleanup_deadline,
     )
+    assert build_receipt._BUILT_LEASES[active.built][3] is active.runtime_proof
 
     class _MarkerPopLoss(dict):
         raised = False
@@ -1601,6 +1822,8 @@ def test_unconsumed_retirement_rejects_rebuilt_marker_after_lease_map_pops(
     assert active.command not in build_receipt._BUILT_BY_COMMAND
     assert active.built not in build_receipt._BUILT_LEASES
     exact_marker = retirement_markers[active.command]
+    assert exact_marker[1] == active.runtime_proof.output.digest
+    assert all(value is not active.runtime_proof for value in exact_marker)
     assert exact_marker[3] is None
     wrong_digest = b"z" * 32 if tamper == "digest" else exact_marker[1]
     wrong_process = (

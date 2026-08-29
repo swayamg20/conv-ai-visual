@@ -72,6 +72,10 @@ def _valid_graph(tmp_path: Path, run_id: str = "filesystem-worker"):
     next_cli = node_modules / "next" / "dist" / "bin" / "next"
     next_cli.write_bytes(b"#!/usr/bin/env node\n")
     next_cli.chmod(0o700)
+    playwright = node_modules / "@playwright" / "test"
+    playwright.mkdir(parents=True, mode=0o700)
+    (playwright / "cli.js").write_bytes(b"export {};\n")
+    (playwright / "package.json").write_bytes(b'{"name":"@playwright/test"}\n')
     (node_modules / ".package-lock.json").write_bytes(b'{"lockfileVersion":3}\n')
     node = tmp_path / "node"
     node.write_bytes(b"synthetic-node\n")
@@ -273,6 +277,169 @@ def test_worker_hands_one_synthetic_zero_build_to_caller_then_cleans(
     assert terminal is not None
     assert "scope-cleanup" in events
     assert not owner._request._run_root.exists()
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        ("@playwright", "test", "cli.js"),
+        ("@playwright", "test", "package.json"),
+    ),
+    ids=("playwright-cli", "playwright-package"),
+)
+def test_runtime_proof_rejects_same_content_playwright_inode_replacement_between_cuts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_path: tuple[str, ...],
+) -> None:
+    owner, bundle, construction = _valid_graph(
+        tmp_path,
+        f"runtime-proof-{relative_path[-1].replace('.', '-')}",
+    )
+    prepared = _start_prepared(owner, bundle, construction)
+    target = owner._request._node_modules.joinpath(*relative_path)
+    original_content = target.read_bytes()
+    original_details = target.stat(follow_symlinks=False)
+    cut_results: list[bool] = []
+    replacement_inode: int | None = None
+    output_calls = 0
+    publication_calls = 0
+
+    def fake_process_driver(
+        *,
+        command,
+        request,
+        controller,
+        owner_token,
+        record_token,
+        build_deadline,
+        prestart_authority,
+    ):
+        assert request is owner._request
+        assert prestart_authority.claim._bundle is bundle
+        assert build_values._bind_workspace_build_command_controller(
+            command,
+            controller=controller,
+            owner_token=owner_token,
+            record_token=record_token,
+            build_deadline=build_deadline,
+        )
+        state = build_values._COMMANDS[command]
+        build_values._store_command_state(
+            command,
+            (*state[:4], "running", state[5]),
+        )
+        process_owner_token = object()
+        authority = process_state._RelayLinuxBuildCleanupAuthority(
+            process_state._AUTHORITY_TOKEN,
+            key=object(),
+            owner_token=process_owner_token,
+        )
+        receipt = process_state._RelayLinuxBuildProcessReceipt(
+            process_state._RECEIPT_TOKEN,
+            owner_token=process_owner_token,
+        )
+        build_values._PROCESS_ASSOCIATIONS[command] = (
+            owner_token,
+            record_token,
+            process_owner_token,
+            authority,
+            state[5],
+            receipt,
+            "released-zero",
+        )
+        return receipt
+
+    original_revalidate = fs_build_transaction._revalidate_workspace_build_postprocess
+
+    def replace_after_first_provenance_cut(*args: object, **kwargs: object) -> bool:
+        nonlocal replacement_inode
+        accepted = original_revalidate(*args, **kwargs)
+        cut_results.append(accepted)
+        if len(cut_results) == 1 and accepted:
+            replacement = target.with_name(f".{target.name}.replacement")
+            replacement.write_bytes(original_content)
+            replacement.chmod(stat.S_IMODE(original_details.st_mode))
+            replacement_inode = replacement.stat(follow_symlinks=False).st_ino
+            os.replace(replacement, target)
+        return accepted
+
+    snapshot: fs_output_values._WorkspaceBuildOutputSnapshot | None = None
+
+    def fake_validate_output(**kwargs):
+        nonlocal output_calls, snapshot
+        output_calls += 1
+        workspace = owner._request._workspace
+        parent = workspace / ".next-voice-e2e"
+        dist = parent / owner._request._run_id
+        if snapshot is None:
+            parent.mkdir(mode=0o700)
+            dist.mkdir(mode=0o700)
+            (dist / "synthetic-output").write_bytes(b"validated")
+            snapshot = fs_output_values._WorkspaceBuildOutputSnapshot(
+                digest=b"d" * 32,
+                dist_parent_identity=fs_contract._WorkspaceFilesystemIdentity.from_stat(
+                    parent.stat(follow_symlinks=False)
+                ),
+                dist_root_identity=fs_contract._WorkspaceFilesystemIdentity.from_stat(
+                    dist.stat(follow_symlinks=False)
+                ),
+                dist_nodes=(),
+                node_modules_identity=kwargs["baseline"].node_modules_identity,
+                workspace_nodes=(),
+            )
+        return snapshot
+
+    def unexpected_publish(**_kwargs):
+        nonlocal publication_calls
+        publication_calls += 1
+        raise AssertionError("built publication crossed rejected Playwright provenance")
+
+    monkeypatch.setattr(fs_build_transaction, "_drive_workspace_build_process", fake_process_driver)
+    monkeypatch.setattr(
+        fs_build_transaction,
+        "_revalidate_workspace_build_postprocess",
+        replace_after_first_provenance_cut,
+    )
+    monkeypatch.setattr(
+        fs_build_transaction,
+        "_validate_workspace_build_output",
+        fake_validate_output,
+    )
+    monkeypatch.setattr(
+        fs_build_transaction,
+        "_publish_workspace_built_receipt",
+        unexpected_publish,
+    )
+
+    built, coherent = build_facade._build_relay_linux_workspace(
+        owner,
+        bundle,
+        construction,
+        prepared,
+        build_deadline=time.monotonic() + 3.0,
+    )
+    terminal, joined = thread_module._join_relay_linux_build_workspace_worker(
+        owner,
+        bundle,
+        construction,
+        2.0,
+    )
+
+    assert built is None and coherent is False
+    assert cut_results == [True, False]
+    assert output_calls == 2 and publication_calls == 0
+    assert replacement_inode is not None and replacement_inode != original_details.st_ino
+    assert target.stat(follow_symlinks=False).st_ino == replacement_inode
+    assert target.read_bytes() == original_content
+    assert terminal is not None and joined is True
+    assert not owner._request._run_root.exists()
+    assert thread_module._release_relay_linux_build_workspace_worker(
+        owner,
+        bundle,
+        construction,
+        terminal,
+    )
 
 
 def test_no_command_cleanup_waits_for_globally_empty_build_graph(tmp_path: Path) -> None:

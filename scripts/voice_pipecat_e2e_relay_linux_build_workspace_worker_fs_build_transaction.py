@@ -79,6 +79,7 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_clea
     _new_workspace_build_output_cleanup_state,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _new_workspace_built_runtime_proof,
     _WorkspacePreparedDestinationBaseline,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
@@ -203,12 +204,20 @@ def _run_workspace_build_transaction(
             build_deadline=build_deadline,
         ):
             raise _WorkspaceBuildHandoffError(_FAILURE)
+        runtime_proof = _new_workspace_built_runtime_proof(
+            baseline=baseline,
+            output=second,
+            tool_values=prestart.tool_values,
+            owner_token=claim._owner_token,
+            record_token=claim._record_token,
+        )
         built = _publish_workspace_built_receipt(
             bundle=claim._bundle,
             command=command,
             owner_token=claim._owner_token,
             record_token=claim._record_token,
             output_digest=first.digest,
+            runtime_proof=runtime_proof,
             process_receipt=process_receipt,
             operation_deadline=build_deadline,
         )

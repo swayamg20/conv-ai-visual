@@ -46,6 +46,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_consumer import (
     _workspace_worker_consumer_matches,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry import (
     _WorkspaceWorkerThreadReceipt,
 )
@@ -118,6 +121,7 @@ def _store_outer_phase(
 def _consumed_binding_matches(evidence: _RelayLinuxExecutorBuiltEvidence) -> bool:
     return bool(
         _evidence_matches(evidence, evidence.executor, evidence.destination, evidence.built)
+        and _consumed_lease_matches(evidence)
         and _outer_phase_matches(evidence, "build-consumed")
         and _workspace_built_consumer_is_in_use(evidence.built, evidence.consumer)
     )
@@ -202,6 +206,12 @@ def _evidence_shape_matches(
             and type(evidence.record_token) is object
             and type(evidence.digest) is bytes
             and len(evidence.digest) == 32
+            and type(evidence.runtime_proof) is _WorkspaceBuiltRuntimeProof
+            and evidence.runtime_proof._matches(
+                owner_token=evidence.owner_token,
+                record_token=evidence.record_token,
+                output_digest=evidence.digest,
+            )
             and type(evidence.process_receipt) is _RelayLinuxBuildProcessReceipt
             and type(evidence.source) is RelayProbeSource
             and type(evidence.source_commit) is str
@@ -243,6 +253,12 @@ def _cleanup_evidence_matches(evidence: object) -> bool:
         and type(evidence.bundle) is _WorkspaceWorkerBundle
         and type(evidence.construction) is _WorkspaceWorkerThreadReceipt
         and type(evidence.consumer) is _WorkspaceBuiltConsumerToken
+        and type(evidence.runtime_proof) is _WorkspaceBuiltRuntimeProof
+        and evidence.runtime_proof._matches(
+            owner_token=evidence.owner_token,
+            record_token=evidence.record_token,
+            output_digest=evidence.digest,
+        )
         and evidence.authority is not None
         and _AUTHORITY_KEYS.get(evidence.authority) is evidence.key
         and _OWNER_KEYS.get(evidence.executor) is evidence.key
@@ -549,8 +565,11 @@ def _active_lease_matches(
         and state[0] is owner_token
         and state[1] is record_token
         and type(state[2]) is _WorkspaceBuildCommand
-        and type(state[3]) is bytes
-        and len(state[3]) == 32
+        and type(state[3]) is _WorkspaceBuiltRuntimeProof
+        and state[3]._matches_canonical(
+            owner_token=state[0],
+            record_token=state[1],
+        )
         and type(state[4]) is _RelayLinuxBuildProcessReceipt
         and type(state[5]) is str
         and state[5] == "active"
@@ -563,17 +582,30 @@ def _active_evidence_lease_matches(
     evidence: _RelayLinuxExecutorBuiltEvidence,
     lease: object,
 ) -> bool:
+    return _evidence_lease_matches(evidence, lease, "active")
+
+
+def _evidence_lease_matches(
+    evidence: _RelayLinuxExecutorBuiltEvidence,
+    lease: object,
+    phase: str,
+) -> bool:
     return bool(
         type(lease) is tuple
         and len(lease) == 6
         and lease[0] is evidence.owner_token
         and lease[1] is evidence.record_token
         and lease[2] is evidence.command
-        and type(lease[3]) is bytes
-        and lease[3] == evidence.digest
+        and type(lease[3]) is _WorkspaceBuiltRuntimeProof
+        and lease[3] is evidence.runtime_proof
+        and lease[3]._matches(
+            owner_token=evidence.owner_token,
+            record_token=evidence.record_token,
+            output_digest=evidence.digest,
+        )
         and lease[4] is evidence.process_receipt
         and type(lease[5]) is str
-        and lease[5] == "active"
+        and lease[5] == phase
         and _BUILT_BY_COMMAND.get(evidence.command) is evidence.built
     )
 
@@ -591,8 +623,11 @@ def _fresh_active_consumption_deadline(
             and lease[0] is executor._workspace_owner._cleanup_authority._key
             and type(lease[1]) is object
             and type(lease[2]) is _WorkspaceBuildCommand
-            and type(lease[3]) is bytes
-            and len(lease[3]) == 32
+            and type(lease[3]) is _WorkspaceBuiltRuntimeProof
+            and lease[3]._matches_canonical(
+                owner_token=lease[0],
+                record_token=lease[1],
+            )
             and type(lease[4]) is _RelayLinuxBuildProcessReceipt
             and type(lease[5]) is str
             and lease[5] == "active"
@@ -616,19 +651,18 @@ def _fresh_active_consumption_deadline(
 
 
 def _consumed_lease_matches(evidence: _RelayLinuxExecutorBuiltEvidence) -> bool:
-    lease = _BUILT_LEASES.get(evidence.built)
-    return bool(
-        type(lease) is tuple
-        and len(lease) == 6
-        and lease[0] is evidence.owner_token
-        and lease[1] is evidence.record_token
-        and lease[2] is evidence.command
-        and type(lease[3]) is bytes
-        and lease[3] == evidence.digest
-        and lease[4] is evidence.process_receipt
-        and type(lease[5]) is str
-        and lease[5] == "consumed"
-        and _BUILT_BY_COMMAND.get(evidence.command) is evidence.built
+    return _evidence_lease_matches(
+        evidence,
+        _BUILT_LEASES.get(evidence.built),
+        "consumed",
+    )
+
+
+def _revoked_lease_matches(evidence: _RelayLinuxExecutorBuiltEvidence) -> bool:
+    return _evidence_lease_matches(
+        evidence,
+        _BUILT_LEASES.get(evidence.built),
+        "revoked",
     )
 
 

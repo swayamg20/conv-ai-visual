@@ -96,7 +96,8 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
     controller = claim._controller
     descriptors = _WorkspaceDescriptorSet()
     source_fd = run_parent_fd = run_root_fd = workspace_fd = None
-    node_fd = node_modules_fd = next_fd = node_lock_fd = next_package_fd = None
+    node_fd = node_modules_fd = next_fd = playwright_fd = None
+    node_lock_fd = next_package_fd = playwright_package_fd = None
     run_identity = workspace_identity = None
     receipt: _WorkspacePreparedReceipt | None = None
     root_created = False
@@ -122,6 +123,12 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
             descriptors,
             executable=True,
         )
+        playwright_fd = _open_relative_regular(
+            node_modules_fd,
+            ("@playwright", "test", "cli.js"),
+            descriptors,
+            executable=False,
+        )
         node_lock_fd = _open_regular_at(
             node_modules_fd,
             ".package-lock.json",
@@ -133,11 +140,19 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
             descriptors,
             executable=False,
         )
+        playwright_package_fd = _open_relative_regular(
+            node_modules_fd,
+            ("@playwright", "test", "package.json"),
+            descriptors,
+            executable=False,
+        )
         tool_values = _snapshot_tools(
             node_fd=node_fd,
             next_fd=next_fd,
+            playwright_fd=playwright_fd,
             node_lock_fd=node_lock_fd,
             next_package_fd=next_package_fd,
+            playwright_package_fd=playwright_package_fd,
             node_modules_identity=node_modules_identity,
             controller=controller,
         )
@@ -225,8 +240,10 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
             _snapshot_tools(
                 node_fd=node_fd,
                 next_fd=next_fd,
+                playwright_fd=playwright_fd,
                 node_lock_fd=node_lock_fd,
                 next_package_fd=next_package_fd,
+                playwright_package_fd=playwright_package_fd,
                 node_modules_identity=node_modules_identity,
                 controller=controller,
             )
@@ -276,8 +293,10 @@ def _run_workspace_filesystem_transaction(claim: _WorkspaceWorkerClaim) -> bool:
             workspace_identity=workspace_identity,
             node_fd=node_fd,
             next_fd=next_fd,
+            playwright_fd=playwright_fd,
             node_lock_fd=node_lock_fd,
             next_package_fd=next_package_fd,
+            playwright_package_fd=playwright_package_fd,
             node_modules_identity=node_modules_identity,
             tool_values=tool_values,
             baseline=baseline,

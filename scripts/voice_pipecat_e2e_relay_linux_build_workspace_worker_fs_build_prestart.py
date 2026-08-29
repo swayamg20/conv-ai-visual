@@ -75,6 +75,8 @@ class _WorkspaceBuildPrestartAuthority:
         "node_fd",
         "node_lock_fd",
         "node_modules_identity",
+        "playwright_fd",
+        "playwright_package_fd",
         "prepared",
         "run_identity",
         "run_parent_fd",
@@ -122,8 +124,10 @@ def _new_workspace_build_prestart_authority(
     workspace_identity: _WorkspaceFilesystemIdentity,
     node_fd: int,
     next_fd: int,
+    playwright_fd: int,
     node_lock_fd: int,
     next_package_fd: int,
+    playwright_package_fd: int,
     node_modules_identity: _WorkspaceFilesystemIdentity,
     tool_values: tuple[object, ...],
     baseline: _WorkspacePreparedDestinationBaseline,
@@ -144,8 +148,10 @@ def _new_workspace_build_prestart_authority(
                 "workspace_fd",
                 "node_fd",
                 "next_fd",
+                "playwright_fd",
                 "node_lock_fd",
                 "next_package_fd",
+                "playwright_package_fd",
             )
         )
         or any(
@@ -248,8 +254,10 @@ def _revalidate_workspace_build_prestart(
             _snapshot_tools(
                 node_fd=authority.node_fd,
                 next_fd=authority.next_fd,
+                playwright_fd=authority.playwright_fd,
                 node_lock_fd=authority.node_lock_fd,
                 next_package_fd=authority.next_package_fd,
+                playwright_package_fd=authority.playwright_package_fd,
                 node_modules_identity=authority.node_modules_identity,
                 controller=controller,
             )
@@ -365,8 +373,10 @@ def _revalidate_workspace_build_postprocess(
             _snapshot_tools(
                 node_fd=authority.node_fd,
                 next_fd=authority.next_fd,
+                playwright_fd=authority.playwright_fd,
                 node_lock_fd=authority.node_lock_fd,
                 next_package_fd=authority.next_package_fd,
+                playwright_package_fd=authority.playwright_package_fd,
                 node_modules_identity=authority.node_modules_identity,
                 controller=controller,
             )

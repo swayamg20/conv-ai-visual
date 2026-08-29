@@ -15,12 +15,8 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer
     _activate_workspace_built_consumption,
     _intend_workspace_built_consumption,
     _reject_workspace_built_consumption,
-    _release_workspace_built_consumer_use,
     _workspace_built_consumer_is_acknowledged,
     _workspace_built_consumer_is_forgotten,
-    _workspace_built_consumer_is_in_use,
-    _workspace_built_consumer_is_revoked,
-    _workspace_built_consumer_is_use_released,
     _workspace_built_consumer_registries_are_empty,
     _workspace_built_consumption_effect_is_reconcilable,
     _workspace_built_consumption_intent_is_rejectable,
@@ -30,7 +26,6 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt import (
     _BUILT_LEASES,
-    _workspace_built_receipt_is_revoked,
     _WorkspaceBuiltReceipt,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt_contract import (
@@ -46,6 +41,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _acquire_command_gate,
     _acquire_command_publication_gate,
     _WorkspaceBuildCommand,
+)
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
 )
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_registry import (
     _WorkspaceWorkerThreadReceipt,
@@ -68,7 +66,6 @@ from scripts.voice_pipecat_e2e_relay_linux_executor_build_binding import (
 from scripts.voice_pipecat_e2e_relay_linux_executor_build_contract import (
     _active_lease_matches,
     _binding_maps_match,
-    _cleanup_evidence_matches,
     _consumed_binding_matches,
     _consumed_lease_matches,
     _evidence_for_binding,
@@ -94,6 +91,12 @@ from scripts.voice_pipecat_e2e_relay_linux_executor_build_reconcile import (
     _raise_consume_failure,
     _reconcile,
     _retain_consume_failure,
+)
+from scripts.voice_pipecat_e2e_relay_linux_executor_build_release import (
+    _acknowledge_relay_linux_executor_built_revoked as _acknowledge_relay_linux_executor_built_revoked,
+)
+from scripts.voice_pipecat_e2e_relay_linux_executor_build_release import (
+    _release_relay_linux_executor_built_use as _release_relay_linux_executor_built_use,
 )
 from scripts.voice_pipecat_e2e_relay_linux_executor_state import (
     _EXECUTORS,
@@ -157,7 +160,12 @@ def _consume_relay_linux_executor_built_lease(
     ):
         raise _RelayLinuxExecutorError(_FAILURE)
     lease = _BUILT_LEASES.get(built)
-    if type(lease) is not tuple or len(lease) != 6 or type(lease[2]) is not _WorkspaceBuildCommand:
+    if (
+        type(lease) is not tuple
+        or len(lease) != 6
+        or type(lease[2]) is not _WorkspaceBuildCommand
+        or type(lease[3]) is not _WorkspaceBuiltRuntimeProof
+    ):
         raise _RelayLinuxExecutorError(_FAILURE)
     try:
         deadline = _canonical_workspace_built_deadline(
@@ -270,97 +278,6 @@ def _consume_relay_linux_executor_built_lease(
     if evidence is None or not consumed or not _consumed_binding_matches(evidence):
         raise _RelayLinuxExecutorError(_FAILURE)
     return evidence.binding
-
-
-def _release_relay_linux_executor_built_use(
-    binding: _RelayLinuxExecutorBuiltBinding,
-    *,
-    cleanup_deadline: float,
-) -> bool:
-    """Durably end inner use before workspace cancellation may begin."""
-
-    evidence = _evidence_for_binding(binding)
-    if (
-        evidence is None
-        or type(cleanup_deadline) is not float
-        or not math.isfinite(cleanup_deadline)
-    ):
-        return False
-    if not _cleanup_evidence_matches(evidence):
-        return False
-    from scripts.voice_pipecat_e2e_relay_linux_executor_inner_state import (
-        _inner_settlement_matches_build,
-    )
-
-    if not _inner_settlement_matches_build(evidence):
-        return False
-    if _workspace_built_consumer_is_in_use(evidence.built, evidence.consumer):
-        if not _release_workspace_built_consumer_use(
-            evidence.built,
-            evidence.consumer,
-            cleanup_deadline=cleanup_deadline,
-        ):
-            return False
-    if not _consumer_use_has_ended(evidence):
-        return False
-    if _outer_phase_matches(evidence, "build-consumed") and not _store_outer_phase(
-        evidence,
-        "build-consumed",
-        "use-release-intended",
-    ):
-        return False
-    return bool(
-        _outer_phase_matches(evidence, "use-release-intended")
-        or _outer_phase_matches(evidence, "build-revoked-acknowledged")
-    )
-
-
-def _acknowledge_relay_linux_executor_built_revoked(
-    binding: _RelayLinuxExecutorBuiltBinding,
-    *,
-    cleanup_deadline: float,
-) -> bool:
-    """Acknowledge worker revocation before its filesystem deletion gate."""
-
-    from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer import (
-        _acknowledge_workspace_built_consumer_revoked,
-    )
-
-    evidence = _evidence_for_binding(binding)
-    if (
-        evidence is None
-        or type(cleanup_deadline) is not float
-        or not math.isfinite(cleanup_deadline)
-    ):
-        return False
-    if not _cleanup_evidence_matches(evidence):
-        return False
-    acknowledged = _workspace_built_consumer_is_acknowledged(
-        evidence.built,
-        evidence.consumer,
-    ) or _workspace_built_consumer_is_forgotten(evidence.built, evidence.consumer)
-    if not acknowledged and not (
-        _workspace_built_receipt_is_revoked(
-            evidence.built,
-            evidence.owner_token,
-            evidence.record_token,
-        )
-        and _workspace_built_consumer_is_revoked(evidence.built, evidence.consumer)
-    ):
-        return False
-    if _outer_phase_matches(evidence, "use-release-intended") and not _store_outer_phase(
-        evidence,
-        "use-release-intended",
-        "build-revoked-acknowledged",
-    ):
-        return False
-    if not acknowledged:
-        acknowledged = _acknowledge_workspace_built_consumer_revoked(
-            evidence.built,
-            evidence.consumer,
-            cleanup_deadline=cleanup_deadline,
-        )
-    return bool(acknowledged and _outer_phase_matches(evidence, "build-revoked-acknowledged"))
 
 
 def _consumed_workspace_built_revocation_matches(receipt: object) -> bool:
@@ -604,7 +521,7 @@ def _new_evidence(
     consumer = _new_workspace_built_consumer_token(
         receipt=built,
         command=lease[2],
-        digest=lease[3],
+        digest=lease[3]._canonical_digest(),
         process_receipt=lease[4],
         consumer_key=key,
         owner_token=lease[0],
@@ -629,7 +546,8 @@ def _new_evidence(
         owner_token=lease[0],
         record_token=lease[1],
         reservation=reservation,
-        digest=lease[3],
+        digest=lease[3]._canonical_digest(),
+        runtime_proof=lease[3],
         process_receipt=lease[4],
         request=request,
         request_values=request_values,
@@ -671,15 +589,6 @@ def _reconcile_unconsumed_abort(
         failures,
     )
     _reconcile(lambda: _retire_unconsumed_evidence(evidence), failures)
-
-
-def _consumer_use_has_ended(evidence: _RelayLinuxExecutorBuiltEvidence) -> bool:
-    return bool(
-        _workspace_built_consumer_is_use_released(evidence.built, evidence.consumer)
-        or _workspace_built_consumer_is_revoked(evidence.built, evidence.consumer)
-        or _workspace_built_consumer_is_acknowledged(evidence.built, evidence.consumer)
-        or _workspace_built_consumer_is_forgotten(evidence.built, evidence.consumer)
-    )
 
 
 __all__: list[str] = []

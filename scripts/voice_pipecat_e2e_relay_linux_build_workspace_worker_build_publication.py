@@ -19,6 +19,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values i
     _WorkspaceBuildCommand,
     _WorkspaceBuildHandoffError,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_state import (
     _DESTINATION_TOKEN,
     _WorkspaceWorkerBundle,
@@ -32,6 +35,7 @@ def _publish_workspace_built_receipt(
     owner_token: object,
     record_token: object,
     output_digest: bytes,
+    runtime_proof: _WorkspaceBuiltRuntimeProof,
     process_receipt: object,
     operation_deadline: float,
 ) -> _WorkspaceBuiltReceipt:
@@ -54,6 +58,7 @@ def _publish_workspace_built_receipt(
             owner_token=owner_token,
             record_token=record_token,
             output_digest=output_digest,
+            runtime_proof=runtime_proof,
             process_receipt=process_receipt,
             operation_deadline=build_deadline,
         )

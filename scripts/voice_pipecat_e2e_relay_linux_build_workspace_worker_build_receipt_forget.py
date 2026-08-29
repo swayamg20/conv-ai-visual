@@ -16,6 +16,9 @@ from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt 
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _WorkspaceBuildCommand,
 )
+from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_fs_output_values import (
+    _WorkspaceBuiltRuntimeProof,
+)
 
 _RETIREMENTS: weakref.WeakKeyDictionary[
     _WorkspaceBuildCommand,
@@ -132,8 +135,11 @@ def _forget_workspace_built_receipt_state(command: _WorkspaceBuildCommand) -> bo
             and type(state) is tuple
             and len(state) == 6
             and state[2] is command
-            and type(state[3]) is bytes
-            and len(state[3]) == 32
+            and type(state[3]) is _WorkspaceBuiltRuntimeProof
+            and state[3]._matches_canonical(
+                owner_token=state[0],
+                record_token=state[1],
+            )
             and type(state[5]) is str
             and state[5] == "revoked"
         ):
@@ -141,23 +147,26 @@ def _forget_workspace_built_receipt_state(command: _WorkspaceBuildCommand) -> bo
         valid_authority, consumer = _workspace_built_consumer_retirement_authority(receipt)
         if not valid_authority:
             return False
+        digest = state[3]._canonical_digest()
+        if digest is None:
+            return False
         retired = _RETIRED_RECEIPT_EVIDENCE.get(receipt)
         if retired is None:
             retired = _WorkspaceBuiltRetiredEvidence(
                 _RETIREMENT_TOKEN,
                 command,
-                state[3],
+                digest,
                 state[4],
             )
             _RETIRED_RECEIPT_EVIDENCE[receipt] = retired
-        if not _retired_evidence_matches(retired, command, state[3], state[4]):
+        if not _retired_evidence_matches(retired, command, digest, state[4]):
             return False
         if authority is None:
             authority = _WorkspaceBuiltRetirementAuthority(
                 _RETIREMENT_TOKEN,
                 command=command,
                 receipt=receipt,
-                digest=state[3],
+                digest=digest,
                 process_receipt=state[4],
                 consumer=consumer,
                 evidence=retired,
@@ -166,11 +175,11 @@ def _forget_workspace_built_receipt_state(command: _WorkspaceBuildCommand) -> bo
         if not (
             _authority_matches(authority, command, valid_authority, consumer)
             and authority.receipt is receipt
-            and authority.digest == state[3]
+            and authority.digest == digest
             and authority.process_receipt is state[4]
         ):
             return False
-        marker = (receipt, state[3], state[4], consumer, authority)
+        marker = (receipt, digest, state[4], consumer, authority)
         _RETIREMENTS[command] = marker
         if not _retirement_shape(_RETIREMENTS.get(command), command, authority):
             return False
@@ -231,8 +240,12 @@ def _state_matches_marker(
         type(state) is tuple
         and len(state) == 6
         and state[2] is command
-        and type(state[3]) is bytes
-        and state[3] == marker[1]
+        and type(state[3]) is _WorkspaceBuiltRuntimeProof
+        and state[3]._matches(
+            owner_token=state[0],
+            record_token=state[1],
+            output_digest=marker[1],
+        )
         and state[4] is marker[2]
         and type(state[5]) is str
         and state[5] == "revoked"
