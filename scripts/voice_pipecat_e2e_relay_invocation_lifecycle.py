@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import threading
 import time
 
 from scripts.voice_pipecat_e2e_coturn_runtime_values import (
@@ -18,27 +17,35 @@ from scripts.voice_pipecat_e2e_relay_invocation_cleanup import (
     _cleanup_invocation_owner,
     _drop_secrets,
     _invocation_recovery,
-    _new_cleanup_authority,
+    _locked_invocation_operation,
     _raise_invocation_outcome,
     _recover_invocation_owner_publication,
     _register_cleanup_owner,
     _resolve_cleanup_owner,
     _sanitize_invocation_boundary,
 )
+from scripts.voice_pipecat_e2e_relay_invocation_cleanup_authority import (
+    _cleanup_authority_is_terminal,
+    _new_cleanup_authority,
+)
 from scripts.voice_pipecat_e2e_relay_invocation_driver import (
-    _CHILD_DESTINATION_TOKEN,
-    _START_DESTINATION_TOKEN,
-    _STOP_DESTINATION_TOKEN,
     RelayInvocationDriver,
     RelayInvocationTools,
-    _RelayChildAuthorityDestination,
-    _RelayChildStartDestination,
-    _RelayChildStopDestination,
     _RelayInvocationOwnerDestination,
+    _synthetic_invocation_pair_matches,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_owner_values import (
+    _OWNER_TOKEN,
+    RelayInvocationOwner,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_prebootstrap import (
     RelayPrebootstrapDestination,
     RelayPrebootstrapReceipt,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+    _bind_concrete_invocation_owner_destination,
+    _canonical_concrete_invocation_pair_matches,
+    _concrete_invocation_cleanup_contract,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_support import (
     _browser_command,
@@ -73,114 +80,11 @@ from scripts.voice_pipecat_e2e_relay_probe import (
     replacement_relay_playwright_environment,
 )
 
-_OWNER_TOKEN = object()
 _CLEANUP_FAILURE = "Relay invocation cleanup failed"
 _MIN_FINISH_SECONDS, _MAX_FINISH_SECONDS = 0.01, 600.0
 _RECEIPT_STATES = frozenset(
     {"backend-ready", "backend-bound", "web-ready", "browser-started", "browser-finished"}
 )
-
-
-class RelayInvocationOwner:
-    """Caller-preowned staged owner retaining every child cleanup authority."""
-
-    __slots__ = (
-        "_app",
-        "_app_start",
-        "_app_stop",
-        "_browser",
-        "_browser_start",
-        "_browser_stop",
-        "_cleanup_authority",
-        "_cleanup_phase",
-        "_control",
-        "_destination",
-        "_driver",
-        "_operation_lock",
-        "_owner_token",
-        "_prebootstrap_receipt",
-        "_secret_key",
-        "_state",
-        "_tools",
-        "_web",
-        "_web_start",
-        "_web_stop",
-    )
-
-    def __init__(
-        self,
-        token: object,
-        *,
-        driver: RelayInvocationDriver,
-        tools: RelayInvocationTools,
-        run: RelayProbeRun,
-        destination: _RelayInvocationOwnerDestination,
-        secret_key: object,
-        owner_token: object,
-        cleanup_authority: RelayInvocationCleanupAuthority,
-    ) -> None:
-        if (
-            token is not _OWNER_TOKEN
-            or type(driver) is not RelayInvocationDriver
-            or type(tools) is not RelayInvocationTools
-            or type(run) is not RelayProbeRun
-            or type(destination) is not _RelayInvocationOwnerDestination
-            or type(cleanup_authority) is not RelayInvocationCleanupAuthority
-        ):
-            raise TypeError("Relay invocation owner is factory-owned")
-        self._driver: RelayInvocationDriver | None = driver
-        self._destination: _RelayInvocationOwnerDestination | None = destination
-        self._tools: RelayInvocationTools | None = tools
-        self._secret_key: object | None = secret_key
-        self._owner_token = owner_token
-        self._cleanup_authority = cleanup_authority
-        self._app = _RelayChildAuthorityDestination(_CHILD_DESTINATION_TOKEN, role="app")
-        self._web = _RelayChildAuthorityDestination(_CHILD_DESTINATION_TOKEN, role="web")
-        self._browser = _RelayChildAuthorityDestination(_CHILD_DESTINATION_TOKEN, role="browser")
-        self._app_start = _RelayChildStartDestination(
-            _START_DESTINATION_TOKEN, owner_token=owner_token, role="app"
-        )
-        self._web_start = _RelayChildStartDestination(
-            _START_DESTINATION_TOKEN, owner_token=owner_token, role="web"
-        )
-        self._browser_start = _RelayChildStartDestination(
-            _START_DESTINATION_TOKEN, owner_token=owner_token, role="browser"
-        )
-        self._app_stop = _RelayChildStopDestination(
-            _STOP_DESTINATION_TOKEN, owner_token=owner_token, role="app"
-        )
-        self._web_stop = _RelayChildStopDestination(
-            _STOP_DESTINATION_TOKEN, owner_token=owner_token, role="web"
-        )
-        self._browser_stop = _RelayChildStopDestination(
-            _STOP_DESTINATION_TOKEN, owner_token=owner_token, role="browser"
-        )
-        self._prebootstrap_receipt: RelayPrebootstrapReceipt | None = None
-        self._cleanup_phase = "active"
-        self._control: ControlSignal | None = None
-        self._state = "preowning"
-        self._operation_lock = threading.RLock()
-        destination._publish_owner(run, driver, tools, self)
-        _register_cleanup_owner(cleanup_authority, self)
-
-    @property
-    def concrete_adapter(self) -> bool:
-        return False
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __repr__(self) -> str:
-        return "RelayInvocationOwner(concrete_adapter=False)"
-
-    def __copy__(self) -> None:
-        raise TypeError("Relay invocation owner cannot be copied")
-
-    def __deepcopy__(self, _memo: object) -> None:
-        raise TypeError("Relay invocation owner cannot be copied")
-
-    def __reduce__(self) -> None:
-        raise TypeError("Relay invocation owner cannot be serialized")
 
 
 def _new_relay_invocation_owner(
@@ -199,7 +103,7 @@ def _new_relay_invocation_owner(
     try:
         if type(destination) is not _RelayInvocationOwnerDestination:
             raise RelayInvocationError(_FAILURE)
-        with destination._lock:
+        with destination._construction_lock:
             owner = _construct_relay_invocation_owner(run, driver, tools, destination)
     except (KeyboardInterrupt, SystemExit) as error:
         control = control_signal(error)
@@ -240,6 +144,7 @@ def _construct_relay_invocation_owner(
         return existing
     secret_key = object()
     cleanup_authority = _new_cleanup_authority()
+    cleanup_contract = _concrete_invocation_cleanup_contract(driver, tools)
     failed = False
     owner: RelayInvocationOwner | None = None
     try:
@@ -247,8 +152,19 @@ def _construct_relay_invocation_owner(
             type(run) is not RelayProbeRun
             or type(driver) is not RelayInvocationDriver
             or type(tools) is not RelayInvocationTools
-            or driver.concrete_adapter
-            or tools.concrete_adapter
+            or not (
+                _synthetic_invocation_pair_matches(driver, tools)
+                or (
+                    _canonical_concrete_invocation_pair_matches(driver, tools)
+                    and cleanup_contract is not None
+                )
+            )
+        ):
+            raise RelayInvocationError(_FAILURE)
+        if cleanup_contract is not None and not _bind_concrete_invocation_owner_destination(
+            driver,
+            tools,
+            owner_destination,
         ):
             raise RelayInvocationError(_FAILURE)
         owner_token = object()
@@ -262,6 +178,8 @@ def _construct_relay_invocation_owner(
             secret_key=secret_key,
             owner_token=owner_token,
             cleanup_authority=cleanup_authority,
+            cleanup_contract=cleanup_contract,
+            register_owner=_register_cleanup_owner,
         )
         _preown_child_authorities(owner)
         owner._state = "created"
@@ -320,7 +238,7 @@ def relay_prebootstrap_result(owner: RelayInvocationOwner) -> RelayPrebootstrapR
     try:
         if type(owner) is not RelayInvocationOwner:
             raise RelayInvocationError(_FAILURE)
-        with owner._operation_lock:
+        with _locked_invocation_operation(owner):
             receipt = _read_prebootstrap_receipt(owner, _RECEIPT_STATES)
     except (KeyboardInterrupt, SystemExit) as error:
         control = control_signal(error)
@@ -348,7 +266,7 @@ def _adopt_expected_turn_username(owner: RelayInvocationOwner, sink: object) -> 
     if type(owner) is not RelayInvocationOwner:
         sink = owner = None
         raise RelayInvocationError(_FAILURE) from None
-    with owner._operation_lock:
+    with _locked_invocation_operation(owner):
         try:
             if owner._state == "backend-bound":
                 return
@@ -448,7 +366,9 @@ def cleanup_relay_invocation(
 
     owned = _resolve_cleanup_owner(owner, RelayInvocationOwner)
     if owned is None and type(owner) is RelayInvocationCleanupAuthority:
-        return
+        if _cleanup_authority_is_terminal(owner):
+            return
+        raise RelayInvocationCleanupRequired(owner)
     if type(owned) is not RelayInvocationOwner:
         owner = owned = None  # type: ignore[assignment]
         raise RelayInvocationError(_CLEANUP_FAILURE) from None
@@ -470,7 +390,7 @@ def _forward_backend(
     control: ControlSignal | None = None
     failed = False
     cleanup_failed = False
-    with owner._operation_lock:
+    with _locked_invocation_operation(owner):
         try:
             if owner._state in _RECEIPT_STATES:
                 receipt = _read_prebootstrap_receipt(owner, _RECEIPT_STATES)
@@ -521,7 +441,7 @@ def _forward_browser(owner: RelayInvocationOwner) -> tuple[bool, bool, ControlSi
     control: ControlSignal | None = None
     failed = False
     cleanup_failed = False
-    with owner._operation_lock:
+    with _locked_invocation_operation(owner):
         try:
             if owner._state in {"browser-started", "browser-finished"}:
                 return False, False, None
@@ -583,7 +503,7 @@ def _start_stage(
     control: ControlSignal | None = None
     failed = False
     cleanup_failed = False
-    with owner._operation_lock:
+    with _locked_invocation_operation(owner):
         try:
             if owner._state in committed_states:
                 return False, False, None
@@ -631,7 +551,7 @@ def _finish_browser(
     cleanup_failed = False
     browser = driver = request = None
     destination: RelayPlaywrightExitDestination | None = None
-    with owner._operation_lock:
+    with _locked_invocation_operation(owner):
         try:
             destination = _load_secrets(owner._secret_key).exit_destination
             if type(destination) is not RelayPlaywrightExitDestination:

@@ -1722,6 +1722,28 @@ def test_active_invocation_cap_rejects_then_reuses_released_capacity(
     lifecycle_module.cleanup_relay_invocation(third)
 
 
+def test_cleanup_authority_rejects_crosswired_primary_owner(
+    synthetic_runtime: None,
+) -> None:
+    first_harness = _Harness()
+    second_harness = _Harness()
+    first = _new_owner(_components(first_harness))
+    second = _new_owner(_components(second_harness))
+    authority = first._cleanup_authority
+    cleanup_module._REGISTRY[authority._key] = second
+
+    with pytest.raises(facade.RelayInvocationCleanupRequired) as captured:
+        lifecycle_module.cleanup_relay_invocation(authority)
+
+    assert captured.value.cleanup_authority is authority
+    assert first._cleanup_phase == second._cleanup_phase == "active"
+    assert first._owner_token is not None and second._owner_token is not None
+
+    cleanup_module._REGISTRY[authority._key] = first
+    lifecycle_module.cleanup_relay_invocation(authority)
+    lifecycle_module.cleanup_relay_invocation(second)
+
+
 class _Text(str):
     pass
 

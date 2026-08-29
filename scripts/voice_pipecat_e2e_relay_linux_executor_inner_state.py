@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import weakref
 
+from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+    _concrete_invocation_pair_is_absent,
+    _retire_concrete_invocation_pair,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
+    _is_concrete_invocation_selection,
+)
 from scripts.voice_pipecat_e2e_relay_linux_executor_build_binding import (
     _RelayLinuxExecutorBuiltEvidence,
 )
@@ -71,13 +78,21 @@ _INNER_AUTHORITIES: weakref.WeakKeyDictionary[
 
 def _new_inner_result_destination(
     key: _RelayLinuxExecutorKey,
+    replay_prefix: tuple[object, ...],
 ) -> _RelayLinuxExecutorInnerResultDestination:
     with _LOCK:
         existing = _INNER_RESULTS.get(key)
         if existing is not None:
-            if existing._key_ref() is not key:
+            values = existing._read_replay_values()
+            if not (
+                existing._key_ref() is key
+                and _authority_values_have_shape(values)
+                and values[13] is existing
+            ):
                 raise TypeError(_FAILURE)
             return existing
+        if type(replay_prefix) is not tuple or len(replay_prefix) != 13:
+            raise TypeError(_FAILURE)
         if any(
             type(candidate) is not _RelayLinuxExecutorKey
             or candidate not in _RETIRED_KEYS
@@ -96,6 +111,9 @@ def _new_inner_result_destination(
         ):
             raise TypeError(_FAILURE)
         destination = _RelayLinuxExecutorInnerResultDestination(_RESULT_TOKEN, key)
+        values = (*replay_prefix, destination)
+        if not (destination._bind_replay_values(values) and _authority_values_have_shape(values)):
+            raise TypeError(_FAILURE)
         _store_inner_result(key, destination)
         if _INNER_RESULTS.get(key) is not destination:
             raise TypeError(_FAILURE)
@@ -107,25 +125,34 @@ def _new_inner_evidence(**values: object) -> _RelayLinuxExecutorInnerEvidence:
 
 
 def _intend_inner_owner(evidence: _RelayLinuxExecutorInnerEvidence) -> bool:
+    from scripts.voice_pipecat_e2e_relay_linux_executor_inner_authority import (
+        _preparing_inner_authority_matches,
+    )
+
     with _LOCK:
         authority = _INNER_AUTHORITIES.get(evidence.key)
-        if authority is None:
-            if any(
-                candidate is not evidence.key
-                and not _retired_terminal_authority_matches(candidate, candidate_authority)
-                for candidate, candidate_authority in _INNER_AUTHORITIES.items()
+        if _preparing_inner_authority_matches(evidence.key, authority):
+            if not (
+                authority[0] is evidence.result_destination
+                and authority[1] is evidence.replay_values
             ):
                 return False
             _store_inner_authority(
                 evidence.key,
-                (evidence, _inner_authority_values(evidence), "live"),
+                (
+                    evidence,
+                    _inner_authority_values(evidence),
+                    "live",
+                    evidence.owner_binding,
+                ),
             )
             authority = _INNER_AUTHORITIES.get(evidence.key)
         anchor = _executor_inner_authority_anchor(evidence.key)
         if not (
             type(authority) is tuple
-            and len(authority) == 3
+            and len(authority) == 4
             and type(authority[1]) is tuple
+            and authority[3] is evidence.owner_binding
             and anchor is not None
             and anchor._bind(authority[1]) is authority[1]
             and evidence.result_destination._bind_replay_values(authority[1])
@@ -167,7 +194,9 @@ def _settle_inner_owner(
     owner: RelayProbeOwner | None,
     observation: RelayProbeObservation | None,
 ) -> bool:
-    if not _inner_evidence_authority_matches(evidence):
+    if not (
+        _inner_evidence_authority_matches(evidence) and _settle_effective_invocation_pair(evidence)
+    ):
         return False
     result = evidence.result_destination
     published = (
@@ -205,6 +234,8 @@ def _settle_inner_owner(
 
 
 def _retire_settled_inner(evidence: _RelayLinuxExecutorInnerEvidence) -> bool:
+    if not _concrete_invocation_pair_is_absent(evidence.build):
+        return False
     with _LOCK:
         record = _INNER_RECORDS.get(evidence.key)
         if record is None:
@@ -229,13 +260,16 @@ def _retire_settled_inner(evidence: _RelayLinuxExecutorInnerEvidence) -> bool:
             return False
         authority = _INNER_AUTHORITIES.get(evidence.key)
         if _live_inner_authority_matches(evidence, authority):
+            terminal_token = getattr(evidence.result_destination, "_terminal_token", None)
+            if type(terminal_token) is not object:
+                return False
             _store_inner_authority(
                 evidence.key,
                 (
                     evidence.result_destination,
                     authority[1],
                     "terminal",
-                    evidence.result_destination._terminal_token,
+                    terminal_token,
                 ),
             )
             authority = _INNER_AUTHORITIES.get(evidence.key)
@@ -278,7 +312,7 @@ def _recover_live_inner_evidence(
         anchor = _executor_inner_authority_anchor(key)
         if (
             type(authority) is tuple
-            and len(authority) == 3
+            and len(authority) == 4
             and type(authority[0]) is _RelayLinuxExecutorInnerEvidence
             and authority[0].key is key
             and _live_inner_authority_core_matches(authority[0], authority)
@@ -309,7 +343,7 @@ def _inner_replay_inputs_match(
     runner: object,
     bridge_probe: object,
     tools: object,
-    invocation_driver: object,
+    invocation_selection: object,
     static_auth_secret: object,
     now: object,
     browser_timeout_seconds: object,
@@ -328,7 +362,7 @@ def _inner_replay_inputs_match(
             _terminal_inner_authority_matches(key, authority)
             or (
                 type(authority) is tuple
-                and len(authority) == 3
+                and len(authority) == 4
                 and type(authority[0]) is _RelayLinuxExecutorInnerEvidence
                 and _live_inner_authority_matches(authority[0], authority)
             )
@@ -341,7 +375,7 @@ def _inner_replay_inputs_match(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,
@@ -379,6 +413,8 @@ def _inner_live_evidence_is_absent(key: object) -> bool:
 def _inner_settlement_matches_build(build: object) -> bool:
     if type(build) is not _RelayLinuxExecutorBuiltEvidence:
         return False
+    if not _concrete_invocation_pair_is_absent(build):
+        return False
     with _LOCK:
         record = _INNER_RECORDS.get(build.key)
         if not (
@@ -407,6 +443,18 @@ def _inner_settlement_matches_build(build: object) -> bool:
             and _relay_probe_destination_and_registry_are_empty(evidence.owner_destination)
         )
     return _relay_probe_owner_settlement_matches(owner, evidence.owner_destination, observation)
+
+
+def _settle_effective_invocation_pair(evidence: _RelayLinuxExecutorInnerEvidence) -> bool:
+    if not _is_concrete_invocation_selection(evidence.invocation_selection):
+        return evidence.effective_invocation_driver is evidence.invocation_selection
+    return bool(
+        _retire_concrete_invocation_pair(
+            evidence.effective_invocation_driver,
+            evidence.effective_invocation_tools,
+        )
+        and _concrete_invocation_pair_is_absent(evidence.build)
+    )
 
 
 def _inner_record_matches(
@@ -477,11 +525,14 @@ def _store_or_match_terminal(
             return None
         values = authority[1]
         terminal = _INNER_TERMINALS.get(key)
+        terminal_token = getattr(destination, "_terminal_token", None)
+        if type(terminal_token) is not object:
+            return None
         candidate = (
             destination,
             record[0],
             record[1],
-            destination._terminal_token,
+            terminal_token,
             values,
             weakref.ref(key),
         )
@@ -509,61 +560,69 @@ def _terminal_entry_matches(
     destination: object,
     terminal: object,
 ) -> bool:
-    if (
-        type(key) is not _RelayLinuxExecutorKey
-        or type(destination) is not _RelayLinuxExecutorInnerResultDestination
-        or type(terminal) is not tuple
-        or len(terminal) != 6
-        or terminal[0] is not destination
-        or terminal[3] is not destination._terminal_token
-        or destination._key_ref() is not key
-        or type(terminal[5]) is not weakref.ReferenceType
-        or terminal[5]() is not key
-    ):
-        return False
-    record = destination._read()
-    return bool(
-        type(record) is tuple
-        and len(record) == 2
-        and record[0] is terminal[1]
-        and type(record[1]) is str
-        and type(terminal[2]) is str
-        and record[1] == terminal[2]
-        and _authority_values_have_shape(terminal[4])
-        and (
-            (record[1] == "observed" and type(record[0]) is RelayProbeObservation)
-            or (record[1] == "failed" and record[0] is None)
+    try:
+        if (
+            type(key) is not _RelayLinuxExecutorKey
+            or type(destination) is not _RelayLinuxExecutorInnerResultDestination
+            or type(terminal) is not tuple
+            or len(terminal) != 6
+            or terminal[0] is not destination
+            or type(getattr(destination, "_terminal_token", None)) is not object
+            or terminal[3] is not getattr(destination, "_terminal_token", None)
+            or destination._key_ref() is not key
+            or type(terminal[5]) is not weakref.ReferenceType
+            or terminal[5]() is not key
+        ):
+            return False
+        record = destination._read()
+        return bool(
+            type(record) is tuple
+            and len(record) == 2
+            and record[0] is terminal[1]
+            and type(record[1]) is str
+            and type(terminal[2]) is str
+            and record[1] == terminal[2]
+            and _authority_values_have_shape(terminal[4])
+            and (
+                (record[1] == "observed" and type(record[0]) is RelayProbeObservation)
+                or (record[1] == "failed" and record[0] is None)
+            )
         )
-    )
+    except BaseException:
+        return False
 
 
 def _terminal_inner_authority_matches(key: object, authority: object) -> bool:
-    terminal = _INNER_TERMINALS.get(key)
-    anchor = _executor_inner_authority_anchor(key)
-    return bool(
-        type(key) is _RelayLinuxExecutorKey
-        and type(authority) is tuple
-        and len(authority) == 4
-        and type(authority[0]) is _RelayLinuxExecutorInnerResultDestination
-        and _authority_values_have_shape(authority[1])
-        and authority[1][13] is authority[0]
-        and type(authority[2]) is str
-        and authority[2] == "terminal"
-        and authority[3] is authority[0]._terminal_token
-        and anchor is not None
-        and anchor._matches(authority[1])
-        and authority[0]._key_ref() is key
-        and authority[0]._replay_values_are(authority[1])
-        and type(terminal) is tuple
-        and len(terminal) == 6
-        and terminal[4] is authority[1]
-        and _INNER_RESULTS.get(key) is authority[0]
-        and _terminal_entry_matches(
-            key,
-            authority[0],
-            terminal,
+    try:
+        terminal = _INNER_TERMINALS.get(key)
+        anchor = _executor_inner_authority_anchor(key)
+        return bool(
+            type(key) is _RelayLinuxExecutorKey
+            and type(authority) is tuple
+            and len(authority) == 4
+            and type(authority[0]) is _RelayLinuxExecutorInnerResultDestination
+            and _authority_values_have_shape(authority[1])
+            and authority[1][13] is authority[0]
+            and type(authority[2]) is str
+            and authority[2] == "terminal"
+            and type(getattr(authority[0], "_terminal_token", None)) is object
+            and authority[3] is getattr(authority[0], "_terminal_token", None)
+            and anchor is not None
+            and anchor._matches(authority[1])
+            and authority[0]._key_ref() is key
+            and authority[0]._replay_values_are(authority[1])
+            and type(terminal) is tuple
+            and len(terminal) == 6
+            and terminal[4] is authority[1]
+            and _INNER_RESULTS.get(key) is authority[0]
+            and _terminal_entry_matches(
+                key,
+                authority[0],
+                terminal,
+            )
         )
-    )
+    except BaseException:
+        return False
 
 
 def _retired_terminal_authority_matches(key: object, authority: object) -> bool:
@@ -575,16 +634,19 @@ def _inner_authority_has_destination(
     authority: object,
     destination: object,
 ) -> bool:
-    if _terminal_inner_authority_matches(key, authority):
-        return authority[0] is destination
-    return bool(
-        type(authority) is tuple
-        and len(authority) == 3
-        and type(authority[0]) is _RelayLinuxExecutorInnerEvidence
-        and authority[0].key is key
-        and authority[0].result_destination is destination
-        and _live_inner_authority_matches(authority[0], authority)
-    )
+    try:
+        if _terminal_inner_authority_matches(key, authority):
+            return authority[0] is destination
+        return bool(
+            type(authority) is tuple
+            and len(authority) == 4
+            and type(authority[0]) is _RelayLinuxExecutorInnerEvidence
+            and authority[0].key is key
+            and authority[0].result_destination is destination
+            and _live_inner_authority_matches(authority[0], authority)
+        )
+    except BaseException:
+        return False
 
 
 def _settled_live_authority_matches(
@@ -594,7 +656,7 @@ def _settled_live_authority_matches(
 ) -> bool:
     if not (
         type(authority) is tuple
-        and len(authority) == 3
+        and len(authority) == 4
         and type(authority[0]) is _RelayLinuxExecutorInnerEvidence
         and _live_inner_authority_matches(authority[0], authority)
         and authority[0].key is key

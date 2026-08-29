@@ -72,6 +72,7 @@ from scripts.voice_pipecat_e2e_relay_browser_result import (
 from scripts.voice_pipecat_e2e_relay_invocation import (
     RelayInvocationDriver,
     RelayInvocationOwner,
+    new_relay_invocation_driver,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_prebootstrap import (
     RelayPrebootstrapReceipt,
@@ -195,6 +196,19 @@ def _object(kind: type[object], **values: object) -> object:
     return result
 
 
+def _synthetic_invocation_selection() -> RelayInvocationDriver:
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("synthetic invocation callback must not run")
+
+    return new_relay_invocation_driver(
+        preown=unavailable,
+        start=unavailable,
+        prebootstrap=unavailable,
+        finish=unavailable,
+        stop=unavailable,
+    )
+
+
 def _source() -> RelayProbeSource:
     return RelayProbeSource(relay_probe._SOURCE_TOKEN, commit_sha="a" * 40)
 
@@ -236,7 +250,7 @@ def _driver_arguments(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": _SECRET,
         "now": datetime(2026, 8, 23),
         "start_timeout_seconds": 2.0,

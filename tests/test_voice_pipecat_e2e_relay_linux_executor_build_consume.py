@@ -47,17 +47,18 @@ import scripts.voice_pipecat_e2e_relay_linux_executor_state as executor_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_workspace as executor_workspace
 import scripts.voice_pipecat_e2e_relay_owner_state as relay_owner_state
 import scripts.voice_pipecat_e2e_relay_probe as relay_probe
-from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
 from scripts.voice_pipecat_e2e_relay_probe import RelayProbeSource
 from scripts.voice_pipecat_e2e_stack import WEB_ROOT
 from tests.relay_linux_runtime_proof import synthetic_runtime_proof
 from tests.test_voice_pipecat_e2e_coturn_host import _tools
-from tests.test_voice_pipecat_e2e_relay_linux_executor import _consumed_running_executor
+from tests.test_voice_pipecat_e2e_relay_linux_executor import (
+    _consumed_running_executor,
+    _synthetic_invocation_selection,
+)
 from tests.test_voice_pipecat_e2e_relay_owner import (
     SECRET,
     _BridgeProbe,
     _install_synthetic_lifecycle,
-    _object,
     _Runner,
 )
 
@@ -478,7 +479,7 @@ def test_settled_inner_cleanup_rejects_crosswired_proof_before_release_and_ack(
         runner=_Runner(events),
         bridge_probe=_BridgeProbe(events),
         tools=_tools(),
-        invocation_driver=_object(RelayInvocationDriver),
+        invocation_selection=_synthetic_invocation_selection(),
         static_auth_secret=SECRET,
         now=datetime(2026, 8, 29),
         browser_timeout_seconds=5.0,

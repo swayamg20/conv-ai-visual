@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import gc
 import sys
 import time
 import weakref
@@ -15,6 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import scripts.voice_pipecat_e2e_relay_invocation_process_pair as invocation_process_pair
+import scripts.voice_pipecat_e2e_relay_invocation_process_values as invocation_process_values
 import scripts.voice_pipecat_e2e_relay_linux_build_process_registry as process_registry
 import scripts.voice_pipecat_e2e_relay_linux_build_process_state as process_state
 import scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_consumer as build_consumer
@@ -35,12 +38,17 @@ import scripts.voice_pipecat_e2e_relay_linux_executor_build_binding as executor_
 import scripts.voice_pipecat_e2e_relay_linux_executor_build_consume as executor_consume
 import scripts.voice_pipecat_e2e_relay_linux_executor_cleanup as executor_cleanup
 import scripts.voice_pipecat_e2e_relay_linux_executor_inner_anchor as executor_inner_anchor
+import scripts.voice_pipecat_e2e_relay_linux_executor_inner_contract as executor_inner_contract
 import scripts.voice_pipecat_e2e_relay_linux_executor_inner_state as executor_inner_state
+import scripts.voice_pipecat_e2e_relay_linux_executor_inner_values as executor_inner_values
 import scripts.voice_pipecat_e2e_relay_linux_executor_state as executor_state
 import scripts.voice_pipecat_e2e_relay_linux_executor_workspace as executor_workspace
 import scripts.voice_pipecat_e2e_relay_owner_state as relay_owner_state
 import scripts.voice_pipecat_e2e_relay_probe as relay_probe
-from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
+from scripts.voice_pipecat_e2e_relay_invocation import (
+    RelayInvocationDriver,
+    new_relay_invocation_driver,
+)
 from scripts.voice_pipecat_e2e_relay_owner_values import RelayProbeObservation
 from scripts.voice_pipecat_e2e_relay_probe import RelayProbeSource
 from scripts.voice_pipecat_e2e_stack import WEB_ROOT
@@ -49,7 +57,6 @@ from tests.test_voice_pipecat_e2e_relay_owner import (
     SECRET,
     _BridgeProbe,
     _install_synthetic_lifecycle,
-    _object,
     _Runner,
 )
 
@@ -98,6 +105,7 @@ def _isolated_outer_state() -> None:
         executor_inner_state._INNER_RESULTS,
         executor_inner_state._INNER_TERMINALS,
         executor_inner_state._INNER_AUTHORITIES,
+        invocation_process_pair._PAIR_ENTRIES,
         relay_owner_state._REGISTRY,
     )
     for mapping in mappings:
@@ -109,6 +117,19 @@ def _isolated_outer_state() -> None:
 
 def _source() -> RelayProbeSource:
     return RelayProbeSource(relay_probe._SOURCE_TOKEN, commit_sha="a" * 40)
+
+
+def _synthetic_invocation_selection() -> RelayInvocationDriver:
+    def unavailable(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("synthetic invocation callback must not run")
+
+    return new_relay_invocation_driver(
+        preown=unavailable,
+        start=unavailable,
+        prebootstrap=unavailable,
+        finish=unavailable,
+        stop=unavailable,
+    )
 
 
 def _consumed_running_executor(
@@ -290,7 +311,7 @@ def test_outer_runs_inner_then_retires_every_effect_before_return(
         runner=_Runner(events),
         bridge_probe=_BridgeProbe(events),
         tools=_tools(),
-        invocation_driver=_object(RelayInvocationDriver),
+        invocation_selection=_synthetic_invocation_selection(),
         static_auth_secret=SECRET,
         now=datetime(2026, 8, 23),
         browser_timeout_seconds=5.0,
@@ -341,7 +362,7 @@ def test_outer_replays_one_exact_inner_owner_after_return_loss(
     runner = _Runner(events)
     bridge_probe = _BridgeProbe(events)
     tools = _tools()
-    driver = _object(RelayInvocationDriver)
+    invocation_selection = _synthetic_invocation_selection()
     observed_owners: list[object] = []
     if cut == "factory":
         original = executor_facade.new_relay_probe_owner
@@ -378,7 +399,7 @@ def test_outer_replays_one_exact_inner_owner_after_return_loss(
         runner=runner,
         bridge_probe=bridge_probe,
         tools=tools,
-        invocation_driver=driver,
+        invocation_selection=invocation_selection,
         static_auth_secret=SECRET,
         now=datetime(2026, 8, 23),
         browser_timeout_seconds=5.0,
@@ -421,7 +442,7 @@ def test_inner_intent_return_loss_reuses_deadline_and_rejects_changed_timeout(
     runner = _Runner(events)
     bridge_probe = _BridgeProbe(events)
     tools = _tools()
-    driver = _object(RelayInvocationDriver)
+    invocation_selection = _synthetic_invocation_selection()
 
     def run(timeout: float) -> RelayProbeObservation:
         return executor_facade._run_consumed_relay_linux_executor(
@@ -431,7 +452,7 @@ def test_inner_intent_return_loss_reuses_deadline_and_rejects_changed_timeout(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=SECRET,
             now=datetime(2026, 8, 23),
             browser_timeout_seconds=5.0,
@@ -445,6 +466,204 @@ def test_inner_intent_return_loss_reuses_deadline_and_rejects_changed_timeout(
         run(6.0)
     result = run(5.0)
     assert type(result) is RelayProbeObservation
+    assert not executor_inner_state._INNER_RECORDS
+    assert not executor_state._EXECUTORS
+
+
+def test_concrete_pair_precedes_inner_evidence_loss_and_binds_exact_callers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_synthetic_lifecycle(monkeypatch, events)
+    executor, destination, _built, binding = _consumed_running_executor(
+        tmp_path,
+        monkeypatch,
+        events,
+    )
+    runner = _Runner(events)
+    bridge_probe = _BridgeProbe(events)
+    arguments = {
+        "executor": executor,
+        "destination": destination,
+        "binding": binding,
+        "runner": runner,
+        "bridge_probe": bridge_probe,
+        "tools": _tools(),
+        "invocation_selection": invocation_process_values._concrete_invocation_selection(),
+        "static_auth_secret": SECRET,
+        "now": datetime(2026, 8, 23),
+        "browser_timeout_seconds": 5.0,
+        "runtime_timeout_seconds": 5.0,
+        "cleanup_timeout_seconds": 15.0,
+    }
+    original_new_evidence = executor_inner_contract._new_inner_evidence
+    factory_calls: list[object] = []
+
+    def new_evidence_with_loss(**values):
+        evidence = original_new_evidence(**values)
+        factory_calls.append(evidence)
+        if len(factory_calls) == 1:
+            raise OSError("synthetic inner evidence factory return loss")
+        return evidence
+
+    monkeypatch.setattr(
+        executor_inner_contract,
+        "_new_inner_evidence",
+        new_evidence_with_loss,
+    )
+    with pytest.raises(
+        executor_state._RelayLinuxExecutorError,
+        match="Relay Linux executor run failed",
+    ):
+        executor_facade._run_consumed_relay_linux_executor(**arguments)
+    assert len(factory_calls) == 1
+    assert len(invocation_process_pair._PAIR_ENTRIES) == 1
+    pair_record = next(iter(invocation_process_pair._PAIR_ENTRIES.values()))
+    assert type(pair_record) is tuple and len(pair_record) == 5
+    assert pair_record[1].concrete_adapter is True
+    assert pair_record[2].concrete_adapter is True
+
+    for changed in (
+        {"runner": _Runner([])},
+        {"bridge_probe": _BridgeProbe([])},
+    ):
+        with pytest.raises(
+            executor_state._RelayLinuxExecutorError,
+            match="Relay Linux executor run failed",
+        ):
+            executor_facade._run_consumed_relay_linux_executor(**(arguments | changed))
+        assert len(factory_calls) == 1
+        assert next(iter(invocation_process_pair._PAIR_ENTRIES.values())) is pair_record
+
+    result = executor_facade._run_consumed_relay_linux_executor(**arguments)
+    assert type(result) is RelayProbeObservation
+    assert len(factory_calls) == 2
+    assert not invocation_process_pair._PAIR_ENTRIES
+    assert not executor_inner_state._INNER_RECORDS
+    assert not executor_state._EXECUTORS
+
+
+def test_inner_result_store_loss_binds_call_before_concrete_pair_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_synthetic_lifecycle(monkeypatch, events)
+    executor, destination, _built, binding = _consumed_running_executor(
+        tmp_path,
+        monkeypatch,
+        events,
+    )
+    runner = _Runner(events)
+    bridge_probe = _BridgeProbe(events)
+    tools = _tools()
+    invocation_selection = invocation_process_values._concrete_invocation_selection()
+    now = datetime(2026, 8, 23)
+    arguments = {
+        "executor": executor,
+        "destination": destination,
+        "binding": binding,
+        "runner": runner,
+        "bridge_probe": bridge_probe,
+        "tools": tools,
+        "invocation_selection": invocation_selection,
+        "static_auth_secret": SECRET,
+        "now": now,
+        "browser_timeout_seconds": 5.0,
+        "runtime_timeout_seconds": 5.0,
+        "cleanup_timeout_seconds": 15.0,
+    }
+    original_store = executor_inner_state._store_inner_result
+    committed: list[tuple[object, object, object]] = []
+
+    def store_with_loss(key: object, result_destination: object) -> None:
+        original_store(key, result_destination)  # type: ignore[arg-type]
+        committed.append(
+            (key, result_destination, result_destination._read_replay_values())  # type: ignore[attr-defined]
+        )
+        raise OSError("synthetic inner result destination store return loss")
+
+    original_preown_pair = invocation_process_pair._resolve_or_preown_concrete_pair_destination
+    original_mint_pair = invocation_process_pair._resolve_or_mint_concrete_invocation_pair
+    pair_preown_calls: list[dict[str, object]] = []
+    pair_mint_calls: list[tuple[object, dict[str, object]]] = []
+
+    def observe_pair_preown(**values: object):
+        pair_preown_calls.append(values)
+        return original_preown_pair(**values)
+
+    def observe_pair_mint(pair_destination: object, **values: object):
+        pair_mint_calls.append((pair_destination, values))
+        return original_mint_pair(pair_destination, **values)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(executor_inner_state, "_store_inner_result", store_with_loss)
+    monkeypatch.setattr(
+        invocation_process_pair,
+        "_resolve_or_preown_concrete_pair_destination",
+        observe_pair_preown,
+    )
+    monkeypatch.setattr(
+        invocation_process_pair,
+        "_resolve_or_mint_concrete_invocation_pair",
+        observe_pair_mint,
+    )
+
+    with pytest.raises(
+        executor_state._RelayLinuxExecutorError,
+        match="Relay Linux executor run failed",
+    ):
+        executor_facade._run_consumed_relay_linux_executor(**arguments)
+
+    key = executor_state._canonical_executor_key(executor, destination)
+    assert len(committed) == 1
+    committed_key, result_destination, replay_values = committed[0]
+    assert committed_key is key
+    assert executor_inner_state._INNER_RESULTS[key] is result_destination
+    assert result_destination._read_replay_values() is replay_values  # type: ignore[attr-defined]
+    assert type(replay_values) is tuple and len(replay_values) == 14
+    assert replay_values[0] is binding
+    assert type(replay_values[1]) is (
+        executor_inner_values._RelayLinuxExecutorInnerReplayDescriptor
+    )
+    assert all(replay_values[index] is None for index in range(2, 6))
+    assert replay_values[6] is now
+    assert replay_values[7:9] == (5.0, 5.0)
+    assert all(replay_values[index] is None for index in range(9, 13))
+    assert replay_values[13] is result_destination
+    assert result_destination._replay_values_are(replay_values)  # type: ignore[attr-defined]
+    assert all(
+        all(retained is not sensitive for retained in replay_values)
+        for sensitive in (runner, bridge_probe, tools, invocation_selection, SECRET)
+    )
+    assert not executor_inner_state._INNER_AUTHORITIES
+    assert not invocation_process_pair._PAIR_ENTRIES
+    assert not pair_preown_calls
+    assert not pair_mint_calls
+
+    for changed in (
+        {"runner": _Runner([])},
+        {"bridge_probe": _BridgeProbe([])},
+    ):
+        with pytest.raises(
+            executor_state._RelayLinuxExecutorError,
+            match="Relay Linux executor run failed",
+        ):
+            executor_facade._run_consumed_relay_linux_executor(**(arguments | changed))
+        assert len(committed) == 1
+        assert executor_inner_state._INNER_RESULTS[key] is result_destination
+        assert result_destination._read_replay_values() is replay_values  # type: ignore[attr-defined]
+        assert not executor_inner_state._INNER_AUTHORITIES
+        assert not invocation_process_pair._PAIR_ENTRIES
+        assert not pair_preown_calls
+        assert not pair_mint_calls
+
+    result = executor_facade._run_consumed_relay_linux_executor(**arguments)
+    assert type(result) is RelayProbeObservation
+    assert len(committed) == 1
+    assert len(pair_preown_calls) == 1
+    assert len(pair_mint_calls) == 1
+    assert not invocation_process_pair._PAIR_ENTRIES
     assert not executor_inner_state._INNER_RECORDS
     assert not executor_state._EXECUTORS
 
@@ -463,7 +682,7 @@ def test_terminal_replay_requires_the_exact_original_call(
     runner = _Runner(events)
     bridge_probe = _BridgeProbe(events)
     tools = _tools()
-    driver = _object(RelayInvocationDriver)
+    invocation_selection = _synthetic_invocation_selection()
     arguments = {
         "executor": executor,
         "destination": destination,
@@ -471,7 +690,7 @@ def test_terminal_replay_requires_the_exact_original_call(
         "runner": runner,
         "bridge_probe": bridge_probe,
         "tools": tools,
-        "invocation_driver": driver,
+        "invocation_selection": invocation_selection,
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -488,7 +707,7 @@ def test_terminal_replay_requires_the_exact_original_call(
         {"runner": _Runner([])},
         {"bridge_probe": _BridgeProbe([])},
         {"tools": _tools()},
-        {"invocation_driver": _object(RelayInvocationDriver)},
+        {"invocation_selection": _synthetic_invocation_selection()},
         {"static_auth_secret": object()},
         {"now": datetime(2026, 8, 24)},
         {"browser_timeout_seconds": 6.0},
@@ -605,6 +824,116 @@ def test_terminal_replay_requires_the_exact_original_call(
     assert executor_facade._run_consumed_relay_linux_executor(**arguments) is observation
 
 
+def test_malformed_exact_terminal_descriptor_surfaces_fixed_executor_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_synthetic_lifecycle(monkeypatch, events)
+    executor, destination, _built, binding = _consumed_running_executor(
+        tmp_path,
+        monkeypatch,
+        events,
+    )
+    arguments = {
+        "executor": executor,
+        "destination": destination,
+        "binding": binding,
+        "runner": _Runner(events),
+        "bridge_probe": _BridgeProbe(events),
+        "tools": _tools(),
+        "invocation_selection": _synthetic_invocation_selection(),
+        "static_auth_secret": SECRET,
+        "now": datetime(2026, 8, 23),
+        "browser_timeout_seconds": 5.0,
+        "runtime_timeout_seconds": 5.0,
+        "cleanup_timeout_seconds": 15.0,
+    }
+    assert type(executor_facade._run_consumed_relay_linux_executor(**arguments)) is (
+        RelayProbeObservation
+    )
+    key = executor_state._canonical_executor_key(executor, destination)
+    descriptor = executor_inner_state._INNER_AUTHORITIES[key][1][1]
+    assert type(descriptor) is executor_inner_values._RelayLinuxExecutorInnerReplayDescriptor
+    object.__delattr__(descriptor, "_authentic")
+
+    with pytest.raises(
+        executor_state._RelayLinuxExecutorError,
+        match="Relay Linux executor run failed",
+    ):
+        executor_facade._run_consumed_relay_linux_executor(**arguments)
+
+
+def test_missing_terminal_destination_token_surfaces_fixed_executor_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    _install_synthetic_lifecycle(monkeypatch, events)
+    executor, destination, _built, binding = _consumed_running_executor(
+        tmp_path,
+        monkeypatch,
+        events,
+    )
+    arguments = {
+        "executor": executor,
+        "destination": destination,
+        "binding": binding,
+        "runner": _Runner(events),
+        "bridge_probe": _BridgeProbe(events),
+        "tools": _tools(),
+        "invocation_selection": _synthetic_invocation_selection(),
+        "static_auth_secret": SECRET,
+        "now": datetime(2026, 8, 23),
+        "browser_timeout_seconds": 5.0,
+        "runtime_timeout_seconds": 5.0,
+        "cleanup_timeout_seconds": 15.0,
+    }
+    observation = executor_facade._run_consumed_relay_linux_executor(**arguments)
+    assert type(observation) is RelayProbeObservation
+    assert executor_facade._run_consumed_relay_linux_executor(**arguments) is observation
+    key = executor_state._canonical_executor_key(executor, destination)
+    result_destination = executor_inner_state._INNER_RESULTS[key]
+    object.__delattr__(result_destination, "_terminal_token")
+
+    with pytest.raises(
+        executor_state._RelayLinuxExecutorError,
+        match="Relay Linux executor run failed",
+    ):
+        executor_facade._run_consumed_relay_linux_executor(**arguments)
+
+
+def test_replay_descriptor_rejects_aba_candidates_after_identity_expiry() -> None:
+    class ReplayCandidate:
+        pass
+
+    original_objects = tuple(ReplayCandidate() for _index in range(7))
+    original_values = (
+        *original_objects[:4],
+        SECRET,
+        *original_objects[4:],
+    )
+    descriptor = executor_inner_values._RelayLinuxExecutorInnerReplayDescriptor(
+        executor_inner_values._REPLAY_TOKEN,
+        original_values,
+    )
+    expired = tuple(weakref.ref(value) for value in original_objects)
+    del original_values
+    del original_objects
+    gc.collect()
+    assert all(reference() is None for reference in expired)
+
+    replacements = tuple(ReplayCandidate() for _index in range(7))
+    replacement_values = (
+        *replacements[:4],
+        SECRET,
+        *replacements[4:],
+    )
+    # Expired weak identity anchors model the old side of an ABA reuse without
+    # allocator roulette: no same-type replacement may revive that generation.
+    assert not descriptor._matches(replacement_values)
+
+
 @pytest.mark.parametrize("poison", ["retired", "destination", "registry"])
 def test_initial_return_requires_the_exact_terminal_absence(
     tmp_path: Path,
@@ -644,7 +973,7 @@ def test_initial_return_requires_the_exact_terminal_absence(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -681,7 +1010,7 @@ def test_owner_binding_tamper_is_rejected_before_any_inner_effect(
     runner = _Runner(events)
     bridge_probe = _BridgeProbe(events)
     tools = _tools()
-    driver = _object(RelayInvocationDriver)
+    invocation_selection = _synthetic_invocation_selection()
     original_resolve = executor_facade._resolve_or_intend_inner_evidence
     captured: list[tuple[object, tuple[object, ...]]] = []
 
@@ -689,6 +1018,16 @@ def test_owner_binding_tamper_is_rejected_before_any_inner_effect(
         evidence = original_resolve(**kwargs)
         if not captured:
             owner_binding = evidence.owner_binding
+            authority = executor_inner_state._INNER_AUTHORITIES[evidence.key]
+            assert authority == (
+                evidence,
+                authority[1],
+                "live",
+                owner_binding,
+            )
+            assert len(authority[1]) == 14
+            assert authority[1][12] is None
+            assert evidence.result_destination._replay_values is authority[1]
             captured.append((evidence, owner_binding))
             object.__setattr__(
                 evidence,
@@ -709,7 +1048,7 @@ def test_owner_binding_tamper_is_rejected_before_any_inner_effect(
         "runner": runner,
         "bridge_probe": bridge_probe,
         "tools": tools,
-        "invocation_driver": driver,
+        "invocation_selection": invocation_selection,
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -749,7 +1088,7 @@ def test_two_retained_terminal_graphs_reject_a_full_cross_key_swap(
             "runner": _Runner(events),
             "bridge_probe": _BridgeProbe(events),
             "tools": _tools(),
-            "invocation_driver": _object(RelayInvocationDriver),
+            "invocation_selection": _synthetic_invocation_selection(),
             "static_auth_secret": SECRET,
             "now": datetime(2026, 8, 23),
             "browser_timeout_seconds": 5.0,
@@ -849,7 +1188,7 @@ def test_missing_live_inner_record_cannot_authorize_release_and_is_recovered(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -907,7 +1246,7 @@ def test_inner_authority_store_return_loss_recovers_the_exact_intent(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -971,7 +1310,7 @@ def test_inner_terminal_store_return_loss_does_not_expose_a_partial_result(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -989,6 +1328,7 @@ def test_inner_terminal_store_return_loss_does_not_expose_a_partial_result(
         assert caught.value is error
     key = executor_state._canonical_executor_key(executor, destination)
     assert key in executor_inner_state._INNER_TERMINALS
+    assert executor_inner_state._INNER_TERMINALS[key][4][12] is None
     assert executor_inner_state._inner_result(key) is None
     result = executor_facade._run_consumed_relay_linux_executor(
         **(arguments | {"cleanup_timeout_seconds": 15.0}),
@@ -1020,9 +1360,38 @@ def test_inner_retirement_return_loss_finishes_outer_cleanup_and_replays(
     )
     original_retire = executor_cleanup._retire_settled_inner
     raised = False
+    captured: list[tuple[tuple[object, ...], tuple[object, ...], tuple[object, ...]]] = []
 
     def retire_with_loss(evidence):
         nonlocal raised
+        authority = executor_inner_state._INNER_AUTHORITIES[evidence.key]
+        if not captured:
+            assert authority == (
+                evidence,
+                authority[1],
+                "live",
+                evidence.owner_binding,
+            )
+            assert len(authority[1]) == 14
+            assert authority[1][12] is None
+            captured.append(
+                (
+                    evidence.owner_binding,
+                    authority[1],
+                    (
+                        evidence.runner,
+                        evidence.bridge_probe,
+                        evidence.tools,
+                        evidence.invocation_selection,
+                        evidence.effective_invocation_driver,
+                        evidence.effective_invocation_tools,
+                        evidence.static_auth_secret,
+                        evidence.clock,
+                        evidence.wait,
+                        evidence.epoch_clock,
+                    ),
+                )
+            )
         result = original_retire(evidence)
         if result and not raised:
             raised = True
@@ -1037,7 +1406,7 @@ def test_inner_retirement_return_loss_finishes_outer_cleanup_and_replays(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,
@@ -1053,6 +1422,26 @@ def test_inner_retirement_return_loss_finishes_outer_cleanup_and_replays(
         executor_facade._run_consumed_relay_linux_executor(**arguments)
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         assert caught.value is error
+    key = executor_state._canonical_executor_key(executor, destination)
+    live_owner_binding, replay_values, sensitive_values = captured[0]
+    authority = executor_inner_state._INNER_AUTHORITIES[key]
+    terminal = executor_inner_state._INNER_TERMINALS[key]
+    result_destination = executor_inner_state._INNER_RESULTS[key]
+    assert authority == (
+        result_destination,
+        replay_values,
+        "terminal",
+        result_destination._terminal_token,
+    )
+    assert terminal[4] is replay_values
+    assert replay_values[12] is None
+    assert repr(replay_values[1]) == "_RelayLinuxExecutorInnerReplayDescriptor()"
+    assert result_destination._replay_values is replay_values
+    assert executor._inner_authority_anchor._matches(replay_values)
+    assert all(value is not live_owner_binding for value in authority)
+    assert all(value is not live_owner_binding for value in terminal)
+    for sensitive in sensitive_values:
+        assert all(value is not sensitive for value in replay_values)
     assert not executor_inner_state._INNER_RECORDS
     assert not executor_state._EXECUTORS
     assert type(executor_facade._run_consumed_relay_linux_executor(**arguments)) is (
@@ -1090,7 +1479,7 @@ def test_cleanup_wait_control_is_retained_through_full_outer_absence(
         "runner": _Runner(events),
         "bridge_probe": _BridgeProbe(events),
         "tools": _tools(),
-        "invocation_driver": _object(RelayInvocationDriver),
+        "invocation_selection": _synthetic_invocation_selection(),
         "static_auth_secret": SECRET,
         "now": datetime(2026, 8, 23),
         "browser_timeout_seconds": 5.0,

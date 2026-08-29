@@ -19,7 +19,18 @@ from scripts.voice_pipecat_e2e_relay_invocation import (
     RelayInvocationDriver,
     RelayInvocationTools,
 )
-from scripts.voice_pipecat_e2e_relay_invocation_driver import _TOOLS_TOKEN
+from scripts.voice_pipecat_e2e_relay_invocation_driver import (
+    _TOOLS_TOKEN,
+    _synthetic_invocation_driver_matches,
+    _synthetic_invocation_pair_matches,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+    _concrete_invocation_pair_matches_inputs,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
+    _is_concrete_invocation_selection,
+    _RelayConcreteInvocationSelection,
+)
 from scripts.voice_pipecat_e2e_relay_linux_executor_build_binding import (
     _RelayLinuxExecutorBuiltBinding,
     _RelayLinuxExecutorBuiltEvidence,
@@ -29,12 +40,14 @@ from scripts.voice_pipecat_e2e_relay_linux_executor_build_contract import (
     _consumed_binding_matches,
     _evidence_for_binding,
 )
+from scripts.voice_pipecat_e2e_relay_linux_executor_inner_preparation import (
+    _resolve_or_preown_inner_preparation,
+)
 from scripts.voice_pipecat_e2e_relay_linux_executor_inner_state import (
     _inner_record,
     _inner_replay_inputs_match,
     _intend_inner_owner,
     _new_inner_evidence,
-    _new_inner_result_destination,
     _recover_live_inner_evidence,
     _RelayLinuxExecutorInnerEvidence,
 )
@@ -49,6 +62,7 @@ from scripts.voice_pipecat_e2e_relay_owner_state import _owner_binding
 
 _FAILURE = "Relay Linux executor inner ownership is invalid"
 _MAX_RUNTIME_SECONDS = 60.0
+_MAX_CLEANUP_SECONDS = 60.0
 
 
 def _resolve_or_intend_inner_evidence(
@@ -59,11 +73,12 @@ def _resolve_or_intend_inner_evidence(
     runner: object,
     bridge_probe: object,
     tools: TrustedHostTools,
-    invocation_driver: RelayInvocationDriver,
+    invocation_selection: RelayInvocationDriver | _RelayConcreteInvocationSelection,
     static_auth_secret: object,
     now: datetime,
     browser_timeout_seconds: float,
     runtime_timeout_seconds: float,
+    cleanup_timeout_seconds: float,
     clock: Callable[[], float],
     wait: Callable[[float], None],
     epoch_clock: Callable[[], float],
@@ -88,7 +103,7 @@ def _resolve_or_intend_inner_evidence(
             runner,
             bridge_probe,
             tools,
-            invocation_driver,
+            invocation_selection,
             static_auth_secret,
             now,
             browser_timeout_seconds,
@@ -109,7 +124,7 @@ def _resolve_or_intend_inner_evidence(
             runner,
             bridge_probe,
             tools,
-            invocation_driver,
+            invocation_selection,
             static_auth_secret,
             now,
             browser_timeout_seconds,
@@ -134,22 +149,69 @@ def _resolve_or_intend_inner_evidence(
         and type(runtime_timeout_seconds) is float
         and math.isfinite(runtime_timeout_seconds)
         and 0.0 < runtime_timeout_seconds <= _MAX_RUNTIME_SECONDS
+        and type(cleanup_timeout_seconds) is float
+        and math.isfinite(cleanup_timeout_seconds)
+        and 0.0 < cleanup_timeout_seconds <= _MAX_CLEANUP_SECONDS
+        and (
+            _synthetic_invocation_driver_matches(invocation_selection)
+            or _is_concrete_invocation_selection(invocation_selection)
+        )
         and callable(clock)
         and callable(wait)
         and callable(epoch_clock)
     ):
         raise _RelayLinuxExecutorError(_FAILURE)
-    try:
-        runtime_now = clock()
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException:
-        raise _RelayLinuxExecutorError(_FAILURE) from None
-    if type(runtime_now) is not float or not math.isfinite(runtime_now):
+    preparation = _resolve_or_preown_inner_preparation(
+        key,
+        binding=binding,
+        runner=runner,
+        bridge_probe=bridge_probe,
+        tools=tools,
+        invocation_selection=invocation_selection,
+        static_auth_secret=static_auth_secret,
+        now=now,
+        browser_timeout_seconds=browser_timeout_seconds,
+        runtime_timeout_seconds=runtime_timeout_seconds,
+        clock=clock,
+        wait=wait,
+        epoch_clock=epoch_clock,
+    )
+    if preparation is None:
         raise _RelayLinuxExecutorError(_FAILURE)
-    runtime_deadline = runtime_now + runtime_timeout_seconds
-    if not math.isfinite(runtime_deadline) or runtime_deadline <= runtime_now:
-        raise _RelayLinuxExecutorError(_FAILURE)
+    result_destination, replay_descriptor, replay_values = preparation
+    concrete = _is_concrete_invocation_selection(invocation_selection)
+    pair_destination = None
+    pair_values: dict[str, object] | None = None
+    if concrete:
+        from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+            _recover_concrete_pair_destination,
+            _resolve_or_mint_concrete_invocation_pair,
+            _resolve_or_preown_concrete_pair_destination,
+        )
+
+        stable_pair_values = {
+            "build": build,
+            "binding": binding,
+            "selection": invocation_selection,
+            "runtime_timeout_seconds": runtime_timeout_seconds,
+            "cleanup_timeout_seconds": cleanup_timeout_seconds,
+            "clock": clock,
+            "wait": wait,
+            "epoch_clock": epoch_clock,
+        }
+        pair_destination = _recover_concrete_pair_destination(**stable_pair_values)
+        if pair_destination is not None:
+            runtime_deadline = pair_destination._runtime_deadline
+            pair_values = {
+                **stable_pair_values,
+                "runtime_deadline": runtime_deadline,
+                "cleanup_timeout_seconds": pair_destination._cleanup_timeout_seconds,
+            }
+    if pair_destination is None:
+        runtime_deadline = _sample_runtime_deadline(clock, runtime_timeout_seconds)
+        if concrete:
+            pair_values = {**stable_pair_values, "runtime_deadline": runtime_deadline}
+            pair_destination = _resolve_or_preown_concrete_pair_destination(**pair_values)
     request = build.request
     run_id = request._run_id
     workspace = request._workspace
@@ -161,7 +223,16 @@ def _resolve_or_intend_inner_evidence(
         run_id=run_id,
         owner_nonce=_new_runtime_owner_nonce(),
     )
-    invocation_tools = _new_workspace_invocation_tools(build, epoch_clock)
+    if concrete:
+        if pair_destination is None or pair_values is None:
+            raise _RelayLinuxExecutorError(_FAILURE)
+        _grant, effective_invocation_driver, invocation_tools = (
+            _resolve_or_mint_concrete_invocation_pair(pair_destination, **pair_values)
+        )
+        cleanup_timeout_seconds = pair_values["cleanup_timeout_seconds"]  # type: ignore[assignment]
+    else:
+        effective_invocation_driver = invocation_selection
+        invocation_tools = _new_workspace_invocation_tools(build, epoch_clock)
     owner_destination = executor._relay_owner_destination
     owner_binding = _owner_binding(
         build.source,
@@ -170,13 +241,12 @@ def _resolve_or_intend_inner_evidence(
         tools,
         identity,
         paths,
-        invocation_driver,
+        effective_invocation_driver,
         invocation_tools,
         runtime_deadline,
         clock,
         wait,
     )
-    result_destination = _new_inner_result_destination(key)
     evidence = _new_inner_evidence(
         key=key,
         build=build,
@@ -186,10 +256,12 @@ def _resolve_or_intend_inner_evidence(
         bridge_probe=bridge_probe,
         browser_timeout_seconds=browser_timeout_seconds,
         tools=tools,
-        invocation_driver=invocation_driver,
-        invocation_tools=invocation_tools,
+        invocation_selection=invocation_selection,
+        effective_invocation_driver=effective_invocation_driver,
+        effective_invocation_tools=invocation_tools,
         runtime_deadline=runtime_deadline,
         runtime_timeout_seconds=runtime_timeout_seconds,
+        cleanup_timeout_seconds=cleanup_timeout_seconds,
         static_auth_secret=static_auth_secret,
         now=now,
         clock=clock,
@@ -197,6 +269,8 @@ def _resolve_or_intend_inner_evidence(
         epoch_clock=epoch_clock,
         owner_binding=owner_binding,
         owner_destination=owner_destination,
+        replay_descriptor=replay_descriptor,
+        replay_values=replay_values,
         result_destination=result_destination,
     )
     try:
@@ -213,6 +287,24 @@ def _resolve_or_intend_inner_evidence(
     return evidence
 
 
+def _sample_runtime_deadline(
+    clock: Callable[[], float],
+    runtime_timeout_seconds: float,
+) -> float:
+    try:
+        runtime_now = clock()
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        raise _RelayLinuxExecutorError(_FAILURE) from None
+    if type(runtime_now) is not float or not math.isfinite(runtime_now):
+        raise _RelayLinuxExecutorError(_FAILURE)
+    runtime_deadline = runtime_now + runtime_timeout_seconds
+    if not math.isfinite(runtime_deadline) or runtime_deadline <= runtime_now:
+        raise _RelayLinuxExecutorError(_FAILURE)
+    return runtime_deadline
+
+
 def _inner_inputs_match(
     evidence: object,
     executor: object,
@@ -221,7 +313,7 @@ def _inner_inputs_match(
     runner: object,
     bridge_probe: object,
     tools: object,
-    invocation_driver: object,
+    invocation_selection: object,
     static_auth_secret: object,
     now: object,
     browser_timeout_seconds: object,
@@ -241,14 +333,15 @@ def _inner_inputs_match(
         and evidence.runner is runner
         and evidence.bridge_probe is bridge_probe
         and evidence.tools is tools
-        and evidence.invocation_driver is invocation_driver
+        and evidence.invocation_selection is invocation_selection
+        and _effective_invocation_pair_matches(evidence)
         and _inner_replay_inputs_match(
             evidence.key,
             binding=binding,
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,
@@ -260,6 +353,32 @@ def _inner_inputs_match(
         )
         and _consumed_binding_matches(build)
         and _cleanup_evidence_matches(build)
+    )
+
+
+def _effective_invocation_pair_matches(
+    evidence: _RelayLinuxExecutorInnerEvidence,
+) -> bool:
+    if _is_concrete_invocation_selection(evidence.invocation_selection):
+        return _concrete_invocation_pair_matches_inputs(
+            evidence.effective_invocation_driver,
+            evidence.effective_invocation_tools,
+            build=evidence.build,
+            binding=evidence.build.binding,
+            selection=evidence.invocation_selection,
+            runtime_deadline=evidence.runtime_deadline,
+            runtime_timeout_seconds=evidence.runtime_timeout_seconds,
+            cleanup_timeout_seconds=evidence.cleanup_timeout_seconds,
+            clock=evidence.clock,
+            wait=evidence.wait,
+            epoch_clock=evidence.epoch_clock,
+        )
+    return bool(
+        evidence.effective_invocation_driver is evidence.invocation_selection
+        and _synthetic_invocation_pair_matches(
+            evidence.effective_invocation_driver,
+            evidence.effective_invocation_tools,
+        )
     )
 
 

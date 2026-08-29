@@ -9,6 +9,9 @@ from datetime import datetime
 
 from scripts.voice_pipecat_e2e_coturn_host import TrustedHostTools
 from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
+from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
+    _RelayConcreteInvocationSelection,
+)
 from scripts.voice_pipecat_e2e_relay_linux_executor_build_binding import (
     _RelayLinuxExecutorBuiltBinding,
     _RelayLinuxExecutorBuiltEvidence,
@@ -65,7 +68,7 @@ def _run_consumed_relay_linux_executor(
     runner: object,
     bridge_probe: object,
     tools: TrustedHostTools,
-    invocation_driver: RelayInvocationDriver,
+    invocation_selection: RelayInvocationDriver | _RelayConcreteInvocationSelection,
     static_auth_secret: object,
     now: datetime,
     browser_timeout_seconds: float,
@@ -105,7 +108,7 @@ def _run_consumed_relay_linux_executor(
         runner=runner,
         bridge_probe=bridge_probe,
         tools=tools,
-        invocation_driver=invocation_driver,
+        invocation_selection=invocation_selection,
         static_auth_secret=static_auth_secret,
         now=now,
         browser_timeout_seconds=browser_timeout_seconds,
@@ -127,7 +130,7 @@ def _run_consumed_relay_linux_executor(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,
@@ -180,11 +183,12 @@ def _run_consumed_relay_linux_executor(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,
             runtime_timeout_seconds=runtime_timeout_seconds,
+            cleanup_timeout_seconds=cleanup_timeout_seconds,
             clock=clock,
             wait=wait,
             epoch_clock=epoch_clock,
@@ -213,7 +217,7 @@ def _run_consumed_relay_linux_executor(
     )
     result = _inner_result(evidence.key)
     evidence = None
-    static_auth_secret = now = runner = bridge_probe = tools = invocation_driver = None
+    static_auth_secret = now = runner = bridge_probe = tools = invocation_selection = None
     if not settled:
         _raise_retained(failures)
         raise _RelayLinuxExecutorError(_FAILURE)
@@ -262,8 +266,8 @@ def _resolve_or_construct_inner_owner(
             runner=evidence.runner,
             bridge_probe=evidence.bridge_probe,
             tools=evidence.tools,
-            invocation_driver=evidence.invocation_driver,
-            invocation_tools=evidence.invocation_tools,
+            invocation_driver=evidence.effective_invocation_driver,
+            invocation_tools=evidence.effective_invocation_tools,
             absolute_deadline=evidence.runtime_deadline,
             clock=evidence.clock,
             wait=evidence.wait,
@@ -347,7 +351,7 @@ def _terminal_result_if_outer_absent(
     runner: object,
     bridge_probe: object,
     tools: object,
-    invocation_driver: object,
+    invocation_selection: object,
     static_auth_secret: object,
     now: object,
     browser_timeout_seconds: object,
@@ -365,7 +369,7 @@ def _terminal_result_if_outer_absent(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,

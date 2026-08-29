@@ -15,7 +15,6 @@ from collections.abc import Callable
 from datetime import datetime
 
 from scripts.voice_pipecat_e2e_coturn_host import TrustedHostTools
-from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_receipt import (
     _WorkspaceBuiltReceipt,
 )
@@ -130,7 +129,7 @@ def _resolve_or_intend_driver_attempt(
     runner: object,
     bridge_probe: object,
     tools: TrustedHostTools,
-    invocation_driver: RelayInvocationDriver,
+    invocation_selection: object,
     static_auth_secret: object,
     now: datetime,
     start_timeout_seconds: float,
@@ -151,7 +150,7 @@ def _resolve_or_intend_driver_attempt(
         runner=runner,
         bridge_probe=bridge_probe,
         tools=tools,
-        invocation_driver=invocation_driver,
+        invocation_selection=invocation_selection,
         static_auth_secret=static_auth_secret,
         now=now,
         start_timeout_seconds=start_timeout_seconds,
@@ -182,7 +181,7 @@ def _resolve_or_intend_driver_attempt(
                     runner=runner,
                     bridge_probe=bridge_probe,
                     tools=tools,
-                    invocation_driver=invocation_driver,
+                    invocation_selection=invocation_selection,
                     static_auth_secret=static_auth_secret,
                     now=now,
                     start_timeout_seconds=start_timeout_seconds,
@@ -215,7 +214,7 @@ def _resolve_or_intend_driver_attempt(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             start_timeout_seconds=start_timeout_seconds,
@@ -421,7 +420,7 @@ def _terminal_binding_for_driver_call(
     runner: object,
     bridge_probe: object,
     tools: object,
-    invocation_driver: object,
+    invocation_selection: object,
     static_auth_secret: object,
     now: object,
     browser_timeout_seconds: object,
@@ -439,7 +438,7 @@ def _terminal_binding_for_driver_call(
         runner=runner,
         bridge_probe=bridge_probe,
         tools=tools,
-        invocation_driver=invocation_driver,
+        invocation_selection=invocation_selection,
         static_auth_secret=static_auth_secret,
         now=now,
         start_timeout_seconds=start_timeout_seconds,
@@ -492,7 +491,7 @@ def _terminal_binding_for_driver_call(
             runner=runner,
             bridge_probe=bridge_probe,
             tools=tools,
-            invocation_driver=invocation_driver,
+            invocation_selection=invocation_selection,
             static_auth_secret=static_auth_secret,
             now=now,
             browser_timeout_seconds=browser_timeout_seconds,

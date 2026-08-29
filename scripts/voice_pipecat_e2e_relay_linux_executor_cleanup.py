@@ -6,6 +6,10 @@ import math
 import os
 import time
 
+from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+    _concrete_invocation_pair_is_absent,
+    _concrete_invocation_pair_registries_are_empty,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_process_facade_registry import (
     _build_process_registries_are_empty,
 )
@@ -93,6 +97,7 @@ def _settle_relay_linux_executor_outer(
                 if (
                     type(inner_evidence) is not _RelayLinuxExecutorInnerEvidence
                     or inner_evidence.build is not evidence
+                    or not _concrete_invocation_pair_is_absent(evidence)
                     or not _release_relay_linux_executor_built_use(
                         binding,
                         cleanup_deadline=_slice_deadline(cleanup_deadline),
@@ -239,6 +244,7 @@ def _final_outer_absence(
         and value_matches
         and _inner_live_evidence_is_absent(key)
         and _relay_probe_destination_and_registry_are_empty(owner_destination)
+        and _concrete_invocation_pair_registries_are_empty()
         and _executor_built_registries_are_empty()
         and _workspace_worker_registries_are_empty(time.monotonic() + _WAIT_SLICE_SECONDS) is True
         and _workspace_build_graph_is_empty()

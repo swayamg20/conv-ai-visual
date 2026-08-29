@@ -9,7 +9,12 @@ from collections.abc import Callable
 from datetime import datetime
 
 from scripts.voice_pipecat_e2e_coturn_host import TrustedHostTools
-from scripts.voice_pipecat_e2e_relay_invocation import RelayInvocationDriver
+from scripts.voice_pipecat_e2e_relay_invocation_driver import (
+    _synthetic_invocation_driver_matches,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
+    _is_concrete_invocation_selection,
+)
 from scripts.voice_pipecat_e2e_relay_linux_build_workspace_worker_build_values import (
     _MAX_BUILD_SECONDS,
 )
@@ -23,6 +28,7 @@ from scripts.voice_pipecat_e2e_relay_owner_values import RelayProbeObservation
 
 _ATTEMPT_TOKEN = object()
 _MAX_CLEANUP_SECONDS = 60.0
+_MAX_SECRET_BYTES = 4096
 _MAX_START_SECONDS = 30.0
 
 
@@ -57,7 +63,7 @@ def _new_attempt_type() -> tuple[type, Callable[..., object]]:
         "runner": 3,
         "bridge_probe": 4,
         "tools": 5,
-        "invocation_driver": 6,
+        "invocation_selection": 6,
         "static_auth_secret": 7,
         "now": 8,
         "start_timeout_seconds": 9,
@@ -444,7 +450,7 @@ def _call_values(values: dict[str, object]) -> tuple[object, ...] | None:
         "runner",
         "bridge_probe",
         "tools",
-        "invocation_driver",
+        "invocation_selection",
         "static_auth_secret",
         "now",
         "start_timeout_seconds",
@@ -478,8 +484,11 @@ def _driver_call_values_have_shape(values: object) -> bool:
         and values[3] is not None
         and values[4] is not None
         and type(values[5]) is TrustedHostTools
-        and type(values[6]) is RelayInvocationDriver
-        and values[7] is not None
+        and (
+            _synthetic_invocation_driver_matches(values[6])
+            or _is_concrete_invocation_selection(values[6])
+        )
+        and _replay_inputs_can_be_weakly_bound(values)
         and type(values[8]) is datetime
         and all(
             type(value) is float and math.isfinite(value) and value > 0.0 for value in durations
@@ -491,6 +500,20 @@ def _driver_call_values_have_shape(values: object) -> bool:
         and all(callable(value) for value in values[14:17])
         and all(type(value) is float and math.isfinite(value) for value in values[17:19])
     )
+
+
+def _replay_inputs_can_be_weakly_bound(values: tuple[object, ...]) -> bool:
+    try:
+        secret = values[7]
+        if type(secret) is not str or not 0 < len(secret.encode("utf-8")) <= _MAX_SECRET_BYTES:
+            return False
+        for index in (3, 4, 5, 14, 15, 16):
+            weakref.ref(values[index])
+        if not _is_concrete_invocation_selection(values[6]):
+            weakref.ref(values[6])
+        return True
+    except BaseException:
+        return False
 
 
 def _same_call_values(left: tuple[object, ...], right: tuple[object, ...]) -> bool:

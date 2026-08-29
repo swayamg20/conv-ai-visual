@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from functools import wraps
 
 from scripts.voice_pipecat_e2e_coturn_runtime_values import (
@@ -11,22 +11,41 @@ from scripts.voice_pipecat_e2e_coturn_runtime_values import (
     control_signal,
     raise_control,
 )
+from scripts.voice_pipecat_e2e_relay_invocation_cleanup_authority import (
+    _REGISTRY as _REGISTRY,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_cleanup_authority import (
+    RelayInvocationCleanupAuthority,
+    RelayInvocationCleanupRequired,
+    _release_cleanup_owner,
+    _resolve_cleanup_owner,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_cleanup_authority import (
+    _register_cleanup_owner as _register_cleanup_owner_record,
+)
 from scripts.voice_pipecat_e2e_relay_invocation_driver import (
     RelayInvocationDriver,
     _RelayChildAuthorityDestination,
+    _RelayChildStartDestination,
     _RelayChildStopDestination,
     _RelayInvocationOwnerDestination,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_pair import (
+    _concrete_invocation_cleanup_contract,
+    _resolve_or_mint_concrete_invocation_stop_request,
+    _retire_concrete_invocation_pair,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_support import (
     _SECRET_LOCK,
     _SECRET_RECORDS,
     _scrub_exception,
 )
-from scripts.voice_pipecat_e2e_relay_invocation_values import _FAILURE, RelayInvocationError
+from scripts.voice_pipecat_e2e_relay_invocation_values import (
+    _FAILURE,
+    RelayInvocationError,
+    RelayStopRequest,
+)
 
-_AUTHORITY_TOKEN = object()
-_REGISTRY_LOCK = threading.Lock()
-_REGISTRY: dict[object, object] = {}
 _CLEANUP_FAILURE = "Relay invocation cleanup failed"
 _MISSING = object()
 _MAX_ACTIVE_INVOCATIONS = 32
@@ -40,87 +59,25 @@ _TERMINAL_OWNER_FIELDS = (
     "_app_stop",
     "_web_stop",
     "_browser_stop",
+    "_owner_token",
+    "_cleanup_clock",
+    "_cleanup_timeout_seconds",
+    "_stop_request",
     "_driver",
     "_destination",
     "_tools",
 )
 
 
-class RelayInvocationCleanupAuthority:
-    """Opaque key whose graph never reaches callbacks, paths, or child owners."""
-
-    __slots__ = ("_key",)
-
-    def __init__(self, token: object, *, key: object) -> None:
-        if token is not _AUTHORITY_TOKEN:
-            raise TypeError("Relay invocation cleanup authority is factory-owned")
-        object.__setattr__(self, "_key", key)
-
-    def __repr__(self) -> str:
-        return "RelayInvocationCleanupAuthority()"
-
-    def __bool__(self) -> bool:
-        return False
-
-    def __setattr__(self, _name: str, _value: object) -> None:
-        raise AttributeError("Relay invocation cleanup authority is immutable")
-
-    def __copy__(self) -> None:
-        raise TypeError("Relay invocation cleanup authority cannot be copied")
-
-    def __deepcopy__(self, _memo: object) -> None:
-        raise TypeError("Relay invocation cleanup authority cannot be copied")
-
-    def __reduce__(self) -> None:
-        raise TypeError("Relay invocation cleanup authority cannot be serialized")
-
-
-class RelayInvocationCleanupRequired(RelayInvocationError):
-    """Fixed retry failure carrying only one graph-opaque authority."""
-
-    __slots__ = ("_cleanup_authority",)
-
-    def __init__(self, authority: RelayInvocationCleanupAuthority) -> None:
-        if type(authority) is not RelayInvocationCleanupAuthority:
-            raise TypeError("Relay invocation cleanup error is factory-owned")
-        super().__init__(_CLEANUP_FAILURE)
-        self._cleanup_authority = authority
-
-    @property
-    def cleanup_authority(self) -> RelayInvocationCleanupAuthority:
-        return self._cleanup_authority
-
-    def __repr__(self) -> str:
-        return "RelayInvocationCleanupRequired('Relay invocation cleanup failed')"
-
-
-def _new_cleanup_authority() -> RelayInvocationCleanupAuthority:
-    return RelayInvocationCleanupAuthority(_AUTHORITY_TOKEN, key=object())
-
-
 def _register_cleanup_owner(
     authority: RelayInvocationCleanupAuthority,
     owner: object,
 ) -> None:
-    if type(authority) is not RelayInvocationCleanupAuthority or owner is None:
-        raise RelayInvocationError(_CLEANUP_FAILURE)
-    with _REGISTRY_LOCK:
-        current = _REGISTRY.get(authority._key)
-        if current is not None and current is not owner:
-            raise RelayInvocationError(_CLEANUP_FAILURE)
-        if current is None and len(_REGISTRY) >= _MAX_ACTIVE_INVOCATIONS:
-            raise RelayInvocationError(_FAILURE)
-        _REGISTRY[authority._key] = owner
-
-
-def _resolve_cleanup_owner(authority: object, owner_type: type[object]) -> object | None:
-    if type(authority) is owner_type:
-        return authority
-    if type(authority) is not RelayInvocationCleanupAuthority:
-        return None
-    with _REGISTRY_LOCK:
-        owner = _REGISTRY.get(authority._key)
-    return owner if type(owner) is owner_type else None
+    _register_cleanup_owner_record(
+        authority,
+        owner,
+        max_active_invocations=_MAX_ACTIVE_INVOCATIONS,
+    )
 
 
 def _recover_invocation_owner_publication(
@@ -272,15 +229,6 @@ def _cleanup_registry_retains(owner: object, owner_type: type[object]) -> bool:
     )
 
 
-def _release_cleanup_owner(
-    authority: RelayInvocationCleanupAuthority,
-    owner: object,
-) -> None:
-    with _REGISTRY_LOCK:
-        if _REGISTRY.get(authority._key) is owner:
-            del _REGISTRY[authority._key]
-
-
 def _drop_secrets(key: object) -> tuple[bool, ControlSignal | None]:
     """Scrub in place before releasing the retained capacity record."""
 
@@ -324,8 +272,18 @@ def _cleanup_invocation_owner(
     operation_lock = getattr(owner, "_operation_lock", None)
     if operation_lock is None:
         return True, None
-    with operation_lock:
+    with _locked_invocation_operation(owner):
         return _cleanup_invocation_locked(owner, control)
+
+
+@contextmanager
+def _locked_invocation_operation(owner: object) -> Iterator[None]:
+    operation_lock = getattr(owner, "_operation_lock", None)
+    construction_lock = getattr(owner, "_construction_lock", None)
+    if operation_lock is None or construction_lock is None:
+        raise RelayInvocationError(_CLEANUP_FAILURE)
+    with construction_lock, operation_lock:
+        yield
 
 
 def _cleanup_invocation_locked(
@@ -346,7 +304,18 @@ def _cleanup_invocation_locked(
     owner._state = "cleanup-required"
     failed = False
     if phase == "active":
-        failed = not _settle_children(owner)
+        try:
+            failed = not _latch_stop_request(owner)
+        except (KeyboardInterrupt, SystemExit) as error:
+            _remember_cleanup_control(owner, control_signal(error))
+            _scrub_exception(error)
+            failed = True
+        except BaseException as error:
+            _scrub_exception(error)
+            failed = True
+    if phase == "active":
+        if not failed:
+            failed = not _settle_children(owner)
         if not failed:
             destination = getattr(owner, "_destination", None)
             cleared, clear_control = _clear_owner_destination(destination, owner)
@@ -400,6 +369,11 @@ def _settle_children(owner: object) -> bool:
             settled = False
             break
         if authority is None:
+            sealed, seal_control = _seal_child_authority(destination)
+            _remember_cleanup_control(owner, seal_control)
+            if not sealed:
+                settled = False
+                break
             setattr(owner, attribute, None)
             continue
         if any(authority is current for current in stopped):
@@ -421,7 +395,7 @@ def _settle_children(owner: object) -> bool:
             break
         if not committed:
             try:
-                driver._stop(authority, stop_destination)
+                driver._stop(authority, getattr(owner, "_stop_request", None), stop_destination)
             except (KeyboardInterrupt, SystemExit) as error:
                 _remember_cleanup_control(owner, control_signal(error))
                 _scrub_exception(error)
@@ -454,10 +428,54 @@ def _remember_cleanup_control(owner: object, control: ControlSignal | None) -> N
 
 
 def _scrub_terminal_owner(owner: object) -> None:
+    driver = getattr(owner, "_driver", None)
+    tools = getattr(owner, "_tools", None)
+    concrete_configured = bool(
+        type(getattr(driver, "_pair_key", None)) is object
+        or type(getattr(tools, "_pair_key", None)) is object
+        or getattr(owner, "_cleanup_timeout_seconds", None) is not None
+        or getattr(owner, "_cleanup_clock", None) is not None
+        or getattr(owner, "_stop_request", None) is not None
+    )
+    if concrete_configured and not _retire_concrete_invocation_pair(
+        driver,
+        tools,
+        getattr(owner, "_destination", None),
+    ):
+        raise RelayInvocationError(_CLEANUP_FAILURE)
+    if not _seal_owner_token_destinations(owner):
+        raise RelayInvocationError(_CLEANUP_FAILURE)
     for attribute in _TERMINAL_OWNER_FIELDS:
         setattr(owner, attribute, None)
     owner._state = "cleaned"
     owner._cleanup_phase = "scrubbed"
+
+
+def _latch_stop_request(owner: object) -> bool:
+    timeout = getattr(owner, "_cleanup_timeout_seconds", None)
+    clock = getattr(owner, "_cleanup_clock", None)
+    driver = getattr(owner, "_driver", None)
+    tools = getattr(owner, "_tools", None)
+    current = getattr(owner, "_stop_request", None)
+    if timeout is None and clock is None and current is None:
+        return True
+    contract = _concrete_invocation_cleanup_contract(driver, tools)
+    if not (
+        type(contract) is tuple
+        and len(contract) == 3
+        and timeout == contract[1]
+        and clock is contract[2]
+    ):
+        return False
+    resolved = _resolve_or_mint_concrete_invocation_stop_request(
+        driver,
+        tools,
+        getattr(owner, "_destination", None),
+    )
+    if type(resolved) is not RelayStopRequest or (current is not None and current is not resolved):
+        return False
+    owner._stop_request = resolved
+    return owner._stop_request is resolved
 
 
 def _read_stop_receipt(
@@ -524,7 +542,8 @@ def _clear_child_authority(
     control: ControlSignal | None = None
     for _attempt in range(2):
         try:
-            return destination._clear(authority), control
+            cleared = destination._clear(authority)
+            return bool(cleared and destination._seal_empty()), control
         except (KeyboardInterrupt, SystemExit) as error:
             control = control or control_signal(error)
             _scrub_exception(error)
@@ -532,6 +551,39 @@ def _clear_child_authority(
             _scrub_exception(error)
             break
     return False, control
+
+
+def _seal_child_authority(
+    destination: _RelayChildAuthorityDestination,
+) -> tuple[bool, ControlSignal | None]:
+    control: ControlSignal | None = None
+    for _attempt in range(2):
+        try:
+            return destination._seal_empty(), control
+        except (KeyboardInterrupt, SystemExit) as error:
+            control = control or control_signal(error)
+            _scrub_exception(error)
+        except BaseException as error:
+            _scrub_exception(error)
+            break
+    return False, control
+
+
+def _seal_owner_token_destinations(owner: object) -> bool:
+    owner_token = getattr(owner, "_owner_token", None)
+    for role in ("app", "web", "browser"):
+        for suffix, destination_type in (
+            ("start", _RelayChildStartDestination),
+            ("stop", _RelayChildStopDestination),
+        ):
+            destination = getattr(owner, f"_{role}_{suffix}", None)
+            if destination is None:
+                continue
+            if type(destination) is not destination_type or not destination._seal(
+                owner_token, role
+            ):
+                return False
+    return True
 
 
 def _raise_invocation_outcome(

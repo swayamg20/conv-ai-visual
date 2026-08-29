@@ -221,7 +221,7 @@ class LocalHostProbe:
 
 
 class TrustedHostTools:
-    __slots__ = ("_docker", "_docker_socket", "_openssl")
+    __slots__ = ("__weakref__", "_docker", "_docker_socket", "_openssl")
 
     def __init__(self, token: object, *, docker: Path, openssl: Path, docker_socket: Path) -> None:
         if token is not _RECEIPT_TOKEN:
