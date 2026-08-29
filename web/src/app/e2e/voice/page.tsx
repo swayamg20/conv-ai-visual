@@ -14,6 +14,8 @@ const E2E_API_ORIGINS = new Set([
   "http://127.0.0.1:8100",
   "http://127.0.0.1:8101",
 ]);
+const CANONICAL_UUID4 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function trustedNetworkMode(): BrowserRtcNetworkMode {
   try {
@@ -33,6 +35,14 @@ export default function VoiceE2EPage() {
     notFound();
   }
   const network = trustedNetworkMode();
+  const configuredCallId = process.env.VOICE_E2E_CALL_ID;
+  if (
+    (network === "relay-tls" &&
+      (configuredCallId === undefined || !CANONICAL_UUID4.test(configuredCallId))) ||
+    (network === "direct" && configuredCallId !== undefined)
+  ) {
+    notFound();
+  }
 
   return (
     <VoiceE2EClient
@@ -40,6 +50,7 @@ export default function VoiceE2EPage() {
       apiUrl={apiUrl}
       network={network}
       sessionId={E2E_SESSION_ID}
+      initialVoiceCallId={network === "relay-tls" ? configuredCallId : undefined}
     />
   );
 }

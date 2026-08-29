@@ -47,6 +47,9 @@ from scripts.voice_pipecat_e2e_coturn import (  # noqa: E402
     read_private_coturn_configuration,
     validate_turn_tls_ca_file,
 )
+from scripts.voice_pipecat_e2e_coturn_validation_boundary import (  # noqa: E402
+    validate_without_raw_traceback,
+)
 
 WEB_ROOT = PROJECT_ROOT / "web"
 VOICE_FIXTURE_ROOT = PROJECT_ROOT / "tests" / "fixtures" / "voice" / "audio"
@@ -89,6 +92,16 @@ _DIRTY_SOURCE_ERROR = "source repository must be clean for RTC qualification"
 _SOURCE_CHANGED_ERROR = "source provenance changed during RTC qualification"
 _ARTIFACT_MANIFEST_ERROR = "qualification artifact manifest is incomplete or unsafe"
 _ARTIFACT_TAMPER_ERROR = "qualification artifact manifest no longer matches artifacts"
+_ENVIRONMENT_ERROR = "Pipecat E2E environment is unavailable"
+_ENVIRONMENT_ERRORS = frozenset(
+    {
+        _ENVIRONMENT_ERROR,
+        "Pipecat E2E network mode is invalid",
+        "direct Pipecat E2E does not accept relay material",
+        "relay-tls Pipecat E2E call identity is unavailable",
+        "relay-tls Pipecat E2E material is unavailable",
+    }
+)
 _STRIPPED_ENV_PREFIXES = (
     "ANTHROPIC_",
     "AWS_",
@@ -345,19 +358,70 @@ def build_environment(
     network: PipecatE2ENetworkMode | str = PipecatE2ENetworkMode.DIRECT,
     turn_configuration_file: Path | None = None,
     turn_tls_ca_file: Path | None = None,
+    expected_relay_call_id: str | None = None,
 ) -> dict[str, str]:
     try:
+        return validate_without_raw_traceback(
+            lambda: _build_environment(
+                paths,
+                base,
+                network=network,
+                turn_configuration_file=turn_configuration_file,
+                turn_tls_ca_file=turn_tls_ca_file,
+                expected_relay_call_id=expected_relay_call_id,
+            ),
+            error_type=StackError,
+            fallback=_ENVIRONMENT_ERROR,
+            allowed=_ENVIRONMENT_ERRORS,
+        )
+    finally:
+        paths = network = None  # type: ignore[assignment]
+        base = None
+        turn_configuration_file = turn_tls_ca_file = None
+        expected_relay_call_id = None
+
+
+def _build_environment(
+    paths: StackPaths,
+    base: Mapping[str, str] | None = None,
+    *,
+    network: PipecatE2ENetworkMode | str = PipecatE2ENetworkMode.DIRECT,
+    turn_configuration_file: Path | None = None,
+    turn_tls_ca_file: Path | None = None,
+    expected_relay_call_id: str | None = None,
+) -> dict[str, str]:
+    mode: PipecatE2ENetworkMode | None = None
+    try:
         mode = parse_network_mode(network)
-    except CoturnContractError as exc:
-        raise StackError("Pipecat E2E network mode is invalid") from exc
+    except CoturnContractError:
+        pass
+    if mode is None:
+        raise StackError("Pipecat E2E network mode is invalid")
     if mode is PipecatE2ENetworkMode.DIRECT and (
-        turn_configuration_file is not None or turn_tls_ca_file is not None
+        turn_configuration_file is not None
+        or turn_tls_ca_file is not None
+        or expected_relay_call_id is not None
     ):
         raise StackError("direct Pipecat E2E does not accept relay material")
     relay_environment: dict[str, str] = {}
     if mode is PipecatE2ENetworkMode.RELAY_TLS:
         if turn_configuration_file is None or turn_tls_ca_file is None:
             raise StackError("relay-tls Pipecat E2E material is unavailable")
+        if type(expected_relay_call_id) is not str:
+            raise StackError("relay-tls Pipecat E2E call identity is unavailable")
+        parsed_call_id: uuid.UUID | None = None
+        try:
+            parsed_call_id = uuid.UUID(expected_relay_call_id)
+        except (AttributeError, ValueError):
+            pass
+        if (
+            parsed_call_id is None
+            or parsed_call_id.version != 4
+            or str(parsed_call_id) != expected_relay_call_id
+        ):
+            raise StackError("relay-tls Pipecat E2E call identity is unavailable")
+        certificate: Path | None = None
+        material_available = False
         try:
             coturn_paths = CoturnContractPaths.for_run_dir(paths.run_id, paths.run_dir)
             if turn_configuration_file != coturn_paths.config:
@@ -370,10 +434,14 @@ def build_environment(
                 turn_tls_ca_file,
                 expected_run_dir=paths.run_dir,
             )
-        except CoturnContractError as exc:
-            raise StackError("relay-tls Pipecat E2E material is unavailable") from exc
+            material_available = True
+        except CoturnContractError:
+            pass
+        if not material_available or certificate is None:
+            raise StackError("relay-tls Pipecat E2E material is unavailable")
         relay_environment = {
             "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE": str(coturn_paths.config),
+            "MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID": expected_relay_call_id,
             "SSL_CERT_FILE": str(certificate),
         }
     environment = _clean_environment(base)

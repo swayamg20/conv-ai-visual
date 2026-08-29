@@ -67,6 +67,7 @@ from scripts.voice_pipecat_e2e_stack import (  # noqa: E402
 )
 
 STATIC_TURN_SECRET = "0123456789abcdef" * 4
+EXPECTED_RELAY_CALL_ID = "50000000-0000-4000-8000-000000000005"
 TEST_CERTIFICATE_PEM = """\
 -----BEGIN CERTIFICATE-----
 MIIC9DCCAdygAwIBAgIJAN0Y0Nf5BhrTMA0GCSqGSIb3DQEBCwUAMBQxEjAQBgNV
@@ -115,9 +116,35 @@ def _relay_material(paths: StackPaths) -> CoturnContractPaths:
         encoding="utf-8",
     )
     coturn.cert.write_text(TEST_CERTIFICATE_PEM, encoding="ascii")
-    coturn.config.chmod(0o444)
+    coturn.config.chmod(0o400)
     coturn.cert.chmod(0o400)
     return coturn
+
+
+def _non_test_exception_graph_values(error: BaseException) -> tuple[object, ...]:
+    pending = [error]
+    seen: set[int] = set()
+    values: list[object] = []
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        pending.extend(
+            linked
+            for linked in (current.__cause__, current.__context__)
+            if isinstance(linked, BaseException)
+        )
+        trace = current.__traceback__
+        while trace is not None:
+            if not trace.tb_frame.f_code.co_name.startswith("test_"):
+                values.extend(tuple(trace.tb_frame.f_locals.values()))
+            trace = trace.tb_next
+    return tuple(values)
+
+
+class _HostileCallId(str):
+    pass
 
 
 def _repo_paths(tmp_path: Path) -> StackPaths:
@@ -1017,10 +1044,12 @@ def test_relay_environment_accepts_only_exact_private_file_paths_and_no_raw_secr
         network="relay-tls",
         turn_configuration_file=coturn.config,
         turn_tls_ca_file=coturn.cert,
+        expected_relay_call_id=EXPECTED_RELAY_CALL_ID,
     )
 
     assert environment["MURMUR_PIPECAT_E2E_NETWORK"] == "relay-tls"
     assert environment["MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE"] == str(coturn.config)
+    assert environment["MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID"] == EXPECTED_RELAY_CALL_ID
     assert environment["SSL_CERT_FILE"] == str(coturn.cert)
     assert "TURN_PASSWORD" not in environment
     assert "COTURN_SHARED_SECRET" not in environment
@@ -1046,7 +1075,124 @@ def test_environment_modes_reject_cross_mode_or_incomplete_relay_material(tmp_pa
             network="relay-tls",
             turn_configuration_file=coturn.config,
             turn_tls_ca_file=coturn.config,
+            expected_relay_call_id=EXPECTED_RELAY_CALL_ID,
         )
+
+
+def test_direct_environment_rejects_call_identity_and_is_byte_shape_compatible(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    ambient = {
+        "PATH": "/usr/bin",
+        "MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID": "ambient-call-id",
+        "UNLISTED_VENDOR_AUTH_TOKEN": "ambient-provider-token",
+    }
+
+    default = build_environment(paths, ambient)
+    explicit = build_environment(
+        paths,
+        ambient,
+        network="direct",
+        expected_relay_call_id=None,
+    )
+    default_bytes = json.dumps(default, sort_keys=True, separators=(",", ":")).encode()
+    explicit_bytes = json.dumps(explicit, sort_keys=True, separators=(",", ":")).encode()
+
+    assert default_bytes == explicit_bytes
+    assert set(default) == set(explicit)
+    assert "MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID" not in default
+    with pytest.raises(
+        StackError,
+        match=r"^direct Pipecat E2E does not accept relay material$",
+    ):
+        build_environment(
+            paths,
+            ambient,
+            expected_relay_call_id=EXPECTED_RELAY_CALL_ID,
+        )
+
+
+@pytest.mark.parametrize(
+    "expected_call_id",
+    [
+        None,
+        "not-a-canonical-call-secret",
+        "50000000-0000-1000-8000-000000000005",
+        "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF",
+        "{50000000-0000-4000-8000-000000000005}",
+        _HostileCallId(EXPECTED_RELAY_CALL_ID),
+    ],
+)
+def test_relay_backend_environment_requires_canonical_uuid4_without_reflection(
+    tmp_path: Path,
+    expected_call_id: object,
+) -> None:
+    paths = _paths(tmp_path)
+    coturn = _relay_material(paths)
+
+    with pytest.raises(StackError) as captured:
+        build_environment(
+            paths,
+            network="relay-tls",
+            turn_configuration_file=coturn.config,
+            turn_tls_ca_file=coturn.cert,
+            expected_relay_call_id=expected_call_id,  # type: ignore[arg-type]
+        )
+
+    assert str(captured.value) == "relay-tls Pipecat E2E call identity is unavailable"
+    assert captured.value.__context__ is None
+    assert captured.value.__cause__ is None
+    graph_values = _non_test_exception_graph_values(captured.value)
+    if expected_call_id is not None:
+        assert all(value is not expected_call_id for value in graph_values)
+    if isinstance(expected_call_id, str):
+        assert expected_call_id not in repr(captured.value)
+        assert expected_call_id not in repr(graph_values)
+
+
+def test_relay_environment_scrubs_late_malformed_config_failure_graph(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    coturn = _relay_material(paths)
+    malformed_sentinel = "traceback-malformed-config-sentinel"
+    ambient_sentinel = "traceback-ambient-environment-sentinel"
+    valid_configuration = coturn.config.read_text(encoding="utf-8")
+    malformed_configuration = valid_configuration.replace(
+        "log-min-level=info\n",
+        f"log-min-level=info\n# {malformed_sentinel}\n",
+    )
+    assert malformed_configuration != valid_configuration
+    coturn.config.chmod(0o600)
+    coturn.config.write_text(malformed_configuration, encoding="utf-8")
+    coturn.config.chmod(0o400)
+
+    with pytest.raises(StackError) as captured:
+        build_environment(
+            paths,
+            {"PATH": "/usr/bin", "TRACEBACK_SENTINEL": ambient_sentinel},
+            network="relay-tls",
+            turn_configuration_file=coturn.config,
+            turn_tls_ca_file=coturn.cert,
+            expected_relay_call_id=EXPECTED_RELAY_CALL_ID,
+        )
+
+    assert str(captured.value) == "relay-tls Pipecat E2E material is unavailable"
+    assert captured.value.__context__ is None
+    assert captured.value.__cause__ is None
+    graph_values = _non_test_exception_graph_values(captured.value)
+    rendered_graph = repr(graph_values)
+    assert all(
+        value not in rendered_graph
+        for value in (
+            STATIC_TURN_SECRET,
+            malformed_sentinel,
+            ambient_sentinel,
+            EXPECTED_RELAY_CALL_ID,
+            str(coturn.config),
+        )
+    )
 
 
 def test_default_and_explicit_direct_cli_are_shape_compatible(

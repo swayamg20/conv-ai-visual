@@ -38,6 +38,8 @@ const PREPARED_ASSIGNMENT_TIMEOUT_MS = 30_000;
 const AGENT_READY_TIMEOUT_MS = 15_000;
 const SESSION_END_TIMEOUT_MS = 5_000;
 const MAX_PENDING_READY_EVENTS = 128;
+const CANONICAL_UUID4 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 type LocalTransportEventType =
   | "transport_connected"
@@ -56,6 +58,8 @@ export interface UseVoiceSessionOptions {
   readonly apiUrl?: string;
   readonly agentId: string;
   readonly sessionId?: string;
+  /** One guarded E2E bootstrap identity, consumed on the first call intent. */
+  readonly initialVoiceCallId?: string;
   readonly onTranscript?: (event: VoiceSessionTranscriptEvent) => void;
   readonly onAssistantSpeech?: (text: string) => void;
   readonly onEffect?: (effect: VoiceEventEffect) => void;
@@ -255,9 +259,15 @@ export function classifyVoiceBootstrapFailure(
   };
 }
 
-function createVoiceCallIdentity(): VoiceCallIdentity {
+function createVoiceCallIdentity(initialVoiceCallId?: string): VoiceCallIdentity {
+  if (
+    initialVoiceCallId !== undefined &&
+    !CANONICAL_UUID4.test(initialVoiceCallId)
+  ) {
+    throw new Error("The initial voice call ID is invalid");
+  }
   return {
-    voiceCallId: randomId(),
+    voiceCallId: initialVoiceCallId ?? randomId(),
     browserTraceId: randomId(),
   };
 }
@@ -266,6 +276,7 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
   const optionsRef = useRef(options);
   const [callIdentity, setCallIdentity] = useState<VoiceCallIdentity | null>(null);
   const callIdentityRef = useRef<VoiceCallIdentity | null>(null);
+  const initialVoiceCallIdRef = useRef(options.initialVoiceCallId);
   const voiceCallId = callIdentity?.voiceCallId;
 
   const [eventState, setEventState] = useState<VoiceEventState>(() =>
@@ -918,12 +929,16 @@ export function useVoiceSession(options: UseVoiceSessionOptions) {
             eventStateRef.current.sessionId !== sessionId);
         let activeCallIdentity = callIdentityRef.current;
         if (requiresNewCallIdentity) {
-          activeCallIdentity = createVoiceCallIdentity();
+          const initialVoiceCallId = initialVoiceCallIdRef.current;
+          initialVoiceCallIdRef.current = undefined;
+          activeCallIdentity = createVoiceCallIdentity(initialVoiceCallId);
           callIdentityRef.current = activeCallIdentity;
           stateWriters.setCallIdentity(activeCallIdentity);
         }
         if (activeCallIdentity === null) {
-          activeCallIdentity = createVoiceCallIdentity();
+          const initialVoiceCallId = initialVoiceCallIdRef.current;
+          initialVoiceCallIdRef.current = undefined;
+          activeCallIdentity = createVoiceCallIdentity(initialVoiceCallId);
           callIdentityRef.current = activeCallIdentity;
           stateWriters.setCallIdentity(activeCallIdentity);
         }

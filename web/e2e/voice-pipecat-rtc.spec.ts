@@ -15,7 +15,13 @@ import {
   type AudioClockEvidence,
 } from "../src/app/e2e/voice/audio-clock-diagnostics";
 import { interruptionAttribution } from "../src/app/e2e/voice/proof";
-import type { BrowserRtcEvidence } from "../src/app/e2e/voice/rtc-diagnostics";
+import {
+  isCanonicalPrivateIpv4,
+  parseBrowserRtcNetworkMode,
+  RELAY_GATEWAY_ATTESTATION_GLOBAL,
+  type BrowserRtcEvidence,
+  type RtcSelectedCandidatePairEvidence,
+} from "../src/app/e2e/voice/rtc-diagnostics";
 
 const EXPECTED_AGENT_ID = "90bd1253-90a6-459a-bf37-365bc3039a76";
 const EXPECTED_SESSION_ID = "a4f4328e-185e-4c65-b3f7-101e04a37578";
@@ -27,6 +33,16 @@ const LOCAL_REGION_BRIDGE_MS = 500;
 const REMOTE_ACTIVE_RMS = 0.02;
 const REMOTE_SILENCE_RMS = 0.012;
 const REMOTE_ATTRIBUTION_TOLERANCE_MS = 100;
+const PIPECAT_NETWORK_MODE = parseBrowserRtcNetworkMode(
+  process.env.VOICE_E2E_NETWORK
+);
+const COTURN_SPKI_ENV = "VOICE_E2E_COTURN_SPKI_SHA256_B64";
+const COTURN_GATEWAY_ENV = "VOICE_E2E_COTURN_BRIDGE_GATEWAY_IPV4";
+const CALL_ID_ENV = "VOICE_E2E_CALL_ID";
+const SPKI_ARGUMENT_PREFIX = "--ignore-certificate-errors-spki-list=";
+const SPKI_SHA256_B64 = /^[A-Za-z0-9+/]{43}=$/;
+const CANONICAL_UUID4 =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 export const PIPECAT_PROOF_WAIT_TIMEOUT_MS = 45_000;
 export const PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS = 20_000;
 export const PIPECAT_SPEC_SETUP_MARGIN_MS = 30_000;
@@ -37,6 +53,20 @@ export const PROOF_TIMEOUT_PROGRESS_PREFIX =
   "VOICE_PIPECAT_PROOF_TIMEOUT_PROGRESS=";
 export const PROOF_TIMEOUT_PROGRESS_MAX_BYTES = 2_048;
 const PROOF_TIMEOUT_PROGRESS_MAX_COUNTER = 2_147_483_647;
+
+const EXPECTED_RELAY_CALL_ID = (() => {
+  const configured = process.env[CALL_ID_ENV];
+  if (PIPECAT_NETWORK_MODE === "direct") {
+    if (configured !== undefined) {
+      throw new Error("Direct Pipecat proof does not accept a fixed call identity");
+    }
+    return null;
+  }
+  if (configured === undefined || !CANONICAL_UUID4.test(configured)) {
+    throw new Error("Relay Pipecat proof call identity is unavailable");
+  }
+  return configured;
+})();
 
 // Network traces retain the bearer locator, Authorization header, SDP, and ICE
 // bodies on failure. This proof emits only its deliberately sanitized JSON.
@@ -227,6 +257,7 @@ interface PipecatTerminalStatus {
 
 interface SanitizedRequestTrace {
   bootstrapPosts: number;
+  bootstrapCallIdAttested: boolean | null;
   signalingPosts: number;
   authenticatedSignalingPosts: number;
   signalingPatches: number;
@@ -372,9 +403,124 @@ function proofReady(snapshot: BrowserSnapshot): boolean {
     snapshot.rtc.outbound_audio.packets > 0 &&
     snapshot.rtc.inbound_audio.bytes > 0 &&
     snapshot.rtc.inbound_audio.packets > 0 &&
+    (PIPECAT_NETWORK_MODE === "direct" || relayRtcEvidenceAttested(snapshot.rtc)) &&
     attribution.observation_complete &&
     !attribution.stale_audio_detected
   );
+}
+
+export function relayCandidatePairAttested(
+  pair: RtcSelectedCandidatePairEvidence | null
+): boolean {
+  return (
+    pair !== null &&
+    pair.state === "succeeded" &&
+    pair.nominated === true &&
+    pair.bytes_sent > 0 &&
+    pair.bytes_received > 0 &&
+    pair.local.candidate_type === "relay" &&
+    pair.local.protocol === "udp" &&
+    pair.local.relay_protocol === "tls" &&
+    pair.remote.candidate_type === "host" &&
+    pair.remote.protocol === "udp" &&
+    pair.remote.relay_protocol === null
+  );
+}
+
+export function relayRtcEvidenceAttested(rtc: BrowserRtcEvidence): boolean {
+  return (
+    rtc.relay_policy_attested === true &&
+    rtc.peer_connection_count === 1 &&
+    rtc.selected_candidate_pair_count === 1 &&
+    relayCandidatePairAttested(
+      rtc.peer_connections[0]?.selected_candidate_pair ?? null
+    )
+  );
+}
+
+function canonicalSpkiPin(value: unknown): value is string {
+  if (typeof value !== "string" || !SPKI_SHA256_B64.test(value)) return false;
+  const decoded = Buffer.from(value, "base64");
+  return decoded.length === 32 && decoded.toString("base64") === value;
+}
+
+function requiredCoturnSpkiPin(): string {
+  const value = process.env[COTURN_SPKI_ENV];
+  if (!canonicalSpkiPin(value)) {
+    throw new Error("Pipecat relay Chromium SPKI contract is invalid");
+  }
+  return value;
+}
+
+function requiredCoturnGatewayIpv4(): string {
+  const value = process.env[COTURN_GATEWAY_ENV];
+  if (!isCanonicalPrivateIpv4(value)) {
+    throw new Error("Pipecat relay gateway contract is invalid");
+  }
+  return value;
+}
+
+function certificateBypassArgument(argument: string): boolean {
+  return (
+    argument.startsWith("--ignore-certificate-errors") ||
+    argument.startsWith("--ignore-ssl-errors") ||
+    argument.startsWith("--allow-insecure-localhost")
+  );
+}
+
+export function chromiumSpkiPinAttested(
+  argumentsList: readonly string[],
+  expectedPin: string
+): boolean {
+  if (!canonicalSpkiPin(expectedPin)) return false;
+  const exactArgument = `${SPKI_ARGUMENT_PREFIX}${expectedPin}`;
+  const certificateArguments = argumentsList.filter(certificateBypassArgument);
+  return (
+    certificateArguments.length === 1 &&
+    certificateArguments[0] === exactArgument
+  );
+}
+
+export async function browserRelayGatewayAttested(
+  page: Page,
+  expectedGatewayIpv4: string
+): Promise<boolean> {
+  if (!isCanonicalPrivateIpv4(expectedGatewayIpv4)) return false;
+  try {
+    return await page.evaluate(
+      async ({ propertyName, expectedIpv4 }) => {
+        const descriptor = Object.getOwnPropertyDescriptor(
+          globalThis,
+          propertyName
+        );
+        if (
+          descriptor === undefined ||
+          !("value" in descriptor) ||
+          descriptor.configurable !== true ||
+          descriptor.enumerable !== false ||
+          descriptor.writable !== false ||
+          typeof descriptor.value !== "function" ||
+          !Object.isFrozen(descriptor.value)
+        ) {
+          return false;
+        }
+        try {
+          return (
+            (await Reflect.apply(descriptor.value, undefined, [expectedIpv4])) ===
+            true
+          );
+        } catch {
+          return false;
+        }
+      },
+      {
+        propertyName: RELAY_GATEWAY_ATTESTATION_GLOBAL,
+        expectedIpv4: expectedGatewayIpv4,
+      }
+    );
+  } catch {
+    return false;
+  }
 }
 
 function boundedProgressCounter(value: number): number {
@@ -566,11 +712,14 @@ function requiredPipecatApiUrl(): string {
   return value;
 }
 
-function expectNoSignalingSecrets(value: unknown): void {
+export function signalingSecretLabels(value: unknown): readonly string[] {
   const serialized = JSON.stringify(value);
-  const forbidden = [
+  return [
     { label: "signaling locator", pattern: /\/api\/voice\/pipecat\/signal\//i },
-    { label: "network URL", pattern: /(?:https?|wss?|stun|turns?):\/\//i },
+    {
+      label: "network URL",
+      pattern: /(?:(?:https?|wss?):\/\/|(?:stuns?|turns?):)/i,
+    },
     { label: "authorization value", pattern: /Bearer\s+/i },
     { label: "authorization field", pattern: /"authorization"/i },
     { label: "raw SDP field", pattern: /"sdp"/i },
@@ -581,6 +730,10 @@ function expectNoSignalingSecrets(value: unknown): void {
   ]
     .filter(({ pattern }) => pattern.test(serialized))
     .map(({ label }) => label);
+}
+
+function expectNoSignalingSecrets(value: unknown): void {
+  const forbidden = signalingSecretLabels(value);
   expect(forbidden).toEqual([]);
 }
 
@@ -590,6 +743,7 @@ function writeResultAtomically(resultPath: string, result: object): void {
   fs.writeFileSync(temporary, `${JSON.stringify(result, null, 2)}\n`, {
     encoding: "utf8",
     flag: "wx",
+    mode: 0o600,
   });
   fs.renameSync(temporary, resultPath);
   expectNoSignalingSecrets(JSON.parse(fs.readFileSync(resultPath, "utf8")));
@@ -598,6 +752,7 @@ function writeResultAtomically(resultPath: string, result: object): void {
 function observeSanitizedRequests(page: Page): SanitizedRequestTrace {
   const trace: SanitizedRequestTrace = {
     bootstrapPosts: 0,
+    bootstrapCallIdAttested: null,
     signalingPosts: 0,
     authenticatedSignalingPosts: 0,
     signalingPatches: 0,
@@ -619,6 +774,23 @@ function observeSanitizedRequests(page: Page): SanitizedRequestTrace {
     const method = request.method();
     if (parsed.pathname === "/api/voice/session" && method === "POST") {
       trace.bootstrapPosts += 1;
+      if (EXPECTED_RELAY_CALL_ID !== null) {
+        let attested = false;
+        try {
+          const body = request.postDataJSON() as unknown;
+          attested =
+            typeof body === "object" &&
+            body !== null &&
+            "session_id" in body &&
+            body.session_id === EXPECTED_SESSION_ID &&
+            "voice_call_id" in body &&
+            body.voice_call_id === EXPECTED_RELAY_CALL_ID;
+        } catch {
+          attested = false;
+        }
+        trace.bootstrapCallIdAttested =
+          trace.bootstrapCallIdAttested !== false && attested;
+      }
       return;
     }
     if (parsed.pathname === "/api/voice/session/end" && method === "POST") {
@@ -682,8 +854,23 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   await page.goto("/e2e/voice");
   const cdp = await page.context().newCDPSession(page);
   const browserCommandLine = await cdp.send("Browser.getBrowserCommandLine");
-  expect(browserCommandLine.arguments).not.toContain("--mute-audio");
+  let tlsSpkiPinAttested = false;
+  let gatewayAttested = false;
+  if (PIPECAT_NETWORK_MODE === "relay-tls") {
+    if (browserCommandLine.arguments.includes("--mute-audio")) {
+      throw new Error("Pipecat relay Chromium audio launch attestation failed");
+    }
+    tlsSpkiPinAttested = chromiumSpkiPinAttested(
+      browserCommandLine.arguments,
+      requiredCoturnSpkiPin()
+    );
+  } else {
+    expect(browserCommandLine.arguments).not.toContain("--mute-audio");
+  }
   await cdp.detach();
+  if (PIPECAT_NETWORK_MODE === "relay-tls" && !tlsSpkiPinAttested) {
+    throw new Error("Pipecat relay Chromium SPKI attestation failed");
+  }
   await expect(page.getByRole("heading", { name: "Browser media harness" })).toBeVisible();
 
   const activationButton = page.getByTestId("voice-e2e-activate");
@@ -704,6 +891,13 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
     runtime: "pipecat_smallwebrtc_v1",
     profile_id: EXPECTED_PROFILE_ID,
   });
+  if (EXPECTED_RELAY_CALL_ID === null) {
+    expect(requestTrace.bootstrapCallIdAttested).toBeNull();
+  } else {
+    expect(prepared.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(prepared.assignment?.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(requestTrace.bootstrapCallIdAttested).toBe(true);
+  }
   expect(prepared.local_track).toBeNull();
   expect(prepared.remote_track).toBeNull();
   expect(prepared.audio_clock).toMatchObject({
@@ -727,6 +921,10 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   const assignment = proof.assignment;
   expect(assignment).not.toBeNull();
   if (!assignment) throw new Error("Accepted Pipecat assignment disappeared");
+  if (EXPECTED_RELAY_CALL_ID !== null) {
+    expect(proof.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+    expect(assignment.voice_call_id).toBe(EXPECTED_RELAY_CALL_ID);
+  }
 
   expect(proof.schema_version).toBe(1);
   expect(proof.errors).toEqual([]);
@@ -960,10 +1158,22 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   expect(selectedPair.nominated).toBe(true);
   expect(selectedPair.bytes_sent).toBeGreaterThan(0);
   expect(selectedPair.bytes_received).toBeGreaterThan(0);
-  expect(selectedPair.local.candidate_type).not.toBe("relay");
-  expect(selectedPair.remote.candidate_type).not.toBe("relay");
-  expect(selectedPair.local.protocol).toBe("udp");
-  expect(selectedPair.remote.protocol).toBe("udp");
+  if (PIPECAT_NETWORK_MODE === "relay-tls") {
+    expect(proof.rtc.relay_policy_attested).toBe(true);
+    expect(relayCandidatePairAttested(selectedPair)).toBe(true);
+    gatewayAttested = await browserRelayGatewayAttested(
+      page,
+      requiredCoturnGatewayIpv4()
+    );
+    if (!gatewayAttested) {
+      throw new Error("Pipecat relay gateway attestation failed");
+    }
+  } else {
+    expect(selectedPair.local.candidate_type).not.toBe("relay");
+    expect(selectedPair.remote.candidate_type).not.toBe("relay");
+    expect(selectedPair.local.protocol).toBe("udp");
+    expect(selectedPair.remote.protocol).toBe("udp");
+  }
   expect(Object.keys(selectedPair.local).sort()).toEqual(
     ["candidate_type", "protocol", "relay_protocol"].sort()
   );
@@ -1048,22 +1258,49 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
   expect(requestTrace.terminalOrder).toEqual(["peer_delete", "session_end"]);
   expectNoSignalingSecrets(cleaned);
 
-  await expect
-    .poll(
-      async () => {
-        const status = await readTerminalStatus(request, apiUrl, assignment);
-        return status.status;
-      },
-      {
-        timeout: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
-        message: "dedicated Pipecat app must finish exact terminal cleanup",
-      }
-    )
-    .toBe("passed");
+  const terminalCleanupPollOptions = {
+    timeout: PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
+    message: "dedicated Pipecat app must finish exact terminal cleanup",
+  };
+  if (PIPECAT_NETWORK_MODE === "relay-tls") {
+    await expect
+      .poll(
+        async () => {
+          const status = await readTerminalStatus(request, apiUrl, assignment);
+          return {
+            status: status.status,
+            reservation_state: status.reservation.state,
+            cleanup_complete: status.reservation.cleanup_complete,
+            signaling_active_call_count:
+              status.control_plane.signaling_active_call_count,
+            runtime_handle_retained:
+              status.control_plane.runtime_handle_retained,
+          };
+        },
+        terminalCleanupPollOptions
+      )
+      .toEqual({
+        status: "pending",
+        reservation_state: "terminal",
+        cleanup_complete: true,
+        signaling_active_call_count: 0,
+        runtime_handle_retained: false,
+      });
+  } else {
+    await expect
+      .poll(
+        async () => {
+          const status = await readTerminalStatus(request, apiUrl, assignment);
+          return status.status;
+        },
+        terminalCleanupPollOptions
+      )
+      .toBe("passed");
+  }
   const terminalStatus = await readTerminalStatus(request, apiUrl, assignment);
   expect(terminalStatus).toMatchObject({
     schema_version: 1,
-    status: "passed",
+    status: PIPECAT_NETWORK_MODE === "relay-tls" ? "pending" : "passed",
     runtime: "pipecat_smallwebrtc_v1",
     profile_id: EXPECTED_PROFILE_ID,
     session_id: assignment.session_id,
@@ -1110,6 +1347,14 @@ test("real browser media crosses Pipecat SmallWebRTC and cleans one peer", async
     voice_call_id: assignment.voice_call_id,
     trace_id: assignment.trace_id,
     browser_evidence: {
+      ...(PIPECAT_NETWORK_MODE === "relay-tls"
+        ? {
+            relay_policy_attested:
+              proof.rtc.relay_policy_attested === true,
+            tls_spki_pin_attested: tlsSpkiPinAttested,
+            gateway_attested: gatewayAttested,
+          }
+        : {}),
       exact_local_track_id: proof.local_track?.id,
       exact_remote_track_id: proof.remote_track?.id,
       connection_gestures: proof.connection_gestures,
