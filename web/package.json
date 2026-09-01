@@ -6,6 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
+    "e2e:scene": "playwright test --config=playwright.scene.config.ts",
     "e2e:voice": "playwright test e2e/voice-rtc.spec.ts",
     "test:e2e:offline": "playwright test e2e/voice-rtc.spec.ts",
     "lint": "eslint . --max-warnings=0",
