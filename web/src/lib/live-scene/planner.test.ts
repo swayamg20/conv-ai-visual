@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { planSceneTransition } from "./planner";
+import { materializeSceneTransition, planSceneTransition } from "./planner";
 import { createSceneState } from "./state";
 import type { LatexSceneNode, LineSceneNode, SceneNode, TextSceneNode } from "./types";
 
@@ -244,5 +244,61 @@ describe("planSceneTransition", () => {
     if (enter.type === "enter" && enter.node.kind === "line") {
       expect(enter.node.points[0]).toEqual([20, 180]);
     }
+  });
+
+  it("materializes only entered nodes from an interrupted initial plan", () => {
+    const previous = createSceneState({ revision: 0, nodes: [] });
+    const next = createSceneState({
+      revision: 1,
+      nodes: [line("triangle-base", 220), line("triangle-height", 180), text("Title")],
+    });
+
+    const materialized = materializeSceneTransition(previous, next, [
+      "triangle-base",
+      "lesson-title",
+    ]);
+
+    expect(materialized.revision).toBe(1);
+    expect(materialized.nodes.map((node) => node.id)).toEqual([
+      "triangle-base",
+      "lesson-title",
+    ]);
+  });
+
+  it("retains unapplied updates and removals while applying completed steps", () => {
+    const previous = createSceneState({
+      revision: 3,
+      nodes: [line("keep-old", 120), line("remove-later", 160), text("Old title")],
+    });
+    const next = createSceneState({
+      revision: 4,
+      nodes: [line("keep-old", 240), text("New title"), latex("a^2+b^2=c^2")],
+    });
+
+    const materialized = materializeSceneTransition(previous, next, [
+      "keep-old",
+      "theorem-equation",
+    ]);
+
+    expect(materialized.nodes.map((node) => node.id)).toEqual([
+      "keep-old",
+      "lesson-title",
+      "theorem-equation",
+      "remove-later",
+    ]);
+    expect(materialized.nodes.find((node) => node.id === "lesson-title")).toMatchObject({
+      kind: "text",
+      text: "Old title",
+    });
+    expect(materialized.nodes).toContainEqual(expect.objectContaining({ id: "remove-later" }));
+  });
+
+  it("rejects materialized step IDs that are not part of the transition", () => {
+    const previous = createSceneState({ revision: 0, nodes: [] });
+    const next = createSceneState({ revision: 1, nodes: [line("triangle-base", 220)] });
+
+    expect(() =>
+      materializeSceneTransition(previous, next, ["not-planned"])
+    ).toThrow("not-planned is not in the plan");
   });
 });

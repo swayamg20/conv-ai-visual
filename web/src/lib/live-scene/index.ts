@@ -1,4 +1,4 @@
-export { planSceneTransition } from "./planner";
+export { materializeSceneTransition, planSceneTransition } from "./planner";
 export { createSceneState } from "./state";
 export type {
   EnterMotion,

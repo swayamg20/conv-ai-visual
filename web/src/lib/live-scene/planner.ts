@@ -177,3 +177,48 @@ export function planSceneTransition(previous: SceneState, next: SceneState): Mot
     steps: Object.freeze(steps),
   });
 }
+
+/**
+ * Reconstruct the semantic snapshot represented by a partially applied plan.
+ *
+ * Entered and completed steps are supplied by ID. Unapplied enters stay absent,
+ * while unapplied updates and removals retain their previous node.
+ */
+export function materializeSceneTransition(
+  previous: SceneState,
+  next: SceneState,
+  appliedStepIds: readonly string[]
+): SceneState {
+  const from = createSceneState(previous);
+  const to = createSceneState(next);
+  const plan = planSceneTransition(from, to);
+  const plannedIds = new Set(plan.steps.map((step) => step.id));
+  const applied = new Set<string>();
+
+  for (const id of appliedStepIds) {
+    if (!plannedIds.has(id)) {
+      throw new RangeError(`Invalid live scene materialization: ${id} is not in the plan`);
+    }
+    applied.add(id);
+  }
+
+  const materialized = new Map(from.nodes.map((node) => [node.id, node]));
+  for (const step of plan.steps) {
+    if (!applied.has(step.id)) continue;
+    if (step.type === "remove") materialized.delete(step.id);
+    else if (step.type === "update") materialized.set(step.id, step.next);
+    else materialized.set(step.id, step.node);
+  }
+
+  const orderedIds = [
+    ...to.nodes.map((node) => node.id),
+    ...from.nodes.map((node) => node.id).filter((id) => !to.nodes.some((node) => node.id === id)),
+  ];
+  return createSceneState({
+    revision: to.revision,
+    nodes: orderedIds.flatMap((id) => {
+      const node = materialized.get(id);
+      return node ? [node] : [];
+    }),
+  });
+}

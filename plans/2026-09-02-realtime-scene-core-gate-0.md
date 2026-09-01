@@ -12,12 +12,12 @@ In this plan, a **scene document** means the committed semantic description of w
 
 - [x] 2026-09-02 01:17 IST: Read `.agent/PLANS.md`, inspected the current SDL/compiler/renderer/interruption paths, and confirmed the existing dirty voice checkout must remain untouched.
 - [x] 2026-09-02 01:17 IST: Created clean worktree `/Users/swayam.gupta/Documents/GitHub/conv-ai-visual-scene-core` on branch `codex/realtime-scene-core` from clean `main` at `471bbe0`.
-- [ ] Separate normal SDL completion from interruption and add regression coverage proving interruption never plays future timelines.
-- [ ] Add a pure TypeScript scene document and deterministic scene-to-scene motion planner with stable semantic IDs and replay tests.
-- [ ] Add the concrete SVG/GSAP motion-plan executor and explicit pause/cancel ownership while preserving already-visible board elements.
-- [ ] Add a hand-authored Pythagorean live-scene prototype with play, interrupt, focused-question, and reset controls.
-- [ ] Run focused frontend tests, full frontend lint/typecheck/test/build gates as applicable, and visually inspect the prototype in a browser.
-- [ ] Update this plan with measured outcomes, remaining limitations, and the Gate 0 verdict.
+- [x] 2026-09-02 01:28 IST: Separated normal SDL completion from interruption, added canvas-owned motion cancellation, and pushed regression coverage in commit `73a4103`.
+- [x] 2026-09-02 01:36 IST: Added the pure TypeScript scene document, validation, deterministic scene-to-scene planner, stable semantic IDs, and replay tests in commit `7cc0c13`.
+- [x] 2026-09-02 02:02 IST: Added the SVG/GSAP motion-plan executor with explicit playback outcomes, materialized-step reporting, rollback-safe cancellation, stable in-place transforms, and CSS-variable-safe emphasis.
+- [x] 2026-09-02 02:02 IST: Added the hand-authored Pythagorean prototype with normal completion, manual and 700 ms automatic interruption, focused-question branching, accepted-revision replay, and synchronous reset.
+- [x] 2026-09-02 02:13 IST: Passed 41 focused tests and the full frontend check (lint, typecheck, 318 tests, and production build), then inspected normal completion, interruption, replay, rapid reset/interruption, desktop, and 375 px mobile behavior in a real browser.
+- [x] 2026-09-02 02:07 IST: Recorded the measured outcomes, remaining limitations, and a passing Gate 0 verdict below.
 
 ## Surprises & Discoveries
 
@@ -25,6 +25,9 @@ In this plan, a **scene document** means the committed semantic description of w
 - `createTeachingTimeline` schedules callbacks that call `render`, and `render` starts independent GSAP tweens. Killing the parent teaching timeline prevents future callbacks but does not necessarily stop a stroke or pulse already running. Canvas-level tween ownership is required for honest interruption behavior.
 - Several semantic component renderers use `Date.now()` to create child IDs. The same SDL compiled twice can therefore produce different render commands, preventing deterministic replay and stable morph targets.
 - The Voice V2 envelope and reducer already define task generations, canvas revisions, apply acknowledgements, first-visible events, and animation completion. Gate 0 should not redesign that protocol; it should produce a scene core that can be connected to it later.
+- Cancelling an animation is not enough to keep the semantic scene and visible DOM consistent. The executor must return the exact step IDs that became materialized, while interrupted updates and removals need cancellation-specific rollback instead of normal completion finalizers.
+- GSAP's color interpolator cannot parse unresolved CSS custom-property expressions such as `hsl(var(--amber))`. The real-browser run exposed a repeated `splitColor` failure that unit tests had missed; resolving the variables to concrete browser colors before starting the emphasis tween removed the exception.
+- A synchronous reset is important even when the exit effect is visually desirable. An asynchronous fade-out can race the next playback and later remove newly-created nodes with the same semantic IDs.
 
 ## Decision Log
 
@@ -33,10 +36,17 @@ In this plan, a **scene document** means the committed semantic description of w
 - 2026-09-02, Codex: Treat the scene document as client-derived state only. Do not put it on the wire or into durable storage in Gate 0 because that would prematurely freeze the most expensive contract.
 - 2026-09-02, Codex: Reuse SVG and GSAP. Gate 0 must explicitly fail if this substrate cannot achieve convincing visual continuity at reasonable complexity; switching renderers is not hidden inside this plan.
 - 2026-09-02, Codex: Separate normal sequence completion from interruption instead of weakening normal completion semantics. Interruption pauses/kills owned animation and retains visible DOM; normal completion may finish its planned sequence.
+- 2026-09-02, Codex: Define cancellation as retaining only actually materialized steps. Enters become materialized when their visible node is installed; compatible transforms apply in place; incomplete crossfades and removals roll back to their previous node. The resulting partial scene is committed as an accepted revision before branching.
+- 2026-09-02, Codex: Keep reset synchronous and replay from accepted scene documents rather than recorded animation commands. This makes rapid reset/play deterministic and lets replay re-plan motion while preserving semantic identity.
+- 2026-09-02, Codex: Pass Gate 0 and proceed to Gate 1 model authorship. SVG plus GSAP produced a credible board experience at desktop and narrow viewports without requiring a video renderer, so the next uncertainty is incremental model output and validation rather than rendering feasibility.
 
 ## Outcomes & Retrospective
 
-No implementation outcome has been recorded yet. At completion this section will state whether the deterministic replay, interruption behavior, and visual-quality inspection passed; which commands ran; and whether Gate 1 streaming authorship is justified.
+Gate 0 passed. The branch now contains a small immutable scene model, deterministic transition planner, concrete SVG motion executor, and a Pythagorean live-scene lab. The normal branch progressively constructs the triangle and then reveals `a² + b² = c²`. The interruption branch cancels the queued theorem, materializes only the ink that was actually installed, fills missing foundational geometry, and evolves the retained board into a focused right-angle explanation. Replay re-plans the accepted revisions and reaches the same semantic object set.
+
+The focused validation finished with 41 passing tests. The complete frontend `npm run check` passed lint, generated route/type checks, all 318 unit tests, and a Next.js production build. Browser inspection covered 1280×900 and 375×812 viewports. Automatic interruption remained theorem-free beyond the original reveal deadline; immediate reset → play → manual interrupt produced no duplicate semantic IDs; replay reproduced the same 12-node interrupted scene; and the final post-fix browser runs recorded zero application errors. The browser pass also caught and drove the CSS-variable emphasis fix that the simulated DOM did not expose.
+
+The remaining limitations are intentional. Scene revisions are still hand-authored, the format is not streamed or persisted, no model validity/repair loop exists, no latency budget has been measured, and the demo is not connected to the voice generation protocol. The primitive vocabulary is deliberately small and SVG/GSAP has only one real lesson as evidence. Gate 1 should therefore add bounded incremental scene-patch authorship and evaluation without changing the renderer substrate or coupling it to voice yet.
 
 ## Context and Orientation
 

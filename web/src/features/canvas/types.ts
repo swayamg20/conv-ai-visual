@@ -1,5 +1,28 @@
 import type { gsap } from "gsap";
 
+import type { MotionPlan } from "@/lib/live-scene";
+
+export type MotionPlaybackStatus = "completed" | "cancelled" | "failed";
+
+export interface MotionPlaybackOutcome {
+  readonly status: MotionPlaybackStatus;
+  /** Plan step IDs that are materially represented by the retained SVG. */
+  readonly appliedStepIds: readonly string[];
+  readonly error?: string;
+}
+
+export interface MotionPlayback {
+  readonly finished: Promise<MotionPlaybackOutcome>;
+  pause(): void;
+  resume(): void;
+  cancel(): MotionPlaybackOutcome;
+}
+
+export interface MotionPlaybackOptions {
+  /** Delay between starting adjacent plan steps. */
+  staggerMs?: number;
+}
+
 export interface CanvasOperation {
   id?: string;
   action: string;
@@ -104,6 +127,8 @@ export interface SVGCanvasHandle {
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
+  playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
+  emphasizeElement(id: string, color?: string): void;
   /** Stop scheduled and active drawing work without removing visible SVG elements. */
   cancelMotion(): void;
   clear(): void;

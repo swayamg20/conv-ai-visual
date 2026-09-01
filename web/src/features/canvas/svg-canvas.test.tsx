@@ -6,6 +6,7 @@ import { gsap } from "gsap";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SVGCanvas } from "@/components/svg-canvas";
+import { createSceneState, planSceneTransition } from "@/lib/live-scene";
 
 import type { SVGCanvasHandle } from "./types";
 
@@ -115,6 +116,329 @@ describe("SVGCanvas", () => {
     expect(host.querySelector("[data-element-id='committed-ink']")).not.toBeNull();
     expect(host.querySelector("[data-element-id='stale-future']")).toBeNull();
 
+    await act(async () => root.unmount());
+  });
+
+  it("owns queued motion-plan work and keeps the accepted scene on cancellation", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const foundation = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "visible-now",
+          kind: "text",
+          x: 20,
+          y: 40,
+          text: "Visible now",
+          presentation: { enter: "none", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1, anchor: "start" },
+        },
+        {
+          id: "stale-later",
+          kind: "text",
+          x: 20,
+          y: 80,
+          text: "Stale later",
+          presentation: { enter: "fade", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1, anchor: "start" },
+        },
+      ],
+    });
+
+    const playback = canvas.current?.playMotionPlan(
+      planSceneTransition(empty, foundation),
+      { staggerMs: 10_000 }
+    );
+    act(() => {
+      playback?.cancel();
+    });
+
+    await expect(playback?.finished).resolves.toMatchObject({
+      status: "cancelled",
+      appliedStepIds: ["visible-now"],
+    });
+    expect(host.querySelector("[data-element-id='visible-now']")).not.toBeNull();
+    expect(host.querySelector("[data-element-id='stale-later']")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("retains one stable DOM identity when a same-id update is interrupted", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const oldScene = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "stable-title",
+          kind: "text",
+          x: 20,
+          y: 40,
+          text: "Old title",
+          presentation: { enter: "none", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1, anchor: "start" },
+        },
+      ],
+    });
+    const oldTitle = oldScene.nodes[0];
+    if (oldTitle.kind !== "text") throw new Error("Expected a text fixture");
+    const newScene = createSceneState({
+      revision: 2,
+      nodes: [
+        {
+          ...oldTitle,
+          text: "New title",
+        },
+      ],
+    });
+
+    let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, oldScene));
+    });
+    await expect(initial?.finished).resolves.toMatchObject({ status: "completed" });
+    const before = host.querySelector("[data-element-id='stable-title']");
+    let update: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      update = canvas.current?.playMotionPlan(planSceneTransition(oldScene, newScene));
+      update?.cancel();
+    });
+
+    await expect(update?.finished).resolves.toMatchObject({
+      status: "cancelled",
+      appliedStepIds: [],
+    });
+    const stableElements = host.querySelectorAll("[data-element-id='stable-title']");
+    expect(stableElements).toHaveLength(1);
+    expect(stableElements[0]).toBe(before);
+    expect(stableElements[0].querySelector("text")?.textContent).toBe("Old title");
+    expect(getComputedStyle(stableElements[0]).opacity).toBe("1");
+    expect(host.querySelector("[data-element-id='stable-title--outgoing']")).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("updates compatible geometry in place and reports it as materialized", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const first = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "moving-title",
+          kind: "text",
+          x: 20,
+          y: 40,
+          text: "Same title",
+          presentation: { enter: "none", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1, anchor: "start" },
+        },
+      ],
+    });
+    const firstTitle = first.nodes[0];
+    if (firstTitle.kind !== "text") throw new Error("Expected a text fixture");
+    const moved = createSceneState({
+      revision: 2,
+      nodes: [{ ...firstTitle, x: 80 }],
+    });
+
+    let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, first));
+    });
+    await initial?.finished;
+    const before = host.querySelector("[data-element-id='moving-title']");
+    let update: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      update = canvas.current?.playMotionPlan(planSceneTransition(first, moved));
+      update?.cancel();
+    });
+
+    await expect(update?.finished).resolves.toMatchObject({
+      status: "cancelled",
+      appliedStepIds: ["moving-title"],
+    });
+    const after = host.querySelector("[data-element-id='moving-title']");
+    expect(after).toBe(before);
+    expect(after?.querySelector("text")?.getAttribute("x")).toBe("80");
+    expect(gsap.getProperty(after as Element, "scale")).toBe(1);
+
+    await act(async () => root.unmount());
+  });
+
+  it("rolls back an interrupted removal and keeps the visible node opaque", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const visible = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "retained-note",
+          kind: "text",
+          x: 20,
+          y: 40,
+          text: "Keep this ink",
+          presentation: { enter: "none", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1, anchor: "start" },
+        },
+      ],
+    });
+    const removed = createSceneState({ revision: 2, nodes: [] });
+
+    let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, visible));
+    });
+    await initial?.finished;
+    const before = host.querySelector("[data-element-id='retained-note']");
+    let removal: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      removal = canvas.current?.playMotionPlan(planSceneTransition(visible, removed));
+      removal?.cancel();
+    });
+
+    await expect(removal?.finished).resolves.toMatchObject({
+      status: "cancelled",
+      appliedStepIds: [],
+    });
+    const after = host.querySelector("[data-element-id='retained-note']");
+    expect(after).toBe(before);
+    expect(getComputedStyle(after as Element).opacity).toBe("1");
+
+    await act(async () => root.unmount());
+  });
+
+  it("clears synchronously before a new scene starts", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+    act(() => {
+      canvas.current?.render([
+        {
+          action: "text",
+          id: "stale-callout",
+          text: "Old branch",
+          x: 20,
+          y: 40,
+        },
+      ]);
+      canvas.current?.clear();
+      canvas.current?.render([
+        {
+          action: "text",
+          id: "fresh-board",
+          text: "Fresh branch",
+          x: 20,
+          y: 40,
+          animate_style: "none",
+        },
+      ]);
+    });
+
+    expect(host.querySelector("[data-element-id='stale-callout']")).toBeNull();
+    expect(host.querySelector("[data-element-id='fresh-board']")).not.toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("resolves CSS variable colors before running an emphasis tween", async () => {
+    document.documentElement.style.setProperty("--test-stroke", "252 36% 64%");
+    document.documentElement.style.setProperty("--test-highlight", "38 91% 55%");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const scene = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "css-colored-angle",
+          kind: "path",
+          points: [
+            [20, 60],
+            [20, 20],
+            [60, 20],
+          ],
+          closed: false,
+          presentation: { enter: "none", exit: "fade" },
+          style: {
+            stroke: "hsl(var(--test-stroke))",
+            strokeWidth: 4,
+            fill: "none",
+            opacity: 1,
+            roughness: 0,
+          },
+        },
+      ],
+    });
+
+    let playback: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      playback = canvas.current?.playMotionPlan(planSceneTransition(empty, scene));
+    });
+    await playback?.finished;
+
+    const path = host.querySelector("[data-element-id='css-colored-angle'] path");
+    expect(path?.getAttribute("stroke")).toBe("hsl(var(--test-stroke))");
+    expect(() => {
+      act(() => {
+        canvas.current?.emphasizeElement(
+          "css-colored-angle",
+          "hsl(var(--test-highlight))"
+        );
+        gsap.ticker.tick();
+      });
+    }).not.toThrow();
+
+    act(() => canvas.current?.cancelMotion());
+    expect(path?.getAttribute("stroke")).toBe("hsl(var(--test-stroke))");
+
+    document.documentElement.style.removeProperty("--test-stroke");
+    document.documentElement.style.removeProperty("--test-highlight");
     await act(async () => root.unmount());
   });
 });
