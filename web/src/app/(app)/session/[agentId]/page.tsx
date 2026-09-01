@@ -4,8 +4,13 @@ import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { Mic, ArrowLeft, ChevronUp, Loader2 } from "lucide-react";
-import { gsap } from "gsap";
 import { SVGCanvas } from "@/components/svg-canvas";
+import {
+  endStepTimelineSequence,
+  killStepTimelines,
+  type SDLSequenceEndReason,
+  type SDLStepTimelineMap,
+} from "@/features/canvas/sequence-lifecycle";
 import type {
   CanvasOperation,
   SVGCanvasHandle,
@@ -210,11 +215,11 @@ export default function AgentSessionPage() {
     }
   }, []);
 
-  const stepTimelinesRef = useRef<Map<string, { tl: gsap.core.Timeline; started: boolean }>>(new Map());
+  const stepTimelinesRef = useRef<SDLStepTimelineMap>(new Map());
 
   const handleSDLStart = useCallback((sdl: SDLScene, sequenceId: string, _totalSteps: number) => {
+    killStepTimelines(stepTimelinesRef.current);
     const plan = compileScene(sdl, { width: 800, height: 600 });
-    stepTimelinesRef.current.clear();
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       if (step.commands.length > 0) {
@@ -251,19 +256,15 @@ export default function AgentSessionPage() {
         }
       }
     }
-    stepTimelinesRef.current.delete(key);
   }, []);
 
-  const handleSDLComplete = useCallback((sequenceId: string) => {
-    const keys = Array.from(stepTimelinesRef.current.keys());
-    for (const key of keys) {
-      if (key.startsWith(`${sequenceId}:`)) {
-        const entry = stepTimelinesRef.current.get(key);
-        if (entry && !entry.started) {
-          entry.tl.play();
-        }
-        stepTimelinesRef.current.delete(key);
-      }
+  const handleSDLComplete = useCallback((
+    sequenceId: string,
+    reason: SDLSequenceEndReason
+  ) => {
+    endStepTimelineSequence(stepTimelinesRef.current, sequenceId, reason);
+    if (reason === "interrupted") {
+      canvasRef.current?.cancelMotion();
     }
   }, []);
 
@@ -271,8 +272,7 @@ export default function AgentSessionPage() {
   useEffect(() => {
     const stepTimelines = stepTimelinesRef.current;
     return () => {
-      stepTimelines.forEach(({ tl }) => tl.kill());
-      stepTimelines.clear();
+      killStepTimelines(stepTimelines);
     };
   }, []);
 

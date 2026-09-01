@@ -6,6 +6,7 @@ import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
 import { getAuthHeaders } from "@/lib/firebase";
 import type { CanvasOperation } from "@/features/canvas/types";
+import type { SDLSequenceEndReason } from "@/features/canvas/sequence-lifecycle";
 import {
   lifecycleSignalForBackendError,
   reduceVoiceLifecycle,
@@ -57,7 +58,7 @@ interface UseWebRTCOptions {
   onSDLStart?: (sdl: any, sequenceId: string, totalSteps: number) => void;
   onSDLStepAudioStart?: (sequenceId: string, stepIndex: number) => void;
   onSDLStepComplete?: (sequenceId: string, stepIndex: number, audioDurationMs: number) => void;
-  onSDLComplete?: (sequenceId: string) => void;
+  onSDLComplete?: (sequenceId: string, reason: SDLSequenceEndReason) => void;
   onPipelineMetrics?: (metrics: Record<string, any>) => void;
   onError?: (message: string) => void;
   onLog?: (message: string) => void;
@@ -98,6 +99,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
   const isFirstTTSChunkRef = useRef(true);  // Track if this is first chunk of TTS session
   const isTTSEnabledRef = useRef(true);  // Ref for TTS enabled state
   const sdlStepChunkTrackerRef = useRef<{ sequenceId: string; stepIndex: number; firstChunkSent: boolean } | null>(null);
+  const activeSDLSequenceIdRef = useRef<string | null>(null);
   const readinessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const terminalErrorRef = useRef(false);
   const connectionAttemptRef = useRef(0);
@@ -140,6 +142,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     }
     isFirstTTSChunkRef.current = true;
     sdlStepChunkTrackerRef.current = null;
+    activeSDLSequenceIdRef.current = null;
   }, [clearReadinessTimer]);
 
   const log = useCallback((msg: string) => {
@@ -464,6 +467,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
           case "sdl_start":
             log(`SDL sequence started: ${data.total_steps} steps`);
             sdlStepChunkTrackerRef.current = null;
+            activeSDLSequenceIdRef.current = data.sequence_id;
             isFirstTTSChunkRef.current = true;
             onSDLStart?.(data.sdl, data.sequence_id, data.total_steps);
             updatePipelineState("speaking");
@@ -488,7 +492,13 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             log("SDL sequence complete");
             sdlStepChunkTrackerRef.current = null;
             isFirstTTSChunkRef.current = true;
-            onSDLComplete?.(data.sequence_id);
+            if (activeSDLSequenceIdRef.current === data.sequence_id) {
+              activeSDLSequenceIdRef.current = null;
+            }
+            onSDLComplete?.(
+              data.sequence_id,
+              data.reason === "interrupted" ? "interrupted" : "completed"
+            );
             break;
 
           case "llm_response":
@@ -560,8 +570,13 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
             isFirstTTSChunkRef.current = true;  // Reset for next session
             sdlStepChunkTrackerRef.current = null;
             // Clean up any active SDL sequence timelines
-            if (data.sequence_id) {
-              onSDLComplete?.(data.sequence_id);
+            {
+              const interruptedSequenceId =
+                data.sequence_id ?? activeSDLSequenceIdRef.current;
+              activeSDLSequenceIdRef.current = null;
+              if (interruptedSequenceId) {
+                onSDLComplete?.(interruptedSequenceId, "interrupted");
+              }
             }
             updatePipelineState("listening");
             break;

@@ -2,6 +2,7 @@
 
 import { act, createRef } from "react";
 import { createRoot } from "react-dom/client";
+import { gsap } from "gsap";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { SVGCanvas } from "@/components/svg-canvas";
@@ -63,6 +64,56 @@ describe("SVGCanvas", () => {
     expect(
       host.querySelector("[data-element-id='sequence-answer'] text")?.textContent
     ).toBe("2 + 2 = 4");
+
+    await act(async () => root.unmount());
+  });
+
+  it("cancels active and future drawing work without clearing visible ink", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+    act(() => {
+      canvas.current?.render([
+        {
+          action: "text",
+          id: "committed-ink",
+          text: "Keep me",
+          x: 20,
+          y: 40,
+        },
+      ]);
+    });
+    const committed = host.querySelector<SVGGElement>(
+      "[data-element-id='committed-ink']"
+    );
+    expect(committed).not.toBeNull();
+    expect(gsap.getTweensOf(committed as SVGGElement).length).toBeGreaterThan(0);
+
+    const future = canvas.current?.createPausedSequence({
+      steps: [
+        {
+          action: "text",
+          target_id: "stale-future",
+          text: "Do not reveal",
+          x: 40,
+          y: 80,
+        },
+      ],
+    });
+
+    act(() => {
+      canvas.current?.cancelMotion();
+    });
+
+    expect(gsap.getTweensOf(committed as SVGGElement)).toHaveLength(0);
+    expect(future?.isActive()).toBe(false);
+    expect(host.querySelector("[data-element-id='committed-ink']")).not.toBeNull();
+    expect(host.querySelector("[data-element-id='stale-future']")).toBeNull();
 
     await act(async () => root.unmount());
   });

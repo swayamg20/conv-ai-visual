@@ -397,12 +397,21 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       [buildTimeline]
     );
 
-    const clear = useCallback(() => {
+    const cancelMotion = useCallback(() => {
       sequenceQueueRef.current.forEach((timeline) => timeline.kill());
       sequenceQueueRef.current.length = 0;
       isPlayingRef.current = false;
       timelinesRef.current.forEach((timeline) => timeline.kill());
       timelinesRef.current.clear();
+
+      const svg = svgRef.current;
+      if (!svg) return;
+      const canvasTargets = [svg, ...Array.from(svg.querySelectorAll("*"))];
+      gsap.getTweensOf(canvasTargets).forEach((animation) => animation.kill());
+    }, []);
+
+    const clear = useCallback(() => {
+      cancelMotion();
       panRef.current = { x: 0, y: 0 };
       applyViewBox(zoomLevel, panRef.current, true);
 
@@ -430,7 +439,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           forceRender((revision) => revision + 1);
         },
       });
-    }, [applyViewBox, panRef, zoomLevel]);
+    }, [applyViewBox, cancelMotion, panRef, zoomLevel]);
 
     const saveAsImage = useCallback(() => {
       const svg = svgRef.current;
@@ -447,6 +456,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         createSequence,
         createPausedSequence,
         renderFunctionPlot,
+        cancelMotion,
         clear,
         saveAsImage,
         zoomIn,
@@ -456,6 +466,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       }),
       [
         animate,
+        cancelMotion,
         clear,
         createPausedSequence,
         createSequence,

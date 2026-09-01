@@ -104,6 +104,8 @@ export interface SVGCanvasHandle {
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
+  /** Stop scheduled and active drawing work without removing visible SVG elements. */
+  cancelMotion(): void;
   clear(): void;
   saveAsImage(): void;
   zoomIn(): void;
