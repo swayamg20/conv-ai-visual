@@ -13,6 +13,7 @@ def test_product_route_contract_is_registered_once() -> None:
         "/api/auth/me": {"get"},
         "/api/logs": {"get"},
         "/api/logs/stats": {"get"},
+        "/api/live-scenes/stream": {"post"},
         "/api/sessions": {"get", "post"},
         "/api/sessions/{session_id}": {"get"},
         "/api/sessions/{session_id}/end": {"post"},

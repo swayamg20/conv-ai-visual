@@ -26,6 +26,21 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _provider_model(
+    provider: str,
+    *,
+    openai_model: str,
+    groq_model: str,
+    gemini_model: str,
+) -> str:
+    """Resolve the configured model for one supported LLM provider."""
+    return {
+        "openai": openai_model,
+        "groq": groq_model,
+        "gemini": gemini_model,
+    }.get(provider.lower(), "")
+
+
 class Config:
     """Application configuration."""
 
@@ -69,6 +84,24 @@ class Config:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = (
         int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
+    )
+    # Gate 1 live-scene authoring can be tuned independently while inheriting
+    # the existing LLM selection when no scene-specific override is supplied.
+    MURMUR_SCENE_LLM_PROVIDER: str = os.getenv("MURMUR_SCENE_LLM_PROVIDER") or LLM_PROVIDER
+    MURMUR_SCENE_LLM_MODEL: str = os.getenv("MURMUR_SCENE_LLM_MODEL") or _provider_model(
+        MURMUR_SCENE_LLM_PROVIDER,
+        openai_model=OPENAI_MODEL,
+        groq_model=GROQ_MODEL,
+        gemini_model=GEMINI_MODEL,
+    )
+    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(
+        os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS") or LLM_MAX_TOKENS or 4096
+    )
+    MURMUR_SCENE_LLM_TIMEOUT_SECONDS: float = float(
+        os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
+    )
+    MURMUR_SCENE_LLM_TEMPERATURE: float = float(
+        os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", str(LLM_TEMPERATURE))
     )
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
     ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
@@ -269,6 +302,21 @@ EXAMPLE — "Explain the Pythagorean theorem":
             raise ValueError(
                 f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
             )
+
+        scene_provider = cls.MURMUR_SCENE_LLM_PROVIDER.lower()
+        if scene_provider not in {"openai", "groq", "gemini"}:
+            raise ValueError(
+                "Unknown MURMUR_SCENE_LLM_PROVIDER: "
+                f"{scene_provider}. Supported providers: openai, groq, gemini"
+            )
+        if not cls.MURMUR_SCENE_LLM_MODEL:
+            raise ValueError("MURMUR_SCENE_LLM_MODEL must not be empty")
+        if cls.MURMUR_SCENE_LLM_MAX_TOKENS <= 0:
+            raise ValueError("MURMUR_SCENE_LLM_MAX_TOKENS must be greater than zero")
+        if cls.MURMUR_SCENE_LLM_TIMEOUT_SECONDS <= 0:
+            raise ValueError("MURMUR_SCENE_LLM_TIMEOUT_SECONDS must be greater than zero")
+        if not 0 <= cls.MURMUR_SCENE_LLM_TEMPERATURE <= 2:
+            raise ValueError("MURMUR_SCENE_LLM_TEMPERATURE must be between zero and two")
 
         # Validate TTS configuration
         if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:

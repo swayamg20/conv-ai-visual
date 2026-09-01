@@ -16,6 +16,8 @@ from murmur.canvas.state import register_canvas_tool
 from murmur.chat import ChatService
 from murmur.core import MurmurError
 from murmur.core.config import config
+from murmur.live_scene import SceneAuthoringService
+from murmur.llm.factory import create_llm_client
 from murmur.persistence import init_db
 from murmur.runtime import RuntimeRegistry
 from murmur.runtime.supervisor import SessionSupervisor
@@ -44,12 +46,29 @@ def create_application(
     chat_service: ChatService | None = None,
     voice_service: VoiceService | None = None,
     voice_bootstrap_service: VoiceBootstrapper | None = None,
+    scene_authoring_service: SceneAuthoringService | None = None,
 ) -> FastAPI:
     """Build the HTTP application around an explicit runtime owner."""
     runtime = runtime or RuntimeRegistry()
     chat_service = chat_service or ChatService(runtime)
     voice_service = voice_service or VoiceService(runtime)
     voice_bootstrap_service = voice_bootstrap_service or create_default_voice_bootstrap_service()
+    if scene_authoring_service is None:
+        scene_provider = config.MURMUR_SCENE_LLM_PROVIDER
+        scene_model = config.MURMUR_SCENE_LLM_MODEL
+
+        def create_scene_client():
+            return create_llm_client(
+                scene_provider,
+                model=scene_model,
+            )
+
+        scene_authoring_service = SceneAuthoringService(
+            client_factory=create_scene_client,
+            temperature=config.MURMUR_SCENE_LLM_TEMPERATURE,
+            max_tokens=config.MURMUR_SCENE_LLM_MAX_TOKENS,
+            timeout_seconds=config.MURMUR_SCENE_LLM_TIMEOUT_SECONDS,
+        )
     supervisor = SessionSupervisor(chat_service, voice_service)
 
     @asynccontextmanager
@@ -87,6 +106,7 @@ def create_application(
     app.state.chat_service = chat_service
     app.state.voice_service = voice_service
     app.state.voice_bootstrap_service = voice_bootstrap_service
+    app.state.scene_authoring_service = scene_authoring_service
     app.state.session_supervisor = supervisor
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(MurmurError, domain_error_handler)

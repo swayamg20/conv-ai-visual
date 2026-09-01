@@ -36,6 +36,12 @@ from murmur.live_scene.contracts import (
     TextStyle,
     dump_scene_stream_event,
 )
+from murmur.live_scene.service import (
+    SceneAuthoringService,
+    SceneClock,
+    SceneModelClient,
+    SceneModelClientFactory,
+)
 from murmur.live_scene.stream_parser import (
     NDJSONScenePatchParser,
     ScenePatchStreamError,
@@ -61,7 +67,11 @@ __all__ = [
     "PutSceneOperation",
     "RectSceneNode",
     "RemoveSceneOperation",
+    "SceneAuthoringService",
+    "SceneClock",
     "SceneGenerationRequest",
+    "SceneModelClient",
+    "SceneModelClientFactory",
     "SceneNode",
     "ScenePatch",
     "ScenePatchDraft",

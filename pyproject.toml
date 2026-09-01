@@ -72,6 +72,7 @@ packages = [
   "murmur.chat",
   "murmur.core",
   "murmur.llm",
+  "murmur.live_scene",
   "murmur.memory",
   "murmur.persistence",
   "murmur.persistence.repositories",
