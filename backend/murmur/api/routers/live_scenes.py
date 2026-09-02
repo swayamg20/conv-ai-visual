@@ -23,6 +23,16 @@ from murmur.live_scene import (
 router = APIRouter(prefix="/api/live-scenes", tags=["live-scenes"])
 
 
+class _OwnedStreamingResponse(StreamingResponse):
+    """Close the body owner even when the ASGI server loses the client during send."""
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await close_async_resource(self.body_iterator)
+
+
 async def _encode_scene_events(
     events: AsyncIterator[SceneStreamEvent],
     lease: SceneAdmissionLease | None = None,
@@ -52,7 +62,7 @@ async def stream_live_scene(
     except SceneAdmissionError as exc:
         raise ApiError(429, str(exc)) from None
     events = scene_service.stream_events(body)
-    return StreamingResponse(
+    return _OwnedStreamingResponse(
         _encode_scene_events(events, lease),
         media_type="text/event-stream",
         headers={

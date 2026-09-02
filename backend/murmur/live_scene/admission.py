@@ -23,12 +23,14 @@ class SceneAdmissionLease:
         self._owner = owner
         self._user_id = user_id
         self._closed = False
+        self._close_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        await self._owner._release(self._user_id)
+        async with self._close_lock:
+            if self._closed:
+                return
+            await self._owner._release(self._user_id)
+            self._closed = True
 
 
 class SceneAuthoringAdmission:

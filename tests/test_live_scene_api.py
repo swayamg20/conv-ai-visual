@@ -14,14 +14,16 @@ import pytest
 from fastapi.testclient import TestClient
 from murmur.api.dependencies import get_authenticated_user
 from murmur.api.errors import ApiError
-from murmur.api.routers.live_scenes import _encode_scene_events
+from murmur.api.routers.live_scenes import _encode_scene_events, _OwnedStreamingResponse
 from murmur.live_scene import (
     LiveSceneRequest,
+    SceneAuthoringAdmission,
     ScenePatchEvent,
     SceneStreamCompletedEvent,
     SceneStreamEvent,
     SceneStreamStartedEvent,
 )
+from starlette.requests import ClientDisconnect
 
 AUTHENTICATED_USER = {
     "id": "scene-user",
@@ -161,6 +163,46 @@ async def test_sse_encoder_closes_inner_service_iterator_on_consumer_abort() -> 
     await encoded.aclose()
 
     assert events.closed is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_closes_events_and_admission_when_send_disconnects() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("scene-user")
+    events = _ClosingSceneEvents(_scene_events())
+    response = _OwnedStreamingResponse(_encode_scene_events(events, lease))
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/live-scenes/stream",
+        "raw_path": b"/api/live-scenes/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    assert events.closed is True
+    replacement = await admission.acquire("scene-user")
+    await replacement.aclose()
 
 
 def test_live_scene_stream_requires_authentication() -> None:
