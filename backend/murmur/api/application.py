@@ -16,7 +16,7 @@ from murmur.canvas.state import register_canvas_tool
 from murmur.chat import ChatService
 from murmur.core import MurmurError
 from murmur.core.config import config
-from murmur.live_scene import SceneAuthoringService
+from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
 from murmur.llm.factory import create_llm_client
 from murmur.persistence import init_db
 from murmur.runtime import RuntimeRegistry
@@ -47,6 +47,8 @@ def create_application(
     voice_service: VoiceService | None = None,
     voice_bootstrap_service: VoiceBootstrapper | None = None,
     scene_authoring_service: SceneAuthoringService | None = None,
+    scene_authoring_admission: SceneAuthoringAdmission | None = None,
+    scene_authoring_enabled: bool | None = None,
 ) -> FastAPI:
     """Build the HTTP application around an explicit runtime owner."""
     runtime = runtime or RuntimeRegistry()
@@ -69,6 +71,13 @@ def create_application(
             max_tokens=config.MURMUR_SCENE_LLM_MAX_TOKENS,
             timeout_seconds=config.MURMUR_SCENE_LLM_TIMEOUT_SECONDS,
         )
+    scene_authoring_admission = scene_authoring_admission or SceneAuthoringAdmission(
+        global_limit=config.MURMUR_SCENE_GLOBAL_CONCURRENCY,
+        per_user_limit=config.MURMUR_SCENE_PER_USER_CONCURRENCY,
+        requests_per_minute=config.MURMUR_SCENE_REQUESTS_PER_MINUTE,
+    )
+    if scene_authoring_enabled is None:
+        scene_authoring_enabled = config.MURMUR_SCENE_ENABLED
     supervisor = SessionSupervisor(chat_service, voice_service)
 
     @asynccontextmanager
@@ -107,6 +116,8 @@ def create_application(
     app.state.voice_service = voice_service
     app.state.voice_bootstrap_service = voice_bootstrap_service
     app.state.scene_authoring_service = scene_authoring_service
+    app.state.scene_authoring_admission = scene_authoring_admission
+    app.state.scene_authoring_enabled = scene_authoring_enabled
     app.state.session_supervisor = supervisor
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(MurmurError, domain_error_handler)

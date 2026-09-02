@@ -5,10 +5,16 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from murmur.core.async_cleanup import close_async_resource
 from murmur.llm.base import LLMClient
 from murmur.tools.contracts import ToolCall
 
 logger = logging.getLogger(__name__)
+
+
+async def _close_provider_resource(resource: object | None) -> None:
+    if not await close_async_resource(resource):
+        logger.warning("Gemini provider resource cleanup did not finish cleanly")
 
 
 class GeminiClient(LLMClient):
@@ -124,6 +130,7 @@ class GeminiClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
+        response = None
         try:
             system_prompt, history = self._convert_messages(messages)
 
@@ -150,6 +157,8 @@ class GeminiClient(LLMClient):
         except Exception as e:
             logger.exception(f"Gemini stream error: {e}")
             raise
+        finally:
+            await _close_provider_resource(response)
 
     async def complete_with_tools(
         self,
@@ -218,6 +227,7 @@ class GeminiClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
+        response = None
         try:
             system_prompt, history = self._convert_messages(messages)
 
@@ -251,6 +261,8 @@ class GeminiClient(LLMClient):
         except Exception as e:
             logger.exception(f"Gemini stream with tools error: {e}")
             raise
+        finally:
+            await _close_provider_resource(response)
 
     async def iter_stream_tool_events(
         self, stream: AsyncGenerator[Any, None]

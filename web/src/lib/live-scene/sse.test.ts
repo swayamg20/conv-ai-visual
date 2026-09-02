@@ -166,7 +166,17 @@ describe("LiveSceneSseDecoder", () => {
     expect(errorCode(() => closed.finish())).toBe("decoder_closed");
   });
 
-  it("uses a 64 KiB default and requires a positive safe custom limit", () => {
+  it("accepts canonical envelope headroom above the 64 KiB model frame", () => {
+    expect(LIVE_SCENE_MAX_SSE_EVENT_BYTES).toBe(96 * 1024);
+    const wire = encoder.encode(`data: ${"x".repeat(70 * 1024)}\n\n`);
+
+    expect(new LiveSceneSseDecoder().push(wire)).toHaveLength(1);
+    expect(() => new LiveSceneSseDecoder(64 * 1024).push(wire)).toThrow(
+      "65536-byte limit"
+    );
+  });
+
+  it("uses the shared 96 KiB default and requires a positive safe custom limit", () => {
     expect(new LiveSceneSseDecoder().maxEventBytes).toBe(
       LIVE_SCENE_MAX_SSE_EVENT_BYTES
     );

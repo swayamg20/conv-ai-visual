@@ -1,4 +1,6 @@
-export const LIVE_SCENE_MAX_SSE_EVENT_BYTES = 64 * 1024;
+// The model NDJSON frame is capped at 64 KiB server-side. The authoritative
+// SSE envelope has a separate budget for lifecycle metadata and normalization.
+export const LIVE_SCENE_MAX_SSE_EVENT_BYTES = 96 * 1024;
 
 export type LiveSceneSseErrorCode =
   | "invalid_utf8"

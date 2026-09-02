@@ -5,10 +5,16 @@ import logging
 from collections.abc import AsyncGenerator
 from typing import Any
 
+from murmur.core.async_cleanup import close_async_resource
 from murmur.llm.base import LLMClient
 from murmur.tools.contracts import ToolCall
 
 logger = logging.getLogger(__name__)
+
+
+async def _close_provider_resource(resource: object | None) -> None:
+    if not await close_async_resource(resource):
+        logger.warning("OpenAI provider resource cleanup did not finish cleanly")
 
 
 class OpenAIClient(LLMClient):
@@ -70,6 +76,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
+        stream = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -86,6 +93,8 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logger.exception(f"OpenAI stream error: {e}")
             raise
+        finally:
+            await _close_provider_resource(stream)
 
     async def complete_with_tools(
         self,
@@ -119,6 +128,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
+        stream = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -135,6 +145,12 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logger.exception(f"OpenAI stream with tools error: {e}")
             raise
+        finally:
+            await _close_provider_resource(stream)
+
+    async def aclose(self) -> None:
+        """Close the owned OpenAI-compatible HTTP client."""
+        await _close_provider_resource(self.client)
 
     async def iter_stream_tool_events(
         self, stream: AsyncGenerator[Any, None]

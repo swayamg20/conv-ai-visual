@@ -10,9 +10,11 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import murmur.api.application as application
+import pytest
 from fastapi.testclient import TestClient
 from murmur.api.dependencies import get_authenticated_user
 from murmur.api.errors import ApiError
+from murmur.api.routers.live_scenes import _encode_scene_events
 from murmur.live_scene import (
     LiveSceneRequest,
     ScenePatchEvent,
@@ -109,6 +111,21 @@ class FakeSceneAuthoringService:
             yield event
 
 
+class _ClosingSceneEvents:
+    def __init__(self, events: tuple[SceneStreamEvent, ...]) -> None:
+        self._events = iter(events)
+        self.closed = False
+
+    def __aiter__(self) -> _ClosingSceneEvents:
+        return self
+
+    async def __anext__(self) -> SceneStreamEvent:
+        return next(self._events)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
 def _sse_payloads(response_text: str) -> list[dict[str, Any]]:
     blocks = [block for block in response_text.split("\n\n") if block]
     assert all(block.startswith("data: ") for block in blocks)
@@ -119,8 +136,12 @@ def _test_client(
     service: FakeSceneAuthoringService,
     *,
     authenticated: bool,
+    scene_authoring_enabled: bool = True,
 ) -> TestClient:
-    app = application.create_application(scene_authoring_service=service)  # type: ignore[arg-type]
+    app = application.create_application(
+        scene_authoring_service=service,  # type: ignore[arg-type]
+        scene_authoring_enabled=scene_authoring_enabled,
+    )
 
     def authenticate() -> dict[str, str | None]:
         if not authenticated:
@@ -129,6 +150,17 @@ def _test_client(
 
     app.dependency_overrides[get_authenticated_user] = authenticate
     return TestClient(app)
+
+
+@pytest.mark.asyncio
+async def test_sse_encoder_closes_inner_service_iterator_on_consumer_abort() -> None:
+    events = _ClosingSceneEvents(_scene_events())
+    encoded = _encode_scene_events(events)
+
+    assert (await anext(encoded)).startswith("data: ")
+    await encoded.aclose()
+
+    assert events.closed is True
 
 
 def test_live_scene_stream_requires_authentication() -> None:
@@ -141,6 +173,23 @@ def test_live_scene_stream_requires_authentication() -> None:
 
     assert response.status_code == 401
     assert response.json() == {"error": "Not authenticated"}
+    assert service.requests == []
+
+
+def test_live_scene_stream_is_default_off_even_for_authenticated_users() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(
+        service,
+        authenticated=True,
+        scene_authoring_enabled=False,
+    )
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "Live scene generation is not enabled"}
     assert service.requests == []
 
 

@@ -1,5 +1,10 @@
 """Incremental SceneDoc authoring contracts and framing."""
 
+from murmur.live_scene.admission import (
+    SceneAdmissionError,
+    SceneAdmissionLease,
+    SceneAuthoringAdmission,
+)
 from murmur.live_scene.contracts import (
     LIVE_SCENE_BOARD_HEIGHT,
     LIVE_SCENE_BOARD_WIDTH,
@@ -8,6 +13,7 @@ from murmur.live_scene.contracts import (
     MAX_NDJSON_FRAME_BYTES,
     MAX_PATCH_OPERATIONS,
     MAX_PATH_POINTS,
+    MAX_SCENE_MODEL_OUTPUT_TOKENS,
     MAX_SCENE_NODES,
     LatexSceneNode,
     LatexStyle,
@@ -48,6 +54,11 @@ from murmur.live_scene.stream_parser import (
     ScenePatchStreamErrorCode,
     ScenePatchStreamParser,
 )
+from murmur.live_scene.wire import (
+    MAX_SSE_EVENT_BYTES,
+    SceneStreamWireError,
+    encode_scene_stream_event,
+)
 
 __all__ = [
     "LIVE_SCENE_BOARD_HEIGHT",
@@ -57,7 +68,9 @@ __all__ = [
     "MAX_NDJSON_FRAME_BYTES",
     "MAX_PATCH_OPERATIONS",
     "MAX_PATH_POINTS",
+    "MAX_SCENE_MODEL_OUTPUT_TOKENS",
     "MAX_SCENE_NODES",
+    "MAX_SSE_EVENT_BYTES",
     "LatexSceneNode",
     "LatexStyle",
     "LineSceneNode",
@@ -67,6 +80,9 @@ __all__ = [
     "PutSceneOperation",
     "RectSceneNode",
     "RemoveSceneOperation",
+    "SceneAdmissionError",
+    "SceneAdmissionLease",
+    "SceneAuthoringAdmission",
     "SceneAuthoringService",
     "SceneClock",
     "SceneGenerationRequest",
@@ -87,9 +103,11 @@ __all__ = [
     "SceneStreamFailedEvent",
     "SceneStreamRepairingEvent",
     "SceneStreamStartedEvent",
+    "SceneStreamWireError",
     "ShapeStyle",
     "StrokeStyle",
     "TextSceneNode",
     "TextStyle",
     "dump_scene_stream_event",
+    "encode_scene_stream_event",
 ]

@@ -147,7 +147,7 @@ function stringValue(
     fail(code, `${field} must be a non-empty string`);
   }
   const normalized = stripWhitespace ? value.trim() : value;
-  if (normalized.length > maxLength) {
+  if ([...normalized].length > maxLength) {
     fail("budget_exceeded", `${field} exceeds ${maxLength} characters`);
   }
   return normalized;

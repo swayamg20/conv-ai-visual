@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import json
 import math
 import time
@@ -13,9 +12,14 @@ from typing import Any, Protocol, cast
 
 from pydantic import ValidationError
 
+from murmur.core.async_cleanup import (
+    DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
+    close_async_resource,
+)
 from murmur.live_scene.contracts import (
     MAX_ACCEPTED_PATCHES,
     MAX_SAFE_SEQUENCE,
+    MAX_SCENE_MODEL_OUTPUT_TOKENS,
     LiveSceneRequest,
     PutSceneOperation,
     ScenePatchDraft,
@@ -29,6 +33,7 @@ from murmur.live_scene.contracts import (
 )
 from murmur.live_scene.prompt import build_scene_messages
 from murmur.live_scene.stream_parser import ScenePatchStreamError, ScenePatchStreamParser
+from murmur.live_scene.wire import SceneStreamWireError, encode_scene_stream_event
 
 _REPAIR_MESSAGE = "The first visual draft needed correction. The last board is safe while I retry."
 _INVALID_STREAM_MESSAGE = (
@@ -174,6 +179,10 @@ class _GenerationState:
             result_revision=next_scene.revision,
             patch=patch,
         )
+        try:
+            encode_scene_stream_event(event)
+        except SceneStreamWireError as exc:
+            raise _ScenePatchApplicationError("patch exceeded the browser wire budget") from exc
         self.scene = next_scene
         self.accepted_patch_ids.add(patch.patch_id)
         self.patch_count = next_sequence
@@ -212,21 +221,8 @@ async def _next_before_deadline(
     return await asyncio.wait_for(anext(stream), timeout=remaining)
 
 
-async def _close_upstream(stream: object | None) -> None:
-    if stream is None:
-        return
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        close = getattr(stream, "close", None)
-    if close is None:
-        return
-    try:
-        result = close()
-        if inspect.isawaitable(result):
-            await result
-    except Exception:
-        # Cleanup must never replace cancellation or the bounded public failure event.
-        return
+async def _close_upstream(stream: object | None, *, timeout_seconds: float) -> None:
+    await close_async_resource(stream, timeout_seconds=timeout_seconds)
 
 
 class SceneAuthoringService:
@@ -256,8 +252,12 @@ class SceneAuthoringService:
             or temperature > 2
         ):
             raise ValueError("temperature must be finite and between 0 and 2")
-        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
-            raise ValueError("max_tokens must be a positive integer")
+        if (
+            isinstance(max_tokens, bool)
+            or not isinstance(max_tokens, int)
+            or not 1 <= max_tokens <= MAX_SCENE_MODEL_OUTPUT_TOKENS
+        ):
+            raise ValueError(f"max_tokens must be between 1 and {MAX_SCENE_MODEL_OUTPUT_TOKENS}")
         if (
             isinstance(timeout_seconds, bool)
             or not isinstance(timeout_seconds, int | float)
@@ -272,6 +272,10 @@ class SceneAuthoringService:
         self._temperature = float(temperature)
         self._max_tokens = max_tokens
         self._timeout_seconds = float(timeout_seconds)
+        self._cleanup_timeout_seconds = min(
+            self._timeout_seconds,
+            DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
+        )
 
     def _resolve_client(self) -> SceneModelClient:
         if self._client is not None:
@@ -335,7 +339,10 @@ class SceneAuthoringService:
         finally:
             if not parser.closed:
                 parser.abort()
-            await _close_upstream(upstream)
+            await _close_upstream(
+                upstream,
+                timeout_seconds=self._cleanup_timeout_seconds,
+            )
 
     async def stream_events(self, request: LiveSceneRequest) -> AsyncIterator[SceneStreamEvent]:
         """Yield one bounded generation, including at most one model repair attempt."""
@@ -374,101 +381,112 @@ class SceneAuthoringService:
             )
             return
 
+        client: SceneModelClient | None = None
+        owns_client = self._client is None
         try:
-            client = self._resolve_client()
-        except Exception:
-            yield SceneStreamFailedEvent(
-                generation=request.generation,
-                attempt=1,
-                code="provider_error",
-                message=_PROVIDER_ERROR_MESSAGE,
-                last_accepted_revision=state.scene.revision,
-                retryable=True,
-            )
-            return
-
-        for attempt in (1, 2):
-            current_scene_json = _scene_json(state.scene)
-            repair_context: dict[str, str] | None = None
-            if attempt == 2:
-                assert repair_reason is not None
-                repair_context = {
-                    "error": repair_reason,
-                    "last_accepted_scene_json": current_scene_json,
-                }
-
             try:
-                messages = build_scene_messages(
-                    request.prompt,
-                    current_scene_json,
-                    state.remaining_patch_budget,
-                    repair_context=repair_context,
-                )
-            except (TypeError, ValueError):
+                client = self._resolve_client()
+            except Exception:
                 yield SceneStreamFailedEvent(
                     generation=request.generation,
-                    attempt=attempt,
-                    code="context_too_large",
-                    message=_CONTEXT_LIMIT_MESSAGE,
-                    last_accepted_revision=state.scene.revision,
-                    retryable=False,
-                )
-                return
-
-            outcome = _AttemptOutcome()
-            attempt_stream = self._stream_attempt(
-                client=client,
-                state=state,
-                attempt=attempt,
-                messages=messages,
-                outcome=outcome,
-            )
-            try:
-                async for event in attempt_stream:
-                    yield event
-            finally:
-                await attempt_stream.aclose()
-
-            if outcome.provider_failure_code is not None:
-                message = (
-                    _PROVIDER_TIMEOUT_MESSAGE
-                    if outcome.provider_failure_code == "provider_timeout"
-                    else _PROVIDER_ERROR_MESSAGE
-                )
-                yield SceneStreamFailedEvent(
-                    generation=request.generation,
-                    attempt=attempt,
-                    code=outcome.provider_failure_code,
-                    message=message,
+                    attempt=1,
+                    code="provider_error",
+                    message=_PROVIDER_ERROR_MESSAGE,
                     last_accepted_revision=state.scene.revision,
                     retryable=True,
                 )
                 return
 
-            if state.budget_reached or (outcome.invalid_reason is None and outcome.patch_count > 0):
-                yield state.completed_event(repaired=attempt == 2)
-                return
+            for attempt in (1, 2):
+                current_scene_json = _scene_json(state.scene)
+                repair_context: dict[str, str] | None = None
+                if attempt == 2:
+                    assert repair_reason is not None
+                    repair_context = {
+                        "error": repair_reason,
+                        "last_accepted_scene_json": current_scene_json,
+                    }
 
-            repair_reason = outcome.invalid_reason or "model stream ended without a patch"
-            if attempt == 1:
-                yield SceneStreamRepairingEvent(
-                    generation=request.generation,
-                    from_attempt=1,
-                    to_attempt=2,
-                    last_accepted_revision=state.scene.revision,
-                    message=_REPAIR_MESSAGE,
+                try:
+                    messages = build_scene_messages(
+                        request.prompt,
+                        current_scene_json,
+                        state.remaining_patch_budget,
+                        repair_context=repair_context,
+                    )
+                except (TypeError, ValueError):
+                    yield SceneStreamFailedEvent(
+                        generation=request.generation,
+                        attempt=attempt,
+                        code="context_too_large",
+                        message=_CONTEXT_LIMIT_MESSAGE,
+                        last_accepted_revision=state.scene.revision,
+                        retryable=False,
+                    )
+                    return
+
+                outcome = _AttemptOutcome()
+                attempt_stream = self._stream_attempt(
+                    client=client,
+                    state=state,
+                    attempt=attempt,
+                    messages=messages,
+                    outcome=outcome,
                 )
-                continue
+                try:
+                    async for event in attempt_stream:
+                        yield event
+                finally:
+                    await attempt_stream.aclose()
 
-            yield SceneStreamFailedEvent(
-                generation=request.generation,
-                attempt=2,
-                code="invalid_scene_stream",
-                message=_INVALID_STREAM_MESSAGE,
-                last_accepted_revision=state.scene.revision,
-                retryable=True,
-            )
-            return
+                if outcome.provider_failure_code is not None:
+                    message = (
+                        _PROVIDER_TIMEOUT_MESSAGE
+                        if outcome.provider_failure_code == "provider_timeout"
+                        else _PROVIDER_ERROR_MESSAGE
+                    )
+                    yield SceneStreamFailedEvent(
+                        generation=request.generation,
+                        attempt=attempt,
+                        code=outcome.provider_failure_code,
+                        message=message,
+                        last_accepted_revision=state.scene.revision,
+                        retryable=True,
+                    )
+                    return
+
+                if state.budget_reached or (
+                    outcome.invalid_reason is None and outcome.patch_count > 0
+                ):
+                    yield state.completed_event(repaired=attempt == 2)
+                    return
+
+                repair_reason = outcome.invalid_reason or "model stream ended without a patch"
+                if attempt == 1:
+                    yield SceneStreamRepairingEvent(
+                        generation=request.generation,
+                        from_attempt=1,
+                        to_attempt=2,
+                        last_accepted_revision=state.scene.revision,
+                        message=_REPAIR_MESSAGE,
+                    )
+                    continue
+
+                yield SceneStreamFailedEvent(
+                    generation=request.generation,
+                    attempt=2,
+                    code="invalid_scene_stream",
+                    message=_INVALID_STREAM_MESSAGE,
+                    last_accepted_revision=state.scene.revision,
+                    retryable=True,
+                )
+                return
+        finally:
+            if owns_client:
+                await _close_upstream(
+                    client,
+                    timeout_seconds=self._cleanup_timeout_seconds,
+                )
 
 
 __all__ = [

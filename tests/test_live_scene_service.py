@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 from murmur.live_scene.contracts import (
+    MAX_NDJSON_FRAME_BYTES,
     LiveSceneRequest,
     ScenePatchEvent,
     SceneStreamCompletedEvent,
@@ -16,6 +17,7 @@ from murmur.live_scene.contracts import (
     SceneStreamStartedEvent,
 )
 from murmur.live_scene.service import SceneAuthoringService
+from murmur.live_scene.wire import MAX_SSE_EVENT_BYTES, encode_scene_stream_event
 
 _BLOCK = object()
 
@@ -61,6 +63,49 @@ def _patch_line(
         },
         separators=(",", ":"),
     )
+
+
+def _near_model_frame_limit_patch() -> str:
+    operations: list[dict[str, object]] = []
+    short_float_points = 24
+    for index in range(16):
+        id_prefix = f"p{index:02d}"
+        node_id = id_prefix + "x" * (64 - len(id_prefix))
+        points: list[list[float]] = []
+        for _ in range(96):
+            x = 800.0 if short_float_points > 0 else 123.12345678901234
+            short_float_points -= int(short_float_points > 0)
+            points.append([x, 456.12345678901234])
+        operations.append(
+            {
+                "op": "put",
+                "node": {
+                    "id": node_id,
+                    "kind": "path",
+                    "presentation": _presentation(),
+                    "points": points,
+                    "closed": False,
+                    "style": {
+                        "stroke": "hsl(var(--lavender))",
+                        "strokeWidth": 3.123456789012345,
+                        "opacity": 0.9876543210123456,
+                        "roughness": 0.1234567890123456,
+                        "fill": "transparent",
+                    },
+                },
+            }
+        )
+    # Exponent notation keeps the model frame below 64 KiB. Canonical server
+    # serialization expands these values and exercises the separate SSE budget.
+    return json.dumps(
+        {
+            "v": 1,
+            "patchId": "p" + "z" * 63,
+            "narration": "n" * 512,
+            "operations": operations,
+        },
+        separators=(",", ":"),
+    ).replace("800.0", "8e2")
 
 
 def _request(
@@ -124,6 +169,7 @@ class _FakeClient:
         self.calls: list[dict[str, object]] = []
         self.streams: list[_TrackedStream] = []
         self.stream_created = asyncio.Event()
+        self.close_calls = 0
 
     def stream(
         self,
@@ -143,6 +189,9 @@ class _FakeClient:
         self.streams.append(stream)
         self.stream_created.set()
         return stream
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
 
 
 async def _collect(
@@ -191,6 +240,22 @@ async def test_streams_fragmented_and_multiple_frames_with_authoritative_metadat
     assert client.calls[0]["temperature"] == 0.2
     assert client.calls[0]["max_tokens"] == 4_096
     assert client.streams[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_near_limit_model_frame_fits_the_larger_canonical_sse_budget() -> None:
+    frame = _near_model_frame_limit_patch()
+    client = _FakeClient([[frame]])
+    service = SceneAuthoringService(client)
+
+    events = await _collect(service)
+
+    patch_event = next(event for event in events if isinstance(event, ScenePatchEvent))
+    wire = encode_scene_stream_event(patch_event)
+    assert len(frame.encode("utf-8")) <= MAX_NDJSON_FRAME_BYTES
+    assert len(wire.encode("utf-8")) > MAX_NDJSON_FRAME_BYTES
+    assert len(wire.encode("utf-8")) <= MAX_SSE_EVENT_BYTES
+    assert isinstance(events[-1], SceneStreamCompletedEvent)
 
 
 @pytest.mark.asyncio
@@ -440,6 +505,22 @@ async def test_factory_is_resolved_once_per_request_and_receives_provider_parame
     assert factory_calls == 1
     assert client.calls[0]["temperature"] == 0.1
     assert client.calls[0]["max_tokens"] == 777
+    assert client.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_factory_owned_client_closes_when_consumer_aborts_after_visible_patch() -> None:
+    patch = _patch_line("visible", _put(_line("visible-node")))
+    client = _FakeClient([[patch + "\n", _BLOCK]])
+    service = SceneAuthoringService(client_factory=lambda: client)
+    events = service.stream_events(_request())
+
+    assert isinstance(await anext(events), SceneStreamStartedEvent)
+    assert isinstance(await anext(events), ScenePatchEvent)
+    await events.aclose()
+
+    assert client.streams[0].closed is True
+    assert client.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -484,6 +565,7 @@ async def test_oversized_model_context_fails_before_provider_invocation() -> Non
         ({"client": object(), "client_factory": lambda: object()}, ValueError),
         ({"client": object(), "temperature": float("nan")}, ValueError),
         ({"client": object(), "max_tokens": 0}, ValueError),
+        ({"client": object(), "max_tokens": 4_097}, ValueError),
         ({"client": object(), "max_tokens": True}, ValueError),
         ({"client": object(), "timeout_seconds": 0}, ValueError),
         ({"client": object(), "timeout_seconds": float("inf")}, ValueError),

@@ -68,6 +68,12 @@ function errorCode(callback: () => unknown): string | undefined {
   return undefined;
 }
 
+function percentile(samples: readonly number[], percentileValue: number): number {
+  const sorted = [...samples].sort((left, right) => left - right);
+  const index = Math.max(0, Math.ceil(sorted.length * percentileValue) - 1);
+  return sorted[index];
+}
+
 describe("live scene patch protocol", () => {
   it("decodes the exact server-authoritative envelope and freezes trusted output", () => {
     const event = decodeLiveScenePatchEvent(rawEvent());
@@ -330,6 +336,20 @@ describe("live scene patch protocol", () => {
     expect(errorCode(() => decodeLiveScenePatchEvent(longNarration))).toBe(
       "budget_exceeded"
     );
+
+    const unicodeBoundary = clone(rawEvent());
+    (unicodeBoundary.patch as { narration: string }).narration = "😀".repeat(
+      LIVE_SCENE_MAX_NARRATION_LENGTH
+    );
+    expect(() => decodeLiveScenePatchEvent(unicodeBoundary)).not.toThrow();
+
+    const unicodeOverflow = clone(rawEvent());
+    (unicodeOverflow.patch as { narration: string }).narration = "😀".repeat(
+      LIVE_SCENE_MAX_NARRATION_LENGTH + 1
+    );
+    expect(errorCode(() => decodeLiveScenePatchEvent(unicodeOverflow))).toBe(
+      "budget_exceeded"
+    );
   });
 
   it("enforces operation, target, node-count, and no-op budgets", () => {
@@ -426,5 +446,55 @@ describe("live scene patch protocol", () => {
         "invalid_event"
       );
     }
+  });
+
+  it("decodes, applies, and plans a maximum-complexity patch under 16ms p95", () => {
+    const accepted = createSceneState({
+      revision: 0,
+      nodes: Array.from(
+        { length: LIVE_SCENE_MAX_NODES - LIVE_SCENE_MAX_PATCH_OPERATIONS },
+        (_, index) => textNode(`existing-${index}`, `Existing node ${index}`)
+      ),
+    });
+    const maximumPatch = JSON.stringify(
+      rawEvent(
+        Array.from({ length: LIVE_SCENE_MAX_PATCH_OPERATIONS }, (_, operationIndex) => ({
+          op: "put",
+          node: {
+            id: `path-${operationIndex}`,
+            kind: "path",
+            presentation,
+            points: Array.from({ length: LIVE_SCENE_MAX_PATH_POINTS }, (_, pointIndex) => [
+              pointIndex * 6,
+              (operationIndex * 31 + pointIndex * 3) % 600,
+            ]),
+            closed: false,
+            style: {
+              stroke: "#AABBCC",
+              strokeWidth: 4,
+              opacity: 1,
+              roughness: 1,
+              fill: "none",
+            },
+          },
+        }))
+      )
+    );
+    const measure = (): number => {
+      const startedAt = performance.now();
+      const event = parseLiveScenePatchEvent(maximumPatch);
+      const applied = applyLiveScenePatch(accepted, event);
+      const elapsedMs = performance.now() - startedAt;
+      expect(applied.scene.nodes).toHaveLength(LIVE_SCENE_MAX_NODES);
+      expect(applied.plan.steps).toHaveLength(LIVE_SCENE_MAX_PATCH_OPERATIONS);
+      return elapsedMs;
+    };
+
+    for (let index = 0; index < 20; index += 1) measure();
+    const samples = Array.from({ length: 200 }, measure);
+    const p95Ms = percentile(samples, 0.95);
+
+    console.info(`Gate 1 max-patch decode/apply/plan p95: ${p95Ms.toFixed(3)}ms`);
+    expect(p95Ms).toBeLessThan(16);
   });
 });

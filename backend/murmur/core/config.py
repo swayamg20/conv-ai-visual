@@ -6,6 +6,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from murmur.live_scene.contracts import MAX_SCENE_MODEL_OUTPUT_TOKENS
+
 
 def default_env_path() -> Path:
     """Resolve the documented project-level ``.env`` file."""
@@ -87,6 +89,7 @@ class Config:
     )
     # Gate 1 live-scene authoring can be tuned independently while inheriting
     # the existing LLM selection when no scene-specific override is supplied.
+    MURMUR_SCENE_ENABLED: bool = os.getenv("MURMUR_SCENE_ENABLED", "false").lower() == "true"
     MURMUR_SCENE_LLM_PROVIDER: str = os.getenv("MURMUR_SCENE_LLM_PROVIDER") or LLM_PROVIDER
     MURMUR_SCENE_LLM_MODEL: str = os.getenv("MURMUR_SCENE_LLM_MODEL") or _provider_model(
         MURMUR_SCENE_LLM_PROVIDER,
@@ -103,6 +106,11 @@ class Config:
     MURMUR_SCENE_LLM_TEMPERATURE: float = float(
         os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", str(LLM_TEMPERATURE))
     )
+    MURMUR_SCENE_GLOBAL_CONCURRENCY: int = int(os.getenv("MURMUR_SCENE_GLOBAL_CONCURRENCY", "4"))
+    MURMUR_SCENE_PER_USER_CONCURRENCY: int = int(
+        os.getenv("MURMUR_SCENE_PER_USER_CONCURRENCY", "1")
+    )
+    MURMUR_SCENE_REQUESTS_PER_MINUTE: int = int(os.getenv("MURMUR_SCENE_REQUESTS_PER_MINUTE", "10"))
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
     ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
         os.getenv("ALLOWED_CORS_ORIGINS"),
@@ -311,12 +319,22 @@ EXAMPLE — "Explain the Pythagorean theorem":
             )
         if not cls.MURMUR_SCENE_LLM_MODEL:
             raise ValueError("MURMUR_SCENE_LLM_MODEL must not be empty")
-        if cls.MURMUR_SCENE_LLM_MAX_TOKENS <= 0:
-            raise ValueError("MURMUR_SCENE_LLM_MAX_TOKENS must be greater than zero")
+        if not 1 <= cls.MURMUR_SCENE_LLM_MAX_TOKENS <= MAX_SCENE_MODEL_OUTPUT_TOKENS:
+            raise ValueError(
+                f"MURMUR_SCENE_LLM_MAX_TOKENS must be between 1 and {MAX_SCENE_MODEL_OUTPUT_TOKENS}"
+            )
         if cls.MURMUR_SCENE_LLM_TIMEOUT_SECONDS <= 0:
             raise ValueError("MURMUR_SCENE_LLM_TIMEOUT_SECONDS must be greater than zero")
         if not 0 <= cls.MURMUR_SCENE_LLM_TEMPERATURE <= 2:
             raise ValueError("MURMUR_SCENE_LLM_TEMPERATURE must be between zero and two")
+        if cls.MURMUR_SCENE_GLOBAL_CONCURRENCY <= 0:
+            raise ValueError("MURMUR_SCENE_GLOBAL_CONCURRENCY must be greater than zero")
+        if not 1 <= cls.MURMUR_SCENE_PER_USER_CONCURRENCY <= cls.MURMUR_SCENE_GLOBAL_CONCURRENCY:
+            raise ValueError(
+                "MURMUR_SCENE_PER_USER_CONCURRENCY must be between 1 and the global limit"
+            )
+        if cls.MURMUR_SCENE_REQUESTS_PER_MINUTE <= 0:
+            raise ValueError("MURMUR_SCENE_REQUESTS_PER_MINUTE must be greater than zero")
 
         # Validate TTS configuration
         if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
