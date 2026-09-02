@@ -157,6 +157,7 @@ export function ModelSceneDemo({
   const canInterrupt = isBusy;
   const canReplay = snapshot.accepted.length > 0 && !isBusy;
   const isEmpty = snapshot.committedScene.nodes.length === 0;
+  const requiresReset = snapshot.phase === "failed" && snapshot.error?.retryable === false;
 
   const startGeneration = useCallback(
     (event?: FormEvent) => {
@@ -204,14 +205,15 @@ export function ModelSceneDemo({
             >
               <ArrowLeft className="h-5 w-5" />
             </Link>
-            <MurmurLogoMark className="shrink-0" />
+            <MurmurLogoMark className="hidden shrink-0 sm:block" />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="truncate text-base font-semibold tracking-tight sm:text-lg">
+                <h1 className="truncate text-sm font-semibold tracking-tight sm:text-lg">
                   Model-authored board
                 </h1>
                 <span className="rounded-full border border-amber/25 bg-amber/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber">
-                  Gate 1
+                  <span className="sm:hidden">G1</span>
+                  <span className="hidden sm:inline">Gate 1</span>
                 </span>
               </div>
               <p className="hidden text-xs text-muted-foreground sm:block">
@@ -296,16 +298,23 @@ export function ModelSceneDemo({
 
             <div className="grid grid-cols-2 gap-2">
               <Button
-                type="submit"
+                type={requiresReset ? "button" : "submit"}
+                onClick={requiresReset ? reset : undefined}
                 disabled={isBusy || prompt.trim().length === 0}
                 className="min-h-11 gap-2"
               >
-                {snapshot.phase === "failed" ? (
+                {requiresReset ? (
+                  <Square className="h-3.5 w-3.5" />
+                ) : snapshot.phase === "failed" ? (
                   <RotateCcw className="h-4 w-4" />
                 ) : (
                   <Send className="h-4 w-4" />
                 )}
-                {snapshot.phase === "failed" ? "Try again" : "Generate live"}
+                {requiresReset
+                  ? "Reset to continue"
+                  : snapshot.phase === "failed"
+                    ? "Try again"
+                    : "Generate live"}
               </Button>
               <Button
                 type="button"
@@ -349,6 +358,11 @@ export function ModelSceneDemo({
               <p className="mt-2 flex items-start gap-2 text-xs leading-5 text-ember" role="alert">
                 <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 {formError ?? snapshot.error?.message}
+              </p>
+            )}
+            {requiresReset && (
+              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                Reset the board before starting another generation.
               </p>
             )}
           </div>

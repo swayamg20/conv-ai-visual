@@ -94,7 +94,7 @@ function latex(id: string, x: number, y: number, value: string): SceneNode {
     x,
     y,
     latex: value,
-    style: Object.freeze({ color: AMBER, fontSize: 40, opacity: 1 }),
+    style: Object.freeze({ color: AMBER, fontSize: 32, opacity: 1 }),
   });
 }
 
@@ -178,7 +178,9 @@ function authoredPatches(request: SceneStreamRequest, attempt: number): readonly
       3,
       [
         put(rect(`equationFrame${suffix}`, 555, 210, 205, 105)),
-        put(latex(`equation${suffix}`, 585, 272, "a^2 + b^2 = c^2")),
+        // The renderer gives LaTeX a fixed 500px foreignObject; offset its
+        // origin so KaTeX's centered content lands inside the visible frame.
+        put(latex(`equation${suffix}`, 407, 205, "a^2 + b^2 = c^2")),
       ],
       "Now the relationship appears beside the geometry instead of replacing it."
     ),

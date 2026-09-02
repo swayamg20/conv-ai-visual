@@ -142,6 +142,46 @@ describe("ModelSceneDemo", () => {
     await act(async () => demo.root.unmount());
   });
 
+  it("replaces retry with a reset action for a non-retryable failure", async () => {
+    const nonRetryableRunner: SceneStreamRunner = async (invocation) => {
+      invocation.onEvent({
+        type: "scene_stream_started",
+        generation: invocation.request.generation,
+        attempt: 1,
+        baseRevision: invocation.request.baseScene.revision,
+      });
+      invocation.onEvent({
+        type: "scene_stream_failed",
+        generation: invocation.request.generation,
+        attempt: 1,
+        code: "context_too_large",
+        message: "This board is too large. The current board remains safe.",
+        lastAcceptedRevision: invocation.request.baseScene.revision,
+        retryable: false,
+      });
+    };
+    const demo = await mount(nonRetryableRunner);
+
+    await act(async () => {
+      button(demo.container, "Generate live").click();
+      await flushWork();
+    });
+
+    expect(demo.container.textContent).toContain(
+      "Reset the board before starting another generation."
+    );
+    expect(() => button(demo.container, "Try again")).toThrow();
+
+    await act(async () => {
+      button(demo.container, "Reset to continue").click();
+      await flushWork();
+    });
+    expect(button(demo.container, "Generate live").disabled).toBe(false);
+    expect(demo.container.textContent).toContain("Ready for a visual explanation.");
+
+    await act(async () => demo.root.unmount());
+  });
+
   it("retains visible ink and ignores deliberately late old-generation events", async () => {
     let releaseLateEvents: (() => void) | undefined;
     const lateGate = new Promise<void>((resolve) => {
