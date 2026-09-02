@@ -309,7 +309,10 @@ export class SceneStreamRuntime {
 
     if (active) {
       const outcome = active.playback.cancel();
-      const retained = this.retainedScene(active, outcome);
+      const retained = this.authoritativeRetainedScene(
+        active,
+        this.retainedScene(active, outcome)
+      );
       this.committedScene = retained;
       this.provisionalScene = retained;
       if (active.source === "stream") {
@@ -428,14 +431,10 @@ export class SceneStreamRuntime {
       if (this.currentToken !== token || this.active !== transition) return;
       this.active = null;
       if (outcome.status !== "completed") {
-        const retained = this.retainedScene(transition, outcome);
-        const authoritativeRetained =
-          retained.revision === record.scene.revision
-            ? retained
-            : createSceneState({
-                revision: record.scene.revision,
-                nodes: retained.nodes,
-              });
+        const authoritativeRetained = this.authoritativeRetainedScene(
+          transition,
+          this.retainedScene(transition, outcome)
+        );
         this.committedScene = authoritativeRetained;
         this.provisionalScene = authoritativeRetained;
         this.reconcileInterruptedReplay(transition, authoritativeRetained);
@@ -744,6 +743,22 @@ export class SceneStreamRuntime {
     } catch {
       return transition.previous;
     }
+  }
+
+  private authoritativeRetainedScene(
+    transition: ActiveTransition,
+    retained: SceneState
+  ): SceneState {
+    if (
+      transition.source !== "replay" ||
+      retained.revision === transition.record.scene.revision
+    ) {
+      return retained;
+    }
+    return createSceneState({
+      revision: transition.record.scene.revision,
+      nodes: retained.nodes,
+    });
   }
 
   private appendAccepted(record: AcceptedSceneRevision): void {

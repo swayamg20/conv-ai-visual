@@ -734,6 +734,60 @@ describe("SceneStreamRuntime", () => {
     });
   });
 
+  it("keeps the authoritative revision when a pruned replay is interrupted", async () => {
+    const renderer = new ControlledRenderer();
+    const harness = runnerHarness();
+    const runtime = new SceneStreamRuntime({
+      renderer,
+      runStream: harness.runStream,
+      staggerMs: 0,
+    });
+    const generationCount = LIVE_SCENE_MAX_ACCEPTED_HISTORY + 4;
+
+    for (let generation = 1; generation <= generationCount; generation += 1) {
+      runtime.start(`Lecture update ${generation}`);
+      await flushMicrotasks();
+      const run = harness.runs[generation - 1];
+      run.invocation.onEvent(started(generation, generation - 1));
+      run.invocation.onEvent(
+        patch({
+          generation,
+          baseRevision: generation - 1,
+          patchId: `interruptible-${generation}`,
+          nodes: [textNode("lesson", `Version ${generation}`)],
+        })
+      );
+      run.invocation.onEvent(
+        completed({ generation, finalRevision: generation, patchCount: 1 })
+      );
+      completePlayback(renderer.rendered[generation - 1].playback, ["lesson"]);
+      run.completion.resolve();
+      await flushMicrotasks();
+    }
+
+    const replay = runtime.replayAccepted();
+    const firstReplay = renderer.rendered[generationCount].playback;
+    firstReplay.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["lesson"],
+    };
+    expect(runtime.interrupt()).toBe(true);
+    await replay;
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 5 },
+      provisionalScene: { revision: 5 },
+    });
+    expect(runtime.getSnapshot().accepted.map((record) => record.scene.revision)).toEqual([5]);
+
+    expect(runtime.start("Continue from the interrupted checkpoint")).toBe(
+      generationCount + 1
+    );
+    await flushMicrotasks();
+    expect(harness.runs.at(-1)?.invocation.request.baseScene.revision).toBe(5);
+  });
+
   it("truncates abandoned replay revisions before branching from the visible scene", async () => {
     const { renderer, harness, runtime, run } = await startedRuntime();
     run.invocation.onEvent(patch());
