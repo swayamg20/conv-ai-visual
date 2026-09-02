@@ -89,6 +89,9 @@ class Config:
     )
     # Gate 1 live-scene authoring can be tuned independently while inheriting
     # the existing LLM selection when no scene-specific override is supplied.
+    # Its bounded output budget must not inherit the unbounded chat setting:
+    # scenes are default-off, and an otherwise valid chat budget must never
+    # make application construction fail.
     MURMUR_SCENE_ENABLED: bool = os.getenv("MURMUR_SCENE_ENABLED", "false").lower() == "true"
     MURMUR_SCENE_LLM_PROVIDER: str = os.getenv("MURMUR_SCENE_LLM_PROVIDER") or LLM_PROVIDER
     MURMUR_SCENE_LLM_MODEL: str = os.getenv("MURMUR_SCENE_LLM_MODEL") or _provider_model(
@@ -97,9 +100,7 @@ class Config:
         groq_model=GROQ_MODEL,
         gemini_model=GEMINI_MODEL,
     )
-    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(
-        os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS") or LLM_MAX_TOKENS or 4096
-    )
+    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS", "4096"))
     MURMUR_SCENE_LLM_TIMEOUT_SECONDS: float = float(
         os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
     )

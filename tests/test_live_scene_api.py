@@ -365,7 +365,7 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
     assert client_calls == [("openai", "scene-model")]
 
 
-def test_scene_config_inherits_existing_llm_defaults() -> None:
+def test_scene_config_inherits_provider_defaults_but_owns_output_budget() -> None:
     env = os.environ.copy()
     for name in tuple(env):
         if name.startswith("MURMUR_SCENE_LLM_"):
@@ -375,7 +375,7 @@ def test_scene_config_inherits_existing_llm_defaults() -> None:
             "PYTHON_DOTENV_DISABLED": "1",
             "LLM_PROVIDER": "openai",
             "OPENAI_MODEL": "existing-model",
-            "LLM_MAX_TOKENS": "987",
+            "LLM_MAX_TOKENS": "8192",
             "LLM_TEMPERATURE": "0.35",
         }
     )
@@ -402,7 +402,31 @@ print(json.dumps({
     assert json.loads(completed.stdout) == {
         "provider": "openai",
         "model": "existing-model",
-        "max_tokens": 987,
+        "max_tokens": 4096,
         "temperature": 0.35,
         "timeout_seconds": 20.0,
     }
+
+
+def test_disabled_scene_startup_ignores_existing_chat_output_budget() -> None:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("MURMUR_SCENE_LLM_"):
+            env.pop(name)
+    env.update(
+        {
+            "PYTHON_DOTENV_DISABLED": "1",
+            "MURMUR_SCENE_ENABLED": "false",
+            "LLM_MAX_TOKENS": "8192",
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import main"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr
