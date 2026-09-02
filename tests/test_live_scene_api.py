@@ -411,12 +411,13 @@ print(json.dumps({
 def test_disabled_scene_startup_ignores_existing_chat_output_budget() -> None:
     env = os.environ.copy()
     for name in tuple(env):
-        if name.startswith("MURMUR_SCENE_LLM_"):
+        if name.startswith("MURMUR_SCENE_"):
             env.pop(name)
     env.update(
         {
             "PYTHON_DOTENV_DISABLED": "1",
             "MURMUR_SCENE_ENABLED": "false",
+            "MURMUR_SCENE_LLM_MAX_TOKENS": "",
             "LLM_MAX_TOKENS": "8192",
         }
     )

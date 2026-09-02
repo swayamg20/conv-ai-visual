@@ -100,7 +100,9 @@ class Config:
         groq_model=GROQ_MODEL,
         gemini_model=GEMINI_MODEL,
     )
-    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS", "4096"))
+    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(
+        os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS") or MAX_SCENE_MODEL_OUTPUT_TOKENS
+    )
     MURMUR_SCENE_LLM_TIMEOUT_SECONDS: float = float(
         os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
     )
