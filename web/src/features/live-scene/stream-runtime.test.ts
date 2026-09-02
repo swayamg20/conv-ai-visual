@@ -16,6 +16,7 @@ import {
   type SceneStreamEvent,
 } from "./model-stream";
 import {
+  LIVE_SCENE_MAX_ACCEPTED_HISTORY,
   SceneStreamRuntime,
   type SceneStreamRenderer,
   type SceneStreamRunner,
@@ -675,6 +676,62 @@ describe("SceneStreamRuntime", () => {
       [0, 1],
       [1, 2],
     ]);
+  });
+
+  it("bounds long-lecture history and replays a pruned checkpoint to the exact revision", async () => {
+    const renderer = new ControlledRenderer();
+    const harness = runnerHarness();
+    const runtime = new SceneStreamRuntime({
+      renderer,
+      runStream: harness.runStream,
+      staggerMs: 0,
+    });
+    const generationCount = LIVE_SCENE_MAX_ACCEPTED_HISTORY + 4;
+
+    for (let generation = 1; generation <= generationCount; generation += 1) {
+      runtime.start(`Lecture update ${generation}`);
+      await flushMicrotasks();
+      const run = harness.runs[generation - 1];
+      run.invocation.onEvent(started(generation, generation - 1));
+      run.invocation.onEvent(
+        patch({
+          generation,
+          baseRevision: generation - 1,
+          patchId: `lecture-${generation}`,
+          nodes: [textNode("lesson", `Version ${generation}`)],
+        })
+      );
+      run.invocation.onEvent(
+        completed({ generation, finalRevision: generation, patchCount: 1 })
+      );
+      completePlayback(renderer.rendered[generation - 1].playback, ["lesson"]);
+      run.completion.resolve();
+      await flushMicrotasks();
+    }
+
+    const accepted = runtime.getSnapshot().accepted;
+    expect(accepted).toHaveLength(LIVE_SCENE_MAX_ACCEPTED_HISTORY);
+    expect(accepted[0].scene.revision).toBe(5);
+    expect(accepted.at(-1)?.scene.revision).toBe(generationCount);
+
+    const renderedBeforeReplay = renderer.rendered.length;
+    const replay = runtime.replayAccepted();
+    for (let index = 0; index < LIVE_SCENE_MAX_ACCEPTED_HISTORY; index += 1) {
+      await flushMicrotasks();
+      completePlayback(renderer.rendered[renderedBeforeReplay + index].playback, ["lesson"]);
+    }
+    await replay;
+
+    expect(harness.runs).toHaveLength(generationCount);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "completed",
+      committedScene: { revision: generationCount },
+      provisionalScene: { revision: generationCount },
+    });
+    expect(runtime.getSnapshot().committedScene.nodes[0]).toMatchObject({
+      id: "lesson",
+      text: `Version ${generationCount}`,
+    });
   });
 
   it("truncates abandoned replay revisions before branching from the visible scene", async () => {

@@ -22,6 +22,7 @@ const EMPTY_SCENE = createSceneState({ revision: 0, nodes: [] });
 const MAX_PROMPT_LENGTH = 2_000;
 
 export const LIVE_SCENE_MAX_PATCH_QUEUE = LIVE_SCENE_MAX_ACCEPTED_PATCHES;
+export const LIVE_SCENE_MAX_ACCEPTED_HISTORY = 32;
 
 export type SceneStreamRuntimePhase =
   | "idle"
@@ -386,9 +387,16 @@ export class SceneStreamRuntime {
 
     for (const [replayIndex, record] of records.entries()) {
       if (this.currentToken !== token) return;
+      const target =
+        record.scene.revision === this.committedScene.revision + 1
+          ? record.scene
+          : createSceneState({
+              revision: this.committedScene.revision + 1,
+              nodes: record.scene.nodes,
+            });
       let playback: MotionPlayback;
       try {
-        const plan = planSceneTransition(this.committedScene, record.scene);
+        const plan = planSceneTransition(this.committedScene, target);
         playback = this.renderer.playMotionPlan(plan, { staggerMs: this.staggerMs });
       } catch {
         this.finishReplayFailure(
@@ -403,7 +411,7 @@ export class SceneStreamRuntime {
         token,
         source: "replay",
         previous: this.committedScene,
-        target: record.scene,
+        target,
         playback,
         record,
         replayIndex,
@@ -421,9 +429,16 @@ export class SceneStreamRuntime {
       this.active = null;
       if (outcome.status !== "completed") {
         const retained = this.retainedScene(transition, outcome);
-        this.committedScene = retained;
-        this.provisionalScene = retained;
-        this.reconcileInterruptedReplay(transition, retained);
+        const authoritativeRetained =
+          retained.revision === record.scene.revision
+            ? retained
+            : createSceneState({
+                revision: record.scene.revision,
+                nodes: retained.nodes,
+              });
+        this.committedScene = authoritativeRetained;
+        this.provisionalScene = authoritativeRetained;
+        this.reconcileInterruptedReplay(transition, authoritativeRetained);
         this.sequence = this.lastAcceptedSequence(this.generation);
         this.currentToken = null;
         this.renderer.cancelMotion();
@@ -443,12 +458,15 @@ export class SceneStreamRuntime {
         return;
       }
 
-      this.committedScene = record.scene;
-      this.provisionalScene = record.scene;
+      this.committedScene = target;
+      this.provisionalScene = target;
       this.publish();
     }
 
     if (this.currentToken !== token) return;
+    const authoritativeFinal = records[records.length - 1].scene;
+    this.committedScene = authoritativeFinal;
+    this.provisionalScene = authoritativeFinal;
     this.currentToken = null;
     this.phase = "completed";
     this.narration = "Replay reached the same accepted semantic state.";
@@ -730,11 +748,13 @@ export class SceneStreamRuntime {
 
   private appendAccepted(record: AcceptedSceneRevision): void {
     const previous = this.accepted[this.accepted.length - 1];
+    let next: AcceptedSceneRevision[];
     if (previous?.scene.revision === record.scene.revision) {
-      this.accepted = [...this.accepted.slice(0, -1), record];
+      next = [...this.accepted.slice(0, -1), record];
     } else {
-      this.accepted = [...this.accepted, record];
+      next = [...this.accepted, record];
     }
+    this.accepted = next.slice(-LIVE_SCENE_MAX_ACCEPTED_HISTORY);
   }
 
   private reconcileInterruptedReplay(
@@ -808,6 +828,9 @@ export class SceneStreamRuntime {
     this.currentToken = null;
     this.active = null;
     this.accepted = this.accepted.slice(0, acceptedPrefixLength);
+    const lastAccepted = this.accepted[this.accepted.length - 1]?.scene ?? EMPTY_SCENE;
+    this.committedScene = lastAccepted;
+    this.provisionalScene = lastAccepted;
     this.sequence = this.lastAcceptedSequence(this.generation);
     this.renderer.cancelMotion();
     this.phase = "failed";
