@@ -481,6 +481,78 @@ describe("SceneStreamRuntime", () => {
     expect(runtime.interrupt()).toBe(false);
   });
 
+  it("rejects stale nodes across 20 consecutive interrupted generations", async () => {
+    const renderer = new ControlledRenderer();
+    const harness = runnerHarness();
+    const runtime = new SceneStreamRuntime({
+      renderer,
+      runStream: harness.runStream,
+      staggerMs: 0,
+    });
+
+    for (let generation = 1; generation <= 20; generation += 1) {
+      const baseRevision = generation - 1;
+      const visibleId = `visible-${generation}`;
+      const staleId = `stale-${generation}`;
+
+      expect(runtime.start(`Interrupted explanation ${generation}`)).toBe(generation);
+      await flushMicrotasks();
+      const run = harness.runs[generation - 1];
+      run.invocation.onEvent(started(generation, baseRevision));
+      run.invocation.onEvent(
+        patch({
+          generation,
+          baseRevision,
+          patchId: `visible-patch-${generation}`,
+          nodes: [textNode(visibleId)],
+        })
+      );
+
+      const playback = renderer.rendered[generation - 1].playback;
+      playback.cancelOutcome = {
+        status: "cancelled",
+        appliedStepIds: [visibleId],
+      };
+      expect(runtime.interrupt()).toBe(true);
+      const interrupted = runtime.getSnapshot();
+
+      run.invocation.onEvent(
+        patch({
+          generation,
+          sequence: 2,
+          baseRevision: baseRevision + 1,
+          patchId: `late-patch-${generation}`,
+          nodes: [textNode(staleId)],
+        })
+      );
+      run.invocation.onEvent(
+        completed({ generation, finalRevision: baseRevision + 2, patchCount: 2 })
+      );
+      run.completion.resolve();
+      playback.settle({
+        status: "completed",
+        appliedStepIds: [visibleId, staleId],
+      });
+      await flushMicrotasks();
+
+      expect(runtime.getSnapshot(), `generation ${generation}`).toBe(interrupted);
+      expect(
+        runtime.getSnapshot().committedScene.nodes.some((node) => node.id === staleId),
+        `generation ${generation}`
+      ).toBe(false);
+    }
+
+    expect(runtime.getSnapshot().committedScene).toMatchObject({ revision: 20 });
+    expect(runtime.getSnapshot().committedScene.nodes.map((node) => node.id)).toEqual(
+      Array.from({ length: 20 }, (_, index) => `visible-${index + 1}`)
+    );
+    expect(
+      runtime
+        .getSnapshot()
+        .committedScene.nodes.some((node) => node.id.startsWith("stale-"))
+    ).toBe(false);
+  });
+
   it("materializes only executor-confirmed replacements and removals", async () => {
     const { renderer, harness, runtime, run } = await startedRuntime();
     run.invocation.onEvent(
