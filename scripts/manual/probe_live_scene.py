@@ -25,6 +25,13 @@ MAX_OUTPUT_TOKENS = 4_096
 MAX_SCENE_CONTEXT_BYTES = 64 * 1024
 CHAT_FRAMING_TOKEN_RESERVE = 2_048
 REPAIR_PROMPT_BYTE_RESERVE = 4_096
+SUPPORTED_PROVIDERS = frozenset({"openai", "azure_openai", "groq", "gemini"})
+PROVIDER_CREDENTIAL_FIELDS = {
+    "openai": "OPENAI_API_KEY",
+    "azure_openai": "AZURE_OPENAI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
 
 DEFAULT_PROMPTS = (
     "Teach why the Pythagorean theorem works using a right triangle and areas.",
@@ -142,6 +149,19 @@ def _estimate_cost(
     }
 
 
+def _configured_scene_provider(config: Any) -> tuple[str, str]:
+    """Resolve one supported provider without returning or rendering its credential."""
+
+    provider = config.MURMUR_SCENE_LLM_PROVIDER.lower()
+    model = config.MURMUR_SCENE_LLM_MODEL
+    if provider not in SUPPORTED_PROVIDERS or not model:
+        raise RuntimeError("scene provider configuration is invalid")
+    credential = getattr(config, PROVIDER_CREDENTIAL_FIELDS[provider], None)
+    if not credential:
+        raise RuntimeError(f"credential for configured scene provider {provider} is unavailable")
+    return provider, model
+
+
 async def _run_corpus(args: argparse.Namespace, prompts: tuple[str, ...]) -> dict[str, Any]:
     from murmur.core.config import config
     from murmur.live_scene import (
@@ -152,24 +172,20 @@ async def _run_corpus(args: argparse.Namespace, prompts: tuple[str, ...]) -> dic
         SceneStreamFailedEvent,
         SceneStreamRepairingEvent,
     )
+    from murmur.live_scene.provider import scene_model_client_options
     from murmur.llm.factory import create_llm_client
 
-    provider = config.MURMUR_SCENE_LLM_PROVIDER.lower()
-    model = config.MURMUR_SCENE_LLM_MODEL
-    credential = {
-        "openai": config.OPENAI_API_KEY,
-        "groq": config.GROQ_API_KEY,
-        "gemini": config.GEMINI_API_KEY,
-    }.get(provider)
-    if provider not in {"openai", "groq", "gemini"} or not model:
-        raise RuntimeError("scene provider configuration is invalid")
-    if not credential:
-        raise RuntimeError(f"credential for configured scene provider {provider} is unavailable")
+    provider, model = _configured_scene_provider(config)
+    client_options = scene_model_client_options(provider, model)
 
     results: list[dict[str, Any]] = []
     for generation, prompt in enumerate(prompts, start=1):
         service = SceneAuthoringService(
-            client_factory=lambda: create_llm_client(provider, model=model),
+            client_factory=lambda: create_llm_client(
+                provider,
+                model=model,
+                **client_options,
+            ),
             temperature=config.MURMUR_SCENE_LLM_TEMPERATURE,
             max_tokens=args.max_tokens,
             timeout_seconds=args.timeout_seconds,

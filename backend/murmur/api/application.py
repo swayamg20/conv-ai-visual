@@ -17,6 +17,7 @@ from murmur.chat import ChatService
 from murmur.core import MurmurError
 from murmur.core.config import config
 from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
+from murmur.live_scene.provider import scene_model_client_options
 from murmur.llm.factory import create_llm_client
 from murmur.persistence import init_db
 from murmur.runtime import RuntimeRegistry
@@ -38,14 +39,6 @@ def _cors_origins() -> list[str]:
 
     origins = [origin.strip() for origin in raw_origins if origin and origin.strip()]
     return origins or ["http://localhost:3000"]
-
-
-def _scene_client_options(provider: str, model: str) -> dict[str, str]:
-    """Return provider controls that are safe for the selected scene model only."""
-
-    if provider.casefold() == "azure_openai" and "gpt-oss" in model.casefold():
-        return {"reasoning_effort": "low"}
-    return {}
 
 
 def create_application(
@@ -71,7 +64,7 @@ def create_application(
             return create_llm_client(
                 scene_provider,
                 model=scene_model,
-                **_scene_client_options(scene_provider, scene_model),
+                **scene_model_client_options(scene_provider, scene_model),
             )
 
         scene_authoring_service = SceneAuthoringService(

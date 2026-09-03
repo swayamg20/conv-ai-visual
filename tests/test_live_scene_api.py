@@ -24,6 +24,7 @@ from murmur.live_scene import (
     SceneStreamEvent,
     SceneStreamStartedEvent,
 )
+from murmur.live_scene.provider import scene_model_client_options
 from starlette.requests import ClientDisconnect
 
 AUTHENTICATED_USER = {
@@ -499,7 +500,7 @@ def test_scene_client_options_do_not_leak_gpt_oss_tuning_to_other_clients(
     provider: str,
     model: str,
 ) -> None:
-    assert application._scene_client_options(provider, model) == {}
+    assert scene_model_client_options(provider, model) == {}
 
 
 def test_scene_config_inherits_provider_selection_but_owns_generation_controls() -> None:
