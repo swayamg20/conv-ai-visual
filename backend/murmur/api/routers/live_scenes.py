@@ -1,8 +1,10 @@
-"""Authenticated progressive SceneDoc authoring over server-sent events."""
+"""Progressive SceneDoc authoring over server-sent events."""
 
+import os
 from collections.abc import AsyncIterator
+from ipaddress import IPv4Address, ip_address
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from murmur.api.dependencies import (
@@ -12,6 +14,7 @@ from murmur.api.dependencies import (
 )
 from murmur.api.errors import ApiError
 from murmur.core.async_cleanup import close_async_resource
+from murmur.core.config import config
 from murmur.live_scene import (
     LiveSceneRequest,
     SceneAdmissionError,
@@ -21,6 +24,26 @@ from murmur.live_scene import (
 )
 
 router = APIRouter(prefix="/api/live-scenes", tags=["live-scenes"])
+
+_DEVELOPMENT_SCENE_LAB_IDENTITY = "live-scene-lab-development"
+
+
+def _require_development_scene_lab(request: Request) -> None:
+    """Hide the auth-free lab route unless both server-side guards are active."""
+    environment = getattr(config, "MURMUR_ENVIRONMENT", "")
+    try:
+        peer_address = ip_address(request.client.host if request.client else "")
+        if peer_address.version == 6 and peer_address.ipv4_mapped is not None:
+            peer_address = IPv4Address(peer_address.ipv4_mapped)
+        is_loopback = peer_address.is_loopback
+    except ValueError:
+        is_loopback = False
+    if (
+        os.getenv("MURMUR_SCENE_LAB") != "1"
+        or environment != "development"
+        or not is_loopback
+    ):
+        raise ApiError(404, "Not found")
 
 
 class _OwnedStreamingResponse(StreamingResponse):
@@ -72,4 +95,30 @@ async def stream_live_scene(
     )
 
 
-__all__ = ["router", "stream_live_scene"]
+@router.post(
+    "/lab/stream",
+    include_in_schema=False,
+    dependencies=[Depends(_require_development_scene_lab)],
+)
+async def stream_development_live_scene(
+    body: LiveSceneRequest,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream through the real provider for the explicitly enabled development lab."""
+    try:
+        lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
+    except SceneAdmissionError as exc:
+        raise ApiError(429, str(exc)) from None
+    events = scene_service.stream_events(body)
+    return _OwnedStreamingResponse(
+        _encode_scene_events(events, lease),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+__all__ = ["router", "stream_development_live_scene", "stream_live_scene"]

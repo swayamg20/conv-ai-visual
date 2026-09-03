@@ -57,12 +57,20 @@ export interface SceneStreamRequest {
 
 export interface RunSceneStreamOptions {
   readonly apiUrl: string;
+  readonly endpoint?: SceneStreamEndpoint;
   readonly request: SceneStreamRequest;
   readonly signal: AbortSignal;
   readonly onEvent: (event: SceneStreamEvent) => void;
   readonly headers?: Readonly<Record<string, string>>;
   readonly fetchImpl?: typeof fetch;
 }
+
+export type SceneStreamEndpoint = "product" | "developmentLab";
+
+const SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
+  product: "/api/live-scenes/stream",
+  developmentLab: "/api/live-scenes/lab/stream",
+};
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -359,8 +367,9 @@ export async function runSceneModelStream(
   options: RunSceneStreamOptions
 ): Promise<void> {
   const requestFetch = options.fetchImpl ?? fetch;
+  const endpointPath = SCENE_STREAM_PATHS[options.endpoint ?? "product"];
   const response = await requestFetch(
-    `${options.apiUrl.replace(/\/$/, "")}/api/live-scenes/stream`,
+    `${options.apiUrl.replace(/\/$/, "")}${endpointPath}`,
     {
       method: "POST",
       headers: {

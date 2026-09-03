@@ -265,4 +265,37 @@ describe("scene model stream transport", () => {
       "scene_stream_failed",
     ]);
   });
+
+  it("posts a changed prompt to the auth-free development-lab endpoint", async () => {
+    const controller = new AbortController();
+    const baseScene = createSceneState({ revision: 0, nodes: [] });
+    const request = {
+      prompt: "Compare merge sort with quicksort using my exact wording",
+      generation: 3,
+      baseScene,
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      streamedResponse([
+        encoder.encode(
+          sseFrame(startedEvent({ generation: 3 })) +
+            sseFrame(failedEvent({ generation: 3 }), "scene_stream_failed")
+        ),
+      ])
+    );
+
+    await runSceneModelStream({
+      apiUrl: "http://127.0.0.1:8000/",
+      endpoint: "developmentLab",
+      request,
+      signal: controller.signal,
+      fetchImpl,
+      onEvent: vi.fn(),
+    });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe("http://127.0.0.1:8000/api/live-scenes/lab/stream");
+    expect(init?.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
 });

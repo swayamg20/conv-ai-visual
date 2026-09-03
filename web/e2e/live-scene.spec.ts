@@ -103,6 +103,13 @@ async function chooseScenario(page: Page, label: string): Promise<void> {
   await expect(page.getByText(`Fixture · ${label}`, { exact: true })).toBeVisible();
 }
 
+async function chooseSource(page: Page, label: "Fixture" | "Azure model"): Promise<void> {
+  await page
+    .getByTestId("scene-source-picker")
+    .getByText(label, { exact: true })
+    .click();
+}
+
 test("draws accepted model patches before the stream finishes, then replays", async ({ page }) => {
   await openLab(page);
   await page.getByRole("button", { name: "Generate live" }).click();
@@ -119,6 +126,55 @@ test("draws accepted model patches before the stream finishes, then replays", as
   await expect(page.getByText("Replaying accepted work", { exact: true })).toBeVisible();
   await expect(page.getByText("Explanation complete", { exact: true })).toBeVisible();
   await expect(page.getByText("4 accepted", { exact: true })).toBeVisible();
+});
+
+test("sends the edited prompt to the auth-free Azure lab stream", async ({ page }) => {
+  const prompt = "Show how a red-black tree rebalances after inserting 7";
+  let postedBody: unknown;
+  let authorization: string | undefined;
+  let requestPath: string | undefined;
+  await page.route("**/api/live-scenes/lab/stream", async (route) => {
+    postedBody = route.request().postDataJSON();
+    authorization = route.request().headers().authorization;
+    requestPath = new URL(route.request().url()).pathname;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: [
+        {
+          type: "scene_stream_started",
+          generation: 1,
+          attempt: 1,
+          baseRevision: 0,
+        },
+        {
+          type: "scene_stream_failed",
+          generation: 1,
+          attempt: 1,
+          code: "provider_error",
+          message: "The test intercepted the provider stream.",
+          lastAcceptedRevision: 0,
+          retryable: true,
+        },
+      ]
+        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+        .join(""),
+    });
+  });
+
+  await openLab(page);
+  await chooseSource(page, "Azure model");
+  await expect(page.getByRole("radio", { name: "Azure model" })).toBeChecked();
+  await expect(page.getByText("Azure · live backend", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("fixture-mode-picker")).not.toBeVisible();
+  await page.getByLabel("What should the board teach?").fill(prompt);
+  await page.getByRole("button", { name: "Generate live" }).click();
+  await expect(page.getByText("Stream stopped", { exact: true })).toBeVisible();
+
+  expect(requestPath).toBe("/api/live-scenes/lab/stream");
+  expect(authorization).toBeUndefined();
+  expect(postedBody).toMatchObject({ prompt, generation: 1 });
 });
 
 test("shows the one-repair lifecycle and completes from attempt two", async ({ page }) => {

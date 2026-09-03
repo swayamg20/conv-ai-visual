@@ -2,7 +2,11 @@ import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
-const port = 3102;
+const configuredPort = process.env.SCENE_E2E_PORT ?? "3102";
+const port = Number(configuredPort);
+if (!/^\d+$/.test(configuredPort) || !Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+  throw new Error("SCENE_E2E_PORT must be an integer between 1 and 65535");
+}
 const baseURL = `http://127.0.0.1:${port}`;
 const artifactDir = path.resolve(
   process.env.SCENE_E2E_ARTIFACT_DIR ?? "../var/scene-e2e"

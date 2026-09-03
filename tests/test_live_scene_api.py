@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import murmur.api.application as application
+import murmur.api.routers.live_scenes as live_scenes
 import pytest
 from fastapi.testclient import TestClient
 from murmur.api.dependencies import get_authenticated_user
@@ -113,6 +114,16 @@ class FakeSceneAuthoringService:
             yield event
 
 
+class RecordingSceneAuthoringAdmission(SceneAuthoringAdmission):
+    def __init__(self) -> None:
+        super().__init__(global_limit=1, per_user_limit=1, requests_per_minute=10)
+        self.user_ids: list[str] = []
+
+    async def acquire(self, user_id: str):
+        self.user_ids.append(user_id)
+        return await super().acquire(user_id)
+
+
 class _ClosingSceneEvents:
     def __init__(self, events: tuple[SceneStreamEvent, ...]) -> None:
         self._events = iter(events)
@@ -139,9 +150,12 @@ def _test_client(
     *,
     authenticated: bool,
     scene_authoring_enabled: bool = True,
+    admission: SceneAuthoringAdmission | None = None,
+    client_host: str = "127.0.0.1",
 ) -> TestClient:
     app = application.create_application(
         scene_authoring_service=service,  # type: ignore[arg-type]
+        scene_authoring_admission=admission,
         scene_authoring_enabled=scene_authoring_enabled,
     )
 
@@ -151,7 +165,7 @@ def _test_client(
         return AUTHENTICATED_USER
 
     app.dependency_overrides[get_authenticated_user] = authenticate
-    return TestClient(app)
+    return TestClient(app, client=(client_host, 50_000))
 
 
 @pytest.mark.asyncio
@@ -206,6 +220,112 @@ async def test_streaming_response_closes_events_and_admission_when_send_disconne
 
 
 def test_live_scene_stream_requires_authentication() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Not authenticated"}
+    assert service.requests == []
+
+
+@pytest.mark.parametrize(
+    "environment",
+    ["production", "staging", "test", "", "Development", " development "],
+)
+def test_development_lab_stream_is_hidden_outside_development(
+    monkeypatch,
+    environment: str,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", environment)
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json={})
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_development_lab_stream_is_hidden_without_explicit_flag(monkeypatch) -> None:
+    monkeypatch.delenv("MURMUR_SCENE_LAB", raising=False)
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json={})
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_development_lab_stream_uses_fixed_admission_identity_without_auth(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=False,
+        admission=admission,
+    )
+    body = _request_body()
+    body["prompt"] = "Draw the exact request I typed into the lab."
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json=body)
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert _sse_payloads(response.text)[0]["type"] == "scene_stream_started"
+    assert admission.user_ids == ["live-scene-lab-development"]
+    assert len(service.requests) == 1
+    assert service.requests[0].prompt == "Draw the exact request I typed into the lab."
+
+
+def test_development_lab_stream_rejects_non_loopback_peers_and_spoofed_headers(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(
+        service,
+        authenticated=False,
+        client_host="192.0.2.10",
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/lab/stream",
+            json=_request_body(),
+            headers={
+                "Host": "127.0.0.1:8000",
+                "X-Forwarded-For": "127.0.0.1",
+            },
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_lab_flag_does_not_bypass_authentication_on_product_stream(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
     service = FakeSceneAuthoringService(_scene_events())
     client = _test_client(service, authenticated=False)
     try:
