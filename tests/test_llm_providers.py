@@ -146,7 +146,7 @@ async def test_openai_azure_stream_uses_max_completion_tokens() -> None:
     client.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     client.model = "murmur-gpt-oss-120b"
     client.max_tokens_parameter = "max_completion_tokens"
-    client.default_params = {}
+    client.default_params = {"reasoning_effort": "low"}
 
     chunks = client.stream(
         [{"role": "user", "content": "draw"}],
@@ -159,6 +159,7 @@ async def test_openai_azure_stream_uses_max_completion_tokens() -> None:
     assert captured["model"] == "murmur-gpt-oss-120b"
     assert captured["temperature"] == 0.7
     assert captured["max_completion_tokens"] == 64
+    assert captured["reasoning_effort"] == "low"
     assert "max_tokens" not in captured
 
 
@@ -176,6 +177,17 @@ def test_openai_request_params_enforce_configured_token_field() -> None:
     client.max_tokens_parameter = "max_tokens"
 
     assert client._request_params(64, {}) == {"max_tokens": 64}
+
+
+def test_openai_request_params_allow_call_to_override_default_reasoning_effort() -> None:
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.default_params = {"reasoning_effort": "low"}
+    client.max_tokens_parameter = "max_completion_tokens"
+
+    assert client._request_params(64, {"reasoning_effort": "medium"}) == {
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 64,
+    }
 
 
 @pytest.mark.asyncio

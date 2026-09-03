@@ -40,6 +40,14 @@ def _cors_origins() -> list[str]:
     return origins or ["http://localhost:3000"]
 
 
+def _scene_client_options(provider: str, model: str) -> dict[str, str]:
+    """Return provider controls that are safe for the selected scene model only."""
+
+    if provider.casefold() == "azure_openai" and "gpt-oss" in model.casefold():
+        return {"reasoning_effort": "low"}
+    return {}
+
+
 def create_application(
     *,
     runtime: RuntimeRegistry | None = None,
@@ -63,6 +71,7 @@ def create_application(
             return create_llm_client(
                 scene_provider,
                 model=scene_model,
+                **_scene_client_options(scene_provider, scene_model),
             )
 
         scene_authoring_service = SceneAuthoringService(

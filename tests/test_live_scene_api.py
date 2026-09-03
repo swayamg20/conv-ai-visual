@@ -439,7 +439,7 @@ def test_live_scene_request_rejects_client_identity_claims() -> None:
 
 def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch) -> None:
     captured: dict[str, object] = {}
-    client_calls: list[tuple[str, str | None]] = []
+    client_calls: list[tuple[str, str | None, dict[str, object]]] = []
     expected_client = object()
 
     class CapturingSceneAuthoringService:
@@ -460,14 +460,14 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
                 }
             )
 
-    def create_client(provider: str, *, model: str | None = None):
-        client_calls.append((provider, model))
+    def create_client(provider: str, *, model: str | None = None, **kwargs: object):
+        client_calls.append((provider, model, kwargs))
         return expected_client
 
     monkeypatch.setattr(application, "SceneAuthoringService", CapturingSceneAuthoringService)
     monkeypatch.setattr(application, "create_llm_client", create_client)
-    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "openai")
-    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MODEL", "scene-model")
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "azure_openai")
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MODEL", "murmur-gpt-oss-120b")
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TEMPERATURE", 0.2)
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MAX_TOKENS", 1234)
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TIMEOUT_SECONDS", 9.5)
@@ -482,7 +482,24 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
     assert captured["max_tokens"] == 1234
     assert captured["timeout_seconds"] == 9.5
     assert captured["client_factory"]() is expected_client  # type: ignore[operator]
-    assert client_calls == [("openai", "scene-model")]
+    assert client_calls == [
+        ("azure_openai", "murmur-gpt-oss-120b", {"reasoning_effort": "low"})
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model"),
+    [
+        ("openai", "gpt-4o-mini"),
+        ("azure_openai", "gpt-4o"),
+        ("groq", "gpt-oss-120b"),
+    ],
+)
+def test_scene_client_options_do_not_leak_gpt_oss_tuning_to_other_clients(
+    provider: str,
+    model: str,
+) -> None:
+    assert application._scene_client_options(provider, model) == {}
 
 
 def test_scene_config_inherits_provider_selection_but_owns_generation_controls() -> None:
