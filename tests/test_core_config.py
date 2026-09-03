@@ -3,7 +3,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from murmur.core.config import default_env_path
+import pytest
+from murmur.core.config import default_env_path, normalize_azure_openai_endpoint
 
 
 def test_default_env_path_is_the_documented_repository_file() -> None:
@@ -36,3 +37,81 @@ def test_dotenv_can_be_disabled_before_config_import(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        (
+            " https://murmur-resource.openai.azure.com ",
+            "https://murmur-resource.openai.azure.com/openai/v1/",
+        ),
+        (
+            "https://MURMUR-RESOURCE.openai.azure.com/openai/v1/",
+            "https://murmur-resource.openai.azure.com/openai/v1/",
+        ),
+        (
+            "https://murmur-resource.services.ai.azure.com/",
+            "https://murmur-resource.services.ai.azure.com/openai/v1/",
+        ),
+    ],
+)
+def test_normalize_azure_openai_endpoint(endpoint: str, expected: str) -> None:
+    assert normalize_azure_openai_endpoint(endpoint) == expected
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "",
+        "http://murmur-resource.openai.azure.com",
+        "https://example.com",
+        "https://evilopenai.azure.com",
+        "https://@murmur-resource.openai.azure.com",
+        "https://user@murmur-resource.openai.azure.com",
+        "https://murmur-resource.openai.azure.com:443",
+        "https://murmur-resource.openai.azure.com/openai/deployments/example",
+        "https://murmur-resource.openai.azure.com?api-version=preview",
+        "https://murmur-resource.openai.azure.com/#fragment",
+    ],
+)
+def test_normalize_azure_openai_endpoint_rejects_unsafe_values(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="AZURE_OPENAI_ENDPOINT"):
+        normalize_azure_openai_endpoint(endpoint)
+
+
+def test_azure_scene_config_inherits_deployment_name_as_model() -> None:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("MURMUR_SCENE_LLM_") or name.startswith("AZURE_OPENAI_"):
+            env.pop(name)
+    env.update(
+        {
+            "PYTHON_DOTENV_DISABLED": "1",
+            "LLM_PROVIDER": "groq",
+            "MURMUR_SCENE_LLM_PROVIDER": "azure_openai",
+            "AZURE_OPENAI_API_KEY": "server-only-test-key",
+            "AZURE_OPENAI_ENDPOINT": "https://murmur-resource.openai.azure.com",
+            "AZURE_OPENAI_DEPLOYMENT": "murmur-gpt-oss-120b",
+        }
+    )
+    script = """
+import json
+from murmur.core.config import config
+print(json.dumps({
+    'provider': config.MURMUR_SCENE_LLM_PROVIDER,
+    'model': config.MURMUR_SCENE_LLM_MODEL,
+}))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.stdout.strip() == (
+        '{"provider": "azure_openai", "model": "murmur-gpt-oss-120b"}'
+    )

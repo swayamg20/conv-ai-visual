@@ -103,6 +103,7 @@ async def test_openai_text_stream_and_owned_http_client_close_on_consumer_abort(
     client = OpenAIClient.__new__(OpenAIClient)
     client.client = http_client
     client.model = "test-model"
+    client.max_tokens_parameter = "max_tokens"
     client.default_params = {}
     chunks = client.stream([{"role": "user", "content": "draw"}])
 
@@ -112,6 +113,69 @@ async def test_openai_text_stream_and_owned_http_client_close_on_consumer_abort(
 
     assert provider_stream.closed is True
     assert http_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_azure_stream_uses_max_completion_tokens() -> None:
+    captured = {}
+
+    class ProviderStream:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="azure patch"))]
+            )
+
+        async def close(self) -> None:
+            return None
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return ProviderStream()
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    client.model = "murmur-gpt-oss-120b"
+    client.max_tokens_parameter = "max_completion_tokens"
+    client.default_params = {}
+
+    chunks = client.stream(
+        [{"role": "user", "content": "draw"}],
+        temperature=0.7,
+        max_tokens=64,
+    )
+
+    assert await anext(chunks) == "azure patch"
+    await chunks.aclose()
+    assert captured["model"] == "murmur-gpt-oss-120b"
+    assert captured["temperature"] == 0.7
+    assert captured["max_completion_tokens"] == 64
+    assert "max_tokens" not in captured
+
+
+def test_openai_request_params_enforce_configured_token_field() -> None:
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.default_params = {"max_tokens": 999}
+    client.max_tokens_parameter = "max_completion_tokens"
+
+    assert client._request_params(None, {}) == {}
+    assert client._request_params(64, {"max_tokens": 128}) == {
+        "max_completion_tokens": 64
+    }
+
+    client.default_params = {"max_completion_tokens": 999}
+    client.max_tokens_parameter = "max_tokens"
+
+    assert client._request_params(64, {}) == {"max_tokens": 64}
 
 
 @pytest.mark.asyncio
@@ -164,6 +228,52 @@ def test_factory_routes_groq_through_openai_compatible_endpoint(monkeypatch) -> 
     assert client.api_key == "key"
     assert client.model == "model"
     assert captured["base_url"] == "https://api.groq.com/openai/v1"
+    assert "max_tokens_parameter" not in captured
+
+
+def test_factory_routes_azure_deployment_through_openai_v1_endpoint(monkeypatch) -> None:
+    captured = {}
+
+    def fake_openai_client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("murmur.llm.factory.OpenAIClient", fake_openai_client)
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_ENDPOINT",
+        "https://murmur-resource.openai.azure.com/",
+    )
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_DEPLOYMENT",
+        "murmur-gpt-oss-120b",
+    )
+    monkeypatch.setattr("murmur.llm.factory.config.AZURE_OPENAI_API_KEY", "server-key")
+
+    client = create_llm_client("azure_openai")
+
+    assert client.api_key == "server-key"
+    assert client.model == "murmur-gpt-oss-120b"
+    assert captured["base_url"] == "https://murmur-resource.openai.azure.com/openai/v1/"
+    assert captured["max_tokens_parameter"] == "max_completion_tokens"
+
+
+def test_factory_rejects_invalid_azure_endpoint_before_client_construction(monkeypatch) -> None:
+    constructed = False
+
+    def fake_openai_client(**_kwargs):
+        nonlocal constructed
+        constructed = True
+
+    monkeypatch.setattr("murmur.llm.factory.OpenAIClient", fake_openai_client)
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_ENDPOINT",
+        "https://example.com",
+    )
+
+    with pytest.raises(ValueError, match="Azure OpenAI resource hostname"):
+        create_llm_client("azure_openai", api_key="server-key", model="deployment")
+
+    assert constructed is False
 
 
 def test_factory_rejects_unknown_provider() -> None:

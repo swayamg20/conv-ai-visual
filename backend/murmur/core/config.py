@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -28,16 +29,62 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def normalize_azure_openai_endpoint(endpoint: str) -> str:
+    """Normalize an Azure OpenAI resource endpoint to its OpenAI v1 base URL."""
+    value = endpoint.strip()
+    if not value:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not be empty")
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be a valid HTTPS URL") from exc
+
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be a valid HTTPS URL")
+    if parsed.username is not None or parsed.password is not None or port is not None:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not contain credentials or a port")
+    if parsed.query or parsed.fragment:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not contain a query or fragment")
+
+    hostname = parsed.hostname.lower()
+    azure_suffixes = (".openai.azure.com", ".services.ai.azure.com")
+    resource_name = next(
+        (hostname[: -len(suffix)] for suffix in azure_suffixes if hostname.endswith(suffix)),
+        "",
+    )
+    if (
+        not resource_name
+        or resource_name.startswith("-")
+        or resource_name.endswith("-")
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in resource_name)
+    ):
+        raise ValueError(
+            "AZURE_OPENAI_ENDPOINT must use an Azure OpenAI resource hostname"
+        )
+
+    path = parsed.path.rstrip("/")
+    if path not in {"", "/openai/v1"}:
+        raise ValueError(
+            "AZURE_OPENAI_ENDPOINT must be the resource root or its /openai/v1 endpoint"
+        )
+
+    return f"https://{hostname}/openai/v1/"
+
+
 def _provider_model(
     provider: str,
     *,
     openai_model: str,
+    azure_openai_deployment: str,
     groq_model: str,
     gemini_model: str,
 ) -> str:
     """Resolve the configured model for one supported LLM provider."""
     return {
         "openai": openai_model,
+        "azure_openai": azure_openai_deployment,
         "groq": groq_model,
         "gemini": gemini_model,
     }.get(provider.lower(), "")
@@ -69,6 +116,13 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    # Azure OpenAI v1 config. The deployment name is passed as the API's model value.
+    AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+    AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
+    AZURE_OPENAI_DEPLOYMENT: str = os.getenv(
+        "AZURE_OPENAI_DEPLOYMENT", "murmur-gpt-oss-120b"
+    ).strip()
+
     # Groq config (OpenAI-compatible, ultra-fast inference)
     GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -97,6 +151,7 @@ class Config:
     MURMUR_SCENE_LLM_MODEL: str = os.getenv("MURMUR_SCENE_LLM_MODEL") or _provider_model(
         MURMUR_SCENE_LLM_PROVIDER,
         openai_model=OPENAI_MODEL,
+        azure_openai_deployment=AZURE_OPENAI_DEPLOYMENT,
         groq_model=GROQ_MODEL,
         gemini_model=GEMINI_MODEL,
     )
@@ -301,6 +356,18 @@ EXAMPLE — "Explain the Pythagorean theorem":
                 raise ValueError(
                     "OPENAI_API_KEY environment variable is required for provider=openai"
                 )
+        elif provider == "azure_openai":
+            if not cls.AZURE_OPENAI_API_KEY:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY environment variable is required "
+                    "for provider=azure_openai"
+                )
+            normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
+            if not cls.AZURE_OPENAI_DEPLOYMENT:
+                raise ValueError(
+                    "AZURE_OPENAI_DEPLOYMENT environment variable is required "
+                    "for provider=azure_openai"
+                )
         elif provider == "groq":
             if not cls.GROQ_API_KEY:
                 raise ValueError("GROQ_API_KEY environment variable is required for provider=groq")
@@ -311,15 +378,23 @@ EXAMPLE — "Explain the Pythagorean theorem":
                 )
         else:
             raise ValueError(
-                f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
+                "Unknown LLM_PROVIDER: "
+                f"{provider}. Supported providers: openai, azure_openai, groq, gemini"
             )
 
         scene_provider = cls.MURMUR_SCENE_LLM_PROVIDER.lower()
-        if scene_provider not in {"openai", "groq", "gemini"}:
+        if scene_provider not in {"openai", "azure_openai", "groq", "gemini"}:
             raise ValueError(
                 "Unknown MURMUR_SCENE_LLM_PROVIDER: "
-                f"{scene_provider}. Supported providers: openai, groq, gemini"
+                f"{scene_provider}. Supported providers: openai, azure_openai, groq, gemini"
             )
+        if cls.MURMUR_SCENE_ENABLED and scene_provider == "azure_openai":
+            if not cls.AZURE_OPENAI_API_KEY:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY environment variable is required "
+                    "for MURMUR_SCENE_LLM_PROVIDER=azure_openai"
+                )
+            normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
         if not cls.MURMUR_SCENE_LLM_MODEL:
             raise ValueError("MURMUR_SCENE_LLM_MODEL must not be empty")
         if not 1 <= cls.MURMUR_SCENE_LLM_MAX_TOKENS <= MAX_SCENE_MODEL_OUTPUT_TOKENS:

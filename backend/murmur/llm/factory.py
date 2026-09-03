@@ -1,6 +1,6 @@
 """Configuration-backed LLM provider factory."""
 
-from murmur.core.config import config
+from murmur.core.config import config, normalize_azure_openai_endpoint
 from murmur.llm.base import LLMClient
 from murmur.llm.gemini import GeminiClient
 from murmur.llm.openai import OpenAIClient
@@ -13,7 +13,7 @@ def create_llm_client(
     Factory function to create LLM client based on provider.
 
     Args:
-        provider: Provider name ("openai" or "gemini")
+        provider: Provider name ("openai", "azure_openai", "groq", or "gemini")
         api_key: API key (fetched from config if not provided)
         model: Model name (fetched from config if not provided)
         **kwargs: Additional parameters to pass to client
@@ -30,6 +30,14 @@ def create_llm_client(
         return OpenAIClient(
             api_key=api_key or config.OPENAI_API_KEY, model=model or config.OPENAI_MODEL, **kwargs
         )
+    elif provider == "azure_openai":
+        return OpenAIClient(
+            api_key=api_key or config.AZURE_OPENAI_API_KEY,
+            model=model or config.AZURE_OPENAI_DEPLOYMENT,
+            base_url=normalize_azure_openai_endpoint(config.AZURE_OPENAI_ENDPOINT),
+            max_tokens_parameter="max_completion_tokens",
+            **kwargs,
+        )
     elif provider == "groq":
         return OpenAIClient(
             api_key=api_key or config.GROQ_API_KEY,
@@ -43,5 +51,6 @@ def create_llm_client(
         )
     else:
         raise ValueError(
-            f"Unsupported LLM provider: {provider}. Supported providers: openai, groq, gemini"
+            "Unsupported LLM provider: "
+            f"{provider}. Supported providers: openai, azure_openai, groq, gemini"
         )
