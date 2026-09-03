@@ -162,7 +162,7 @@ class Config:
         os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
     )
     MURMUR_SCENE_LLM_TEMPERATURE: float = float(
-        os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", str(LLM_TEMPERATURE))
+        os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", "0.2")
     )
     MURMUR_SCENE_GLOBAL_CONCURRENCY: int = int(os.getenv("MURMUR_SCENE_GLOBAL_CONCURRENCY", "4"))
     MURMUR_SCENE_PER_USER_CONCURRENCY: int = int(

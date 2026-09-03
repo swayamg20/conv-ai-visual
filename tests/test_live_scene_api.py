@@ -485,7 +485,7 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
     assert client_calls == [("openai", "scene-model")]
 
 
-def test_scene_config_inherits_provider_defaults_but_owns_output_budget() -> None:
+def test_scene_config_inherits_provider_selection_but_owns_generation_controls() -> None:
     env = os.environ.copy()
     for name in tuple(env):
         if name.startswith("MURMUR_SCENE_LLM_"):
@@ -523,7 +523,7 @@ print(json.dumps({
         "provider": "openai",
         "model": "existing-model",
         "max_tokens": 4096,
-        "temperature": 0.35,
+        "temperature": 0.2,
         "timeout_seconds": 20.0,
     }
 
