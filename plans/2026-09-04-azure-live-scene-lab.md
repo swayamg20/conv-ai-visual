@@ -13,6 +13,7 @@ Murmur's development-only live-scene lab currently accepts a prompt but always p
 - [x] 2026-09-04 03:08 IST: Diagnosed Azure's malformed tail as a 4,096-token `length` finish, then pushed bounded three-patch authoring, scene-owned temperature, Azure GPT-OSS low reasoning, and server-enforced patch targets in `905c9c7`, `6566f1f`, and `9089b13`.
 - [x] 2026-09-04 03:10 IST: Verified custom prompts end to end with process-only credentials. A direct stack request completed three first-attempt patches at 2,468 ms first patch / 2,762 ms total. The browser queue run completed with three visible revisions at 2,614 ms first patch / 4,947 ms total, correct queue labels, and no console errors.
 - [x] 2026-09-04 03:13 IST: Passed 1,234 backend tests plus Ruff, 369 frontend tests plus ESLint and TypeScript, and all eight dedicated Chromium scenarios with 20 ms deterministic first-visible p95. Updated the live plans; all implementation commits are pushed on `codex/realtime-scene-core`.
+- [x] 2026-09-04 03:17 IST: Pushed Azure support for the explicitly cost-guarded ten-prompt corpus runner in `0581ba7`; 39 focused API/provider/probe tests and Ruff passed, and an independent offline audit confirmed dry-run performs no config, factory, or socket access.
 
 ## Surprises & Discoveries
 
@@ -36,6 +37,8 @@ Murmur's development-only live-scene lab currently accepts a prompt but always p
 ## Outcomes & Retrospective
 
 The Azure lab integration and browser-visible custom-prompt proof are complete and pushed through `9089b13`. Both stack and queue prompts produced semantically relevant, progressive scenes; the queue screenshot shows four labeled boxes plus enqueue/dequeue annotations at revision 3. Full regression passed with 1,234 backend tests, 369 frontend tests, clean Ruff/ESLint/TypeScript, and eight Chromium scenarios. The single browser sample is inside the 3-second Gate 1 p95 ceiling, but it is not the required ten-prompt corpus, so the overall live-model gate remains pending that separately budgeted run.
+
+The corpus runner now supports Azure GPT-OSS through the same provider policy as the application while retaining its exact acknowledgement and maximum-cost guards. No corpus call was made as part of that change.
 
 ## Context and Orientation
 

@@ -34,6 +34,7 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - [x] 2026-09-03 00:17 IST: Independent adversarial review returned **SHIP** for deterministic Gate 1 at pushed HEAD `8b0e915`, with no remaining P0-P2 findings and an independently verified production 404 for the lab route. The separate paid live-model product gate remains pending.
 - [x] 2026-09-04 03:10 IST: Connected Azure `gpt-oss-120b`, verified custom stack and queue prompts through canonical server/browser paths, and pushed provider, lab, truncation, low-reasoning, and server patch-target fixes through `9089b13`.
 - [x] 2026-09-04 03:13 IST: Re-ran the complete regression at `9089b13`: 1,234 backend tests and Ruff passed; 369 frontend tests, ESLint, TypeScript, and all eight Chromium scenarios passed with 20 ms deterministic first-visible p95.
+- [x] 2026-09-04 03:17 IST: Extended the cost-guarded live corpus runner to Azure GPT-OSS in `0581ba7`; its dry-run remains config- and network-free, and 39 focused tests plus Ruff passed.
 
 ## Surprises & Discoveries
 
