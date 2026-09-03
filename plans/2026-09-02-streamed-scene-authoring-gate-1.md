@@ -32,6 +32,8 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - [ ] Run a small live-provider corpus only after the user supplies the repository-required explicit cost budget.
 - [x] 2026-09-03 00:16 IST: Passed the full repository gates: 1,198 backend tests and Ruff at `3f6d4e7`, followed by all 11 focused config/API tests and Ruff at `8b0e915`; 368 frontend tests, exact-delta lint/typecheck, and all seven Chromium scenarios at `093c56e`; the production build generated all 11 pages at `8540130`.
 - [x] 2026-09-03 00:17 IST: Independent adversarial review returned **SHIP** for deterministic Gate 1 at pushed HEAD `8b0e915`, with no remaining P0-P2 findings and an independently verified production 404 for the lab route. The separate paid live-model product gate remains pending.
+- [x] 2026-09-04 03:10 IST: Connected Azure `gpt-oss-120b`, verified custom stack and queue prompts through canonical server/browser paths, and pushed provider, lab, truncation, low-reasoning, and server patch-target fixes through `9089b13`.
+- [x] 2026-09-04 03:13 IST: Re-ran the complete regression at `9089b13`: 1,234 backend tests and Ruff passed; 369 frontend tests, ESLint, TypeScript, and all eight Chromium scenarios passed with 20 ms deterministic first-visible p95.
 
 ## Surprises & Discoveries
 
@@ -51,6 +53,8 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - Pruned replay uses adjacent synthetic revisions only to satisfy the motion planner. Any interrupted materialization must be normalized back to the retained record's authoritative revision before it becomes the next generation's base.
 - A scene-specific 4,096-token safety cap cannot inherit the general chat output budget. Because the scene service is composed during application construction even while its paid route is default-off, that inheritance allowed a valid `LLM_MAX_TOKENS=8192` chat configuration to take down startup.
 - Environment variables may be present but blank in deployment systems. Scene-budget fallback must use the protocol constant and treat a blank value as unset, preserving the repository's previous configuration semantics.
+- Azure GPT-OSS exhausted the 4,096 completion-token cap while beginning an extra NDJSON frame; a metadata-only reproduction confirmed `finish_reason=length`. Hidden reasoning and visible JSON share this cap, so lowering reasoning effort and bounding authored frames is safer than raising the scene budget.
+- A prompt-only patch count is advisory. The server must stop after the same target so a useful accepted prefix cannot be reclassified as invalid because the model begins an unrequested trailing frame.
 
 ## Decision Log
 
@@ -70,6 +74,7 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - 2026-09-03, Codex: Wrap Starlette's streaming response with an explicit body owner so an exception from ASGI `send()` still closes the route encoder, service/provider chain, and admission lease. Lease closure is serialized, idempotent, and marked complete only after capacity release succeeds.
 - 2026-09-03, Codex: Synthetic adjacent revisions exist only inside pruned replay playback. Both the awaited playback outcome and the synchronous public interrupt path convert retained nodes back to the accepted record's authoritative revision.
 - 2026-09-03, Codex: The scene authoring output budget defaults directly to `MAX_SCENE_MODEL_OUTPUT_TOKENS` and never inherits `LLM_MAX_TOKENS`. Provider, model, and temperature may retain their compatible selection defaults, but a broader chat budget must not violate the bounded scene protocol or break default-off startup.
+- 2026-09-04, Codex: Azure GPT-OSS scene generation uses low reasoning, scene-owned temperature 0.2, three initial patches, and one repair patch. The service enforces the same patch targets and closes upstream immediately after they are reached.
 
 ## Outcomes & Retrospective
 
@@ -79,7 +84,9 @@ The desktop and mobile review confirmed the intended teaching-workstation hierar
 
 Independent adversarial review found no remaining P0-P2 issues and returned **SHIP** for the deterministic implementation at pushed HEAD `8b0e915`. It separately confirmed that a production server returns 404 for `/labs/live-scene` even when the development lab flag is set.
 
-No paid provider call has been made. Therefore the deterministic protocol, safety, runtime, API, and UI portions pass, while the overall Gate 1 product verdict remains **pending live-model evidence**. First-attempt validity, visual usefulness on unseen prompts, and real prompt-to-first-visible latency cannot be claimed until the user supplies a positive explicit budget, the redacted server corpus runs, and the same prompts are reviewed with browser timing in the product UI.
+Paid Azure integration evidence now exists for two custom prompts. A direct stack request completed three first-attempt patches at 2,468 ms first patch / 2,762 ms total. A browser queue request completed revision 3 with semantically correct queue, enqueue, and dequeue ink at 2,614 ms first patch / 4,947 ms total and no console errors; its bounded repair retained the two valid initial patches and added one repair patch. This proves connectivity, real prompt influence, progressive rendering, safe repair, and one warm browser sample within the 3-second p95 ceiling.
+
+The overall Gate 1 product verdict remains **pending the required ten-prompt live corpus**. Two successful prompts cannot establish the 90% first-attempt-validity, 1.5-second median, or 3-second p95 requirements. Run the redacted corpus only after an explicit positive cost budget and then review the same outputs for visual usefulness in the browser.
 
 ## Context and Orientation
 

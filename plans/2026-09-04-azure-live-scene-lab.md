@@ -8,17 +8,20 @@ Murmur's development-only live-scene lab currently accepts a prompt but always p
 
 - [x] 2026-09-04 02:42 IST: Deployed `murmur-gpt-oss-120b` version 1 as Azure `GlobalStandard` capacity 10 and proved it with an HTTP 200 smoke request.
 - [x] 2026-09-04 02:47 IST: Launched the deterministic `/labs/live-scene` page and confirmed that its prompt is intentionally ignored by the fixture runner.
-- [ ] Add and test an explicit `azure_openai` provider using the existing OpenAI-compatible client.
-- [ ] Add and test a development-only, auth-free lab stream endpoint without changing the authenticated product endpoint.
-- [ ] Let the lab switch between Azure live output and the existing deterministic regression fixtures.
-- [ ] Start both local servers with process-only Azure credentials and verify a custom prompt end to end.
-- [ ] Run focused and full regression suites, update this plan, commit logical units, and push `codex/realtime-scene-core`.
+- [x] 2026-09-04 02:55 IST: Added and pushed the explicit `azure_openai` provider in `27a6733`, including strict endpoint normalization and `max_completion_tokens` translation.
+- [x] 2026-09-04 02:58 IST: Added and pushed the loopback-only development lab stream plus Fixture/Azure selector in `7438148`; the authenticated product route remains unchanged.
+- [x] 2026-09-04 03:08 IST: Diagnosed Azure's malformed tail as a 4,096-token `length` finish, then pushed bounded three-patch authoring, scene-owned temperature, Azure GPT-OSS low reasoning, and server-enforced patch targets in `905c9c7`, `6566f1f`, and `9089b13`.
+- [x] 2026-09-04 03:10 IST: Verified custom prompts end to end with process-only credentials. A direct stack request completed three first-attempt patches at 2,468 ms first patch / 2,762 ms total. The browser queue run completed with three visible revisions at 2,614 ms first patch / 4,947 ms total, correct queue labels, and no console errors.
+- [x] 2026-09-04 03:13 IST: Passed 1,234 backend tests plus Ruff, 369 frontend tests plus ESLint and TypeScript, and all eight dedicated Chromium scenarios with 20 ms deterministic first-visible p95. Updated the live plans; all implementation commits are pushed on `codex/realtime-scene-core`.
 
 ## Surprises & Discoveries
 
 - Azure Foundry's catalog UI tried to deploy catalog asset version 4 even though the live `eastus2` account supports deployment model version 1 only. The native Azure deployment API succeeded with version 1.
 - The portal also created a second `gpt-oss-120b` deployment at capacity 2500. The Murmur deployment uses capacity 10. The duplicate consumes quota but is not dedicated hourly GPU compute; it will not be deleted without explicit approval.
 - The existing lab intentionally separates Firebase-free browser QA from paid provider behavior. Its text field changes local state, but `createSceneFixtureRunner` ignores the prompt and emits scripted Pythagoras patches.
+- The first Azure browser run accepted one useful binary-search patch but failed after both attempts. A redacted reproduction proved the first attempt ended with an unterminated NDJSON frame; a metadata-only provider probe then confirmed `finish_reason=length` and exactly 4,096 completion tokens.
+- `gpt-oss-120b` shares `max_completion_tokens` between hidden reasoning and visible output. Default reasoning plus a 3-5 patch prompt delayed visible ink and exhausted the scene cap. Low reasoning, scene temperature 0.2, exactly three compact initial patches, and one repair patch produced clean bounded output without raising the safety cap.
+- Prompt instructions alone are not an execution boundary. The service now stops and closes the provider after three accepted initial patches or one accepted repair patch, so a model cannot invalidate useful work by beginning a truncated extra frame.
 
 ## Decision Log
 
@@ -27,10 +30,12 @@ Murmur's development-only live-scene lab currently accepts a prompt but always p
 - 2026-09-04, Codex: Require both an explicit lab flag and a non-production environment. A missing or production gate returns 404 so an accidental production setting does not advertise an auth-free model route.
 - 2026-09-04, Codex: Keep deterministic modes alongside Azure live mode. Fixtures remain the fast regression oracle; Azure mode proves usefulness and provider latency.
 - 2026-09-04, Codex: Keep Azure keys and tokens in the backend process environment only. No credential, endpoint key, or browser-visible secret is written to the repository.
+- 2026-09-04, Codex: Use low reasoning only for Azure GPT-OSS scene clients and keep the 4,096-token safety cap. This reduces time-to-first-visible and reserves output capacity without changing chat or unrelated providers.
+- 2026-09-04, Codex: Ask for exactly three compact initial patches and exactly one repair patch, and enforce those targets server-side. Accepted prefix patches are a product result; an unrequested fourth frame must not trigger another paid attempt.
 
 ## Outcomes & Retrospective
 
-Implementation is in progress. The Azure deployment and a direct inference smoke test are complete. The remaining outcome is the browser-visible custom-prompt proof plus regression evidence and pushed commits.
+The Azure lab integration and browser-visible custom-prompt proof are complete and pushed through `9089b13`. Both stack and queue prompts produced semantically relevant, progressive scenes; the queue screenshot shows four labeled boxes plus enqueue/dequeue annotations at revision 3. Full regression passed with 1,234 backend tests, 369 frontend tests, clean Ruff/ESLint/TypeScript, and eight Chromium scenarios. The single browser sample is inside the 3-second Gate 1 p95 ceiling, but it is not the required ten-prompt corpus, so the overall live-model gate remains pending that separately budgeted run.
 
 ## Context and Orientation
 
