@@ -31,7 +31,7 @@ from murmur.live_scene.contracts import (
     SceneStreamRepairingEvent,
     SceneStreamStartedEvent,
 )
-from murmur.live_scene.prompt import build_scene_messages
+from murmur.live_scene.prompt import build_scene_messages, scene_patch_target
 from murmur.live_scene.stream_parser import ScenePatchStreamError, ScenePatchStreamParser
 from murmur.live_scene.wire import SceneStreamWireError, encode_scene_stream_event
 
@@ -289,6 +289,7 @@ class SceneAuthoringService:
         client: SceneModelClient,
         state: _GenerationState,
         attempt: int,
+        patch_target: int,
         messages: list[dict[str, str]],
         outcome: _AttemptOutcome,
     ) -> AsyncIterator[ScenePatchEvent]:
@@ -306,7 +307,7 @@ class SceneAuthoringService:
             typed_upstream = cast(AsyncIterator[str | bytes], upstream)
             deadline = asyncio.get_running_loop().time() + self._timeout_seconds
 
-            while not state.budget_reached:
+            while not state.budget_reached and outcome.patch_count < patch_target:
                 try:
                     chunk = await _next_before_deadline(typed_upstream, deadline=deadline)
                 except StopAsyncIteration:
@@ -316,15 +317,15 @@ class SceneAuthoringService:
                     event = state.accept(patch, attempt=attempt)
                     outcome.patch_count += 1
                     yield event
-                    if state.budget_reached:
+                    if state.budget_reached or outcome.patch_count >= patch_target:
                         break
 
-            if not state.budget_reached:
+            if not state.budget_reached and outcome.patch_count < patch_target:
                 for patch in parser.finish():
                     event = state.accept(patch, attempt=attempt)
                     outcome.patch_count += 1
                     yield event
-                    if state.budget_reached:
+                    if state.budget_reached or outcome.patch_count >= patch_target:
                         break
         except ScenePatchStreamError as exc:
             outcome.invalid_reason = f"{exc.code}: model patch frame was rejected"
@@ -399,6 +400,10 @@ class SceneAuthoringService:
 
             for attempt in (1, 2):
                 current_scene_json = _scene_json(state.scene)
+                patch_target = scene_patch_target(
+                    state.remaining_patch_budget,
+                    repair=attempt == 2,
+                )
                 repair_context: dict[str, str] | None = None
                 if attempt == 2:
                     assert repair_reason is not None
@@ -430,6 +435,7 @@ class SceneAuthoringService:
                     client=client,
                     state=state,
                     attempt=attempt,
+                    patch_target=patch_target,
                     messages=messages,
                     outcome=outcome,
                 )

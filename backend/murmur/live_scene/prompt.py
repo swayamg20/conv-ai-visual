@@ -152,6 +152,16 @@ def _validate_patch_budget(value: int) -> int:
     return value
 
 
+def scene_patch_target(remaining_patch_budget: int, *, repair: bool) -> int:
+    """Choose the bounded number of frames the prompt and server will accept."""
+
+    budget = _validate_patch_budget(remaining_patch_budget)
+    configured_target = (
+        _REPAIR_TARGET_PATCH_COUNT if repair else _INITIAL_TARGET_PATCH_COUNT
+    )
+    return min(configured_target, budget)
+
+
 def build_scene_messages(
     prompt: str,
     current_scene_json: str,
@@ -173,9 +183,7 @@ def build_scene_messages(
     user_prompt = _bounded_prompt(prompt)
     current_scene = _canonical_scene_json(current_scene_json, field="current_scene_json")
     budget = _validate_patch_budget(remaining_patch_budget)
-    target_patch_count = min(_INITIAL_TARGET_PATCH_COUNT, budget)
-    if repair_context is not None:
-        target_patch_count = _REPAIR_TARGET_PATCH_COUNT
+    target_patch_count = scene_patch_target(budget, repair=repair_context is not None)
 
     context_lines = [
         f"REMAINING_PATCH_BUDGET:{budget}",

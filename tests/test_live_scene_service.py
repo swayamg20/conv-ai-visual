@@ -310,7 +310,7 @@ async def test_repairs_from_partial_snapshot_with_stable_node_order_and_remainin
 
 
 @pytest.mark.asyncio
-async def test_second_invalid_attempt_preserves_patches_accepted_by_both_attempts() -> None:
+async def test_repair_completes_after_one_valid_patch_without_parsing_trailing_garbage() -> None:
     first = _patch_line("patch-one", _put(_line("node-one")))
     second = _patch_line("patch-two", _put(_line("node-two")))
     client = _FakeClient(
@@ -328,14 +328,13 @@ async def test_second_invalid_attempt_preserves_patches_accepted_by_both_attempt
         "scene_patch",
         "scene_stream_repairing",
         "scene_patch",
-        "scene_stream_failed",
+        "scene_stream_completed",
     ]
-    failure = events[-1]
-    assert isinstance(failure, SceneStreamFailedEvent)
-    assert failure.attempt == 2
-    assert failure.code == "invalid_scene_stream"
-    assert failure.last_accepted_revision == 2
-    assert "not-json" not in failure.message
+    completed = events[-1]
+    assert isinstance(completed, SceneStreamCompletedEvent)
+    assert completed.repaired is True
+    assert completed.patch_count == 2
+    assert completed.final_revision == 2
     assert all(stream.closed for stream in client.streams)
 
 
@@ -463,23 +462,27 @@ async def test_consumer_close_after_patch_closes_upstream_without_reading_more()
 
 
 @pytest.mark.asyncio
-async def test_hard_patch_budget_accepts_eight_and_closes_before_ninth() -> None:
-    lines = [_patch_line(f"patch-{index}", _put(_line(f"node-{index}"))) for index in range(1, 10)]
+async def test_initial_attempt_accepts_three_and_closes_before_invalid_fourth_frame() -> None:
+    lines = [_patch_line(f"patch-{index}", _put(_line(f"node-{index}"))) for index in range(1, 4)]
     client = _FakeClient([["\n".join(lines) + "\n"]])
+    client._attempts[0][0] += '{"v":1,"patchId":"truncated-fourth"'
     service = SceneAuthoringService(client)
 
     events = await _collect(service)
 
     patches = [event for event in events if isinstance(event, ScenePatchEvent)]
-    assert [event.sequence for event in patches] == list(range(1, 9))
+    assert [event.sequence for event in patches] == [1, 2, 3]
     assert [event.patch.patch_id for event in patches] == [
-        f"patch-{index}" for index in range(1, 9)
+        "patch-1",
+        "patch-2",
+        "patch-3",
     ]
     completed = events[-1]
     assert isinstance(completed, SceneStreamCompletedEvent)
-    assert completed.patch_count == 8
-    assert completed.final_revision == 8
+    assert completed.patch_count == 3
+    assert completed.final_revision == 3
     assert "REMAINING_PATCH_BUDGET:8" in client.calls[0]["messages"][1]["content"]  # type: ignore[index]
+    assert "TARGET_PATCH_COUNT:3" in client.calls[0]["messages"][1]["content"]  # type: ignore[index]
     assert client.streams[0].closed is True
 
 
