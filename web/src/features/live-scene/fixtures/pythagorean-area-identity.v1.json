@@ -1,0 +1,807 @@
+{
+  "v": 1,
+  "fixtureId": "pythagorean-area-identity",
+  "componentId": "areas",
+  "generation": 1,
+  "baseRevision": 0,
+  "events": [
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 1,
+      "baseRevision": 0,
+      "resultRevision": 1,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_triangle",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__triangle",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  320.0,
+                  260.0
+                ],
+                [
+                  440.0,
+                  260.0
+                ],
+                [
+                  320.0,
+                  420.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--chalk))",
+                "strokeWidth": 4.0,
+                "opacity": 1.0,
+                "roughness": 0.45,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_triangle",
+        "componentId": "areas",
+        "role": "triangle",
+        "atomOrdinal": 1,
+        "semanticBaseRevision": 0,
+        "semanticResultRevision": 1,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "triangle",
+          "nodeId": "areas__triangle",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "right_angle",
+            "hypotenuse_ratio"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_triangle",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "triangle",
+            "nodeId": "areas__triangle",
+            "atomOrdinal": 1,
+            "baseSemanticRevision": 0,
+            "resultSemanticRevision": 1,
+            "baseSceneSha256": "a8a338405d84e56a062bb45ec4800cfb09e8af57bbcec8560069464ff3f7dee0",
+            "resultSceneSha256": "2f47395b2aa4c0e994301c2698a2ebb5814b176d23f30035348728bfb1b54ae8",
+            "patchSha256": "4cc1d990a304e1dc5c9a291c774cca4b4c0775c5413daae1ab9ac76a13af01f2",
+            "receiptSha256": "518b80fd923323c07939edb97a9dad39aebd3ec475518be0074c85b890fbee47",
+            "previousCertificateSha256": null
+          },
+          "certificateSha256": "28ab5dd89fb5a900354b63a1279c2c5566eebc99f8f9142500a082d1436f485d"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 2,
+      "baseRevision": 1,
+      "resultRevision": 2,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_square_a",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__square_a",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  320.0,
+                  260.0
+                ],
+                [
+                  440.0,
+                  260.0
+                ],
+                [
+                  440.0,
+                  140.0
+                ],
+                [
+                  320.0,
+                  140.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--sage))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.35,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_square_a",
+        "componentId": "areas",
+        "role": "square_a",
+        "atomOrdinal": 2,
+        "semanticBaseRevision": 1,
+        "semanticResultRevision": 2,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "square_a",
+          "nodeId": "areas__square_a",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "attached_square",
+            "square_edge_length"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_square_a",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "square_a",
+            "nodeId": "areas__square_a",
+            "atomOrdinal": 2,
+            "baseSemanticRevision": 1,
+            "resultSemanticRevision": 2,
+            "baseSceneSha256": "2f47395b2aa4c0e994301c2698a2ebb5814b176d23f30035348728bfb1b54ae8",
+            "resultSceneSha256": "68838dd25b57251d844521384ecca40e59fd541476ddb75efa05b8c951a27629",
+            "patchSha256": "f0814a4204dd0e42bb5db5e68e421aa2e683d393ad7c0e44b6736f456ca44ce1",
+            "receiptSha256": "7047c5b65ff82a14fac4162a1e1bd9505d93aeab347103da5c31f0c71503c57e",
+            "previousCertificateSha256": "28ab5dd89fb5a900354b63a1279c2c5566eebc99f8f9142500a082d1436f485d"
+          },
+          "certificateSha256": "a1668c61cdb87b268804eb8caa6f9342db632ddf5752ab218f7ab831539cfb01"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 3,
+      "baseRevision": 2,
+      "resultRevision": 3,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_label_a2",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__label_a2",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 380.0,
+              "y": 200.0,
+              "text": "a²",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 30.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_label_a2",
+        "componentId": "areas",
+        "role": "label_a2",
+        "atomOrdinal": 3,
+        "semanticBaseRevision": 2,
+        "semanticResultRevision": 3,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "label_a2",
+          "nodeId": "areas__label_a2",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "label_containment",
+            "label_separation"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_label_a2",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "label_a2",
+            "nodeId": "areas__label_a2",
+            "atomOrdinal": 3,
+            "baseSemanticRevision": 2,
+            "resultSemanticRevision": 3,
+            "baseSceneSha256": "68838dd25b57251d844521384ecca40e59fd541476ddb75efa05b8c951a27629",
+            "resultSceneSha256": "42d172e85dbb25b559859d83773ff574119c3590dab751069944ec47de67403f",
+            "patchSha256": "62c50435d1af24a14e9712ff328e50e482081d83685093cab40dc05a6074db09",
+            "receiptSha256": "201b675adca2436b2fb7f9faf5c0066b2325e0d5ee2450b099d4c0b28066b677",
+            "previousCertificateSha256": "a1668c61cdb87b268804eb8caa6f9342db632ddf5752ab218f7ab831539cfb01"
+          },
+          "certificateSha256": "2732395b986d0e6681b000c4c4cf181450e3da708427e8906a35fb63070e2795"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 4,
+      "baseRevision": 3,
+      "resultRevision": 4,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_square_b",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__square_b",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  320.0,
+                  260.0
+                ],
+                [
+                  320.0,
+                  420.0
+                ],
+                [
+                  160.0,
+                  420.0
+                ],
+                [
+                  160.0,
+                  260.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--lavender))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.35,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_square_b",
+        "componentId": "areas",
+        "role": "square_b",
+        "atomOrdinal": 4,
+        "semanticBaseRevision": 3,
+        "semanticResultRevision": 4,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "square_b",
+          "nodeId": "areas__square_b",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "attached_square",
+            "square_edge_length"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_square_b",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "square_b",
+            "nodeId": "areas__square_b",
+            "atomOrdinal": 4,
+            "baseSemanticRevision": 3,
+            "resultSemanticRevision": 4,
+            "baseSceneSha256": "42d172e85dbb25b559859d83773ff574119c3590dab751069944ec47de67403f",
+            "resultSceneSha256": "200d50f46f84edcbe7c8ce17d15e4b3b4a4fe4b444782eac31443de81eb8d4a7",
+            "patchSha256": "7d2372364718ddd8557e25b7b44aeb862023ad868f5f7ea4703f3dd6b6d72ab5",
+            "receiptSha256": "be64153af29bcf328a95feed88c70a51f58acb4ba9985474051b4267b2a8827a",
+            "previousCertificateSha256": "2732395b986d0e6681b000c4c4cf181450e3da708427e8906a35fb63070e2795"
+          },
+          "certificateSha256": "09c64e6c676b67f4ec6cd68e7588ef2bff447ba90c347aa97f7c24c0ad6c5448"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 5,
+      "baseRevision": 4,
+      "resultRevision": 5,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_label_b2",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__label_b2",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 240.0,
+              "y": 340.0,
+              "text": "b²",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 30.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_label_b2",
+        "componentId": "areas",
+        "role": "label_b2",
+        "atomOrdinal": 5,
+        "semanticBaseRevision": 4,
+        "semanticResultRevision": 5,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "label_b2",
+          "nodeId": "areas__label_b2",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "label_containment",
+            "label_separation"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_label_b2",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "label_b2",
+            "nodeId": "areas__label_b2",
+            "atomOrdinal": 5,
+            "baseSemanticRevision": 4,
+            "resultSemanticRevision": 5,
+            "baseSceneSha256": "200d50f46f84edcbe7c8ce17d15e4b3b4a4fe4b444782eac31443de81eb8d4a7",
+            "resultSceneSha256": "8cb2a14fdb6441e7104f4dc9ad176a1d4650cd403d0a1d31ba626c441c7a4700",
+            "patchSha256": "f2575c39be214771f4cf8856c139db23d31e413a787fa28b278d230be97256da",
+            "receiptSha256": "f9f64364598f48277424392877e55f96765d9c617d2c43dc11ca2159576c7d89",
+            "previousCertificateSha256": "09c64e6c676b67f4ec6cd68e7588ef2bff447ba90c347aa97f7c24c0ad6c5448"
+          },
+          "certificateSha256": "f66af0059b0247161252eeb85959af9953e833bc417be194dfad1b1238f2659d"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 6,
+      "baseRevision": 5,
+      "resultRevision": 6,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_square_c",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__square_c",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  440.0,
+                  260.0
+                ],
+                [
+                  320.0,
+                  420.0
+                ],
+                [
+                  480.0,
+                  540.0
+                ],
+                [
+                  600.0,
+                  380.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--amber))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.35,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_square_c",
+        "componentId": "areas",
+        "role": "square_c",
+        "atomOrdinal": 6,
+        "semanticBaseRevision": 5,
+        "semanticResultRevision": 6,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "square_c",
+          "nodeId": "areas__square_c",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "attached_square",
+            "square_edge_length"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_square_c",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "square_c",
+            "nodeId": "areas__square_c",
+            "atomOrdinal": 6,
+            "baseSemanticRevision": 5,
+            "resultSemanticRevision": 6,
+            "baseSceneSha256": "8cb2a14fdb6441e7104f4dc9ad176a1d4650cd403d0a1d31ba626c441c7a4700",
+            "resultSceneSha256": "86aaa610deab581fbc9b33fb2e74c59e747241455924edff1335e081d7f5f8b3",
+            "patchSha256": "ce3a790cb030bc47b85a10960c5f6fd4f69325b66486566a32b8bd8fe946e95b",
+            "receiptSha256": "77780efb83b5ef353370a827bd6d9d9eab60797b05f1b80a2197d163d4af054d",
+            "previousCertificateSha256": "f66af0059b0247161252eeb85959af9953e833bc417be194dfad1b1238f2659d"
+          },
+          "certificateSha256": "a890662f38b307d98952b44f8695f0432540a2e92abd4a63f01aaf295fe6153f"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 7,
+      "baseRevision": 6,
+      "resultRevision": 7,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_label_c2",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__label_c2",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 460.0,
+              "y": 400.0,
+              "text": "c²",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 30.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_label_c2",
+        "componentId": "areas",
+        "role": "label_c2",
+        "atomOrdinal": 7,
+        "semanticBaseRevision": 6,
+        "semanticResultRevision": 7,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "label_c2",
+          "nodeId": "areas__label_c2",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "label_containment",
+            "label_separation"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_label_c2",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "label_c2",
+            "nodeId": "areas__label_c2",
+            "atomOrdinal": 7,
+            "baseSemanticRevision": 6,
+            "resultSemanticRevision": 7,
+            "baseSceneSha256": "86aaa610deab581fbc9b33fb2e74c59e747241455924edff1335e081d7f5f8b3",
+            "resultSceneSha256": "9667612830109358ff5a52c48e1b0bbabbe6dc37ee4ef39864660db5ac3aba7f",
+            "patchSha256": "83b0a093a757d0146bb61307e75c2c18171f02ba5c4f8afc19f55a1851c98ba6",
+            "receiptSha256": "d54b6b04b83f6d9e5641bbc2403f463f68766c3fb4637bf41ef77c4fb60abaf6",
+            "previousCertificateSha256": "a890662f38b307d98952b44f8695f0432540a2e92abd4a63f01aaf295fe6153f"
+          },
+          "certificateSha256": "8d14d632b10ac809e6b775291d6dc358e431a2f9351e1d5807def8907ddda2fd"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 8,
+      "baseRevision": 7,
+      "resultRevision": 8,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_identity",
+        "narration": "Relate the three square areas.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__identity",
+              "kind": "latex",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 150.0,
+              "y": 10.0,
+              "latex": "a^2+b^2=c^2",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 36.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-identity",
+          "narration": "Relate the three square areas.",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "identity"
+          }
+        },
+        "atomId": "areas__atom_identity",
+        "componentId": "areas",
+        "role": "identity",
+        "atomOrdinal": 8,
+        "semanticBaseRevision": 7,
+        "semanticResultRevision": 8,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "identity",
+          "nodeId": "areas__identity",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "compiler_identity"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_identity",
+            "beatId": "beat-identity",
+            "beatSha256": "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+            "componentId": "areas",
+            "role": "identity",
+            "nodeId": "areas__identity",
+            "atomOrdinal": 8,
+            "baseSemanticRevision": 7,
+            "resultSemanticRevision": 8,
+            "baseSceneSha256": "9667612830109358ff5a52c48e1b0bbabbe6dc37ee4ef39864660db5ac3aba7f",
+            "resultSceneSha256": "0150eb86270b260c5303ab0e74a9428966c738cd519e0f0c3311756824a547ac",
+            "patchSha256": "04a2735c46ee3ba22226870b3de9eb7b5a600f1ab14095c29b5c736e657542e2",
+            "receiptSha256": "8fdfde60d9096048ca52f8fc0cee33e661df4e9eec7cfed0d6ef19bd9daeffc0",
+            "previousCertificateSha256": "8d14d632b10ac809e6b775291d6dc358e431a2f9351e1d5807def8907ddda2fd"
+          },
+          "certificateSha256": "df4f7cec75afb919a3c54017f816c43ec54b7f23a66ffa5f3ff252e54c36f279"
+        }
+      }
+    }
+  ]
+}
