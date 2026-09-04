@@ -24,7 +24,9 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:52 IST: Added a semantic-only declined terminal for successful abstention. Its strict backend and browser contracts preserve an unchanged paired frontier, retain a closed reason code, render a calm `No visual change` state, ignore late frames, and allow the next generation immediately. Fifty-seven backend and forty-nine frontend tests pass; TypeScript type checking is clean.
 - [x] 2026-09-05 03:55 IST: Hardened the routing boundary before service integration: a repair lifecycle step now reaches consumers before the second provider dispatch, the qualified 2,048-token router ceiling is explicit for downstream caps, and a second component start fails closed until deterministic layout can prevent overlapping geometry. One hundred focused engine, resolver, prompt, and lowering tests pass provider-free.
 - [x] 2026-09-05 03:56 IST: Reconnected the guarded semantic SSE route through router, lowering, compiler, verifier, and certificate emission. Added no-mutation decline and failure terminals, exact repair timing, a distinct ten-dispatch-per-minute provider ceiling that counts repairs, and fail-closed single-component policy. Two hundred thirty-three backend tests pass provider-free with Ruff clean.
-- [ ] Update the browser lab's Gate 1.1 copy, replace the legacy semantic probe with routed-path evidence, and run browser rendering and interruption checks.
+- [x] 2026-09-05 04:08 IST: Updated the lab to the truthful Gate 1.2 trust boundary and migrated the ten-case probe through routed semantic SSE, including lowering, compiler output, verifier receipts, certificate continuity, decline, repair, and safe failures. The dry run reserves at most 20 calls and USD 0.040891800; 48 probe tests and all 12 Playwright scene flows pass, with 24.700 ms complete-frame-to-visible p95.
+- [x] 2026-09-05 04:22 IST: Closed the final evidence loopholes before another paid run. Live mode now refuses a dirty or unresolved source before provider construction, verifies the same clean commit after the corpus, always fails when qualification thresholds miss, and proves pacing admissions equal both cost-ledger reservations and reported attempts. Twenty-eight probe tests pass with Ruff clean.
+- [ ] Run one explicitly capped Azure corpus from the exact clean integration source, then record whether routed semantic SSE still satisfies accuracy and latency thresholds.
 
 ## Surprises & Discoveries
 
@@ -42,6 +44,10 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - A router-owned retry cannot be represented faithfully if `route()` returns only after both attempts. The engine now exposes a lifecycle stream so the service can emit its repair boundary before, rather than after, the second paid dispatch.
 - Request admission and paid-call admission are different limits: one accepted user request may make two provider calls after a repair. Reusing the request-rate setting for both would couple product UX to the Azure deployment quota, so the provider-dispatch ceiling needs its own configuration.
 - The existing manual semantic probe calls the legacy model-authored `TeachingBeatDraft` path directly. It cannot certify Gate 1.2's router-to-compiler integration and must not be cited as routed-path evidence without migration.
+- OpenAI-compatible SDKs and the allowed Gemini SDK can retry one logical dispatch internally. A service-level reservation alone therefore does not bound provider HTTP attempts; scene-only clients must disable transport retries before the ledger can claim exact call and spend ceilings.
+- The provider-dispatch limiter is process-local. Ten dispatches per minute is exact for the current single-process lab, but a multi-worker or replicated deployment must divide that setting across processes or replace it with shared admission before claiming a deployment-wide Azure quota guard.
+- The unconditional multi-component abstention rule changed the router prompt after the first paid corpus. Its result remains valid evidence for the earlier isolated-router source, but it is not exact-current-source evidence for the integrated route.
+- Recording git state only after a corpus can mislabel edited code as exact-source evidence, and an opt-in threshold flag can allow a failed score to exit successfully. Qualification therefore needs clean source before dispatch, stable source afterward, and mandatory gate semantics.
 
 ## Decision Log
 
@@ -62,12 +68,15 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Expose the router's one repair as an engine lifecycle step before its second dispatch. The synchronous `route()` convenience API consumes that step for evaluator compatibility; the live semantic service can translate it into SSE without misreporting retry timing.
 - 2026-09-05, Codex: Guard each actual provider dispatch with `MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE`, independently of per-user request admission. Reject immediately rather than queue, count a repair as a second dispatch, and classify the same exhaustion consistently on raw, legacy semantic, and routed semantic paths.
 - 2026-09-05, Codex: Keep the current compiler's supported live scene to one component. Any non-abstain route against a multi-component accepted scene fails closed, even when the prompt names one component explicitly, until deterministic multi-component layout exists.
+- 2026-09-05, Codex: Disable hidden SDK retries on every configured scene provider. OpenAI, Azure OpenAI, and Groq receive `transport_max_retries=0`; Gemini receives GAPIC `request_options={"retry": None}`. Murmur's one explicit, paced repair is the only permitted second dispatch.
+- 2026-09-05, Codex: Use `probe_visual_act_router.py` as the Gate 1.2 integration probe and label `probe_semantic_live_scene.py` historical Gate 1.1. A qualifying report must traverse the routed service and encoded SSE rather than the legacy model-authored teaching-beat path.
+- 2026-09-05, Codex: Make evidence integrity part of the gate rather than operator convention. Live qualification requires a clean resolved commit before dispatch, the same clean state afterward, mandatory routing and latency thresholds, and one pacing admission for every reserved and reported provider attempt.
 
 ## Outcomes & Retrospective
 
 The isolated router gate passed against Azure `gpt-oss-120b`. The private report at `var/live-scene/evaluations/20260904T215957.626451Z/report.json` is mode `0600`, records clean source commit `b66c9dc307964cb77c8bab0af8068baea95e1e3f`, and has evidence scope `provider_to_visual_act_parser_and_resolver`. It contains no raw prompts or provider output. Its USD 0.021856950 figure is a conservative reservation upper bound, not actual billed usage.
 
-The guarded semantic HTTP path now uses that router, deterministic lowering, the existing verified compiler, and the strict semantic SSE/runtime contract. Provider-free tests prove successful start and continuation, both abstain reasons, one repair, repair-boundary cancellation, per-dispatch admission, atomic capacity and namespace failures, compiler exception containment, client cleanup, and unchanged frontend decline semantics. Browser rendering/interruption evidence and a routed live probe still remain before Gate 1.2 integration is fully qualified.
+The guarded semantic HTTP path now uses that router, deterministic lowering, the existing verified compiler, and the strict semantic SSE/runtime contract. Provider-free tests prove successful start and continuation, both abstain reasons, one repair, repair-boundary cancellation, per-dispatch admission, atomic capacity and namespace failures, compiler exception containment, client cleanup, and unchanged frontend decline semantics. The routed probe now validates those boundaries through encoded SSE, and all twelve browser flows prove fixture rendering, exact interruption/resume/replay, paid-route request shape, responsive reachability, and a 24.700 ms frame-to-visible p95. One exact-current-source paid Azure run remains before Gate 1.2 integration is fully qualified.
 
 ## Context and Orientation
 
@@ -110,7 +119,11 @@ The provider-free dry-run is:
 
     .venv/bin/python scripts/manual/probe_visual_act_router.py --max-cost-usd 0.041 --case-limit 10 --max-tokens 2048 --dry-run
 
-It must report corpus SHA-256 `374aa407164cd9ca84ec8a311792c895ea39152dcdb2daa90dfec0a931e6e549`, twenty reserved attempts, and a worst-case cost of USD 0.040441800 before any paid command is considered.
+It must report evidence scope `provider_to_routed_semantic_sse`, corpus SHA-256 `374aa407164cd9ca84ec8a311792c895ea39152dcdb2daa90dfec0a931e6e549`, twenty reserved attempts, 108,772 input-bound tokens, 40,960 output-bound tokens, and a worst-case cost of USD 0.040891800 before any paid command is considered.
+
+After the exact source is committed, pushed, and locally verified against its upstream, the explicitly acknowledged live command is:
+
+    .venv/bin/python scripts/manual/probe_visual_act_router.py --max-cost-usd 0.041 --case-limit 10 --max-tokens 2048 --request-start-interval-seconds 6.1 --acknowledge-paid-provider I_ACCEPT_PROVIDER_COST
 
 ## Validation and Acceptance
 
@@ -120,4 +133,4 @@ The state milestone passes when pure tests cover a start from an empty scene, re
 
 The prompt and parser milestone passes when all three stages have balanced selection guidance, unrelated domains route to abstain, current-scene JSON is canonical and bounded, prompt injection remains quoted data, parser chunk boundaries and Unicode boundaries are exhaustive, duplicate keys and non-standard constants fail closed, only one decision is accepted, and the existing teaching-beat parser suite remains unchanged.
 
-The live router gate passes only if every stream has a safe terminal outcome, at least 90% of scored supported cases select the expected route and stage, 100% of unsupported cases abstain, the completed-prefix case abstains for no forward progress, 100% of resume cases reuse the existing component and move strictly forward, no forbidden field crosses the model boundary, warm median decision latency is at most 1,500 ms, warm p95 is at most 3,000 ms, and the conservative dispatched cost remains within the approved cap. With exactly eight supported-vocabulary cases, the 90% threshold quantizes to eight out of eight. Cold and warm latency are reported separately. A failure preserves the current compiler/runtime and triggers another router revision rather than widening the component vocabulary.
+The live router gate passes only if every stream has a safe terminal outcome, at least 90% of scored supported cases select the expected route and stage, 100% of unsupported cases abstain, the completed-prefix case abstains for no forward progress, 100% of resume cases reuse the existing component and move strictly forward, no forbidden field crosses the model boundary, warm median decision latency is at most 1,500 ms, warm p95 is at most 3,000 ms, the conservative dispatched cost remains within the approved cap, source stays at the same clean commit, and every reserved provider attempt is paced and reported. With exactly eight supported-vocabulary cases, the 90% threshold quantizes to eight out of eight. Cold and warm latency are reported separately. A failure preserves the current compiler/runtime and triggers another router revision rather than widening the component vocabulary.

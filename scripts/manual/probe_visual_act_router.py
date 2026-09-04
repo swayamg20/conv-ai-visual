@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a redacted, explicitly budgeted Azure visual-act routing corpus."""
+"""Run a redacted, explicitly budgeted Azure routed semantic-scene corpus."""
 
 from __future__ import annotations
 
@@ -12,33 +12,30 @@ import statistics
 import sys
 import time
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from importlib import import_module
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from murmur.core.async_cleanup import (
-    DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
-    close_async_resource,
-)
 from murmur.live_scene import visual_act_engine as engine_module
+from murmur.live_scene.contracts import (
+    SceneState,
+    SceneStreamCompletedEvent,
+    SceneStreamFailedEvent,
+    SceneStreamRepairingEvent,
+)
 from murmur.live_scene.semantic_contracts import (
-    PYTHAGOREAN_ROLE_ORDER,
-    AbstainVisualDecision,
-    ContinueVisualDecision,
-    PythagoreanAreaIdentityState,
     PythagoreanStage,
     SemanticSceneState,
-    StartVisualDecision,
     roles_through,
 )
 from murmur.live_scene.semantic_prompt import build_visual_act_decision_messages
-from murmur.live_scene.visual_act_engine import (
-    VisualActEngineError,
-    VisualActEngineErrorCode,
-    VisualActRoutingEngine,
+from murmur.live_scene.semantic_service_contracts import (
+    SemanticLiveSceneRequest,
+    SemanticScenePatchEvent,
+    SemanticSceneStreamDeclinedEvent,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -68,6 +65,12 @@ MIN_REQUEST_START_INTERVAL_SECONDS = _support.MIN_REQUEST_START_INTERVAL_SECONDS
 DEFAULT_REQUEST_START_INTERVAL_SECONDS = _support.DEFAULT_REQUEST_START_INTERVAL_SECONDS
 WARM_MEDIAN_MAX_MS = 1_500
 WARM_P95_MAX_MS = 3_000
+EVIDENCE_SCOPE = "provider_to_routed_semantic_sse"
+_EXPECTED_ACT_BY_STAGE = {
+    "triangle": "introduce",
+    "areas": "derive",
+    "identity": "connect",
+}
 
 ExpectedDecision = Literal["start_visual", "continue_visual", "abstain"]
 
@@ -211,12 +214,17 @@ class DispatchPacer:
         self._sleep = sleep
         self._last_started_at: float | None = None
         self._total_wait_seconds = 0.0
+        self._admission_count = 0
 
     @property
     def total_wait_seconds(self) -> float:
         return self._total_wait_seconds
 
-    async def wait(self) -> float:
+    @property
+    def admission_count(self) -> int:
+        return self._admission_count
+
+    async def admit(self) -> None:
         now = self._clock()
         delay = 0.0
         if self._last_started_at is not None:
@@ -225,53 +233,7 @@ class DispatchPacer:
             await self._sleep(delay)
             self._total_wait_seconds += delay
         self._last_started_at = self._clock()
-        return delay
-
-
-class PacedBudgetedSceneModelClient:
-    """Delay each lazy provider stream, including an engine-owned repair."""
-
-    def __init__(self, client: Any, pacer: DispatchPacer) -> None:
-        if not callable(getattr(client, "stream", None)):
-            raise TypeError("client must provide stream()")
-        if not isinstance(pacer, DispatchPacer):
-            raise TypeError("pacer must be a DispatchPacer")
-        self._client = client
-        self._pacer = pacer
-
-    def stream(
-        self,
-        messages: list[dict[str, str]],
-        temperature: float = 0.0,
-        max_tokens: int | None = None,
-        **kwargs: Any,
-    ) -> AsyncIterator[str | bytes]:
-        upstream = self._client.stream(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs,
-        )
-        if not hasattr(upstream, "__anext__"):
-            raise TypeError("provider did not return an async iterator")
-
-        async def iterate() -> AsyncIterator[str | bytes]:
-            try:
-                await self._pacer.wait()
-                async for chunk in cast(AsyncIterator[str | bytes], upstream):
-                    yield chunk
-            finally:
-                await close_async_resource(
-                    upstream,
-                    timeout_seconds=DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
-                )
-
-        return iterate()
-
-    async def aclose(self) -> None:
-        close = getattr(self._client, "aclose", None)
-        if close is not None:
-            await close()
+        self._admission_count += 1
 
 
 def _sha256_text(value: str) -> str:
@@ -286,18 +248,13 @@ def _format_nano_usd(value: int) -> str:
     return _support._format_nano_usd(value)
 
 
+def _case_base(case: EvaluationCase) -> tuple[SceneState, SemanticSceneState]:
+    scene, semantic_scene = _support._prefix_scenes()[case.base_prefix]
+    return cast(SceneState, scene), cast(SemanticSceneState, semantic_scene)
+
+
 def _case_scene(case: EvaluationCase) -> SemanticSceneState:
-    if case.base_prefix == 0:
-        return SemanticSceneState(revision=0)
-    return SemanticSceneState(
-        revision=case.base_prefix,
-        components=(
-            PythagoreanAreaIdentityState(
-                id="areas",
-                revealed_roles=PYTHAGOREAN_ROLE_ORDER[: case.base_prefix],
-            ),
-        ),
-    )
+    return _case_base(case)[1]
 
 
 def _messages_for_preflight(
@@ -351,32 +308,41 @@ def _expected_missing_roles(case: EvaluationCase) -> tuple[str, ...]:
     return tuple(role.value for role in target[case.base_prefix :])
 
 
-def _case_expectation(case: EvaluationCase, result: Any) -> bool:
-    decision = result.decision
-    resolved = result.resolved
+def _case_expectation(
+    case: EvaluationCase,
+    *,
+    terminal: str,
+    decision: str | None,
+    stage: str | None,
+    act: str | None,
+    reason_code: str | None,
+    resolved_component_id: str | None,
+    roles: tuple[str, ...],
+) -> bool:
     if case.expected_decision == "start_visual":
         return bool(
-            isinstance(decision, StartVisualDecision)
-            and decision.target_stage.value == case.expected_stage
-            and resolved is not None
-            and resolved.component_id == "areas"
-            and tuple(role.value for role in resolved.missing_roles)
-            == _expected_missing_roles(case)
+            terminal == "completed"
+            and decision == "start_visual"
+            and stage == case.expected_stage
+            and act == _EXPECTED_ACT_BY_STAGE.get(case.expected_stage)
+            and resolved_component_id == "areas"
+            and roles == _expected_missing_roles(case)
         )
     if case.expected_decision == "continue_visual":
         return bool(
-            isinstance(decision, ContinueVisualDecision)
-            and decision.component_id == "areas"
-            and decision.target_stage.value == case.expected_stage
-            and resolved is not None
-            and resolved.component_id == "areas"
-            and tuple(role.value for role in resolved.missing_roles)
-            == _expected_missing_roles(case)
+            terminal == "completed"
+            and decision == "continue_visual"
+            and stage == case.expected_stage
+            and act == _EXPECTED_ACT_BY_STAGE.get(case.expected_stage)
+            and resolved_component_id == "areas"
+            and roles == _expected_missing_roles(case)
         )
     return bool(
-        isinstance(decision, AbstainVisualDecision)
-        and decision.reason_code.value == case.expected_reason_code
-        and resolved is None
+        terminal == "declined"
+        and decision == "abstain"
+        and reason_code == case.expected_reason_code
+        and resolved_component_id is None
+        and not roles
     )
 
 
@@ -396,69 +362,185 @@ def _record_base(case: EvaluationCase) -> dict[str, object]:
 async def _run_case(
     case: EvaluationCase,
     *,
-    engine: VisualActRoutingEngine,
+    generation: int,
+    service: Any,
     ledger: Any,
     pacer: DispatchPacer,
 ) -> dict[str, object]:
+    base_scene, base_semantic_scene = _case_base(case)
+    request = SemanticLiveSceneRequest(
+        prompt=case.prompt,
+        generation=generation,
+        base_scene=base_scene,
+        base_semantic_scene=base_semantic_scene,
+    )
+    decoder = _support.SemanticSseDecoder()
     pacing_before = pacer.total_wait_seconds
     started_at = time.perf_counter()
-    try:
-        result = await engine.route(prompt=case.prompt, semantic_scene=_case_scene(case))
-    except VisualActEngineError as exc:
-        total_ms = (time.perf_counter() - started_at) * 1_000
-        pacing_ms = (pacer.total_wait_seconds - pacing_before) * 1_000
-        provider_attempts = ledger.attempts_for(case.case_id)
-        if provider_attempts != exc.provider_attempts:
-            raise ProbeProtocolError("provider_attempt_count_mismatch") from None
-        return {
-            **_record_base(case),
-            "terminal": "failed",
-            "failureCode": exc.code.value,
-            "providerAttempts": provider_attempts,
-            "repaired": provider_attempts == 2,
-            "firstAttemptValid": False,
-            "selectedDecision": None,
-            "selectedStage": None,
-            "selectedReasonCode": None,
-            "selectedComponentId": None,
-            "resolvedComponentId": None,
-            "reusedBaseComponent": None,
-            "missingRoles": [],
-            "routingExpectationMet": False,
-            "observedDecisionMs": round(max(0.0, total_ms - pacing_ms), 3),
-            "pacingWaitMs": round(pacing_ms, 3),
-        }
+    event_types: list[str] = []
+    roles: list[str] = []
+    obligation_codes: set[str] = set()
+    selected_stage: str | None = None
+    selected_act: str | None = None
+    resolved_component_id: str | None = None
+    expected_certificate_head = base_semantic_scene.certificate_head_sha256
+    terminal: str | None = None
+    failure_code: str | None = None
+    selected_reason_code: str | None = None
+    first_outcome_ms: float | None = None
+    repaired = False
+    saw_started = False
 
-    total_ms = (time.perf_counter() - started_at) * 1_000
+    events = service.stream_routed_semantic_events(request)
+    try:
+        async for source_event in events:
+            event = _support._wire_round_trip(source_event, decoder)
+            event_type = event.type
+            if terminal is not None:
+                raise ProbeProtocolError("event_after_terminal")
+            if event.generation != generation:
+                raise ProbeProtocolError("generation_mismatch")
+            event_types.append(event_type)
+
+            if event_type == "scene_stream_started":
+                if saw_started or len(event_types) != 1:
+                    raise ProbeProtocolError("invalid_started_event")
+                if event.attempt != 1 or event.base_revision != case.base_prefix:
+                    raise ProbeProtocolError("invalid_started_boundary")
+                saw_started = True
+                continue
+            if not saw_started:
+                raise ProbeProtocolError("missing_started_event")
+
+            if isinstance(event, SceneStreamRepairingEvent):
+                if repaired or roles or event.from_attempt != 1 or event.to_attempt != 2:
+                    raise ProbeProtocolError("invalid_repair_boundary")
+                if event.last_accepted_revision != case.base_prefix:
+                    raise ProbeProtocolError("repair_revision_mismatch")
+                repaired = True
+                continue
+
+            if isinstance(event, SemanticScenePatchEvent):
+                expected_attempt = 2 if repaired else 1
+                sequence = len(roles) + 1
+                if event.attempt != expected_attempt or event.sequence != sequence:
+                    raise ProbeProtocolError("patch_sequence_mismatch")
+                if event.base_revision != case.base_prefix + sequence - 1:
+                    raise ProbeProtocolError("patch_base_revision_mismatch")
+                if event.result_revision != case.base_prefix + sequence:
+                    raise ProbeProtocolError("patch_result_revision_mismatch")
+                certificate = event.semantic.certificate
+                if certificate.body.previous_certificate_sha256 != expected_certificate_head:
+                    raise ProbeProtocolError("certificate_chain_mismatch")
+                expected_certificate_head = certificate.certificate_sha256
+                beat = event.semantic.beat
+                stage = beat.directive.reveal_through.value
+                act = beat.act.value
+                component_id = beat.directive.id
+                if beat.beat_id != f"route-{generation:x}":
+                    raise ProbeProtocolError("server_beat_id_mismatch")
+                if selected_stage is not None and (
+                    stage != selected_stage
+                    or act != selected_act
+                    or component_id != resolved_component_id
+                ):
+                    raise ProbeProtocolError("beat_changed_within_batch")
+                selected_stage = stage
+                selected_act = act
+                resolved_component_id = component_id
+                roles.append(event.semantic.role.value)
+                obligation_codes.update(
+                    code.value for code in event.semantic.receipt.obligation_codes
+                )
+                if first_outcome_ms is None:
+                    first_outcome_ms = (time.perf_counter() - started_at) * 1_000
+                continue
+
+            if isinstance(event, SceneStreamCompletedEvent):
+                if not roles or event.patch_count != len(roles):
+                    raise ProbeProtocolError("completed_patch_count_mismatch")
+                if event.final_revision != case.base_prefix + len(roles):
+                    raise ProbeProtocolError("completed_revision_mismatch")
+                if event.repaired is not repaired:
+                    raise ProbeProtocolError("completed_repair_mismatch")
+                terminal = "completed"
+                continue
+
+            if isinstance(event, SemanticSceneStreamDeclinedEvent):
+                if roles or event.final_revision != case.base_prefix:
+                    raise ProbeProtocolError("declined_revision_mismatch")
+                if event.attempt != (2 if repaired else 1):
+                    raise ProbeProtocolError("declined_attempt_mismatch")
+                terminal = "declined"
+                selected_reason_code = event.reason_code.value
+                first_outcome_ms = (time.perf_counter() - started_at) * 1_000
+                continue
+
+            if isinstance(event, SceneStreamFailedEvent):
+                if roles or event.last_accepted_revision != case.base_prefix:
+                    raise ProbeProtocolError("failed_revision_mismatch")
+                if event.attempt != (2 if repaired else 1):
+                    raise ProbeProtocolError("failed_attempt_mismatch")
+                terminal = "failed"
+                failure_code = event.code
+                first_outcome_ms = (time.perf_counter() - started_at) * 1_000
+                continue
+
+            raise ProbeProtocolError("unknown_event_type")
+    finally:
+        await events.aclose()
+
+    decoder.finish()
+    if not saw_started or terminal is None or first_outcome_ms is None:
+        raise ProbeProtocolError("missing_terminal_event")
+
     pacing_ms = (pacer.total_wait_seconds - pacing_before) * 1_000
     provider_attempts = ledger.attempts_for(case.case_id)
-    if provider_attempts != result.provider_attempts:
+    if provider_attempts != 1 + int(repaired):
         raise ProbeProtocolError("provider_attempt_count_mismatch")
-    decision = result.decision
-    resolved = result.resolved
-    selected_stage = getattr(decision, "target_stage", None)
-    selected_reason = getattr(decision, "reason_code", None)
-    selected_component_id = getattr(decision, "component_id", None)
-    reused_base_component = (
-        resolved is not None and resolved.component_id == "areas" if case.base_prefix > 0 else None
+    selected_decision: str | None
+    if terminal == "declined":
+        selected_decision = "abstain"
+    elif terminal == "completed":
+        selected_decision = "start_visual" if case.base_prefix == 0 else "continue_visual"
+    else:
+        selected_decision = None
+    selected_component_id = (
+        resolved_component_id if selected_decision == "continue_visual" else None
+    )
+    reused_base_component = resolved_component_id == "areas" if case.base_prefix > 0 else None
+    role_tuple = tuple(roles)
+    routing_expectation_met = _case_expectation(
+        case,
+        terminal=terminal,
+        decision=selected_decision,
+        stage=selected_stage,
+        act=selected_act,
+        reason_code=selected_reason_code,
+        resolved_component_id=resolved_component_id,
+        roles=role_tuple,
     )
     return {
         **_record_base(case),
-        "terminal": "completed",
-        "failureCode": None,
+        "terminal": terminal,
+        "failureCode": failure_code,
         "providerAttempts": provider_attempts,
-        "repaired": result.repaired,
-        "firstAttemptValid": not result.repaired,
-        "selectedDecision": decision.decision,
-        "selectedStage": selected_stage.value if selected_stage is not None else None,
-        "selectedReasonCode": selected_reason.value if selected_reason is not None else None,
+        "repaired": repaired,
+        "firstAttemptValid": not repaired and terminal in {"completed", "declined"},
+        "selectedDecision": selected_decision,
+        "selectedStage": selected_stage,
+        "selectedAct": selected_act,
+        "selectedReasonCode": selected_reason_code,
         "selectedComponentId": selected_component_id,
-        "resolvedComponentId": resolved.component_id if resolved is not None else None,
+        "resolvedComponentId": resolved_component_id,
         "reusedBaseComponent": reused_base_component,
-        "missingRoles": [role.value for role in resolved.missing_roles] if resolved else [],
-        "routingExpectationMet": _case_expectation(case, result),
-        "observedDecisionMs": round(max(0.0, total_ms - pacing_ms), 3),
+        "missingRoles": list(role_tuple),
+        "routingExpectationMet": routing_expectation_met,
+        "certificateChainValid": True if terminal == "completed" else None,
+        "obligationCodes": sorted(obligation_codes),
+        "observedRoutedOutcomeMs": round(max(0.0, first_outcome_ms - pacing_ms), 3),
         "pacingWaitMs": round(pacing_ms, 3),
+        "eventTypes": event_types,
     }
 
 
@@ -479,9 +561,10 @@ async def _run_corpus(
     cases: tuple[EvaluationCase, ...],
     *,
     max_cost_nano_usd: int,
-) -> tuple[list[dict[str, object]], Any, str | None]:
+) -> tuple[list[dict[str, object]], Any, DispatchPacer, str | None]:
     from murmur.core.config import config
     from murmur.live_scene.provider import scene_model_client_options
+    from murmur.live_scene.service import SceneAuthoringService
     from murmur.llm.factory import create_llm_client
 
     provider = config.MURMUR_SCENE_LLM_PROVIDER.casefold()
@@ -502,17 +585,23 @@ async def _run_corpus(
     results: list[dict[str, object]] = []
     aborted_reason: str | None = None
 
-    for case in cases:
+    for generation, case in enumerate(cases, start=1):
         delegate = create_llm_client(provider, model=model, **options)
-        budgeted = BudgetedSceneModelClient(delegate, ledger, case.case_id)
-        client = PacedBudgetedSceneModelClient(budgeted, pacer)
-        engine = VisualActRoutingEngine(
-            client,
+        client = BudgetedSceneModelClient(delegate, ledger, case.case_id)
+        service = SceneAuthoringService(
+            client=client,
             max_tokens=args.max_tokens,
             timeout_seconds=args.timeout_seconds,
+            before_provider_dispatch=pacer.admit,
         )
         try:
-            record = await _run_case(case, engine=engine, ledger=ledger, pacer=pacer)
+            record = await _run_case(
+                case,
+                generation=generation,
+                service=service,
+                ledger=ledger,
+                pacer=pacer,
+            )
         except ProbeProtocolError as exc:
             record = {
                 **_record_base(case),
@@ -523,14 +612,18 @@ async def _run_corpus(
                 "firstAttemptValid": False,
                 "selectedDecision": None,
                 "selectedStage": None,
+                "selectedAct": None,
                 "selectedReasonCode": None,
                 "selectedComponentId": None,
                 "resolvedComponentId": None,
                 "reusedBaseComponent": None,
                 "missingRoles": [],
                 "routingExpectationMet": False,
-                "observedDecisionMs": None,
+                "certificateChainValid": False,
+                "obligationCodes": [],
+                "observedRoutedOutcomeMs": None,
                 "pacingWaitMs": None,
+                "eventTypes": [],
             }
             aborted_reason = exc.code
         finally:
@@ -547,15 +640,16 @@ async def _run_corpus(
             aborted_reason = "calibration_failed"
             break
         if record["failureCode"] in {
-            VisualActEngineErrorCode.CONTEXT_INVALID.value,
-            VisualActEngineErrorCode.PROVIDER_TIMEOUT.value,
-            VisualActEngineErrorCode.PROVIDER_ERROR.value,
-            VisualActEngineErrorCode.INTERNAL_ERROR.value,
+            "context_too_large",
+            "provider_rate_limited",
+            "provider_timeout",
+            "provider_error",
+            "semantic_integrity_error",
         }:
             aborted_reason = str(record["failureCode"])
             break
 
-    return results, ledger, aborted_reason
+    return results, ledger, pacer, aborted_reason
 
 
 def _metrics(
@@ -565,8 +659,11 @@ def _metrics(
     aborted_reason: str | None,
 ) -> dict[str, object]:
     result_count = len(results)
-    safe_terminal_count = sum(result["terminal"] in {"completed", "failed"} for result in results)
+    safe_terminal_count = sum(
+        result["terminal"] in {"completed", "declined", "failed"} for result in results
+    )
     completed_count = sum(result["terminal"] == "completed" for result in results)
+    declined_count = sum(result["terminal"] == "declined" for result in results)
     repaired_count = sum(bool(result["repaired"]) for result in results)
     expectation_count = sum(result["routingExpectationMet"] is True for result in results)
     supported = [result for result in results if result["supportedByVocabulary"] is True]
@@ -591,15 +688,15 @@ def _metrics(
         result["routingExpectationMet"] is True and result["reusedBaseComponent"] is True
         for result in resume
     )
-    decision_values = [
-        float(result["observedDecisionMs"])
+    outcome_values = [
+        float(result["observedRoutedOutcomeMs"])
         for result in results
-        if result["observedDecisionMs"] is not None
+        if result["observedRoutedOutcomeMs"] is not None
     ]
-    cold_decision_ms = decision_values[0] if decision_values else None
-    warm_decision_values = decision_values[1:]
-    warm_median_ms = statistics.median(warm_decision_values) if warm_decision_values else None
-    warm_p95_ms = _support._percentile(warm_decision_values, 0.95)
+    cold_outcome_ms = outcome_values[0] if outcome_values else None
+    warm_outcome_values = outcome_values[1:]
+    warm_median_ms = statistics.median(warm_outcome_values) if warm_outcome_values else None
+    warm_p95_ms = _support._percentile(warm_outcome_values, 0.95)
     decisions = Counter(
         str(result["selectedDecision"])
         for result in results
@@ -637,6 +734,7 @@ def _metrics(
         "executedCaseCount": result_count,
         "safeTerminalCount": safe_terminal_count,
         "completedCount": completed_count,
+        "declinedCount": declined_count,
         "repairCount": repaired_count,
         "providerAttemptCount": sum(int(result["providerAttempts"]) for result in results),
         "firstAttemptValidityRate": round(
@@ -677,9 +775,11 @@ def _metrics(
         )
         if resume
         else None,
-        "coldDecisionMs": round(cold_decision_ms, 3) if cold_decision_ms is not None else None,
-        "warmMedianDecisionMs": round(warm_median_ms, 3) if warm_median_ms is not None else None,
-        "warmP95DecisionMs": round(warm_p95_ms, 3) if warm_p95_ms is not None else None,
+        "coldRoutedOutcomeMs": round(cold_outcome_ms, 3) if cold_outcome_ms is not None else None,
+        "warmMedianRoutedOutcomeMs": round(warm_median_ms, 3)
+        if warm_median_ms is not None
+        else None,
+        "warmP95RoutedOutcomeMs": round(warm_p95_ms, 3) if warm_p95_ms is not None else None,
         "pacingWaitMs": round(
             sum(float(result["pacingWaitMs"] or 0.0) for result in results),
             3,
@@ -705,6 +805,21 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
     _support._write_report(path, payload)
 
 
+def _clean_source_snapshot() -> dict[str, object]:
+    state = _support._git_state()
+    commit = state.get("sourceCommit")
+    if not isinstance(commit, str) or not commit.strip() or state.get("sourceDirty") is not False:
+        raise ProbeRefusal("live run requires a clean source with a resolved git commit")
+    return state
+
+
+def _source_state_stable(
+    started: dict[str, object],
+    finished: dict[str, object],
+) -> bool:
+    return finished == started and finished.get("sourceDirty") is False
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-cost-usd", required=True)
@@ -718,7 +833,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output")
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--require-router-thresholds", action="store_true")
     parser.add_argument("--acknowledge-paid-provider")
     return parser
 
@@ -757,6 +871,7 @@ def main() -> int:
         )
         preflight_summary = {
             "mode": "dry-run" if args.dry_run else "live",
+            "evidenceScope": EVIDENCE_SCOPE,
             "caseCount": len(cases),
             "corpusSha256": _corpus_sha256(cases),
             "pricingProfile": PRICING_PROFILE,
@@ -774,24 +889,33 @@ def main() -> int:
         if args.dry_run:
             return 0
 
+        source_state = _clean_source_snapshot()
         output_path = _safe_output_path(args.output)
-        results, dispatched, aborted_reason = asyncio.run(
+        results, dispatched, pacer, aborted_reason = asyncio.run(
             _run_corpus(
                 args,
                 cases,
                 max_cost_nano_usd=max_cost_nano_usd,
             )
         )
+        source_state_stable = _source_state_stable(source_state, _support._git_state())
         metrics = _metrics(
             results,
             target_count=len(cases),
             aborted_reason=aborted_reason,
         )
+        reservation_count = len(dispatched.reservations)
+        reported_attempt_count = metrics["providerAttemptCount"]
+        all_dispatches_paced = pacer.admission_count == reservation_count == reported_attempt_count
+        gate_qualification_passed = bool(
+            metrics["routerQualificationPassed"] and source_state_stable and all_dispatches_paced
+        )
         report = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generatedAt": datetime.now(UTC).isoformat(),
-            **_support._git_state(),
-            "evidenceScope": "provider_to_visual_act_parser_and_resolver",
+            **source_state,
+            "sourceStateStable": source_state_stable,
+            "evidenceScope": EVIDENCE_SCOPE,
             "corpusSha256": _corpus_sha256(cases),
             "pricing": {
                 "profile": PRICING_PROFILE,
@@ -815,8 +939,15 @@ def main() -> int:
                 reservation.sanitized() for reservation in dispatched.reservations
             ],
             "dispatchedReservedMaxCostUsd": _format_nano_usd(dispatched.reserved_cost_nano_usd),
+            "dispatchPacing": {
+                "admissionCount": pacer.admission_count,
+                "reservationCount": reservation_count,
+                "reportedProviderAttemptCount": reported_attempt_count,
+                "allDispatchesPaced": all_dispatches_paced,
+            },
             "results": results,
             "metrics": metrics,
+            "gateQualificationPassed": gate_qualification_passed,
             "costEvidence": "reserved_upper_bound_not_actual_billed_usage",
         }
         _write_report(output_path, report)
@@ -825,13 +956,16 @@ def main() -> int:
             "executedCaseCount": metrics["executedCaseCount"],
             "providerAttemptCount": metrics["providerAttemptCount"],
             "routerQualificationPassed": metrics["routerQualificationPassed"],
+            "gateQualificationPassed": gate_qualification_passed,
+            "sourceStateStable": source_state_stable,
+            "allDispatchesPaced": all_dispatches_paced,
             "dispatchedReservedMaxCostUsd": report["dispatchedReservedMaxCostUsd"],
             "output": str(output_path.relative_to(PROJECT_ROOT)),
         }
         print(json.dumps(final_summary, sort_keys=True), flush=True)
         if aborted_reason is not None:
             return 1
-        if args.require_router_thresholds and not metrics["routerQualificationPassed"]:
+        if not gate_qualification_passed:
             return 1
         return 0
     except ProbeRefusal as exc:

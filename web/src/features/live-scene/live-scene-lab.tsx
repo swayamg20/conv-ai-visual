@@ -130,7 +130,7 @@ export function LiveSceneLab() {
         </div>
         <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
           {authoring === "semantic"
-            ? "The model chooses a teaching act; the compiler owns geometry and emits one independently presentable atom at a time."
+            ? "The model routes only start, continue, or abstain and a target stage; the server owns narration, teaching acts, geometry, and verified atoms."
             : "Gate 1 baseline: the model authors coordinates, styles, and complete low-level patches."}
         </p>
       </fieldset>

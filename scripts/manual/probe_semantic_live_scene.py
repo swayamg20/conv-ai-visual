@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Run a redacted, explicitly budgeted Azure semantic-scene corpus."""
+"""Run the historical Gate 1.1 model-authored semantic-scene corpus.
+
+Gate 1.2 routed integration evidence belongs to ``probe_visual_act_router.py``;
+that probe reuses this module's cost, private-output, and SSE guardrails.
+"""
 
 from __future__ import annotations
 

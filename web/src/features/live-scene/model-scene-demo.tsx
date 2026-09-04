@@ -278,9 +278,9 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                   {isSemantic ? "Verified-act board" : "Model-authored board"}
                 </h1>
                 <span className="rounded-full border border-amber/25 bg-amber/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber">
-                  <span className="sm:hidden">{isSemantic ? "G1.1" : "G1"}</span>
+                  <span className="sm:hidden">{isSemantic ? "G1.2" : "G1"}</span>
                   <span className="hidden sm:inline">
-                    {isSemantic ? "Gate 1.1" : "Gate 1"}
+                    {isSemantic ? "Gate 1.2" : "Gate 1"}
                   </span>
                 </span>
               </div>
@@ -657,7 +657,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                     Narration boundary
                   </div>
                   <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                    Teaching text is not fact-checked by Gate 1.1.
+                    Server-owned teaching text is not fact-checked by Gate 1.2.
                   </p>
                 </div>
               </>

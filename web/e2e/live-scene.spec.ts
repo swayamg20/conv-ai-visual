@@ -103,7 +103,7 @@ function percentile(samples: readonly number[], percentileValue: number): number
 async function openLab(page: Page): Promise<void> {
   await page.goto("/labs/live-scene");
   await expect(page.getByRole("heading", { name: "Verified-act board" })).toBeVisible();
-  await expect(page.getByText("Gate 1.1", { exact: true }).locator("..")).toBeVisible();
+  await expect(page.getByText("Gate 1.2", { exact: true }).locator("..")).toBeVisible();
   await expect(page.getByRole("radio", { name: "Verified acts" })).toBeChecked();
   await expect(page.getByRole("radio", { name: "Fixture · $0" })).toBeChecked();
   await expect(page.getByText("Verified fixture · $0", { exact: true })).toBeVisible();

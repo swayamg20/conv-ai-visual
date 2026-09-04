@@ -515,18 +515,20 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
 
 
 @pytest.mark.parametrize(
-    ("provider", "model"),
+    ("provider", "model", "expected"),
     [
-        ("openai", "gpt-4o-mini"),
-        ("azure_openai", "gpt-4o"),
-        ("groq", "gpt-oss-120b"),
+        ("openai", "gpt-4o-mini", {"transport_max_retries": 0}),
+        ("azure_openai", "gpt-4o", {"transport_max_retries": 0}),
+        ("groq", "gpt-oss-120b", {"transport_max_retries": 0}),
+        ("gemini", "gemini-2.0-flash", {"transport_max_retries": 0}),
     ],
 )
-def test_scene_client_options_do_not_leak_gpt_oss_tuning_to_other_clients(
+def test_scene_client_options_disable_hidden_openai_compatible_retries(
     provider: str,
     model: str,
+    expected: dict[str, object],
 ) -> None:
-    assert scene_model_client_options(provider, model) == {}
+    assert scene_model_client_options(provider, model) == expected
 
 
 def test_scene_config_inherits_provider_selection_but_owns_generation_controls() -> None:

@@ -20,13 +20,20 @@ async def _close_provider_resource(resource: object | None) -> None:
 class GeminiClient(LLMClient):
     """LLM client for Google Gemini API."""
 
-    def __init__(self, api_key: str, model: str, **default_params):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        transport_max_retries: int | None = None,
+        **default_params,
+    ):
         """
         Initialize Gemini client.
 
         Args:
             api_key: Google AI API key
             model: Model name (e.g., "gemini-2.0-flash-exp")
+            transport_max_retries: Optional SDK retry ceiling; Gemini supports zero only
             **default_params: Default parameters
         """
         try:
@@ -40,9 +47,15 @@ class GeminiClient(LLMClient):
             ) from exc
 
         self.genai.configure(api_key=api_key)
+        if transport_max_retries not in (None, 0) or isinstance(
+            transport_max_retries,
+            bool,
+        ):
+            raise ValueError("Gemini transport_max_retries must be zero when set")
         self.model_name = model
         self.model = self.genai.GenerativeModel(model)
         self.default_params = default_params
+        self.request_options = {"retry": None} if transport_max_retries == 0 else None
         logger.info(f"Gemini client initialized: model={model}")
 
     def _convert_messages(self, messages: list[dict]) -> tuple:
@@ -114,7 +127,9 @@ class GeminiClient(LLMClient):
             # Send the last message
             last_message = history[-1]["parts"][0] if history else ""
             response = await chat.send_message_async(
-                last_message, generation_config=generation_config
+                last_message,
+                generation_config=generation_config,
+                request_options=getattr(self, "request_options", None),
             )
 
             return response.text
@@ -148,7 +163,10 @@ class GeminiClient(LLMClient):
             last_message = history[-1]["parts"][0] if history else ""
 
             response = await chat.send_message_async(
-                last_message, generation_config=generation_config, stream=True
+                last_message,
+                generation_config=generation_config,
+                stream=True,
+                request_options=getattr(self, "request_options", None),
             )
 
             async for chunk in response:
@@ -197,7 +215,9 @@ class GeminiClient(LLMClient):
             last_message = history[-1]["parts"][0] if history else ""
             try:
                 response = await chat.send_message_async(
-                    last_message, generation_config=generation_config
+                    last_message,
+                    generation_config=generation_config,
+                    request_options=getattr(self, "request_options", None),
                 )
             except Exception as send_err:
                 # Handle MALFORMED_FUNCTION_CALL — Gemini generated bad tool call JSON
@@ -208,7 +228,9 @@ class GeminiClient(LLMClient):
                         history=history[:-1] if len(history) > 1 else []
                     )
                     response = await chat_no_tools.send_message_async(
-                        last_message, generation_config=generation_config
+                        last_message,
+                        generation_config=generation_config,
+                        request_options=getattr(self, "request_options", None),
                     )
                 else:
                     raise
@@ -253,7 +275,10 @@ class GeminiClient(LLMClient):
 
             last_message = history[-1]["parts"][0] if history else ""
             response = await chat.send_message_async(
-                last_message, generation_config=generation_config, stream=True
+                last_message,
+                generation_config=generation_config,
+                stream=True,
+                request_options=getattr(self, "request_options", None),
             )
 
             async for chunk in response:

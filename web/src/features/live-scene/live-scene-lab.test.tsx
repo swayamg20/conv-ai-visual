@@ -117,6 +117,13 @@ describe("LiveSceneLab", () => {
     expect(radio(lab.container, "semantic").checked).toBe(true);
     expect(radio(lab.container, "fixture").checked).toBe(true);
     expect(lab.container.textContent).toContain("no sign-in, network request, or Azure spend");
+    expect(lab.container.textContent).toContain(
+      "The model routes only start, continue, or abstain and a target stage"
+    );
+    expect(lab.container.textContent).toContain(
+      "the server owns narration, teaching acts, geometry, and verified atoms"
+    );
+    expect(lab.container.textContent).not.toContain("The model chooses a teaching act");
     expect(lab.container.textContent).not.toContain("Baseline scenario");
 
     const props = latestProps();

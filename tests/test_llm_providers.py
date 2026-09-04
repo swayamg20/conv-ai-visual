@@ -169,9 +169,7 @@ def test_openai_request_params_enforce_configured_token_field() -> None:
     client.max_tokens_parameter = "max_completion_tokens"
 
     assert client._request_params(None, {}) == {}
-    assert client._request_params(64, {"max_tokens": 128}) == {
-        "max_completion_tokens": 64
-    }
+    assert client._request_params(64, {"max_tokens": 128}) == {"max_completion_tokens": 64}
 
     client.default_params = {"max_completion_tokens": 999}
     client.max_tokens_parameter = "max_tokens"
@@ -222,6 +220,43 @@ def test_openai_rejects_invalid_transport_retry_ceiling(monkeypatch, value) -> N
         )
 
 
+def test_gemini_zero_transport_retry_ceiling_disables_gapic_retries(monkeypatch) -> None:
+    configured: dict[str, object] = {}
+    model = object()
+
+    monkeypatch.setattr(
+        "google.generativeai.configure",
+        lambda **kwargs: configured.update(kwargs),
+    )
+    monkeypatch.setattr("google.generativeai.GenerativeModel", lambda _model: model)
+
+    client = GeminiClient(
+        api_key="server-key",
+        model="gemini-test",
+        transport_max_retries=0,
+    )
+
+    assert configured == {"api_key": "server-key"}
+    assert client.model is model
+    assert client.request_options == {"retry": None}
+    assert client.default_params == {}
+
+
+@pytest.mark.parametrize("value", [-1, 1, True, False, 1.5, "0"])
+def test_gemini_rejects_nonzero_or_invalid_transport_retry_ceiling(
+    monkeypatch,
+    value,
+) -> None:
+    monkeypatch.setattr("google.generativeai.configure", lambda **_kwargs: None)
+
+    with pytest.raises(ValueError, match="transport_max_retries"):
+        GeminiClient(
+            api_key="server-key",
+            model="gemini-test",
+            transport_max_retries=value,
+        )
+
+
 @pytest.mark.asyncio
 async def test_gemini_text_stream_closes_provider_response_on_consumer_abort() -> None:
     class ProviderResponse:
@@ -243,19 +278,24 @@ async def test_gemini_text_stream_closes_provider_response_on_consumer_abort() -
 
     provider_response = ProviderResponse()
 
+    captured: dict[str, object] = {}
+
     class Chat:
-        async def send_message_async(self, *_args, **_kwargs):
+        async def send_message_async(self, *_args, **kwargs):
+            captured.update(kwargs)
             return provider_response
 
     client = GeminiClient.__new__(GeminiClient)
     client.model = SimpleNamespace(start_chat=lambda **_kwargs: Chat())
     client.default_params = {}
+    client.request_options = {"retry": None}
     chunks = client.stream([{"role": "user", "content": "draw"}])
 
     assert await anext(chunks) == "first patch"
     await chunks.aclose()
 
     assert provider_response.closed is True
+    assert captured["request_options"] == {"retry": None}
 
 
 def test_factory_routes_groq_through_openai_compatible_endpoint(monkeypatch) -> None:

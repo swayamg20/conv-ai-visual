@@ -8,10 +8,10 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from murmur.live_scene.visual_act_engine import VisualActRoutingEngine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "manual" / "probe_visual_act_router.py"
@@ -104,20 +104,24 @@ def _passing_record(case: object) -> dict[str, object]:
         "expectedDecision": expected_decision,
         "expectedStage": expected_stage,
         "expectedReasonCode": expected_reason,
-        "terminal": "completed",
+        "terminal": "declined" if expected_decision == "abstain" else "completed",
         "failureCode": None,
         "providerAttempts": 1,
         "repaired": False,
         "firstAttemptValid": True,
         "selectedDecision": expected_decision,
         "selectedStage": expected_stage,
+        "selectedAct": None,
         "selectedReasonCode": expected_reason,
         "resolvedComponentId": "areas" if expected_decision != "abstain" else None,
         "reusedBaseComponent": True if base_prefix else None,
         "missingRoles": [],
         "routingExpectationMet": True,
-        "observedDecisionMs": 100.0,
+        "certificateChainValid": True if expected_decision != "abstain" else None,
+        "obligationCodes": [],
+        "observedRoutedOutcomeMs": 100.0,
         "pacingWaitMs": 0.0,
+        "eventTypes": [],
     }
 
 
@@ -136,11 +140,12 @@ def test_router_probe_dry_run_pins_full_corpus_and_twenty_attempt_cost() -> None
     assert json.loads(result.stdout) == {
         "caseCount": 10,
         "corpusSha256": "374aa407164cd9ca84ec8a311792c895ea39152dcdb2daa90dfec0a931e6e549",
+        "evidenceScope": "provider_to_routed_semantic_sse",
         "maxCostUsd": "0.041000000",
         "mode": "dry-run",
         "pricingProfile": "azure-gpt-oss-120b-global-standard-2026-03-01",
-        "reservedMaxCostUsd": "0.040441800",
-        "reservedMaxInputTokens": 105_772,
+        "reservedMaxCostUsd": "0.040891800",
+        "reservedMaxInputTokens": 108_772,
         "reservedMaxOutputTokens": 40_960,
         "reservedMaxProviderAttempts": 20,
     }
@@ -215,25 +220,13 @@ def test_dry_run_never_enters_live_corpus_or_constructs_a_client(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     entered_live_path = False
-    constructed_engine = False
 
     async def forbidden_live_path(*_args: object, **_kwargs: object) -> None:
         nonlocal entered_live_path
         entered_live_path = True
         raise AssertionError("dry-run entered live provider path")
 
-    class ForbiddenEngine:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            nonlocal constructed_engine
-            constructed_engine = True
-            raise AssertionError("dry-run constructed a routing client")
-
     monkeypatch.setitem(PROBE["main"].__globals__, "_run_corpus", forbidden_live_path)
-    monkeypatch.setitem(
-        PROBE["main"].__globals__,
-        "VisualActRoutingEngine",
-        ForbiddenEngine,
-    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -242,7 +235,6 @@ def test_dry_run_never_enters_live_corpus_or_constructs_a_client(
 
     assert PROBE["main"]() == 0
     assert entered_live_path is False
-    assert constructed_engine is False
     assert json.loads(capsys.readouterr().out)["mode"] == "dry-run"
 
 
@@ -399,20 +391,20 @@ def test_metrics_require_ninety_percent_plus_perfect_unsupported_and_resume_gate
 
 def test_metrics_gate_only_warm_latency_at_the_inclusive_boundaries() -> None:
     records = [_passing_record(case) for case in PROBE["CASES"]]
-    records[0]["observedDecisionMs"] = 99_000.0
+    records[0]["observedRoutedOutcomeMs"] = 99_000.0
     for record in records[1:]:
-        record["observedDecisionMs"] = 1_500.0
-    records[-1]["observedDecisionMs"] = 3_000.0
+        record["observedRoutedOutcomeMs"] = 1_500.0
+    records[-1]["observedRoutedOutcomeMs"] = 3_000.0
 
     boundary = PROBE["_metrics"](records, target_count=10, aborted_reason=None)
 
-    assert boundary["coldDecisionMs"] == 99_000.0
-    assert boundary["warmMedianDecisionMs"] == 1_500.0
-    assert boundary["warmP95DecisionMs"] == 3_000.0
+    assert boundary["coldRoutedOutcomeMs"] == 99_000.0
+    assert boundary["warmMedianRoutedOutcomeMs"] == 1_500.0
+    assert boundary["warmP95RoutedOutcomeMs"] == 3_000.0
     assert boundary["latencyThresholdsPassed"] is True
     assert boundary["routerQualificationPassed"] is True
 
-    records[-1]["observedDecisionMs"] = 3_000.001
+    records[-1]["observedRoutedOutcomeMs"] = 3_000.001
     over_p95 = PROBE["_metrics"](records, target_count=10, aborted_reason=None)
 
     assert over_p95["latencyThresholdsPassed"] is False
@@ -485,26 +477,45 @@ async def test_run_case_maps_abstain_and_resume_results_without_raw_model_data(
     )
     budgeted = PROBE["BudgetedSceneModelClient"](delegate, ledger, case.case_id)
     pacer = PROBE["DispatchPacer"](0)
-    client = PROBE["PacedBudgetedSceneModelClient"](budgeted, pacer)
-    engine = VisualActRoutingEngine(client, max_tokens=2_048, timeout_seconds=5)
+    from murmur.live_scene.service import SceneAuthoringService
+
+    service = SceneAuthoringService(
+        client=budgeted,
+        max_tokens=2_048,
+        timeout_seconds=5,
+        before_provider_dispatch=pacer.admit,
+    )
 
     record = await PROBE["_run_case"](
         case,
-        engine=engine,
+        generation=case_index + 1,
+        service=service,
         ledger=ledger,
         pacer=pacer,
     )
-    await client.aclose()
+    await budgeted.aclose()
 
-    assert record["terminal"] == "completed"
+    assert record["terminal"] == (
+        "declined" if expected["selectedDecision"] == "abstain" else "completed"
+    )
     assert record["providerAttempts"] == 1
+    assert pacer.admission_count == 1
     assert record["routingExpectationMet"] is True
     assert {key: record[key] for key in expected} == expected
+    assert (
+        "semantic_scene_stream_declined" in record["eventTypes"]
+        or record["eventTypes"][-1] == "scene_stream_completed"
+    )
+    assert delegate.calls[0]["messages"] == PROBE["_messages_for_preflight"](
+        case,
+        repair=False,
+    )
+    assert delegate.calls[0]["max_tokens"] == 2_048
     assert decision.strip() not in json.dumps(record)
 
 
 @pytest.mark.asyncio
-async def test_engine_repair_is_budgeted_and_paced_as_a_second_dispatch() -> None:
+async def test_routed_service_repair_is_budgeted_and_paced_as_a_second_dispatch() -> None:
     secret_prompt = "TOP-SECRET-PROMPT introduce only the right triangle."
     case = PROBE["EvaluationCase"](
         "offline_repair",
@@ -533,20 +544,23 @@ async def test_engine_repair_is_budgeted_and_paced_as_a_second_dispatch() -> Non
         clock=fake_time.monotonic,
         sleep=fake_time.sleep,
     )
-    client = PROBE["PacedBudgetedSceneModelClient"](budgeted, pacer)
-    engine = VisualActRoutingEngine(
-        client,
+    from murmur.live_scene.service import SceneAuthoringService
+
+    service = SceneAuthoringService(
+        client=budgeted,
         max_tokens=2_048,
         timeout_seconds=5,
+        before_provider_dispatch=pacer.admit,
     )
 
     record = await PROBE["_run_case"](
         case,
-        engine=engine,
+        generation=1,
+        service=service,
         ledger=ledger,
         pacer=pacer,
     )
-    await client.aclose()
+    await budgeted.aclose()
 
     assert record["terminal"] == "completed"
     assert record["providerAttempts"] == 2
@@ -557,5 +571,134 @@ async def test_engine_repair_is_budgeted_and_paced_as_a_second_dispatch() -> Non
     assert len(ledger.reservations) == 2
     assert fake_time.sleeps == [pytest.approx(6.1)]
     assert pacer.total_wait_seconds == pytest.approx(6.1)
+    assert pacer.admission_count == 2
     assert record["pacingWaitMs"] == pytest.approx(6_100.0)
+    assert record["eventTypes"][:2] == [
+        "scene_stream_started",
+        "scene_stream_repairing",
+    ]
+    assert record["eventTypes"][-1] == "scene_stream_completed"
+    actual_input_bounds = [
+        PROBE["_message_input_token_bound"](call["messages"]) for call in delegate.calls
+    ]
+    reserved_input_bounds = [
+        PROBE["_message_input_token_bound"](PROBE["_messages_for_preflight"](case, repair=repair))
+        for repair in (False, True)
+    ]
+    assert actual_input_bounds[0] == reserved_input_bounds[0]
+    assert actual_input_bounds[1] <= reserved_input_bounds[1]
     assert delegate.closed is True
+
+
+def test_live_run_refuses_dirty_source_before_provider_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    dispatched = False
+
+    async def forbidden_run(*_args: object, **_kwargs: object) -> None:
+        nonlocal dispatched
+        dispatched = True
+        raise AssertionError("dirty source reached provider path")
+
+    monkeypatch.setattr(
+        PROBE["_support"],
+        "_git_state",
+        lambda: {"sourceCommit": "a" * 40, "sourceDirty": True},
+    )
+    monkeypatch.setitem(PROBE["main"].__globals__, "_run_corpus", forbidden_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--max-cost-usd",
+            "0.50",
+            "--acknowledge-paid-provider",
+            PROBE["ACKNOWLEDGEMENT"],
+        ],
+    )
+
+    assert PROBE["main"]() == 2
+    output = capsys.readouterr()
+    assert "live run requires a clean source" in output.err
+    assert dispatched is False
+
+
+@pytest.mark.parametrize(
+    ("fault", "expected_exit"),
+    [(None, 0), ("router", 1), ("source", 1), ("pacing", 1)],
+)
+def test_live_gate_always_enforces_router_source_and_pacing_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    fault: str | None,
+    expected_exit: int,
+) -> None:
+    records = [_passing_record(case) for case in PROBE["CASES"]]
+    if fault == "router":
+        records[0]["routingExpectationMet"] = False
+
+    class FakeReservation:
+        def sanitized(self) -> dict[str, object]:
+            return {}
+
+    dispatched = SimpleNamespace(
+        reservations=[FakeReservation() for _ in records],
+        reserved_cost_nano_usd=0,
+    )
+    pacer = SimpleNamespace(admission_count=len(records) - int(fault == "pacing"))
+    source_state = {"sourceCommit": "a" * 40, "sourceDirty": False}
+    finished_state = (
+        {"sourceCommit": "b" * 40, "sourceDirty": False} if fault == "source" else source_state
+    )
+    call_order: list[str] = []
+    reports: list[dict[str, object]] = []
+
+    def clean_source_snapshot() -> dict[str, object]:
+        call_order.append("source")
+        return source_state
+
+    async def run_corpus(*_args: object, **_kwargs: object) -> tuple[object, ...]:
+        call_order.append("run")
+        return records, dispatched, pacer, None
+
+    monkeypatch.setitem(
+        PROBE["main"].__globals__,
+        "_clean_source_snapshot",
+        clean_source_snapshot,
+    )
+    monkeypatch.setitem(PROBE["main"].__globals__, "_run_corpus", run_corpus)
+    monkeypatch.setitem(
+        PROBE["main"].__globals__,
+        "_safe_output_path",
+        lambda _raw: PROJECT_ROOT / "var" / "test-router-report.json",
+    )
+    monkeypatch.setitem(
+        PROBE["main"].__globals__,
+        "_write_report",
+        lambda _path, payload: reports.append(payload),
+    )
+    monkeypatch.setattr(PROBE["_support"], "_git_state", lambda: finished_state)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--max-cost-usd",
+            "0.50",
+            "--acknowledge-paid-provider",
+            PROBE["ACKNOWLEDGEMENT"],
+        ],
+    )
+
+    assert PROBE["main"]() == expected_exit
+    capsys.readouterr()
+    assert call_order == ["source", "run"]
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["gateQualificationPassed"] is (fault is None)
+    assert report["sourceStateStable"] is (fault != "source")
+    pacing = report["dispatchPacing"]
+    assert isinstance(pacing, dict)
+    assert pacing["allDispatchesPaced"] is (fault != "pacing")
