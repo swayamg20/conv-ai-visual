@@ -1,9 +1,9 @@
-"""Strict contracts for compiler-verified semantic teaching beats.
+"""Strict contracts for routed and compiler-verified semantic visual acts.
 
-Only :class:`TeachingBeatDraft` crosses the model trust boundary.  Geometry,
-styles, equations, child node identifiers, verification receipts, and semantic
-revision bookkeeping are deliberately represented only by the server-owned
-contracts in this module.
+Only :class:`VisualActDecision` and the legacy :class:`TeachingBeatDraft` cross
+model trust boundaries. Geometry, styles, equations, child node identifiers,
+verification receipts, and semantic revision bookkeeping are deliberately
+represented only by the server-owned contracts in this module.
 """
 
 from __future__ import annotations
@@ -82,6 +82,48 @@ class PythagoreanStage(StrEnum):
     IDENTITY = "identity"
 
 
+class VisualActAbstainReason(StrEnum):
+    """Closed reasons for deliberately producing no visual mutation."""
+
+    UNSUPPORTED_INTENT = "unsupported_intent"
+    NO_FORWARD_PROGRESS = "no_forward_progress"
+
+
+PythagoreanComponentKind: TypeAlias = Literal["pythagorean_area_identity"]
+
+
+class StartVisualDecision(LiveSceneContract):
+    """Model request to create one supported semantic component."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["start_visual"] = "start_visual"
+    component_kind: PythagoreanComponentKind = Field(alias="componentKind")
+    target_stage: PythagoreanStage = Field(alias="targetStage")
+
+
+class ContinueVisualDecision(LiveSceneContract):
+    """Model request to extend one accepted semantic component."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["continue_visual"] = "continue_visual"
+    component_id: SemanticComponentId = Field(alias="componentId")
+    target_stage: PythagoreanStage = Field(alias="targetStage")
+
+
+class AbstainVisualDecision(LiveSceneContract):
+    """Model decision to leave the accepted visual state unchanged."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["abstain"] = "abstain"
+    reason_code: VisualActAbstainReason = Field(alias="reasonCode")
+
+
+VisualActDecision: TypeAlias = Annotated[
+    StartVisualDecision | ContinueVisualDecision | AbstainVisualDecision,
+    Field(discriminator="decision"),
+]
+
+
 class PythagoreanRole(StrEnum):
     """Server-owned semantic order of independently committable visual atoms."""
 
@@ -124,7 +166,7 @@ def roles_through(stage: PythagoreanStage) -> tuple[PythagoreanRole, ...]:
 class PythagoreanAreaIdentityDirective(LiveSceneContract):
     """The complete model-authored surface for the first semantic component."""
 
-    kind: Literal["pythagorean_area_identity"] = "pythagorean_area_identity"
+    kind: PythagoreanComponentKind = "pythagorean_area_identity"
     id: SemanticComponentId
     reveal_through: PythagoreanStage = Field(alias="revealThrough")
 
@@ -515,3 +557,4 @@ class CompiledTeachingBeat(LiveSceneContract):
 
 
 TEACHING_BEAT_DRAFT_ADAPTER = TypeAdapter(TeachingBeatDraft)
+VISUAL_ACT_DECISION_ADAPTER = TypeAdapter(VisualActDecision)

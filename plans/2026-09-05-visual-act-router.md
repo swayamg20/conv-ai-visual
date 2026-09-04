@@ -4,7 +4,7 @@
 
 Murmur's verified Pythagorean scene compiler and interruption-safe browser runtime work, but the first live semantic model frequently chose the wrong reveal stage and drew an unrelated Pythagorean scene for unsupported prompts. This plan introduces Gate 1.2: a small model-authored routing decision that answers only whether to start a supported visual, continue an existing visual, or abstain. It does not ask the router to narrate, draw, style, or prove anything.
 
-A **visual-act decision** is the strict object returned by the routing model. A start decision names a supported component kind, component ID, and target stage. A continue decision reuses an existing component ID and selects a later target stage. An abstain decision gives one closed reason code and causes no scene mutation. A **semantic prefix** is the server-accepted list of roles already revealed for a component, such as a right triangle followed by its three side squares. The router may only extend that prefix.
+A **visual-act decision** is the strict object returned by the routing model. A start decision names a supported component kind and target stage; the server allocates its stable component ID. A continue decision reuses an existing component ID and selects a later target stage. An abstain decision gives one closed reason code and causes no scene mutation. A **semantic prefix** is the server-accepted list of roles already revealed for a component, such as a right triangle followed by its three side squares. The router may only extend that prefix.
 
 The observable outcome of the offline milestones is a provider-neutral router contract, bounded prompt, incremental parser, and state validator whose tests prove that unsupported or backward requests can fail closed without exposing geometry to the model. The observable outcome of the later paid milestone is a sanitized, budget-capped Azure report showing whether this smaller decision surface reaches at least 90% routing and stage accuracy. Only a passing router is eligible to reconnect to the existing compiler and browser runtime.
 
@@ -12,7 +12,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 
 - [x] 2026-09-05 02:53 IST: Re-read `.agent/PLANS.md`, preserved the unrelated dirty voice checkout, and confirmed the clean `codex/realtime-scene-core` worktree matches `origin` at `9460a8e`.
 - [x] 2026-09-05 02:54 IST: Established a 137-test semantic baseline covering the current contracts, prompt, parser, and service.
-- [ ] Define the strict decision union and provider-free state-transition rules.
+- [x] 2026-09-05 02:57 IST: Defined the three-variant decision union, server-owned component ID allocation, and pure forward-only resolver; 191 contract, prompt, parser, and service tests pass with Ruff clean.
 - [ ] Add a balanced, narration-free routing prompt and incremental decision parser without duplicating framing logic.
 - [ ] Prove routing, abstention, prefix reuse, prompt-injection resistance, and model-surface isolation with deterministic tests.
 - [ ] Add a small cost-guarded decision evaluator and dry-run it without provider access.
@@ -24,10 +24,12 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - The current `TeachingBeatDraft` combines routing, narration, pedagogical act, component identity, and stage selection in one provider frame. The compiler uses narration in every emitted patch and binds the complete beat into its certificate chain, so splitting live narration from visual routing is a separate protocol decision rather than a harmless field move.
 - The current system prompt contains one concrete example, and that example is specifically `introduce` plus `triangle`. The live corpus subsequently chose `introduce` for 13 of 19 outputs and `triangle` for 10 of 19. This correlation motivates a balanced router prompt but does not prove the model's internal cause.
 - The semantic parser already implements the difficult bounded NDJSON and UTF-8 lifecycle. Gate 1.2 should reuse that framing machinery rather than copying another parser.
+- A new component ID has no pedagogical meaning. Letting the model invent one adds a failure mode without adding expressive power, so start decisions can be smaller and the server can allocate the first free stable ID.
 
 ## Decision Log
 
 - 2026-09-05, Codex: Keep Gate 1.2 decision-only. The model may select `start_visual`, `continue_visual`, or `abstain`; it may not author narration, a teaching act, coordinates, style, equations, child IDs, receipts, revisions, or lifecycle fields.
+- 2026-09-05, Codex: Allocate IDs for new components on the server. `start_visual` carries only component kind and target stage; `continue_visual` must carry the exact ID of an accepted component. This removes a model choice that the runtime can derive deterministically.
 - 2026-09-05, Codex: Preserve the verified compiler, verifier, certificate chain, SSE contract, and browser runtime until the isolated router passes. This prevents an unqualified semantic change from destabilizing already-passing execution.
 - 2026-09-05, Codex: Treat abstention as a successful no-mutation routing outcome, not a provider or compiler error. Unsupported intent and requests that cannot advance the accepted prefix must not trigger a misleading fallback visual.
 - 2026-09-05, Codex: Prefer extracting or parameterizing the existing strict NDJSON framing code over creating a parallel copy. Compatibility aliases may remain so the passing teaching-beat path does not require a broad rewrite.
@@ -47,7 +49,7 @@ The first supported component remains `pythagorean_area_identity`. This plan doe
 
 ## Plan of Work
 
-First, define three immutable strict decision variants. `start_visual` includes the supported component kind, a bounded component ID, and a target stage. `continue_visual` includes an existing component ID and a later target stage. `abstain` includes only a closed reason code. Add a pure validator that checks a decision against the accepted semantic scene: starts cannot collide with an existing ID, continues must reuse an existing component, targets must strictly extend its role prefix, and abstentions never create a mutation plan.
+First, define three immutable strict decision variants. `start_visual` includes the supported component kind and a target stage. `continue_visual` includes an existing component ID and a later target stage. `abstain` includes only a closed reason code. Add a pure validator that checks a decision against the accepted semantic scene: starts receive the first free deterministic server ID, continues must reuse an existing component, targets must strictly extend its role prefix, and abstentions never create a mutation plan.
 
 Next, make the current bounded NDJSON framing reusable for a supplied Pydantic adapter and fixed public error language. Keep `TeachingBeatStreamParser` behavior byte-for-byte compatible, then expose a decision parser through the same core. This is the main code-reduction seam: UTF-8, size, duplicate-key, constant, close, abort, and incremental-frame logic should have one owner.
 
