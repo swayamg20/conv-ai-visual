@@ -13,6 +13,7 @@ import {
   animateDrawOn,
   DURATION,
   EASING,
+  resolveCssColor,
 } from "@/lib/gsap-setup";
 import type { MotionPlan, MotionStep, SceneNode } from "@/lib/live-scene";
 
@@ -163,25 +164,6 @@ function rememberElement(
     data: node,
   });
   context.invalidate();
-}
-
-function resolveCssColor(color: string): string {
-  let expanded = color;
-  for (let depth = 0; depth < 4 && expanded.includes("var("); depth += 1) {
-    expanded = expanded.replace(
-      /var\((--[\w-]+)(?:,\s*([^)]*))?\)/g,
-      (_match, property: string, fallback = "") =>
-        getComputedStyle(document.documentElement).getPropertyValue(property).trim() ||
-        fallback.trim()
-    );
-  }
-  const probe = document.createElement("span");
-  probe.style.color = expanded;
-  probe.style.display = "none";
-  document.body.appendChild(probe);
-  const resolved = getComputedStyle(probe).color;
-  probe.remove();
-  return resolved && !resolved.includes("var(") ? resolved : expanded;
 }
 
 function executeMotionStep(

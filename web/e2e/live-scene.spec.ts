@@ -177,6 +177,87 @@ test("sends the edited prompt to the auth-free Azure lab stream", async ({ page 
   expect(postedBody).toMatchObject({ prompt, generation: 1 });
 });
 
+test("settles a draw animation that uses a theme-token fill", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (error) => pageErrors.push(error.message));
+  const events = [
+    {
+      type: "scene_stream_started",
+      generation: 1,
+      attempt: 1,
+      baseRevision: 0,
+    },
+    {
+      type: "scene_patch",
+      generation: 1,
+      attempt: 1,
+      sequence: 1,
+      baseRevision: 0,
+      resultRevision: 1,
+      patch: {
+        v: 1,
+        patchId: "filled-path",
+        narration: "Draw a filled triangle.",
+        operations: [
+          {
+            op: "put",
+            node: {
+              id: "filled-triangle",
+              kind: "path",
+              presentation: { enter: "draw", exit: "fade" },
+              points: [
+                [180, 420],
+                [400, 120],
+                [620, 420],
+              ],
+              closed: true,
+              style: {
+                stroke: "hsl(var(--chalk))",
+                strokeWidth: 4,
+                fill: "hsl(var(--amber))",
+                opacity: 1,
+                roughness: 1,
+              },
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: "scene_stream_completed",
+      generation: 1,
+      finalRevision: 1,
+      patchCount: 1,
+      firstPatchMs: 1,
+      totalMs: 2,
+      repaired: false,
+    },
+  ];
+  await page.route("**/api/live-scenes/lab/stream", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+    });
+  });
+
+  await openLab(page);
+  await chooseSource(page, "Azure model");
+  await page.getByLabel("What should the board teach?").fill("Draw a filled triangle");
+  await page.getByRole("button", { name: "Generate live" }).click();
+
+  await expect(page.getByText("Explanation complete", { exact: true })).toBeVisible();
+  await expect(page.getByText("revision 1", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 accepted", { exact: true })).toBeVisible();
+  await expect(page.locator("#filled-triangle")).toBeVisible();
+  await expect(page.locator("#filled-triangle path")).toHaveAttribute(
+    "fill",
+    "hsl(var(--amber))"
+  );
+  expect(pageErrors).toEqual([]);
+});
+
 test("shows the one-repair lifecycle and completes from attempt two", async ({ page }) => {
   await openLab(page);
   await chooseScenario(page, "Repair");
