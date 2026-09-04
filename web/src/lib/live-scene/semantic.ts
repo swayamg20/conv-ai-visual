@@ -7,6 +7,7 @@ import {
   type ScenePatchDraft,
   type ScenePatchEvent,
 } from "./patch";
+import { createSceneState } from "./state";
 import type { MotionPlan, SceneState } from "./types";
 
 export const SEMANTIC_COMPILER_VERSION =
@@ -67,6 +68,11 @@ export interface SemanticSceneState {
   readonly certificateHeadSha256?: string | null;
 }
 
+/**
+ * An opaque same-origin server claim about a compiler-emitted node. The browser
+ * validates its structure and binds it to presentation; it does not independently
+ * re-run the geometry verifier.
+ */
 export interface VerificationReceipt {
   readonly issuer: "semantic_verifier";
   readonly componentId: string;
@@ -254,6 +260,14 @@ function rolesThrough(stage: PythagoreanStage): readonly PythagoreanRole[] {
   if (stage === "triangle") return PYTHAGOREAN_ROLE_ORDER.slice(0, 1);
   if (stage === "areas") return PYTHAGOREAN_ROLE_ORDER.slice(0, 7);
   return PYTHAGOREAN_ROLE_ORDER;
+}
+
+function semanticNodeId(componentId: string, role: PythagoreanRole): string {
+  return `${componentId}__${role}`;
+}
+
+function semanticAtomId(componentId: string, role: PythagoreanRole): string {
+  return `${componentId}__atom_${role}`;
 }
 
 function decodeDirective(value: unknown): PythagoreanAreaIdentityDirective {
@@ -499,6 +513,8 @@ function decodeSemanticMetadata(value: unknown, patch: ScenePatchDraft): Semanti
   const certificate = decodeCertificate(input.certificate);
   const targetRoles = rolesThrough(beat.directive.revealThrough);
   const operation = patch.operations[0];
+  const expectedAtomId = semanticAtomId(componentId, role);
+  const expectedNodeId = semanticNodeId(componentId, role);
 
   if (beat.directive.id !== componentId) fail("beat directive id must match componentId");
   if (atomOrdinal > targetRoles.length || targetRoles[atomOrdinal - 1] !== role) {
@@ -507,11 +523,17 @@ function decodeSemanticMetadata(value: unknown, patch: ScenePatchDraft): Semanti
   if (semanticResultRevision !== semanticBaseRevision + 1) {
     fail("metadata semantic revisions must advance exactly once", "revision_mismatch");
   }
+  if (atomId !== expectedAtomId) {
+    fail(`atomId must equal deterministic semantic atom id ${expectedAtomId}`);
+  }
   if (patch.patchId !== atomId) fail("patchId must equal semantic atomId");
   if (patch.operations.length !== 1 || operation?.op !== "put") {
     fail("each semantic atom patch must contain exactly one put operation");
   }
   const targetId = operation.node.id;
+  if (targetId !== expectedNodeId) {
+    fail(`put target must equal deterministic semantic node id ${expectedNodeId}`);
+  }
   if (receipt.componentId !== componentId || receipt.role !== role || receipt.nodeId !== targetId) {
     fail("verification receipt must match the semantic atom owner and target node");
   }
@@ -547,7 +569,14 @@ function decodeSemanticMetadata(value: unknown, patch: ScenePatchDraft): Semanti
   });
 }
 
-/** Strictly decode one server-authoritative compiler-certified scene atom. */
+/**
+ * Strictly decode one same-origin server-claimed semantic scene atom.
+ *
+ * SHA-256 fields and verifier receipts remain opaque claims here. This decoder
+ * checks their grammar and cross-field continuity; browser acceptance additionally
+ * binds the claimed node to the exact presentation plan. It does not recompute a
+ * digest or independently verify the compiler's geometry.
+ */
 export function decodeSemanticScenePatchEvent(inputValue: unknown): SemanticScenePatchEvent {
   const input = record(inputValue, "semantic_scene_patch event");
   exactKeys(
@@ -600,6 +629,46 @@ export function decodeSemanticScenePatchEvent(inputValue: unknown): SemanticScen
     patch: rawEvent.patch,
     semantic,
   });
+}
+
+function validateAcceptedSemanticPrefix(
+  acceptedScene: SceneState,
+  acceptedSemantic: SemanticSceneState
+): void {
+  const nodeIds = new Set(acceptedScene.nodes.map((node) => node.id));
+
+  for (const component of acceptedSemantic.components) {
+    const revealedRoleCount = component.revealedRoles.length;
+    for (const [roleIndex, role] of PYTHAGOREAN_ROLE_ORDER.entries()) {
+      const nodeId = semanticNodeId(component.id, role);
+      if (roleIndex < revealedRoleCount && !nodeIds.has(nodeId)) {
+        fail(
+          `accepted revealed role ${role} is missing stable node ${nodeId}`,
+          "revision_mismatch"
+        );
+      }
+      if (roleIndex >= revealedRoleCount && nodeIds.has(nodeId)) {
+        fail(
+          `accepted unrevealed role ${role} already has stable node ${nodeId}`,
+          "revision_mismatch"
+        );
+      }
+    }
+  }
+}
+
+function validateSemanticPresentationPlan(plan: MotionPlan, expectedNodeId: string): void {
+  const step = plan.steps[0];
+  if (
+    plan.steps.length !== 1 ||
+    step?.type !== "enter" ||
+    step.id !== expectedNodeId ||
+    step.node.id !== expectedNodeId
+  ) {
+    fail(
+      `semantic atom must produce exactly one enter motion for node ${expectedNodeId}`
+    );
+  }
 }
 
 function advanceSemanticScene(
@@ -658,8 +727,9 @@ export function applySemanticScenePatch(
   eventValue: SemanticScenePatchEvent
 ): AppliedSemanticScenePatch {
   const event = decodeSemanticScenePatchEvent(eventValue);
+  const acceptedScene = createSceneState(currentScene);
   const acceptedSemantic = createSemanticSceneState(currentSemanticScene);
-  if (currentScene.revision !== acceptedSemantic.revision) {
+  if (acceptedScene.revision !== acceptedSemantic.revision) {
     fail("accepted low-level and semantic revisions must match", "revision_mismatch");
   }
   const hasCommittedRoles = acceptedSemantic.components.some(
@@ -676,7 +746,16 @@ export function applySemanticScenePatch(
     fail("event baseRevision does not match the accepted semantic revision", "revision_mismatch");
   }
 
-  const applied = applyLiveScenePatch(currentScene, {
+  const expectedNodeId = event.semantic.receipt.nodeId;
+  if (acceptedScene.nodes.some((node) => node.id === expectedNodeId)) {
+    fail(
+      `incoming semantic target ${expectedNodeId} must be absent from the accepted scene`,
+      "revision_mismatch"
+    );
+  }
+  validateAcceptedSemanticPrefix(acceptedScene, acceptedSemantic);
+
+  const applied = applyLiveScenePatch(acceptedScene, {
     type: "scene_patch",
     generation: event.generation,
     attempt: event.attempt,
@@ -685,6 +764,7 @@ export function applySemanticScenePatch(
     resultRevision: event.resultRevision,
     patch: event.patch,
   });
+  validateSemanticPresentationPlan(applied.plan, expectedNodeId);
   const semanticScene = advanceSemanticScene(acceptedSemantic, event);
 
   return Object.freeze({

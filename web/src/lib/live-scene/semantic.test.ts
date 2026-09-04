@@ -183,7 +183,7 @@ function protocolCode(callback: () => unknown): string | undefined {
 }
 
 describe("semantic live scene contract", () => {
-  it("decodes an exact server event and deep-freezes every trusted layer", () => {
+  it("decodes an exact server event and deep-freezes every accepted layer", () => {
     const event = decodeSemanticScenePatchEvent(rawSemanticEvent());
 
     expect(event).toMatchObject({
@@ -275,7 +275,7 @@ describe("semantic live scene contract", () => {
 
     const wrongAtom = rawSemanticEvent();
     (wrongAtom.semantic as Record<string, unknown>).atomId = "other_atom";
-    expect(() => decodeSemanticScenePatchEvent(wrongAtom)).toThrow(/patchId/);
+    expect(() => decodeSemanticScenePatchEvent(wrongAtom)).toThrow(/deterministic semantic atom id/);
 
     const wrongReceipt = rawSemanticEvent();
     ((wrongReceipt.semantic as Record<string, unknown>).receipt as Record<string, unknown>).nodeId =
@@ -292,6 +292,52 @@ describe("semantic live scene contract", () => {
       { op: "remove", id: "areas__triangle" },
     ];
     expect(() => decodeSemanticScenePatchEvent(remove)).toThrow(/exactly one put/);
+  });
+
+  it("rejects coherent cross-field renaming away from deterministic semantic IDs", () => {
+    const renamedAtom = rawSemanticEvent();
+    (renamedAtom.patch as Record<string, unknown>).patchId = "renamed_atom";
+    const renamedAtomSemantic = renamedAtom.semantic as Record<string, unknown>;
+    renamedAtomSemantic.atomId = "renamed_atom";
+    const renamedAtomCertificate = renamedAtomSemantic.certificate as Record<string, unknown>;
+    (renamedAtomCertificate.body as Record<string, unknown>).atomId = "renamed_atom";
+    expect(() => decodeSemanticScenePatchEvent(renamedAtom)).toThrow(
+      /deterministic semantic atom id areas__atom_triangle/
+    );
+
+    const renamedNode = rawSemanticEvent();
+    const renamedNodePatch = renamedNode.patch as Record<string, unknown>;
+    const renamedNodeOperations = renamedNodePatch.operations as Record<string, unknown>[];
+    (renamedNodeOperations[0].node as Record<string, unknown>).id = "renamed_node";
+    const renamedNodeSemantic = renamedNode.semantic as Record<string, unknown>;
+    (renamedNodeSemantic.receipt as Record<string, unknown>).nodeId = "renamed_node";
+    const renamedNodeCertificate = renamedNodeSemantic.certificate as Record<string, unknown>;
+    (renamedNodeCertificate.body as Record<string, unknown>).nodeId = "renamed_node";
+    expect(() => decodeSemanticScenePatchEvent(renamedNode)).toThrow(
+      /deterministic semantic node id areas__triangle/
+    );
+  });
+
+  it("treats well-formed server digest fields as opaque structural claims", () => {
+    const event = rawSemanticEvent();
+    const certificate = (event.semantic as Record<string, unknown>)
+      .certificate as Record<string, unknown>;
+    const body = certificate.body as Record<string, unknown>;
+    for (const key of [
+      "beatSha256",
+      "baseSceneSha256",
+      "resultSceneSha256",
+      "patchSha256",
+      "receiptSha256",
+    ]) {
+      body[key] = "0".repeat(64);
+    }
+    certificate.certificateSha256 = "0".repeat(64);
+
+    expect(decodeSemanticScenePatchEvent(event).semantic.certificate).toMatchObject({
+      certificateSha256: "0".repeat(64),
+      body: { patchSha256: "0".repeat(64) },
+    });
   });
 
   it("validates the certificate structure, absolute ordinal, and atom bindings", () => {
@@ -368,6 +414,12 @@ describe("semantic live scene contract", () => {
 
     expect(first.scene.revision).toBe(1);
     expect(first.scene.nodes.map((node) => node.id)).toEqual(["areas__triangle"]);
+    expect(first.plan.steps).toHaveLength(1);
+    expect(first.plan.steps[0]).toMatchObject({
+      type: "enter",
+      id: "areas__triangle",
+      node: { id: "areas__triangle" },
+    });
     expect(first.semanticScene).toEqual({
       revision: 1,
       components: [
@@ -399,6 +451,63 @@ describe("semantic live scene contract", () => {
     expect(second.semanticScene.certificateHeadSha256).toBe("f".repeat(64));
   });
 
+  it("rejects low-level scene drift from the registered semantic prefix", () => {
+    const first = applySemanticScenePatch(
+      createSceneState({ revision: 0, nodes: [] }),
+      createSemanticSceneState({ revision: 0, components: [] }),
+      rawSemanticEvent() as unknown as SemanticScenePatchEvent
+    );
+    const second = applySemanticScenePatch(
+      first.scene,
+      first.semanticScene,
+      secondSemanticEvent() as unknown as SemanticScenePatchEvent
+    );
+
+    expect(() =>
+      applySemanticScenePatch(
+        createSceneState({ revision: 1, nodes: [] }),
+        first.semanticScene,
+        secondSemanticEvent() as unknown as SemanticScenePatchEvent
+      )
+    ).toThrow(/revealed role triangle is missing stable node areas__triangle/);
+
+    const prematureIdentity = {
+      ...second.scene.nodes[1],
+      id: "areas__identity",
+    };
+    expect(() =>
+      applySemanticScenePatch(
+        createSceneState({
+          revision: 1,
+          nodes: [first.scene.nodes[0], prematureIdentity],
+        }),
+        first.semanticScene,
+        secondSemanticEvent() as unknown as SemanticScenePatchEvent
+      )
+    ).toThrow(/unrevealed role identity already has stable node areas__identity/);
+  });
+
+  it("rejects an existing target instead of accepting a semantic update motion", () => {
+    const first = applySemanticScenePatch(
+      createSceneState({ revision: 0, nodes: [] }),
+      createSemanticSceneState({ revision: 0, components: [] }),
+      rawSemanticEvent() as unknown as SemanticScenePatchEvent
+    );
+    const second = applySemanticScenePatch(
+      first.scene,
+      first.semanticScene,
+      secondSemanticEvent() as unknown as SemanticScenePatchEvent
+    );
+
+    expect(() =>
+      applySemanticScenePatch(
+        createSceneState({ revision: 1, nodes: second.scene.nodes }),
+        first.semanticScene,
+        secondSemanticEvent() as unknown as SemanticScenePatchEvent
+      )
+    ).toThrow(/incoming semantic target areas__square_a must be absent/);
+  });
+
   it("rejects a gap or fork in the accepted semantic chain without mutating either base", () => {
     const first = applySemanticScenePatch(
       createSceneState({ revision: 0, nodes: [] }),
@@ -419,17 +528,28 @@ describe("semantic live scene contract", () => {
     expect(first.semanticScene).toEqual(semanticBefore);
 
     const skipped = secondSemanticEvent();
+    const skippedPatch = skipped.patch as Record<string, unknown>;
+    skippedPatch.patchId = "areas__atom_label_a2";
+    const skippedOperations = skippedPatch.operations as Record<string, unknown>[];
+    (skippedOperations[0].node as Record<string, unknown>).id = "areas__label_a2";
     (skipped.semantic as Record<string, unknown>).atomOrdinal = 3;
+    (skipped.semantic as Record<string, unknown>).atomId = "areas__atom_label_a2";
     const certificate = (skipped.semantic as Record<string, unknown>).certificate as Record<
       string,
       unknown
     >;
     const body = certificate.body as Record<string, unknown>;
+    body.atomId = "areas__atom_label_a2";
     body.atomOrdinal = 3;
     body.role = "label_a2";
+    body.nodeId = "areas__label_a2";
     (skipped.semantic as Record<string, unknown>).role = "label_a2";
-    ((skipped.semantic as Record<string, unknown>).receipt as Record<string, unknown>).role =
-      "label_a2";
+    const receipt = (skipped.semantic as Record<string, unknown>).receipt as Record<
+      string,
+      unknown
+    >;
+    receipt.role = "label_a2";
+    receipt.nodeId = "areas__label_a2";
     expect(() =>
       applySemanticScenePatch(
         first.scene,
