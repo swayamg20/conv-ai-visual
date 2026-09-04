@@ -140,7 +140,9 @@ describe("PythagorasDemo", () => {
     );
     expect(admittedIds).not.toContain("equation-pythagoras");
     expect(mounted.container.textContent).toContain("Focused on the right angle");
-    expect(mounted.container.textContent).toContain("g2 · r2");
+    expect(mounted.container.textContent).toContain("1 commit");
+    expect(mounted.container.textContent).toContain("g2 · r1");
+    expect(mounted.container.textContent).not.toContain("g1 · r0");
 
     await act(async () => mounted.root.unmount());
   });

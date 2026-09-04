@@ -171,6 +171,13 @@ function abortError(error: unknown): boolean {
   );
 }
 
+function committedTransitionWork(
+  transition: ActiveTransition,
+  retained: SceneState
+): boolean {
+  return retained.revision === transition.target.revision;
+}
+
 /** Framework-neutral, single-flight owner for one progressively authored board. */
 export class SceneStreamRuntime {
   private readonly renderer: SceneStreamRenderer;
@@ -309,22 +316,25 @@ export class SceneStreamRuntime {
 
     if (active) {
       const outcome = active.playback.cancel();
-      const retained = this.authoritativeRetainedScene(
-        active,
-        this.retainedScene(active, outcome)
-      );
+      const materialized = this.retainedScene(active, outcome);
+      const committed = committedTransitionWork(active, materialized);
+      const retained = committed
+        ? this.authoritativeRetainedScene(active, materialized)
+        : materialized;
       this.committedScene = retained;
       this.provisionalScene = retained;
       if (active.source === "stream") {
-        this.appendAccepted(
-          Object.freeze({
-            ...active.record,
-            scene: retained,
-            materialized: outcome.status !== "completed",
-          })
-        );
+        if (committed) {
+          this.appendAccepted(
+            Object.freeze({
+              ...active.record,
+              scene: retained,
+              materialized: outcome.status !== "completed",
+            })
+          );
+        }
       } else {
-        this.reconcileInterruptedReplay(active, retained);
+        this.reconcileInterruptedReplay(active, retained, committed);
       }
     } else {
       this.provisionalScene = this.committedScene;
@@ -431,13 +441,14 @@ export class SceneStreamRuntime {
       if (this.currentToken !== token || this.active !== transition) return;
       this.active = null;
       if (outcome.status !== "completed") {
-        const authoritativeRetained = this.authoritativeRetainedScene(
-          transition,
-          this.retainedScene(transition, outcome)
-        );
+        const materialized = this.retainedScene(transition, outcome);
+        const committed = committedTransitionWork(transition, materialized);
+        const authoritativeRetained = committed
+          ? this.authoritativeRetainedScene(transition, materialized)
+          : materialized;
         this.committedScene = authoritativeRetained;
         this.provisionalScene = authoritativeRetained;
-        this.reconcileInterruptedReplay(transition, authoritativeRetained);
+        this.reconcileInterruptedReplay(transition, authoritativeRetained, committed);
         this.sequence = this.lastAcceptedSequence(this.generation);
         this.currentToken = null;
         this.renderer.cancelMotion();
@@ -708,15 +719,17 @@ export class SceneStreamRuntime {
     this.committedScene = retained;
     this.provisionalScene = retained;
     this.queue = [];
-    this.appendAccepted(
-      Object.freeze({
-        ...transition.record,
-        scene: retained,
-        materialized: true,
-      })
-    );
+    if (committedTransitionWork(transition, retained)) {
+      this.appendAccepted(
+        Object.freeze({
+          ...transition.record,
+          scene: retained,
+          materialized: true,
+        })
+      );
+    }
     this.renderer.cancelMotion();
-    this.sequence = transition.record.sequence;
+    this.sequence = this.lastAcceptedSequence(this.generation);
 
     if (outcome.status === "cancelled") {
       this.invalidateCurrentToken(true);
@@ -774,9 +787,14 @@ export class SceneStreamRuntime {
 
   private reconcileInterruptedReplay(
     transition: ActiveTransition,
-    retained: SceneState
+    retained: SceneState,
+    committed: boolean
   ): void {
     if (transition.source !== "replay" || transition.replayIndex === undefined) return;
+    if (!committed) {
+      this.accepted = this.accepted.slice(0, transition.replayIndex);
+      return;
+    }
     const retainedRecord = Object.freeze({
       ...transition.record,
       scene: retained,

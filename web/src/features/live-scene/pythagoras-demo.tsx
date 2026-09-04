@@ -127,14 +127,20 @@ export function PythagorasDemo() {
         transition.target,
         appliedStepIds
       );
-      const nextAccepted = [...acceptedRef.current];
-      const previousRecord = nextAccepted[transition.acceptedIndex];
-      if (previousRecord) {
-        nextAccepted[transition.acceptedIndex] = {
-          ...previousRecord,
-          scene: materialized,
-          label,
-        };
+      let nextAccepted: readonly AcceptedScene[];
+      if (materialized.revision === transition.previous.revision) {
+        nextAccepted = acceptedRef.current.slice(0, transition.acceptedIndex);
+      } else {
+        const updated = [...acceptedRef.current];
+        const previousRecord = updated[transition.acceptedIndex];
+        if (previousRecord) {
+          updated[transition.acceptedIndex] = {
+            ...previousRecord,
+            scene: materialized,
+            label,
+          };
+        }
+        nextAccepted = updated;
       }
       currentSceneRef.current = materialized;
       acceptedRef.current = nextAccepted;
@@ -149,7 +155,7 @@ export function PythagorasDemo() {
     const transition = activeTransitionRef.current;
     const outcome = playback?.cancel();
 
-    if (transition && outcome?.status === "cancelled") {
+    if (transition && outcome && outcome.status !== "completed") {
       retainMaterializedTransition(
         transition,
         outcome.appliedStepIds,

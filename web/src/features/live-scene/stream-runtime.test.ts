@@ -482,6 +482,109 @@ describe("SceneStreamRuntime", () => {
     expect(runtime.interrupt()).toBe(false);
   });
 
+  it("keeps revision zero and an empty ledger when interrupted before the first step", async () => {
+    const { renderer, harness, runtime, run } = await startedRuntime();
+    run.invocation.onEvent(
+      patch({ nodes: [textNode("not-started"), textNode("also-not-started")] })
+    );
+
+    expect(runtime.interrupt()).toBe(true);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      sequence: 0,
+      committedScene: { revision: 0, nodes: [] },
+      provisionalScene: { revision: 0, nodes: [] },
+      accepted: [],
+    });
+
+    const renderCount = renderer.rendered.length;
+    await runtime.replayAccepted();
+    expect(renderer.rendered).toHaveLength(renderCount);
+    expect(renderer.clear).not.toHaveBeenCalled();
+    expect(runtime.getSnapshot().committedScene.revision).toBe(0);
+
+    expect(runtime.start("Continue from the untouched board")).toBe(2);
+    await flushMicrotasks();
+    expect(harness.runs[1].invocation.request.baseScene).toMatchObject({
+      revision: 0,
+      nodes: [],
+    });
+  });
+
+  it.each(["cancelled", "failed"] as const)(
+    "does not replace the last accepted record when a %s transition commits no step",
+    async (status) => {
+      const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const { renderer, harness, runtime, run } = await startedRuntime();
+      run.invocation.onEvent(patch());
+      run.invocation.onEvent(completed({ finalRevision: 1, patchCount: 1 }));
+      completePlayback(renderer.rendered[0].playback, ["node-1"]);
+      await flushMicrotasks();
+      const acceptedBefore = runtime.getSnapshot().accepted;
+
+      runtime.start("Attempt a second revision");
+      await flushMicrotasks();
+      const secondRun = harness.runs[1];
+      secondRun.invocation.onEvent(started(2, 1));
+      secondRun.invocation.onEvent(
+        patch({
+          generation: 2,
+          baseRevision: 1,
+          patchId: "generation-2-not-started",
+          nodes: [textNode("node-2")],
+        })
+      );
+      renderer.rendered[1].playback.settle({ status, appliedStepIds: [] });
+      await flushMicrotasks();
+
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: status === "cancelled" ? "interrupted" : "failed",
+        sequence: 0,
+        committedScene: { revision: 1 },
+        provisionalScene: { revision: 1 },
+      });
+      expect(runtime.getSnapshot().accepted).toEqual(acceptedBefore);
+      expect(runtime.getSnapshot().accepted).toHaveLength(1);
+
+      const replay = runtime.replayAccepted();
+      completePlayback(renderer.rendered[2].playback, ["node-1"]);
+      await replay;
+      expect(runtime.getSnapshot().committedScene.revision).toBe(1);
+      expect(runtime.getSnapshot().accepted).toEqual(acceptedBefore);
+      expect(harness.runs).toHaveLength(2);
+      warning.mockRestore();
+    }
+  );
+
+  it("does not retain or renumber a replay record interrupted before its first step", async () => {
+    const { renderer, harness, runtime, run } = await startedRuntime();
+    run.invocation.onEvent(patch());
+    run.invocation.onEvent(completed({ finalRevision: 1, patchCount: 1 }));
+    completePlayback(renderer.rendered[0].playback, ["node-1"]);
+    await flushMicrotasks();
+    expect(runtime.getSnapshot().accepted).toHaveLength(1);
+
+    const replay = runtime.replayAccepted();
+    expect(renderer.rendered).toHaveLength(2);
+    expect(runtime.interrupt()).toBe(true);
+    await replay;
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      sequence: 0,
+      committedScene: { revision: 0, nodes: [] },
+      provisionalScene: { revision: 0, nodes: [] },
+      accepted: [],
+    });
+    const renderCount = renderer.rendered.length;
+    await runtime.replayAccepted();
+    expect(renderer.rendered).toHaveLength(renderCount);
+
+    expect(runtime.start("Branch from the replay start")).toBe(2);
+    await flushMicrotasks();
+    expect(harness.runs[1].invocation.request.baseScene.revision).toBe(0);
+  });
+
   it("rejects stale nodes across 20 consecutive interrupted generations", async () => {
     const renderer = new ControlledRenderer();
     const harness = runnerHarness();

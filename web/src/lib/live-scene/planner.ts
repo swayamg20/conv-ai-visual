@@ -192,6 +192,7 @@ export function materializeSceneTransition(
   const from = createSceneState(previous);
   const to = createSceneState(next);
   const plan = planSceneTransition(from, to);
+  if (appliedStepIds.length === 0) return from;
   const plannedIds = new Set(plan.steps.map((step) => step.id));
   const applied = new Set<string>();
 

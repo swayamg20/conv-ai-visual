@@ -265,6 +265,23 @@ describe("planSceneTransition", () => {
     ]);
   });
 
+  it("keeps the exact previous scene revision when no transition step began", () => {
+    const previous = createSceneState({
+      revision: 4,
+      nodes: [line("triangle-base", 220), text("Before")],
+    });
+    const next = createSceneState({
+      revision: 5,
+      nodes: [line("triangle-base", 280), latex("a^2+b^2=c^2")],
+    });
+
+    const materialized = materializeSceneTransition(previous, next, []);
+
+    expect(materialized).toEqual(previous);
+    expect(materialized.revision).toBe(4);
+    expect(materialized.nodes).toEqual(previous.nodes);
+  });
+
   it("retains unapplied updates and removals while applying completed steps", () => {
     const previous = createSceneState({
       revision: 3,
