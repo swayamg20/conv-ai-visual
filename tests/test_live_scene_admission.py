@@ -82,6 +82,47 @@ async def test_cancelled_lease_close_can_be_retried_without_leaking_capacity() -
 
 
 @pytest.mark.asyncio
+async def test_rejected_identities_are_not_retained() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("active-user")
+
+    for index in range(100):
+        with pytest.raises(SceneAdmissionError, match="busy"):
+            await admission.acquire(f"rejected-user-{index}")
+
+    assert set(admission._active_by_user) == {"active-user"}
+    assert set(admission._starts_by_user) == {"active-user"}
+    await lease.aclose()
+
+
+@pytest.mark.asyncio
+async def test_expired_rate_limit_identities_are_evicted() -> None:
+    now = 100.0
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+        clock=lambda: now,
+    )
+
+    for index in range(100):
+        lease = await admission.acquire(f"expired-user-{index}")
+        await lease.aclose()
+    assert len(admission._starts_by_user) == 100
+
+    now += 60.0
+    fresh = await admission.acquire("fresh-user")
+
+    assert set(admission._starts_by_user) == {"fresh-user"}
+    assert list(admission._start_expirations) == [(now, "fresh-user")]
+    await fresh.aclose()
+
+
+@pytest.mark.asyncio
 async def test_provider_dispatch_admission_counts_every_call_globally() -> None:
     now = 100.0
     admission = SceneProviderDispatchAdmission(

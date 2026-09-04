@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from murmur.core.config import default_env_path, normalize_azure_openai_endpoint
+from murmur.core.config import Config, default_env_path, normalize_azure_openai_endpoint
 
 
 def test_default_env_path_is_the_documented_repository_file() -> None:
@@ -115,3 +115,32 @@ print(json.dumps({
     assert completed.stdout.strip() == (
         '{"provider": "azure_openai", "model": "murmur-gpt-oss-120b"}'
     )
+
+
+@pytest.mark.parametrize(
+    ("primary_provider", "scene_provider", "missing_key", "primary_key"),
+    [
+        ("groq", "openai", "OPENAI_API_KEY", "GROQ_API_KEY"),
+        ("openai", "groq", "GROQ_API_KEY", "OPENAI_API_KEY"),
+        ("openai", "gemini", "GEMINI_API_KEY", "OPENAI_API_KEY"),
+    ],
+)
+def test_enabled_scene_provider_requires_its_own_api_key(
+    monkeypatch,
+    primary_provider: str,
+    scene_provider: str,
+    missing_key: str,
+    primary_key: str,
+) -> None:
+    monkeypatch.setattr(Config, "LLM_PROVIDER", primary_provider)
+    monkeypatch.setattr(Config, primary_key, "primary-provider-key")
+    monkeypatch.setattr(Config, "MURMUR_SCENE_ENABLED", True)
+    monkeypatch.setattr(Config, "MURMUR_SCENE_LLM_PROVIDER", scene_provider)
+    monkeypatch.setattr(Config, missing_key, None)
+    monkeypatch.setattr(Config, "TTS_PROVIDER", "kokoro")
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{missing_key}.*MURMUR_SCENE_LLM_PROVIDER={scene_provider}",
+    ):
+        Config.validate()

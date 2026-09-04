@@ -64,6 +64,16 @@ class SceneAuthoringAdmission:
         self._active_total = 0
         self._active_by_user: dict[str, int] = defaultdict(int)
         self._starts_by_user: dict[str, deque[float]] = defaultdict(deque)
+        self._start_expirations: deque[tuple[float, str]] = deque()
+
+    def _prune_expired_starts(self, now: float) -> None:
+        while self._start_expirations and now - self._start_expirations[0][0] >= 60.0:
+            started_at, user_id = self._start_expirations.popleft()
+            starts = self._starts_by_user.get(user_id)
+            if starts and starts[0] == started_at:
+                starts.popleft()
+            if not starts:
+                self._starts_by_user.pop(user_id, None)
 
     async def acquire(self, user_id: str) -> SceneAdmissionLease:
         if not isinstance(user_id, str) or not user_id:
@@ -71,15 +81,14 @@ class SceneAuthoringAdmission:
 
         async with self._lock:
             now = self._clock()
-            starts = self._starts_by_user[user_id]
-            while starts and now - starts[0] >= 60.0:
-                starts.popleft()
-            if len(starts) >= self._requests_per_minute:
+            self._prune_expired_starts(now)
+            starts = self._starts_by_user.get(user_id)
+            if starts is not None and len(starts) >= self._requests_per_minute:
                 raise SceneAdmissionError(
                     "rate_limited",
                     "Too many visual generations. Please wait before trying again.",
                 )
-            if self._active_by_user[user_id] >= self._per_user_limit:
+            if self._active_by_user.get(user_id, 0) >= self._per_user_limit:
                 raise SceneAdmissionError(
                     "user_busy",
                     "A visual generation is already active for this account.",
@@ -90,7 +99,11 @@ class SceneAuthoringAdmission:
                     "Visual generation is busy. Please try again shortly.",
                 )
 
+            if starts is None:
+                starts = deque()
+                self._starts_by_user[user_id] = starts
             starts.append(now)
+            self._start_expirations.append((now, user_id))
             self._active_total += 1
             self._active_by_user[user_id] += 1
             return SceneAdmissionLease(self, user_id)

@@ -389,13 +389,21 @@ EXAMPLE — "Explain the Pythagorean theorem":
                 "Unknown MURMUR_SCENE_LLM_PROVIDER: "
                 f"{scene_provider}. Supported providers: openai, azure_openai, groq, gemini"
             )
-        if cls.MURMUR_SCENE_ENABLED and scene_provider == "azure_openai":
-            if not cls.AZURE_OPENAI_API_KEY:
+        if cls.MURMUR_SCENE_ENABLED:
+            scene_api_keys = {
+                "openai": ("OPENAI_API_KEY", cls.OPENAI_API_KEY),
+                "azure_openai": ("AZURE_OPENAI_API_KEY", cls.AZURE_OPENAI_API_KEY),
+                "groq": ("GROQ_API_KEY", cls.GROQ_API_KEY),
+                "gemini": ("GEMINI_API_KEY", cls.GEMINI_API_KEY),
+            }
+            scene_api_key_name, scene_api_key = scene_api_keys[scene_provider]
+            if not scene_api_key:
                 raise ValueError(
-                    "AZURE_OPENAI_API_KEY environment variable is required "
-                    "for MURMUR_SCENE_LLM_PROVIDER=azure_openai"
+                    f"{scene_api_key_name} environment variable is required "
+                    f"for MURMUR_SCENE_LLM_PROVIDER={scene_provider}"
                 )
-            normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
+            if scene_provider == "azure_openai":
+                normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
         if not cls.MURMUR_SCENE_LLM_MODEL:
             raise ValueError("MURMUR_SCENE_LLM_MODEL must not be empty")
         if not 1 <= cls.MURMUR_SCENE_LLM_MAX_TOKENS <= MAX_SCENE_MODEL_OUTPUT_TOKENS:
