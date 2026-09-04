@@ -204,22 +204,14 @@ async def test_semantic_encoder_closes_upstream_on_consumer_abort() -> None:
 
 
 @pytest.mark.asyncio
-async def test_semantic_encoder_failure_closes_upstream_and_admission_lease() -> None:
-    admission = SceneAuthoringAdmission(
-        global_limit=1,
-        per_user_limit=1,
-        requests_per_minute=10,
-    )
-    lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
+async def test_semantic_encoder_failure_closes_upstream() -> None:
     events = _ClosingSemanticEvents(({"type": "scene_patch"},))
-    encoded = _encode_semantic_scene_events(events, lease)
+    encoded = _encode_semantic_scene_events(events)
 
     with pytest.raises(ValidationError):
         await anext(encoded)
 
     assert events.closed is True
-    replacement = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
-    await replacement.aclose()
 
 
 @pytest.mark.asyncio
@@ -231,7 +223,10 @@ async def test_semantic_streaming_response_releases_resources_on_disconnect() ->
     )
     lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
     events = _ClosingSemanticEvents(_semantic_events())
-    response = _OwnedStreamingResponse(_encode_semantic_scene_events(events, lease))
+    response = _OwnedStreamingResponse(
+        _encode_semantic_scene_events(events),
+        admission_lease=lease,
+    )
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.4"},

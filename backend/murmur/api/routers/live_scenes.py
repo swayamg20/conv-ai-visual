@@ -48,45 +48,49 @@ def _require_development_scene_lab(request: Request) -> None:
 
 
 class _OwnedStreamingResponse(StreamingResponse):
-    """Close the body owner even when the ASGI server loses the client during send."""
+    """Release admission even when the client disconnects before streaming starts."""
+
+    def __init__(
+        self,
+        content: AsyncIterator[str],
+        *,
+        admission_lease: SceneAdmissionLease,
+        media_type: str | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(content, media_type=media_type, headers=headers)
+        self._admission_lease = admission_lease
 
     async def __call__(self, scope, receive, send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await close_async_resource(self.body_iterator)
+            try:
+                await close_async_resource(self.body_iterator)
+            finally:
+                await self._admission_lease.aclose()
 
 
 async def _encode_scene_events(
     events: AsyncIterator[SceneStreamEvent],
-    lease: SceneAdmissionLease | None = None,
 ) -> AsyncIterator[str]:
     """Encode canonical camelCase scene events as one SSE data record each."""
     try:
         async for event in events:
             yield encode_scene_stream_event(event)
     finally:
-        try:
-            await close_async_resource(events)
-        finally:
-            if lease is not None:
-                await lease.aclose()
+        await close_async_resource(events)
 
 
 async def _encode_semantic_scene_events(
     events: AsyncIterator[SemanticSceneStreamEvent],
-    lease: SceneAdmissionLease | None = None,
 ) -> AsyncIterator[str]:
     """Encode strict semantic events and release every owned upstream resource."""
     try:
         async for event in events:
             yield encode_semantic_scene_stream_event(event)
     finally:
-        try:
-            await close_async_resource(events)
-        finally:
-            if lease is not None:
-                await lease.aclose()
+        await close_async_resource(events)
 
 
 @router.post("/stream")
@@ -103,7 +107,8 @@ async def stream_live_scene(
         raise ApiError(429, str(exc)) from None
     events = scene_service.stream_events(body)
     return _OwnedStreamingResponse(
-        _encode_scene_events(events, lease),
+        _encode_scene_events(events),
+        admission_lease=lease,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",
@@ -129,7 +134,8 @@ async def stream_development_live_scene(
         raise ApiError(429, str(exc)) from None
     events = scene_service.stream_events(body)
     return _OwnedStreamingResponse(
-        _encode_scene_events(events, lease),
+        _encode_scene_events(events),
+        admission_lease=lease,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",
@@ -155,7 +161,8 @@ async def stream_development_semantic_live_scene(
         raise ApiError(429, str(exc)) from None
     events = scene_service.stream_routed_semantic_events(body)
     return _OwnedStreamingResponse(
-        _encode_semantic_scene_events(events, lease),
+        _encode_semantic_scene_events(events),
+        admission_lease=lease,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-store",

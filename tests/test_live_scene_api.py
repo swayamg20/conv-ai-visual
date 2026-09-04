@@ -128,12 +128,14 @@ class RecordingSceneAuthoringAdmission(SceneAuthoringAdmission):
 class _ClosingSceneEvents:
     def __init__(self, events: tuple[SceneStreamEvent, ...]) -> None:
         self._events = iter(events)
+        self.entered = False
         self.closed = False
 
     def __aiter__(self) -> _ClosingSceneEvents:
         return self
 
     async def __anext__(self) -> SceneStreamEvent:
+        self.entered = True
         return next(self._events)
 
     async def aclose(self) -> None:
@@ -189,7 +191,10 @@ async def test_streaming_response_closes_events_and_admission_when_send_disconne
     )
     lease = await admission.acquire("scene-user")
     events = _ClosingSceneEvents(_scene_events())
-    response = _OwnedStreamingResponse(_encode_scene_events(events, lease))
+    response = _OwnedStreamingResponse(
+        _encode_scene_events(events),
+        admission_lease=lease,
+    )
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.4"},
@@ -216,6 +221,49 @@ async def test_streaming_response_closes_events_and_admission_when_send_disconne
         await response(scope, receive, send)  # type: ignore[arg-type]
 
     assert events.closed is True
+    replacement = await admission.acquire("scene-user")
+    await replacement.aclose()
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_releases_admission_when_headers_disconnect() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("scene-user")
+    events = _ClosingSceneEvents(_scene_events())
+    response = _OwnedStreamingResponse(
+        _encode_scene_events(events),
+        admission_lease=lease,
+    )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/live-scenes/stream",
+        "raw_path": b"/api/live-scenes/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        assert message["type"] == "http.response.start"
+        raise OSError("client disconnected before the body started")
+
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    assert events.entered is False
     replacement = await admission.acquire("scene-user")
     await replacement.aclose()
 
