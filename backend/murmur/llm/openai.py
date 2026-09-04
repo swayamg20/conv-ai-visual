@@ -26,6 +26,7 @@ class OpenAIClient(LLMClient):
         model: str,
         base_url: str | None = None,
         max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+        transport_max_retries: int | None = None,
         **default_params,
     ):
         """
@@ -36,6 +37,7 @@ class OpenAIClient(LLMClient):
             model: Model name (e.g., "gpt-4o-mini", "llama-3.3-70b-versatile")
             base_url: Optional base URL override (e.g., "https://api.groq.com/openai/v1")
             max_tokens_parameter: Provider request field used for the output-token limit
+            transport_max_retries: Optional SDK-level HTTP retry ceiling
             **default_params: Default parameters to include in all requests
         """
         from openai import AsyncOpenAI
@@ -43,6 +45,14 @@ class OpenAIClient(LLMClient):
         client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if transport_max_retries is not None:
+            if (
+                isinstance(transport_max_retries, bool)
+                or not isinstance(transport_max_retries, int)
+                or transport_max_retries < 0
+            ):
+                raise ValueError("transport_max_retries must be a non-negative integer")
+            client_kwargs["max_retries"] = transport_max_retries
 
         self.client = AsyncOpenAI(**client_kwargs)
         self.model = model

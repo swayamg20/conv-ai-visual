@@ -190,6 +190,38 @@ def test_openai_request_params_allow_call_to_override_default_reasoning_effort()
     }
 
 
+def test_openai_transport_retry_ceiling_is_sdk_only(monkeypatch) -> None:
+    captured = {}
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = OpenAIClient(
+        api_key="server-key",
+        model="murmur-gpt-oss-120b",
+        transport_max_retries=0,
+        reasoning_effort="low",
+    )
+
+    assert captured == {"api_key": "server-key", "max_retries": 0}
+    assert client.default_params == {"reasoning_effort": "low"}
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "0"])
+def test_openai_rejects_invalid_transport_retry_ceiling(monkeypatch, value) -> None:
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: object())
+
+    with pytest.raises(ValueError, match="transport_max_retries"):
+        OpenAIClient(
+            api_key="server-key",
+            model="murmur-gpt-oss-120b",
+            transport_max_retries=value,
+        )
+
+
 @pytest.mark.asyncio
 async def test_gemini_text_stream_closes_provider_response_on_consumer_abort() -> None:
     class ProviderResponse:

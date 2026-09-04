@@ -484,7 +484,11 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
     assert captured["timeout_seconds"] == 9.5
     assert captured["client_factory"]() is expected_client  # type: ignore[operator]
     assert client_calls == [
-        ("azure_openai", "murmur-gpt-oss-120b", {"reasoning_effort": "low"})
+        (
+            "azure_openai",
+            "murmur-gpt-oss-120b",
+            {"reasoning_effort": "low", "transport_max_retries": 0},
+        )
     ]
 
 

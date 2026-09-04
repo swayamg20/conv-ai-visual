@@ -153,5 +153,9 @@ async def test_probe_constructs_azure_gpt_oss_with_shared_low_reasoning_options(
     )
 
     assert client_calls == [
-        ("azure_openai", "murmur-gpt-oss-120b", {"reasoning_effort": "low"})
+        (
+            "azure_openai",
+            "murmur-gpt-oss-120b",
+            {"reasoning_effort": "low", "transport_max_retries": 0},
+        )
     ]
