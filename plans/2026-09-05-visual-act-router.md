@@ -20,6 +20,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:14 IST: Added an isolated provider-neutral routing engine with temperature zero, an absolute per-attempt deadline, first-valid-decision early close, one sanitized repair, borrowed-client ownership, and fixed public failures. All 23 focused engine tests pass without provider access.
 - [x] 2026-09-05 03:28 IST: Added and adversarially reviewed a 10-case router evaluator with per-dispatch pacing, an exact 20-attempt ledger, strict category and warm-latency gates, hashed/private evidence, and no provider construction in dry-run. The pinned worst case is 105,772 input-bound plus 40,960 output-bound tokens, or USD 0.040441800; 267 focused tests pass and no provider was called.
 - [x] 2026-09-05 03:31 IST: Ran the approved Azure corpus from clean source `b66c9dc` under a USD 0.05 hard cap. Gate 1.2 passed: 10/10 routing expectations, 8/8 supported-vocabulary cases, 2/2 unsupported abstentions, 1/1 no-progress abstention, and 2/2 exact resumes; warm median was 1,309.380 ms and p95 was 2,704.701 ms. Eleven of twenty possible calls were reserved, with one successful repair and a dispatched upper bound of USD 0.021856950.
+- [x] 2026-09-05 03:49 IST: Added a pure server-owned lowering seam from a resolved route to the existing verified compiler input. Target stage now deterministically selects the teaching act and bounded narration, generation selects a bounded beat ID, and continuation compilation emits only the exact missing suffix. Eighty resolver, lowering, and compiler tests pass with Ruff clean.
 - [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
 
 ## Surprises & Discoveries
@@ -49,6 +50,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Treat warm routing latency as part of Gate 1.2, with median at most 1,500 ms and p95 at most 3,000 ms. Report the first cold request separately so initialization does not distort the warm gate.
 - 2026-09-05, Codex: Reuse the proven semantic probe's pricing, integer reservation ledger, hashing, git evidence, and atomic private writer. Parameterize only its total-attempt ceiling instead of extracting a broad shared framework.
 - 2026-09-05, Codex: Gate 1.2 passed and unlocks the narrow compiler/runtime adapter. The paid result does not itself qualify compiler output, SSE behavior, browser rendering, or interruption handling; those remain the next gate.
+- 2026-09-05, Codex: Lower accepted routes into the existing `TeachingBeatDraft` instead of creating a second compiler surface. The server derives act, narration, directive, and `route-{generation:x}` beat identity; abstentions cannot cross this lowering boundary.
 
 ## Outcomes & Retrospective
 
