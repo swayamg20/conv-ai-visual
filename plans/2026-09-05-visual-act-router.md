@@ -17,6 +17,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:05 IST: Added a narration-free routing prompt with symmetric triangle, areas, and identity definitions, explicit unsupported/no-progress abstention, no contentful example, and shared bounded context construction.
 - [x] 2026-09-05 03:05 IST: Proved the strict contract, pure resolver, prefix rules, injection-safe prompt construction, parser redaction, and model-surface isolation provider-free; 212 focused semantic tests pass with scoped Ruff checks clean. Natural-language routing accuracy remains a live-corpus question.
 - [x] 2026-09-05 03:09 IST: Closed adversarial review findings: start decisions no longer repeat the sole component kind, atom capacity stays server-side, stage semantics and continuation precedence are explicit, fake JSON placeholders are gone, and parser repair hints are record-specific. All 211 focused semantic tests pass with scoped Ruff checks clean.
+- [x] 2026-09-05 03:14 IST: Added an isolated provider-neutral routing engine with temperature zero, an absolute per-attempt deadline, first-valid-decision early close, one sanitized repair, borrowed-client ownership, and fixed public failures. All 23 focused engine tests pass without provider access.
 - [ ] Add a small cost-guarded decision evaluator and dry-run it without provider access.
 - [ ] Obtain an explicit spend boundary, run the smaller Azure decision corpus, and record the gate result.
 - [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
@@ -29,6 +30,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - A new component ID has no pedagogical meaning. Letting the model invent one adds a failure mode without adding expressive power, so start decisions can be smaller and the server can allocate the first free stable ID.
 - The existing prompt and the new router need identical prompt, semantic-snapshot, and repair-error bounds. Extracting one private context builder preserved all legacy prompt tests and avoided a second validation path.
 - Atom capacity is deterministic execution state, not semantic intent. Showing an unexplained atom budget to the model could recreate shallow-stage bias, so the router no longer sees it; server admission remains responsible for checking the resolved suffix.
+- A provider may place a valid first decision and trailing chatter in the same chunk. Splitting only at LF boundaries lets the engine resolve and close after that first decision, avoiding both the prior trailing-frame failure mode and extra stream latency.
 
 ## Decision Log
 
@@ -39,6 +41,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Prefer extracting or parameterizing the existing strict NDJSON framing code over creating a parallel copy. Compatibility aliases may remain so the passing teaching-beat path does not require a broad rewrite.
 - 2026-09-05, Codex: Do not issue another paid Azure request during the offline milestones. Before the decision corpus, state the exact case count, attempt ceiling, token ceiling, and conservative dollar cap.
 - 2026-09-05, Codex: Keep atom capacity out of the model decision. The router selects the requested semantic terminal boundary; the server owns exact suffix size and admission.
+- 2026-09-05, Codex: Keep asynchronous provider orchestration in an isolated `visual_act_engine.py`, not in the pure resolver or current compiler service. The engine borrows its client, fixes temperature at zero, permits one repair only for rejected decisions, and closes the stream immediately after the first resolved decision.
 
 ## Outcomes & Retrospective
 
@@ -48,7 +51,7 @@ Work is in progress. The existing verified visual runtime remains unchanged and 
 
 All work occurs in `/Users/swayam.gupta/Documents/GitHub/conv-ai-visual-scene-core` on `codex/realtime-scene-core`. `backend/murmur/live_scene/semantic_contracts.py` contains the current model-authored `TeachingBeatDraft`, the Pythagorean stage vocabulary, semantic scene state, compiler outputs, verifier receipts, and certificate models. `backend/murmur/live_scene/semantic_prompt.py` builds the current one-beat prompt. `backend/murmur/live_scene/semantic_stream_parser.py` reconstructs strict NDJSON frames across arbitrary provider chunks. `backend/murmur/live_scene/service.py` closes one provider beat, preflights it, invokes `compile_teaching_beat()`, and emits all compiler-certified atoms only after the full batch passes.
 
-The new decision contract belongs beside the semantic vocabulary because it uses the same component kind, component identifier, stage, and semantic scene state, but it remains a distinct trust surface from `TeachingBeatDraft`. Prompt construction should remain provider-neutral. The parser should validate a discriminated Pydantic union while preserving the existing maximum frame size, duplicate-key rejection, UTF-8 handling, terminal lifecycle, and sanitized repair hints.
+The new decision contract belongs beside the semantic vocabulary because it uses the same component kind, component identifier, stage, and semantic scene state, but it remains a distinct trust surface from `TeachingBeatDraft`. Prompt construction should remain provider-neutral. The parser validates a discriminated Pydantic union while preserving the existing maximum frame size, duplicate-key rejection, UTF-8 handling, terminal lifecycle, and sanitized repair hints. `backend/murmur/live_scene/visual_act_engine.py` owns only bounded provider streaming, one repair, and pure decision resolution; it deliberately does not import the compiler, verifier, service, wire format, or SSE layer.
 
 The first supported component remains `pythagorean_area_identity`. This plan does not add another diagram family. It proves that a router can correctly reject other domains and can choose `triangle`, `areas`, or `identity` without having to generate prose or geometry.
 
@@ -59,6 +62,8 @@ First, define three immutable strict decision variants. `start_visual` includes 
 Next, make the current bounded NDJSON framing reusable for a supplied Pydantic adapter and fixed public error language. Keep `TeachingBeatStreamParser` behavior byte-for-byte compatible, then expose a decision parser through the same core. This is the main code-reduction seam: UTF-8, size, duplicate-key, constant, close, abort, and incremental-frame logic should have one owner.
 
 Then add a balanced routing prompt. It will define all three supported stages with equal prominence, give both start and continue rules, and include explicit unsupported and no-progress abstention. The prompt will contain no narration request and no low-level drawing vocabulary. It will serialize only the validated semantic scene and user prompt as untrusted JSON data. Provider-free tests will inspect the exact model surface and exercise supported, interrupted, completed, unsupported, and injection-shaped cases.
+
+Wrap those pieces in a small provider-neutral engine before evaluation. Each attempt gets one absolute deadline; a first rejected decision may receive one fresh repair against the same accepted snapshot, while provider errors and timeouts do not create a hidden second call. The first resolved decision wins and closes the upstream stream immediately. The caller retains client ownership so the evaluator can inject its exact pre-dispatch cost ledger.
 
 After the offline contract passes, add a small evaluator that calls the routing surface only. Its dry-run must prove no provider or credential access. Its live mode must require explicit acknowledgement and enforce an integer pre-dispatch cost ledger, fixed case and attempt ceilings, sequential execution, sanitized private output, and no hidden SDK retries. The live corpus should contain eight to ten balanced cases rather than repeating the prior twenty-case compiler qualification.
 
@@ -72,6 +77,7 @@ After each offline milestone, run its focused tests and lint:
 
     .venv/bin/pytest -q tests/test_live_scene_visual_act_router_contracts.py
     .venv/bin/pytest -q tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
+    .venv/bin/pytest -q tests/test_live_scene_visual_act_engine.py
     .venv/bin/ruff check backend/murmur/live_scene tests/test_live_scene_visual_act_router_contracts.py tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
     .venv/bin/ruff format --check backend/murmur/live_scene tests/test_live_scene_visual_act_router_contracts.py tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
 
