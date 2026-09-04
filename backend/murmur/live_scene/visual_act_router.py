@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from murmur.live_scene.semantic_contracts import (
-    MAX_SEMANTIC_COMPONENTS,
     AbstainVisualDecision,
     ContinueVisualDecision,
     PythagoreanComponentKind,
@@ -23,7 +22,7 @@ from murmur.live_scene.semantic_contracts import (
 class VisualActRoutingErrorCode(StrEnum):
     """Stable reasons a structurally valid decision cannot extend a scene."""
 
-    COMPONENT_CAPACITY = "component_capacity"
+    COMPONENT_ALREADY_EXISTS = "component_already_exists"
     COMPONENT_NOT_FOUND = "component_not_found"
     NON_FORWARD_TARGET = "non_forward_target"
 
@@ -46,15 +45,6 @@ class ResolvedVisualAct:
     missing_roles: tuple[PythagoreanRole, ...]
 
 
-def _next_component_id(scene: SemanticSceneState) -> SemanticComponentId:
-    used_ids = {component.id for component in scene.components}
-    for ordinal in range(1, MAX_SEMANTIC_COMPONENTS + 1):
-        candidate = "areas" if ordinal == 1 else f"areas-{ordinal}"
-        if candidate not in used_ids:
-            return candidate
-    raise VisualActRoutingError(VisualActRoutingErrorCode.COMPONENT_CAPACITY)
-
-
 def resolve_visual_act(
     decision: VisualActDecision,
     scene: SemanticSceneState,
@@ -69,11 +59,11 @@ def resolve_visual_act(
         raise TypeError("decision must be a VisualActDecision")
 
     if isinstance(decision, StartVisualDecision):
-        if len(scene.components) >= MAX_SEMANTIC_COMPONENTS:
-            raise VisualActRoutingError(VisualActRoutingErrorCode.COMPONENT_CAPACITY)
+        if scene.components:
+            raise VisualActRoutingError(VisualActRoutingErrorCode.COMPONENT_ALREADY_EXISTS)
         current_roles: tuple[PythagoreanRole, ...] = ()
         component_kind: PythagoreanComponentKind = "pythagorean_area_identity"
-        component_id = _next_component_id(scene)
+        component_id: SemanticComponentId = "areas"
     else:
         component = next(
             (candidate for candidate in scene.components if candidate.id == decision.component_id),

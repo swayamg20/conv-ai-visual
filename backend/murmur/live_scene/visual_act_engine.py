@@ -8,7 +8,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal, Protocol, cast
+from typing import Any, Literal, Protocol, TypeAlias, cast
 
 from murmur.core.async_cleanup import (
     DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -29,9 +29,10 @@ from murmur.live_scene.visual_act_router import (
 )
 
 _EMPTY_STREAM_REPAIR_HINT = "visual_act_stream: emit one visual-act decision"
+DEFAULT_VISUAL_ACT_MAX_TOKENS = 2_048
 _ROUTING_REPAIR_HINTS = {
-    VisualActRoutingErrorCode.COMPONENT_CAPACITY: (
-        "visual_act_state: continue an accepted component or abstain"
+    VisualActRoutingErrorCode.COMPONENT_ALREADY_EXISTS: (
+        "visual_act_state: continue the accepted component or abstain"
     ),
     VisualActRoutingErrorCode.COMPONENT_NOT_FOUND: (
         "visual_act_state: copy an accepted componentId exactly"
@@ -65,6 +66,17 @@ class VisualActRoutingResult:
     @property
     def repaired(self) -> bool:
         return self.provider_attempts == 2
+
+
+@dataclass(frozen=True, slots=True)
+class VisualActRoutingRepairing:
+    """Lifecycle boundary emitted before the one allowed repair dispatch."""
+
+    from_attempt: Literal[1] = 1
+    to_attempt: Literal[2] = 2
+
+
+VisualActRoutingStep: TypeAlias = VisualActRoutingRepairing | VisualActRoutingResult
 
 
 class VisualActEngineErrorCode(StrEnum):
@@ -165,7 +177,7 @@ class VisualActRoutingEngine:
         self,
         client: VisualActModelClient,
         *,
-        max_tokens: int = 2_048,
+        max_tokens: int = DEFAULT_VISUAL_ACT_MAX_TOKENS,
         timeout_seconds: float = 20.0,
     ) -> None:
         if not callable(getattr(client, "stream", None)):
@@ -198,7 +210,23 @@ class VisualActRoutingEngine:
         prompt: str,
         semantic_scene: SemanticSceneState,
     ) -> VisualActRoutingResult:
-        """Route one prompt against an accepted semantic snapshot."""
+        """Route one prompt while consuming internal lifecycle steps."""
+
+        async for step in self.stream_route(
+            prompt=prompt,
+            semantic_scene=semantic_scene,
+        ):
+            if isinstance(step, VisualActRoutingResult):
+                return step
+        raise AssertionError("visual-act routing ended without a result")
+
+    async def stream_route(
+        self,
+        *,
+        prompt: str,
+        semantic_scene: SemanticSceneState,
+    ) -> AsyncIterator[VisualActRoutingStep]:
+        """Yield a repair boundary before dispatch, then one resolved result."""
 
         if not isinstance(semantic_scene, SemanticSceneState):
             raise VisualActEngineError(
@@ -232,6 +260,7 @@ class VisualActRoutingEngine:
                         VisualActEngineErrorCode.INTERNAL_ERROR,
                         provider_attempts=1,
                     ) from None
+                yield VisualActRoutingRepairing()
 
             try:
                 decision, resolved = await self._attempt(
@@ -247,11 +276,12 @@ class VisualActRoutingEngine:
                     VisualActEngineErrorCode.INVALID_VISUAL_ACT,
                     provider_attempts=2,
                 ) from None
-            return VisualActRoutingResult(
+            yield VisualActRoutingResult(
                 decision=decision,
                 resolved=resolved,
                 provider_attempts=attempt,
             )
+            return
 
         raise AssertionError("visual-act routing attempts were exhausted")
 
@@ -347,9 +377,12 @@ class VisualActRoutingEngine:
 
 
 __all__ = [
+    "DEFAULT_VISUAL_ACT_MAX_TOKENS",
     "VisualActEngineError",
     "VisualActEngineErrorCode",
     "VisualActModelClient",
     "VisualActRoutingEngine",
+    "VisualActRoutingRepairing",
     "VisualActRoutingResult",
+    "VisualActRoutingStep",
 ]

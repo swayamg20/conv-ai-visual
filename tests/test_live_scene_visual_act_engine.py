@@ -21,6 +21,8 @@ from murmur.live_scene.visual_act_engine import (
     VisualActEngineError,
     VisualActEngineErrorCode,
     VisualActRoutingEngine,
+    VisualActRoutingRepairing,
+    VisualActRoutingResult,
 )
 
 _BLOCK = object()
@@ -221,6 +223,28 @@ async def test_parser_empty_and_resolver_rejections_get_one_sanitized_repair(
     assert "CURRENT_ACCEPTED_SEMANTIC_SCENE_JSON:" not in repair_user
     if raw_sentinel is not None:
         assert raw_sentinel not in repair_user
+
+
+@pytest.mark.asyncio
+async def test_stream_route_announces_repair_before_the_second_dispatch() -> None:
+    client = _FakeClient([["not-json\n"], [_decision_line(stage="triangle")]])
+    steps = VisualActRoutingEngine(client).stream_route(
+        prompt="Draw the triangle.",
+        semantic_scene=SemanticSceneState(revision=0),
+    )
+
+    repairing = await anext(steps)
+
+    assert isinstance(repairing, VisualActRoutingRepairing)
+    assert (repairing.from_attempt, repairing.to_attempt) == (1, 2)
+    assert len(client.calls) == 1
+
+    result = await anext(steps)
+    assert isinstance(result, VisualActRoutingResult)
+    assert result.provider_attempts == 2
+    assert len(client.calls) == 2
+    with pytest.raises(StopAsyncIteration):
+        await anext(steps)
 
 
 @pytest.mark.asyncio

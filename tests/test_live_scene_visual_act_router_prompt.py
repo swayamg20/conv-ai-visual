@@ -57,6 +57,8 @@ def test_stage_guidance_is_symmetric_and_selects_a_terminal_boundary() -> None:
     assert "deepest stage explicitly or semantically requested" in system
     assert "terminal boundary for this request" in system
     assert '"only", "stop before", and "leave for later"' in system
+    assert "Start only when the accepted scene contains no component" in system
+    assert "A separate or second construction is not supported yet" in system
     assert "Start with the right triangle" not in system
 
 

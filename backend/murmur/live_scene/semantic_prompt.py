@@ -88,8 +88,8 @@ _VISUAL_ACT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "relationship works maps to identity.",
         "- Continue the sole matching accepted component by default and copy its componentId "
         "exactly.",
-        "- Start only when no matching component exists or the request explicitly asks for a "
-        "separate construction.",
+        "- Start only when the accepted scene contains no component.",
+        '- A separate or second construction is not supported yet; abstain with "unsupported_intent".',
         '- If multiple components make the reference ambiguous, abstain with "unsupported_intent".',
         '- Never move backward or repeat a completed boundary; abstain with "no_forward_progress".',
         "TRUST BOUNDARY:",

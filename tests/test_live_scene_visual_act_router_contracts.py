@@ -7,7 +7,6 @@ from copy import deepcopy
 import pytest
 from murmur.live_scene.contracts import LIVE_SCENE_SCHEMA_VERSION
 from murmur.live_scene.semantic_contracts import (
-    MAX_SEMANTIC_COMPONENTS,
     PYTHAGOREAN_ROLE_ORDER,
     VISUAL_ACT_DECISION_ADAPTER,
     AbstainVisualDecision,
@@ -249,29 +248,11 @@ def test_continue_with_an_unknown_component_fails_closed() -> None:
     assert captured.value.code is VisualActRoutingErrorCode.COMPONENT_NOT_FOUND
 
 
-def test_start_allocates_the_first_free_component_id_deterministically() -> None:
+def test_start_rejects_a_second_component_that_would_overlap_existing_geometry() -> None:
     scene = SemanticSceneState(
         revision=0,
-        components=(
-            PythagoreanAreaIdentityState(id="areas"),
-            PythagoreanAreaIdentityState(id="areas-2"),
-        ),
+        components=(PythagoreanAreaIdentityState(id="areas"),),
     )
-
-    resolved = resolve_visual_act(
-        VISUAL_ACT_DECISION_ADAPTER.validate_python(_start()),
-        scene,
-    )
-
-    assert resolved is not None
-    assert resolved.component_id == "areas-3"
-
-
-def test_start_rejects_a_full_semantic_component_catalog() -> None:
-    components = tuple(
-        PythagoreanAreaIdentityState(id=f"Area{index}") for index in range(MAX_SEMANTIC_COMPONENTS)
-    )
-    scene = SemanticSceneState(revision=0, components=components)
 
     with pytest.raises(VisualActRoutingError) as captured:
         resolve_visual_act(
@@ -279,7 +260,7 @@ def test_start_rejects_a_full_semantic_component_catalog() -> None:
             scene,
         )
 
-    assert captured.value.code is VisualActRoutingErrorCode.COMPONENT_CAPACITY
+    assert captured.value.code is VisualActRoutingErrorCode.COMPONENT_ALREADY_EXISTS
 
 
 def test_resolver_rejects_untyped_inputs() -> None:
