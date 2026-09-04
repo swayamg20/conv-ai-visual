@@ -322,7 +322,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 </p>
               </div>
             </div>
-            <span className="rounded-md border border-chalk-faint/20 bg-slate/45 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
+            <span className="ml-2 shrink-0 whitespace-nowrap rounded-md border border-chalk-faint/20 bg-slate/45 px-2 py-1 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
               {sourceLabel}
             </span>
           </div>
@@ -373,14 +373,14 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 type={requiresReset ? "button" : "submit"}
                 onClick={requiresReset ? reset : undefined}
                 disabled={isBusy || prompt.trim().length === 0}
-                className="min-h-11 gap-2"
+                className="min-h-11 gap-1.5 px-2 text-xs sm:gap-2 sm:px-5 sm:text-sm"
               >
                 {requiresReset ? (
-                  <Square className="h-3.5 w-3.5" />
+                  <Square className="hidden h-3.5 w-3.5 sm:block" />
                 ) : snapshot.phase === "failed" ? (
-                  <RotateCcw className="h-4 w-4" />
+                  <RotateCcw className="hidden h-4 w-4 sm:block" />
                 ) : (
-                  <Send className="h-4 w-4" />
+                  <Send className="hidden h-4 w-4 sm:block" />
                 )}
                 {requiresReset
                   ? "Reset to continue"
@@ -395,9 +395,9 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 variant="outline"
                 disabled={!canInterrupt}
                 onClick={() => runtime.interrupt()}
-                className="min-h-11 gap-2 border-amber/35 hover:bg-amber/10"
+                className="min-h-11 gap-1.5 border-amber/35 px-2 text-xs hover:bg-amber/10 sm:gap-2 sm:px-5 sm:text-sm"
               >
-                <StopCircle className="h-4 w-4 text-amber" />
+                <StopCircle className="hidden h-4 w-4 text-amber sm:block" />
                 {isSemantic ? "Stop after this act" : "Interrupt"}
               </Button>
               <Button
@@ -405,9 +405,9 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 variant="secondary"
                 disabled={!canReplay}
                 onClick={replay}
-                className="min-h-11 gap-2"
+                className="min-h-11 gap-1.5 px-2 text-xs sm:gap-2 sm:px-5 sm:text-sm"
               >
-                <Play className="h-4 w-4" />
+                <Play className="hidden h-4 w-4 sm:block" />
                 {isSemantic ? "Replay presented" : "Replay accepted"}
               </Button>
               <Button
@@ -415,9 +415,9 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 variant="ghost"
                 disabled={snapshot.generation === 0 && snapshot.accepted.length === 0}
                 onClick={reset}
-                className="min-h-11 gap-2 text-muted-foreground"
+                className="min-h-11 gap-1.5 px-2 text-xs text-muted-foreground sm:gap-2 sm:px-5 sm:text-sm"
               >
-                <Square className="h-3.5 w-3.5" />
+                <Square className="hidden h-3.5 w-3.5 sm:block" />
                 {isSemantic ? "Wipe board" : "Reset board"}
               </Button>
             </div>
