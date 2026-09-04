@@ -331,9 +331,22 @@ class AttemptReservation:
 class BudgetLedger:
     """Reserve a conservative integer cost ceiling before every provider stream."""
 
-    def __init__(self, *, max_cost_nano_usd: int, max_tokens: int) -> None:
+    def __init__(
+        self,
+        *,
+        max_cost_nano_usd: int,
+        max_tokens: int,
+        max_provider_attempts: int = MAX_PROVIDER_ATTEMPTS,
+    ) -> None:
+        if (
+            isinstance(max_provider_attempts, bool)
+            or not isinstance(max_provider_attempts, int)
+            or not 1 <= max_provider_attempts <= MAX_PROVIDER_ATTEMPTS
+        ):
+            raise ValueError(f"max_provider_attempts must be between 1 and {MAX_PROVIDER_ATTEMPTS}")
         self.max_cost_nano_usd = max_cost_nano_usd
         self.max_tokens = max_tokens
+        self.max_provider_attempts = max_provider_attempts
         self.reservations: list[AttemptReservation] = []
         self._attempts_by_case: Counter[str] = Counter()
         self.reserved_cost_nano_usd = 0
@@ -348,7 +361,7 @@ class BudgetLedger:
         if max_tokens != self.max_tokens:
             raise ProbeRefusal("provider token ceiling did not match the budget ledger")
         attempt = self._attempts_by_case[case_id] + 1
-        if attempt > 2 or len(self.reservations) >= MAX_PROVIDER_ATTEMPTS:
+        if attempt > 2 or len(self.reservations) >= self.max_provider_attempts:
             raise ProbeRefusal("provider attempt ceiling reached")
         input_tokens = _message_input_token_bound(messages)
         reserved_cost = _reservation_cost_nano_usd(input_tokens, self.max_tokens)

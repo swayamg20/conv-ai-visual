@@ -18,7 +18,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:05 IST: Proved the strict contract, pure resolver, prefix rules, injection-safe prompt construction, parser redaction, and model-surface isolation provider-free; 212 focused semantic tests pass with scoped Ruff checks clean. Natural-language routing accuracy remains a live-corpus question.
 - [x] 2026-09-05 03:09 IST: Closed adversarial review findings: start decisions no longer repeat the sole component kind, atom capacity stays server-side, stage semantics and continuation precedence are explicit, fake JSON placeholders are gone, and parser repair hints are record-specific. All 211 focused semantic tests pass with scoped Ruff checks clean.
 - [x] 2026-09-05 03:14 IST: Added an isolated provider-neutral routing engine with temperature zero, an absolute per-attempt deadline, first-valid-decision early close, one sanitized repair, borrowed-client ownership, and fixed public failures. All 23 focused engine tests pass without provider access.
-- [ ] Add a small cost-guarded decision evaluator and dry-run it without provider access.
+- [x] 2026-09-05 03:28 IST: Added and adversarially reviewed a 10-case router evaluator with per-dispatch pacing, an exact 20-attempt ledger, strict category and warm-latency gates, hashed/private evidence, and no provider construction in dry-run. The pinned worst case is 105,772 input-bound plus 40,960 output-bound tokens, or USD 0.040441800; 267 focused tests pass and no provider was called.
 - [ ] Obtain an explicit spend boundary, run the smaller Azure decision corpus, and record the gate result.
 - [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
 
@@ -31,6 +31,8 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - The existing prompt and the new router need identical prompt, semantic-snapshot, and repair-error bounds. Extracting one private context builder preserved all legacy prompt tests and avoided a second validation path.
 - Atom capacity is deterministic execution state, not semantic intent. Showing an unexplained atom budget to the model could recreate shallow-stage bias, so the router no longer sees it; server admission remains responsible for checking the resolved suffix.
 - A provider may place a valid first decision and trailing chatter in the same chunk. Splitting only at LF boundaries lets the engine resolve and close after that first decision, avoiding both the prior trailing-frame failure mode and extra stream latency.
+- The first evaluator draft reused several phrases from the router's own stage table. Those cases could reward lexical copying rather than semantic routing, so the final corpus includes an indirect prompt for every stage, an implicit continuation, and a completed-prefix `no_forward_progress` case.
+- Quota pacing must happen at every actual provider dispatch, not once per evaluation case. Otherwise an engine-owned repair could silently exceed the ten-requests-per-minute deployment limit even though the dollar ledger remained valid.
 
 ## Decision Log
 
@@ -42,6 +44,9 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Do not issue another paid Azure request during the offline milestones. Before the decision corpus, state the exact case count, attempt ceiling, token ceiling, and conservative dollar cap.
 - 2026-09-05, Codex: Keep atom capacity out of the model decision. The router selects the requested semantic terminal boundary; the server owns exact suffix size and admission.
 - 2026-09-05, Codex: Keep asynchronous provider orchestration in an isolated `visual_act_engine.py`, not in the pure resolver or current compiler service. The engine borrows its client, fixes temperature at zero, permits one repair only for rejected decisions, and closes the stream immediately after the first resolved decision.
+- 2026-09-05, Codex: Keep the paid corpus at ten cases and twenty possible dispatches: five fresh starts, two unrelated unsupported intents, two exact resumes, and one completed-prefix no-progress request. A qualifying run needs all eight supported-vocabulary expectations, both unsupported abstentions, the no-progress abstention, and both resume-ID checks to pass.
+- 2026-09-05, Codex: Treat warm routing latency as part of Gate 1.2, with median at most 1,500 ms and p95 at most 3,000 ms. Report the first cold request separately so initialization does not distort the warm gate.
+- 2026-09-05, Codex: Reuse the proven semantic probe's pricing, integer reservation ledger, hashing, git evidence, and atomic private writer. Parameterize only its total-attempt ceiling instead of extracting a broad shared framework.
 
 ## Outcomes & Retrospective
 
@@ -83,7 +88,11 @@ After each offline milestone, run its focused tests and lint:
 
 Before each commit, run `git diff --check` and inspect `git status --short`. Push each coherent milestone to `origin/codex/realtime-scene-core`, then prove `git rev-parse HEAD` equals `git rev-parse @{u}`.
 
-The exact evaluator command and cap will be added only after its cost math is implemented and tested. A dry-run command must precede any paid command.
+The provider-free dry-run is:
+
+    .venv/bin/python scripts/manual/probe_visual_act_router.py --max-cost-usd 0.041 --case-limit 10 --max-tokens 2048 --dry-run
+
+It must report corpus SHA-256 `374aa407164cd9ca84ec8a311792c895ea39152dcdb2daa90dfec0a931e6e549`, twenty reserved attempts, and a worst-case cost of USD 0.040441800 before any paid command is considered.
 
 ## Validation and Acceptance
 
@@ -93,4 +102,4 @@ The state milestone passes when pure tests cover new starts from an empty scene,
 
 The prompt and parser milestone passes when all three stages have balanced selection guidance, unrelated domains route to abstain, current-scene JSON is canonical and bounded, prompt injection remains quoted data, parser chunk boundaries and Unicode boundaries are exhaustive, duplicate keys and non-standard constants fail closed, only one decision is accepted, and the existing teaching-beat parser suite remains unchanged.
 
-The live router gate passes only if every stream has a safe terminal outcome, at least 90% of scored supported cases select the expected route and stage, 100% of unsupported cases abstain, 100% of resume cases reuse the existing component and move strictly forward, no forbidden field crosses the model boundary, and the conservative dispatched cost remains within the newly approved cap. Cold and warm latency must be reported separately. A failure preserves the current compiler/runtime and triggers another router revision rather than widening the component vocabulary.
+The live router gate passes only if every stream has a safe terminal outcome, at least 90% of scored supported cases select the expected route and stage, 100% of unsupported cases abstain, the completed-prefix case abstains for no forward progress, 100% of resume cases reuse the existing component and move strictly forward, no forbidden field crosses the model boundary, warm median decision latency is at most 1,500 ms, warm p95 is at most 3,000 ms, and the conservative dispatched cost remains within the approved cap. With exactly eight supported-vocabulary cases, the 90% threshold quantizes to eight out of eight. Cold and warm latency are reported separately. A failure preserves the current compiler/runtime and triggers another router revision rather than widening the component vocabulary.
