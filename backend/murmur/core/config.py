@@ -58,11 +58,11 @@ def normalize_azure_openai_endpoint(endpoint: str) -> str:
         not resource_name
         or resource_name.startswith("-")
         or resource_name.endswith("-")
-        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in resource_name)
-    ):
-        raise ValueError(
-            "AZURE_OPENAI_ENDPOINT must use an Azure OpenAI resource hostname"
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in resource_name
         )
+    ):
+        raise ValueError("AZURE_OPENAI_ENDPOINT must use an Azure OpenAI resource hostname")
 
     path = parsed.path.rstrip("/")
     if path not in {"", "/openai/v1"}:
@@ -161,9 +161,7 @@ class Config:
     MURMUR_SCENE_LLM_TIMEOUT_SECONDS: float = float(
         os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
     )
-    MURMUR_SCENE_LLM_TEMPERATURE: float = float(
-        os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", "0.2")
-    )
+    MURMUR_SCENE_LLM_TEMPERATURE: float = float(os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", "0.2"))
     MURMUR_SCENE_GLOBAL_CONCURRENCY: int = int(os.getenv("MURMUR_SCENE_GLOBAL_CONCURRENCY", "4"))
     MURMUR_SCENE_PER_USER_CONCURRENCY: int = int(
         os.getenv("MURMUR_SCENE_PER_USER_CONCURRENCY", "1")
