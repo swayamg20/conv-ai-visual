@@ -20,6 +20,7 @@ from murmur.live_scene.contracts import (
     MAX_ACCEPTED_PATCHES,
     MAX_SAFE_SEQUENCE,
     MAX_SCENE_MODEL_OUTPUT_TOKENS,
+    MAX_SCENE_NODES,
     LiveSceneRequest,
     PutSceneOperation,
     ScenePatchDraft,
@@ -32,6 +33,41 @@ from murmur.live_scene.contracts import (
     SceneStreamStartedEvent,
 )
 from murmur.live_scene.prompt import build_scene_messages, scene_patch_target
+from murmur.live_scene.semantic_compiler import (
+    SemanticCompilationError,
+    compile_teaching_beat,
+)
+from murmur.live_scene.semantic_contracts import (
+    MAX_SEMANTIC_COMPONENTS,
+    PYTHAGOREAN_ROLE_ORDER,
+    CompiledTeachingBeat,
+    CompiledVisualAtom,
+    CompilerCertificateV1,
+    PythagoreanAreaIdentityState,
+    SemanticSceneState,
+    TeachingBeatDraft,
+    compiler_certificate_sha256,
+    roles_through,
+    semantic_scene_sha256,
+)
+from murmur.live_scene.semantic_integrity import digest_matches
+from murmur.live_scene.semantic_prompt import build_semantic_scene_messages
+from murmur.live_scene.semantic_service_contracts import (
+    MAX_COMPILED_ATOMS,
+    SemanticAtomMetadata,
+    SemanticLiveSceneRequest,
+    SemanticScenePatchEvent,
+    SemanticSceneStreamEvent,
+)
+from murmur.live_scene.semantic_stream_parser import (
+    TeachingBeatStreamError,
+    TeachingBeatStreamParser,
+)
+from murmur.live_scene.semantic_verifier import (
+    SemanticVerificationError,
+    verify_pythagorean_realization,
+)
+from murmur.live_scene.semantic_wire import encode_semantic_scene_stream_event
 from murmur.live_scene.stream_parser import ScenePatchStreamError, ScenePatchStreamParser
 from murmur.live_scene.wire import SceneStreamWireError, encode_scene_stream_event
 
@@ -50,6 +86,15 @@ _CONTEXT_LIMIT_MESSAGE = (
 )
 _REVISION_LIMIT_MESSAGE = (
     "This board has reached its revision limit. The current board remains safe."
+)
+_SEMANTIC_BASE_MISMATCH_MESSAGE = (
+    "The semantic lesson no longer matches the visible board. Refresh before continuing."
+)
+_SEMANTIC_CAPACITY_MESSAGE = (
+    "This board has no room for another verified visual atom. The current board remains safe."
+)
+_SEMANTIC_INTEGRITY_MESSAGE = (
+    "The verified visual runtime rejected an internal result. The current board remains safe."
 )
 
 
@@ -73,9 +118,37 @@ class _ScenePatchApplicationError(ValueError):
     """Safe internal reason for asking the model to repair its output."""
 
 
+class _SemanticBaseError(ValueError):
+    """Raised when the supplied semantic prefix does not match the low-level board."""
+
+
+class _SemanticRepairableError(ValueError):
+    """Fixed safe reason a different model-authored teaching beat can repair."""
+
+
+class _SemanticInvariantError(RuntimeError):
+    """Raised when deterministic server-owned compilation or admission fails."""
+
+
 def _scene_json(scene: SceneState) -> str:
     return json.dumps(
         scene.model_dump(mode="json", by_alias=True),
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _semantic_scene_json(scene: SemanticSceneState) -> str:
+    """Serialize only model-relevant semantic state, excluding the certificate head."""
+
+    return json.dumps(
+        scene.model_dump(
+            mode="json",
+            by_alias=True,
+            exclude={"certificate_head_sha256"},
+        ),
         ensure_ascii=False,
         allow_nan=False,
         separators=(",", ":"),
@@ -104,6 +177,14 @@ def _feed_chunk(
     parser: ScenePatchStreamParser,
     chunk: str | bytes,
 ) -> Iterable[ScenePatchDraft]:
+    for segment in _split_after_newlines(chunk):
+        yield from parser.feed(segment)
+
+
+def _feed_semantic_chunk(
+    parser: TeachingBeatStreamParser,
+    chunk: str | bytes,
+) -> Iterable[TeachingBeatDraft]:
     for segment in _split_after_newlines(chunk):
         yield from parser.feed(segment)
 
@@ -208,6 +289,377 @@ class _AttemptOutcome:
     patch_count: int = 0
     invalid_reason: str | None = None
     provider_failure_code: str | None = None
+
+
+@dataclass(frozen=True)
+class _PreparedSemanticAtom:
+    event: SemanticScenePatchEvent
+    scene: SceneState
+    semantic_scene: SemanticSceneState
+
+
+@dataclass(frozen=True)
+class _PreparedSemanticBatch:
+    atoms: tuple[_PreparedSemanticAtom, ...]
+
+
+@dataclass
+class _SemanticAttemptOutcome:
+    batch: _PreparedSemanticBatch | None = None
+    invalid_reason: str | None = None
+    provider_failure_code: str | None = None
+    integrity_failure: bool = False
+
+
+@dataclass
+class _SemanticGenerationState:
+    generation: int
+    scene: SceneState
+    semantic_scene: SemanticSceneState
+    atom_limit: int
+    started_at: float
+    clock: SceneClock
+    atom_count: int = 0
+    first_atom_ms: float | None = None
+
+    @property
+    def remaining_atom_budget(self) -> int:
+        return self.atom_limit - self.atom_count
+
+    def commit_atom(self, atom: _PreparedSemanticAtom) -> None:
+        self.scene = atom.scene
+        self.semantic_scene = atom.semantic_scene
+        self.atom_count += 1
+        if self.first_atom_ms is None:
+            self.first_atom_ms = _elapsed_ms(self.started_at, self.clock())
+
+    def completed_event(self, *, repaired: bool) -> SceneStreamCompletedEvent:
+        assert self.first_atom_ms is not None
+        total_ms = max(self.first_atom_ms, _elapsed_ms(self.started_at, self.clock()))
+        return SceneStreamCompletedEvent(
+            generation=self.generation,
+            final_revision=self.scene.revision,
+            patch_count=self.atom_count,
+            first_patch_ms=self.first_atom_ms,
+            total_ms=total_ms,
+            repaired=repaired,
+        )
+
+
+def _semantic_role_node_id(component_id: str, role_index: int) -> str:
+    return f"{component_id}__{PYTHAGOREAN_ROLE_ORDER[role_index].value}"
+
+
+def _serialized_semantic_prefix(
+    scene: SceneState,
+    *,
+    component_id: str,
+    role_count: int,
+) -> tuple[dict[str, object], ...]:
+    nodes_by_id = {node.id: node for node in scene.nodes}
+    serialized: list[dict[str, object]] = []
+    for role_index in range(role_count):
+        node = nodes_by_id.get(_semantic_role_node_id(component_id, role_index))
+        if node is None:
+            raise _SemanticInvariantError(
+                "semantic_base: a revealed role is absent from the low-level scene"
+            )
+        serialized.append(node.model_dump(mode="json", by_alias=True))
+    return tuple(serialized)
+
+
+def _validate_semantic_base(
+    scene: SceneState,
+    semantic_scene: SemanticSceneState,
+) -> None:
+    if scene.revision != semantic_scene.revision:
+        raise _SemanticBaseError("semantic_base: low-level and semantic revisions differ")
+    has_committed_semantic_atoms = any(
+        component.revealed_roles for component in semantic_scene.components
+    )
+    has_certificate_head = semantic_scene.certificate_head_sha256 is not None
+    if has_committed_semantic_atoms != has_certificate_head:
+        raise _SemanticBaseError(
+            "semantic_base: committed roles and certificate chain head must agree"
+        )
+
+    node_ids = {node.id for node in scene.nodes}
+    for component in semantic_scene.components:
+        role_count = len(component.revealed_roles)
+        for role_index in range(role_count, len(PYTHAGOREAN_ROLE_ORDER)):
+            if _semantic_role_node_id(component.id, role_index) in node_ids:
+                raise _SemanticBaseError(
+                    "semantic_base: an unrevealed role already exists in the low-level scene"
+                )
+        if role_count == 0:
+            continue
+        try:
+            serialized = _serialized_semantic_prefix(
+                scene,
+                component_id=component.id,
+                role_count=role_count,
+            )
+            verify_pythagorean_realization(component.id, serialized)
+        except (_SemanticInvariantError, SemanticVerificationError):
+            raise _SemanticBaseError(
+                "semantic_base: the low-level realization failed verification"
+            ) from None
+
+
+def _preflight_semantic_intent(
+    state: _SemanticGenerationState,
+    beat: TeachingBeatDraft,
+) -> None:
+    """Reject model-fixable intent before invoking the deterministic compiler."""
+
+    component_id = beat.directive.id
+    target_roles = roles_through(beat.directive.reveal_through)
+    current = next(
+        (
+            component
+            for component in state.semantic_scene.components
+            if component.id == component_id
+        ),
+        None,
+    )
+    current_roles = () if current is None else current.revealed_roles
+    if current_roles != target_roles[: len(current_roles)]:
+        raise _SemanticRepairableError(
+            "semantic_intent: revealThrough cannot move a component backward"
+        )
+
+    missing_roles = target_roles[len(current_roles) :]
+    if not missing_roles:
+        raise _SemanticRepairableError("semantic_intent: teaching beat made no semantic progress")
+    if current is None and len(state.semantic_scene.components) >= MAX_SEMANTIC_COMPONENTS:
+        raise _SemanticRepairableError(
+            "semantic_intent: semantic component capacity was insufficient"
+        )
+
+    atom_count = len(missing_roles)
+    if atom_count > state.remaining_atom_budget:
+        raise _SemanticRepairableError("semantic_intent: atom batch exceeded the remaining budget")
+    if atom_count > MAX_SAFE_SEQUENCE - state.scene.revision:
+        raise _SemanticRepairableError(
+            "semantic_intent: low-level revision budget was insufficient"
+        )
+    if atom_count > MAX_SAFE_SEQUENCE - state.semantic_scene.revision:
+        raise _SemanticRepairableError("semantic_intent: semantic revision budget was insufficient")
+    if atom_count > MAX_SCENE_NODES - len(state.scene.nodes):
+        raise _SemanticRepairableError("semantic_intent: low-level node budget was insufficient")
+
+    existing_ids = {node.id for node in state.scene.nodes}
+    missing_node_ids = {
+        _semantic_role_node_id(component_id, role_index)
+        for role_index in range(len(current_roles), len(target_roles))
+    }
+    if existing_ids.intersection(missing_node_ids):
+        raise _SemanticRepairableError(
+            "semantic_intent: a missing-role node ID collided with the accepted scene"
+        )
+
+
+def _advance_semantic_scene_for_atom(
+    scene: SemanticSceneState,
+    atom: CompiledVisualAtom,
+) -> SemanticSceneState:
+    certificate = atom.certificate
+    if certificate is None:
+        raise _SemanticInvariantError("semantic_batch: every atom requires a certificate")
+    body = certificate.body
+    component = PythagoreanAreaIdentityState(
+        id=atom.component_id,
+        revealed_roles=PYTHAGOREAN_ROLE_ORDER[: body.atom_ordinal],
+    )
+    if any(existing.id == atom.component_id for existing in scene.components):
+        components = tuple(
+            component if existing.id == atom.component_id else existing
+            for existing in scene.components
+        )
+    else:
+        components = (*scene.components, component)
+    return SemanticSceneState(
+        revision=scene.revision + 1,
+        components=components,
+        certificate_head_sha256=certificate.certificate_sha256,
+    )
+
+
+def _validate_semantic_certificate_transition(
+    certificate: CompilerCertificateV1,
+    base_scene: SemanticSceneState,
+    result_scene: SemanticSceneState,
+) -> None:
+    """Independently bind one certificate to the exact candidate semantic transition."""
+
+    body = certificate.body
+    if not digest_matches(
+        certificate.certificate_sha256,
+        compiler_certificate_sha256(body),
+    ):
+        raise _SemanticInvariantError("semantic_batch: certificate digest did not match its body")
+    if body.previous_certificate_sha256 != base_scene.certificate_head_sha256:
+        raise _SemanticInvariantError(
+            "semantic_batch: certificate did not extend the candidate chain head"
+        )
+    if body.base_semantic_revision != base_scene.revision:
+        raise _SemanticInvariantError(
+            "semantic_batch: certificate base revision did not match the candidate scene"
+        )
+    if body.result_semantic_revision != result_scene.revision:
+        raise _SemanticInvariantError(
+            "semantic_batch: certificate result revision did not match the candidate scene"
+        )
+    if not digest_matches(body.base_scene_sha256, semantic_scene_sha256(base_scene)):
+        raise _SemanticInvariantError(
+            "semantic_batch: certificate base hash did not match the candidate scene"
+        )
+    if not digest_matches(body.result_scene_sha256, semantic_scene_sha256(result_scene)):
+        raise _SemanticInvariantError(
+            "semantic_batch: certificate result hash did not match the candidate scene"
+        )
+    if result_scene.certificate_head_sha256 != certificate.certificate_sha256:
+        raise _SemanticInvariantError(
+            "semantic_batch: result scene did not advance to the certificate chain head"
+        )
+
+
+def _prepare_semantic_batch(
+    state: _SemanticGenerationState,
+    compiled: CompiledTeachingBeat,
+    *,
+    attempt: int,
+) -> _PreparedSemanticBatch:
+    if compiled.base_scene != state.semantic_scene:
+        raise _SemanticInvariantError("semantic_batch: compiler base did not match accepted state")
+    if not compiled.atoms:
+        raise _SemanticInvariantError("semantic_batch: compiler omitted preflighted atoms")
+    try:
+        atoms = tuple(
+            CompiledVisualAtom.model_validate(
+                atom.model_dump(mode="json", by_alias=True),
+            )
+            for atom in compiled.atoms
+        )
+    except (AttributeError, TypeError, ValidationError):
+        raise _SemanticInvariantError(
+            "semantic_batch: compiler emitted an invalid visual atom"
+        ) from None
+    if any(atom.certificate is None for atom in atoms):
+        raise _SemanticInvariantError("semantic_batch: every atom requires a certificate")
+
+    atom_count = len(atoms)
+    if atom_count > state.remaining_atom_budget:
+        raise _SemanticInvariantError("semantic_batch: compiler bypassed the atom budget")
+    if atom_count > MAX_SAFE_SEQUENCE - state.scene.revision:
+        raise _SemanticInvariantError("semantic_batch: compiler bypassed the revision budget")
+    if atom_count > MAX_SAFE_SEQUENCE - state.semantic_scene.revision:
+        raise _SemanticInvariantError("semantic_batch: compiler bypassed the semantic budget")
+    if atom_count > MAX_SCENE_NODES - len(state.scene.nodes):
+        raise _SemanticInvariantError("semantic_batch: compiler bypassed the node budget")
+
+    patch_ids = tuple(atom.patch.patch_id for atom in atoms)
+    if len(patch_ids) != len(set(patch_ids)):
+        raise _SemanticInvariantError("semantic_batch: compiled patch IDs were not unique")
+    target_ids = tuple(atom.patch.operations[0].target_id for atom in atoms)
+    if len(target_ids) != len(set(target_ids)):
+        raise _SemanticInvariantError("semantic_batch: compiled node IDs were not unique")
+    existing_ids = {node.id for node in state.scene.nodes}
+    if existing_ids.intersection(target_ids):
+        raise _SemanticInvariantError(
+            "semantic_batch: compiler bypassed missing-role collision admission"
+        )
+
+    candidate_scene = state.scene
+    candidate_semantic_scene = state.semantic_scene
+    prepared_atoms: list[_PreparedSemanticAtom] = []
+    for offset, atom in enumerate(atoms, start=1):
+        try:
+            next_scene = _apply_patch(candidate_scene, atom.patch)
+        except _ScenePatchApplicationError:
+            raise _SemanticInvariantError(
+                "semantic_batch: a compiled patch could not be applied"
+            ) from None
+
+        next_semantic_scene = _advance_semantic_scene_for_atom(
+            candidate_semantic_scene,
+            atom,
+        )
+        certificate = atom.certificate
+        assert certificate is not None
+        _validate_semantic_certificate_transition(
+            certificate,
+            candidate_semantic_scene,
+            next_semantic_scene,
+        )
+        try:
+            realized_receipts = verify_pythagorean_realization(
+                atom.component_id,
+                _serialized_semantic_prefix(
+                    next_scene,
+                    component_id=atom.component_id,
+                    role_count=certificate.body.atom_ordinal,
+                ),
+            )
+        except SemanticVerificationError:
+            raise _SemanticInvariantError(
+                "semantic_batch: a realized semantic prefix failed verification"
+            ) from None
+        if realized_receipts[-1] != atom.receipt:
+            raise _SemanticInvariantError(
+                "semantic_batch: verifier receipt changed after patch application"
+            )
+
+        event_candidate = SemanticScenePatchEvent(
+            generation=state.generation,
+            attempt=attempt,
+            sequence=state.atom_count + offset,
+            base_revision=candidate_scene.revision,
+            result_revision=next_scene.revision,
+            patch=atom.patch,
+            semantic=SemanticAtomMetadata(
+                beat=compiled.beat,
+                atom_id=atom.atom_id,
+                component_id=atom.component_id,
+                role=atom.role,
+                atom_ordinal=certificate.body.atom_ordinal,
+                semantic_base_revision=candidate_semantic_scene.revision,
+                semantic_result_revision=next_semantic_scene.revision,
+                receipt=atom.receipt,
+                certificate=certificate,
+            ),
+        )
+        try:
+            event = SemanticScenePatchEvent.model_validate(
+                event_candidate.model_dump(mode="json", by_alias=True),
+            )
+        except ValidationError:
+            raise _SemanticInvariantError(
+                "semantic_batch: compiled event failed independent contract validation"
+            ) from None
+        try:
+            encode_semantic_scene_stream_event(event)
+        except SceneStreamWireError:
+            raise _SemanticInvariantError(
+                "semantic_batch: a compiled event exceeded the browser wire budget"
+            ) from None
+        prepared_atoms.append(
+            _PreparedSemanticAtom(
+                event=event,
+                scene=next_scene,
+                semantic_scene=next_semantic_scene,
+            )
+        )
+        candidate_scene = next_scene
+        candidate_semantic_scene = next_semantic_scene
+
+    if candidate_semantic_scene != compiled.result_scene:
+        raise _SemanticInvariantError(
+            "semantic_batch: compiled result state did not match preflight"
+        )
+    if candidate_scene.revision != candidate_semantic_scene.revision:
+        raise _SemanticInvariantError("semantic_batch: resulting revisions diverged")
+    return _PreparedSemanticBatch(atoms=tuple(prepared_atoms))
 
 
 async def _next_before_deadline(
@@ -344,6 +796,100 @@ class SceneAuthoringService:
                 upstream,
                 timeout_seconds=self._cleanup_timeout_seconds,
             )
+
+    async def _prepare_semantic_attempt(
+        self,
+        *,
+        client: SceneModelClient,
+        state: _SemanticGenerationState,
+        attempt: int,
+        messages: list[dict[str, str]],
+        outcome: _SemanticAttemptOutcome,
+    ) -> None:
+        parser = TeachingBeatStreamParser()
+        upstream: object | None = None
+        beat: TeachingBeatDraft | None = None
+
+        try:
+            upstream = client.stream(
+                messages,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+            if not hasattr(upstream, "__anext__"):
+                raise TypeError("provider did not return an async iterator")
+            typed_upstream = cast(AsyncIterator[str | bytes], upstream)
+            deadline = asyncio.get_running_loop().time() + self._timeout_seconds
+
+            while beat is None:
+                try:
+                    chunk = await _next_before_deadline(typed_upstream, deadline=deadline)
+                except StopAsyncIteration:
+                    finished_beats = parser.finish()
+                    if len(finished_beats) > 1:
+                        outcome.invalid_reason = (
+                            "semantic_stream: an attempt may contain only one teaching beat"
+                        )
+                        break
+                    beat = finished_beats[0] if finished_beats else None
+                    break
+
+                for parsed_beat in _feed_semantic_chunk(parser, chunk):
+                    beat = parsed_beat
+                    break
+        except TeachingBeatStreamError as exc:
+            outcome.invalid_reason = exc.repair_hint
+        except TimeoutError:
+            outcome.provider_failure_code = "provider_timeout"
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            outcome.provider_failure_code = "provider_error"
+        finally:
+            if not parser.closed:
+                parser.abort()
+            await _close_upstream(
+                upstream,
+                timeout_seconds=self._cleanup_timeout_seconds,
+            )
+
+        if outcome.invalid_reason is not None or outcome.provider_failure_code is not None:
+            return
+        if beat is None:
+            outcome.invalid_reason = "semantic_stream: model stream ended without a beat"
+            return
+
+        try:
+            _preflight_semantic_intent(state, beat)
+            compiled_candidate = compile_teaching_beat(beat, state.semantic_scene)
+            if compiled_candidate.beat != beat:
+                raise _SemanticInvariantError(
+                    "semantic_batch: compiler changed the parsed teaching beat"
+                )
+            try:
+                compiled = CompiledTeachingBeat.model_validate(
+                    compiled_candidate.model_dump(mode="json", by_alias=True),
+                )
+            except (AttributeError, TypeError, ValidationError):
+                raise _SemanticInvariantError(
+                    "semantic_batch: compiler result failed independent validation"
+                ) from None
+            outcome.batch = _prepare_semantic_batch(
+                state,
+                compiled,
+                attempt=attempt,
+            )
+        except _SemanticRepairableError as exc:
+            outcome.invalid_reason = str(exc)
+        except (
+            _SemanticInvariantError,
+            SemanticCompilationError,
+            SemanticVerificationError,
+            ValidationError,
+        ):
+            outcome.integrity_failure = True
+        except Exception:
+            outcome.integrity_failure = True
 
     async def stream_events(self, request: LiveSceneRequest) -> AsyncIterator[SceneStreamEvent]:
         """Yield one bounded generation, including at most one model repair attempt."""
@@ -486,6 +1032,204 @@ class SceneAuthoringService:
                     last_accepted_revision=state.scene.revision,
                     retryable=True,
                 )
+                return
+        finally:
+            if owns_client:
+                await _close_upstream(
+                    client,
+                    timeout_seconds=self._cleanup_timeout_seconds,
+                )
+
+    async def stream_semantic_events(
+        self,
+        request: SemanticLiveSceneRequest,
+    ) -> AsyncIterator[SemanticSceneStreamEvent]:
+        """Yield one all-or-nothing compiler-preflighted semantic teaching beat."""
+
+        if not isinstance(request, SemanticLiveSceneRequest):
+            raise TypeError("request must be a SemanticLiveSceneRequest")
+
+        started_at = self._clock()
+        repair_reason: str | None = None
+        atom_limit = min(
+            MAX_COMPILED_ATOMS,
+            MAX_SAFE_SEQUENCE - request.base_scene.revision,
+            MAX_SAFE_SEQUENCE - request.base_semantic_scene.revision,
+            MAX_SCENE_NODES - len(request.base_scene.nodes),
+        )
+        state = _SemanticGenerationState(
+            generation=request.generation,
+            scene=request.base_scene,
+            semantic_scene=request.base_semantic_scene,
+            atom_limit=atom_limit,
+            started_at=started_at,
+            clock=self._clock,
+        )
+
+        started = SceneStreamStartedEvent(
+            generation=request.generation,
+            attempt=1,
+            base_revision=state.scene.revision,
+        )
+        encode_semantic_scene_stream_event(started)
+        yield started
+
+        if atom_limit <= 0:
+            revision_limited = (
+                request.base_scene.revision >= MAX_SAFE_SEQUENCE
+                or request.base_semantic_scene.revision >= MAX_SAFE_SEQUENCE
+            )
+            failed = SceneStreamFailedEvent(
+                generation=request.generation,
+                attempt=1,
+                code="revision_limit" if revision_limited else "semantic_capacity_limit",
+                message=(
+                    _REVISION_LIMIT_MESSAGE if revision_limited else _SEMANTIC_CAPACITY_MESSAGE
+                ),
+                last_accepted_revision=state.scene.revision,
+                retryable=False,
+            )
+            encode_semantic_scene_stream_event(failed)
+            yield failed
+            return
+
+        try:
+            _validate_semantic_base(state.scene, state.semantic_scene)
+        except _SemanticBaseError:
+            failed = SceneStreamFailedEvent(
+                generation=request.generation,
+                attempt=1,
+                code="semantic_base_mismatch",
+                message=_SEMANTIC_BASE_MISMATCH_MESSAGE,
+                last_accepted_revision=state.scene.revision,
+                retryable=False,
+            )
+            encode_semantic_scene_stream_event(failed)
+            yield failed
+            return
+
+        client: SceneModelClient | None = None
+        owns_client = self._client is None
+        try:
+            try:
+                client = self._resolve_client()
+            except Exception:
+                failed = SceneStreamFailedEvent(
+                    generation=request.generation,
+                    attempt=1,
+                    code="provider_error",
+                    message=_PROVIDER_ERROR_MESSAGE,
+                    last_accepted_revision=state.scene.revision,
+                    retryable=True,
+                )
+                encode_semantic_scene_stream_event(failed)
+                yield failed
+                return
+
+            for attempt in (1, 2):
+                current_semantic_scene_json = _semantic_scene_json(state.semantic_scene)
+                repair_context: dict[str, str] | None = None
+                if attempt == 2:
+                    assert repair_reason is not None
+                    repair_context = {
+                        "error": repair_reason,
+                        "last_accepted_semantic_scene_json": current_semantic_scene_json,
+                    }
+
+                try:
+                    messages = build_semantic_scene_messages(
+                        request.prompt,
+                        current_semantic_scene_json,
+                        state.remaining_atom_budget,
+                        repair_context=repair_context,
+                    )
+                except (TypeError, ValueError):
+                    failed = SceneStreamFailedEvent(
+                        generation=request.generation,
+                        attempt=attempt,
+                        code="context_too_large",
+                        message=_CONTEXT_LIMIT_MESSAGE,
+                        last_accepted_revision=state.scene.revision,
+                        retryable=False,
+                    )
+                    encode_semantic_scene_stream_event(failed)
+                    yield failed
+                    return
+
+                outcome = _SemanticAttemptOutcome()
+                await self._prepare_semantic_attempt(
+                    client=client,
+                    state=state,
+                    attempt=attempt,
+                    messages=messages,
+                    outcome=outcome,
+                )
+
+                if outcome.integrity_failure:
+                    failed = SceneStreamFailedEvent(
+                        generation=request.generation,
+                        attempt=attempt,
+                        code="semantic_integrity_error",
+                        message=_SEMANTIC_INTEGRITY_MESSAGE,
+                        last_accepted_revision=state.scene.revision,
+                        retryable=False,
+                    )
+                    encode_semantic_scene_stream_event(failed)
+                    yield failed
+                    return
+
+                if outcome.provider_failure_code is not None:
+                    message = (
+                        _PROVIDER_TIMEOUT_MESSAGE
+                        if outcome.provider_failure_code == "provider_timeout"
+                        else _PROVIDER_ERROR_MESSAGE
+                    )
+                    failed = SceneStreamFailedEvent(
+                        generation=request.generation,
+                        attempt=attempt,
+                        code=outcome.provider_failure_code,
+                        message=message,
+                        last_accepted_revision=state.scene.revision,
+                        retryable=True,
+                    )
+                    encode_semantic_scene_stream_event(failed)
+                    yield failed
+                    return
+
+                if outcome.batch is not None:
+                    for prepared_atom in outcome.batch.atoms:
+                        state.commit_atom(prepared_atom)
+                        yield prepared_atom.event
+                    completed = state.completed_event(repaired=attempt == 2)
+                    encode_semantic_scene_stream_event(completed)
+                    yield completed
+                    return
+
+                repair_reason = outcome.invalid_reason or (
+                    "semantic_stream: model stream ended without a beat"
+                )
+                if attempt == 1:
+                    repairing = SceneStreamRepairingEvent(
+                        generation=request.generation,
+                        from_attempt=1,
+                        to_attempt=2,
+                        last_accepted_revision=state.scene.revision,
+                        message=_REPAIR_MESSAGE,
+                    )
+                    encode_semantic_scene_stream_event(repairing)
+                    yield repairing
+                    continue
+
+                failed = SceneStreamFailedEvent(
+                    generation=request.generation,
+                    attempt=2,
+                    code="invalid_scene_stream",
+                    message=_INVALID_STREAM_MESSAGE,
+                    last_accepted_revision=state.scene.revision,
+                    retryable=True,
+                )
+                encode_semantic_scene_stream_event(failed)
+                yield failed
                 return
         finally:
             if owns_client:
