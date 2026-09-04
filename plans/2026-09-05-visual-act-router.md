@@ -19,7 +19,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:09 IST: Closed adversarial review findings: start decisions no longer repeat the sole component kind, atom capacity stays server-side, stage semantics and continuation precedence are explicit, fake JSON placeholders are gone, and parser repair hints are record-specific. All 211 focused semantic tests pass with scoped Ruff checks clean.
 - [x] 2026-09-05 03:14 IST: Added an isolated provider-neutral routing engine with temperature zero, an absolute per-attempt deadline, first-valid-decision early close, one sanitized repair, borrowed-client ownership, and fixed public failures. All 23 focused engine tests pass without provider access.
 - [x] 2026-09-05 03:28 IST: Added and adversarially reviewed a 10-case router evaluator with per-dispatch pacing, an exact 20-attempt ledger, strict category and warm-latency gates, hashed/private evidence, and no provider construction in dry-run. The pinned worst case is 105,772 input-bound plus 40,960 output-bound tokens, or USD 0.040441800; 267 focused tests pass and no provider was called.
-- [ ] Obtain an explicit spend boundary, run the smaller Azure decision corpus, and record the gate result.
+- [x] 2026-09-05 03:31 IST: Ran the approved Azure corpus from clean source `b66c9dc` under a USD 0.05 hard cap. Gate 1.2 passed: 10/10 routing expectations, 8/8 supported-vocabulary cases, 2/2 unsupported abstentions, 1/1 no-progress abstention, and 2/2 exact resumes; warm median was 1,309.380 ms and p95 was 2,704.701 ms. Eleven of twenty possible calls were reserved, with one successful repair and a dispatched upper bound of USD 0.021856950.
 - [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
 
 ## Surprises & Discoveries
@@ -33,6 +33,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - A provider may place a valid first decision and trailing chatter in the same chunk. Splitting only at LF boundaries lets the engine resolve and close after that first decision, avoiding both the prior trailing-frame failure mode and extra stream latency.
 - The first evaluator draft reused several phrases from the router's own stage table. Those cases could reward lexical copying rather than semantic routing, so the final corpus includes an indirect prompt for every stage, an implicit continuation, and a completed-prefix `no_forward_progress` case.
 - Quota pacing must happen at every actual provider dispatch, not once per evaluation case. Otherwise an engine-owned repair could silently exceed the ten-requests-per-minute deployment limit even though the dollar ledger remained valid.
+- The completed-prefix request needed the one allowed repair before returning `no_forward_progress`; the other nine cases passed on their first attempt. The repaired result is correct, but it identifies completed-state abstention as the weakest prompt edge in this sample.
 
 ## Decision Log
 
@@ -47,10 +48,11 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Keep the paid corpus at ten cases and twenty possible dispatches: five fresh starts, two unrelated unsupported intents, two exact resumes, and one completed-prefix no-progress request. A qualifying run needs all eight supported-vocabulary expectations, both unsupported abstentions, the no-progress abstention, and both resume-ID checks to pass.
 - 2026-09-05, Codex: Treat warm routing latency as part of Gate 1.2, with median at most 1,500 ms and p95 at most 3,000 ms. Report the first cold request separately so initialization does not distort the warm gate.
 - 2026-09-05, Codex: Reuse the proven semantic probe's pricing, integer reservation ledger, hashing, git evidence, and atomic private writer. Parameterize only its total-attempt ceiling instead of extracting a broad shared framework.
+- 2026-09-05, Codex: Gate 1.2 passed and unlocks the narrow compiler/runtime adapter. The paid result does not itself qualify compiler output, SSE behavior, browser rendering, or interruption handling; those remain the next gate.
 
 ## Outcomes & Retrospective
 
-Work is in progress. The existing verified visual runtime remains unchanged and pushed at `9460a8e`. This section will record the router's deterministic and live qualification results, the exact commits shipped, and whether integration was unlocked.
+The isolated router gate passed against Azure `gpt-oss-120b`. The private report at `var/live-scene/evaluations/20260904T215957.626451Z/report.json` is mode `0600`, records clean source commit `b66c9dc307964cb77c8bab0af8068baea95e1e3f`, and has evidence scope `provider_to_visual_act_parser_and_resolver`. It contains no raw prompts or provider output. Its USD 0.021856950 figure is a conservative reservation upper bound, not actual billed usage. Compiler/runtime integration is now unlocked but not yet qualified.
 
 ## Context and Orientation
 
