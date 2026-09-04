@@ -5,7 +5,11 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from murmur.live_scene import SceneAdmissionError, SceneAuthoringAdmission
+from murmur.live_scene import (
+    SceneAdmissionError,
+    SceneAuthoringAdmission,
+    SceneProviderDispatchAdmission,
+)
 
 
 @pytest.mark.asyncio
@@ -75,3 +79,30 @@ async def test_cancelled_lease_close_can_be_retried_without_leaking_capacity() -
     await asyncio.gather(lease.aclose(), lease.aclose())
     replacement = await admission.acquire("user-a")
     await replacement.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_dispatch_admission_counts_every_call_globally() -> None:
+    now = 100.0
+    admission = SceneProviderDispatchAdmission(
+        requests_per_minute=2,
+        clock=lambda: now,
+    )
+
+    await asyncio.gather(admission.acquire(), admission.acquire())
+    with pytest.raises(SceneAdmissionError, match="capacity is busy") as limited:
+        await admission.acquire()
+    assert limited.value.code == "provider_rate_limited"
+
+    now += 60.0
+    await admission.acquire()
+
+
+@pytest.mark.parametrize("requests_per_minute", [0, -1, True, 1.5])
+def test_provider_dispatch_admission_rejects_invalid_limits(
+    requests_per_minute: object,
+) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        SceneProviderDispatchAdmission(
+            requests_per_minute=requests_per_minute,  # type: ignore[arg-type]
+        )

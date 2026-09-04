@@ -263,6 +263,46 @@ def test_start_rejects_a_second_component_that_would_overlap_existing_geometry()
     assert captured.value.code is VisualActRoutingErrorCode.COMPONENT_ALREADY_EXISTS
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _start(),
+        _continue(component_id="areas"),
+        _continue(component_id="areas-alt"),
+    ],
+)
+def test_multiple_component_scene_rejects_every_non_abstain_route(
+    payload: dict[str, object],
+) -> None:
+    scene = SemanticSceneState(
+        revision=0,
+        components=(
+            PythagoreanAreaIdentityState(id="areas"),
+            PythagoreanAreaIdentityState(id="areas-alt"),
+        ),
+    )
+
+    with pytest.raises(VisualActRoutingError) as captured:
+        resolve_visual_act(VISUAL_ACT_DECISION_ADAPTER.validate_python(payload), scene)
+
+    assert captured.value.code is VisualActRoutingErrorCode.MULTIPLE_COMPONENTS_UNSUPPORTED
+
+
+def test_multiple_component_scene_allows_abstention_without_mutation() -> None:
+    scene = SemanticSceneState(
+        revision=0,
+        components=(
+            PythagoreanAreaIdentityState(id="areas"),
+            PythagoreanAreaIdentityState(id="areas-alt"),
+        ),
+    )
+    before = deepcopy(scene)
+    decision = VISUAL_ACT_DECISION_ADAPTER.validate_python(_abstain())
+
+    assert resolve_visual_act(decision, scene) is None
+    assert scene == before
+
+
 def test_resolver_rejects_untyped_inputs() -> None:
     with pytest.raises(TypeError, match="decision"):
         resolve_visual_act("start_visual", SemanticSceneState(revision=0))  # type: ignore[arg-type]

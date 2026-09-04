@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from murmur.live_scene import service as service_module
+from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import (
     MAX_SAFE_SEQUENCE,
     MAX_SCENE_NODES,
@@ -900,6 +901,34 @@ async def test_provider_error_is_friendly_and_closes_the_exact_stream() -> None:
     assert failure.code == "provider_error"
     assert secret not in failure.model_dump_json(by_alias=True)
     assert client.streams[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_provider_dispatch_limit_is_classified_before_legacy_semantic_call() -> None:
+    client = _FakeClient([[]])
+
+    async def reject() -> None:
+        raise SceneAdmissionError("provider_rate_limited", "private limiter state")
+
+    events = await _collect(
+        service_module.SceneAuthoringService(
+            client,
+            before_provider_dispatch=reject,
+        )
+    )
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "scene_stream_failed",
+    ]
+    failure = events[-1]
+    assert isinstance(failure, SceneStreamFailedEvent)
+    assert (failure.code, failure.attempt, failure.retryable) == (
+        "provider_rate_limited",
+        1,
+        True,
+    )
+    assert client.calls == []
 
 
 @pytest.mark.asyncio

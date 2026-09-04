@@ -23,11 +23,16 @@ from murmur.live_scene.contracts import (
     SceneStreamStartedEvent,
 )
 from murmur.live_scene.semantic_compiler import compile_teaching_beat
-from murmur.live_scene.semantic_contracts import SemanticSceneState, TeachingBeatDraft
+from murmur.live_scene.semantic_contracts import (
+    SemanticSceneState,
+    TeachingBeatDraft,
+    VisualActAbstainReason,
+)
 from murmur.live_scene.semantic_service_contracts import (
     SemanticAtomMetadata,
     SemanticLiveSceneRequest,
     SemanticScenePatchEvent,
+    SemanticSceneStreamDeclinedEvent,
     SemanticSceneStreamEvent,
 )
 from pydantic import ValidationError
@@ -97,12 +102,29 @@ def _semantic_events() -> tuple[SemanticSceneStreamEvent, ...]:
     return started, patch, completed
 
 
+def _semantic_declined_events() -> tuple[SemanticSceneStreamEvent, ...]:
+    return (
+        SceneStreamStartedEvent(
+            generation=7,
+            attempt=1,
+            base_revision=0,
+        ),
+        SemanticSceneStreamDeclinedEvent(
+            generation=7,
+            attempt=1,
+            final_revision=0,
+            reason_code=VisualActAbstainReason.UNSUPPORTED_INTENT,
+            message="No supported visual change is available.",
+        ),
+    )
+
+
 class FakeSemanticSceneAuthoringService:
     def __init__(self, events: tuple[SemanticSceneStreamEvent, ...] = ()) -> None:
         self.events = events
         self.requests: list[SemanticLiveSceneRequest] = []
 
-    async def stream_semantic_events(
+    async def stream_routed_semantic_events(
         self,
         request: SemanticLiveSceneRequest,
     ) -> AsyncIterator[SemanticSceneStreamEvent]:
@@ -342,6 +364,41 @@ def test_semantic_lab_streams_strict_metadata_and_releases_admission(
     ]
     assert len(service.requests) == 2
     assert service.requests[0].model_dump(mode="json", by_alias=True) == _request_body()
+
+
+def test_semantic_lab_streams_decline_without_mutating_revision(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSemanticSceneAuthoringService(_semantic_declined_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/lab/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert _sse_payloads(response.text) == [
+        {
+            "type": "scene_stream_started",
+            "generation": 7,
+            "attempt": 1,
+            "baseRevision": 0,
+        },
+        {
+            "type": "semantic_scene_stream_declined",
+            "generation": 7,
+            "attempt": 1,
+            "finalRevision": 0,
+            "reasonCode": "unsupported_intent",
+            "message": "No supported visual change is available.",
+        },
+    ]
+    assert admission.user_ids == [_DEVELOPMENT_SCENE_LAB_IDENTITY]
+    assert len(service.requests) == 1
 
 
 def test_semantic_lab_validates_lockstep_request_before_paid_admission(

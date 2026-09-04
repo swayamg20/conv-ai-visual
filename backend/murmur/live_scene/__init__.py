@@ -4,6 +4,7 @@ from murmur.live_scene.admission import (
     SceneAdmissionError,
     SceneAdmissionLease,
     SceneAuthoringAdmission,
+    SceneProviderDispatchAdmission,
 )
 from murmur.live_scene.contracts import (
     LIVE_SCENE_BOARD_HEIGHT,
@@ -97,6 +98,7 @@ __all__ = [
     "ScenePatchStreamErrorCode",
     "ScenePatchStreamParser",
     "ScenePresentation",
+    "SceneProviderDispatchAdmission",
     "SceneState",
     "SceneStreamCompletedEvent",
     "SceneStreamEvent",

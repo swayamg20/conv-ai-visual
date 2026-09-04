@@ -107,8 +107,46 @@ class SceneAuthoringAdmission:
             self._active_total -= 1
 
 
+class SceneProviderDispatchAdmission:
+    """Process-local global ceiling checked immediately before each provider call."""
+
+    def __init__(
+        self,
+        *,
+        requests_per_minute: int = 10,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if (
+            isinstance(requests_per_minute, bool)
+            or not isinstance(requests_per_minute, int)
+            or requests_per_minute <= 0
+        ):
+            raise ValueError("requests_per_minute must be a positive integer")
+        if not callable(clock):
+            raise TypeError("clock must be callable")
+        self._requests_per_minute = requests_per_minute
+        self._clock = clock
+        self._lock = asyncio.Lock()
+        self._dispatches: deque[float] = deque()
+
+    async def acquire(self) -> None:
+        """Reserve one dispatch or reject without queueing hidden provider work."""
+
+        async with self._lock:
+            now = self._clock()
+            while self._dispatches and now - self._dispatches[0] >= 60.0:
+                self._dispatches.popleft()
+            if len(self._dispatches) >= self._requests_per_minute:
+                raise SceneAdmissionError(
+                    "provider_rate_limited",
+                    "Visual model capacity is busy. Please try again shortly.",
+                )
+            self._dispatches.append(now)
+
+
 __all__ = [
     "SceneAdmissionError",
     "SceneAdmissionLease",
     "SceneAuthoringAdmission",
+    "SceneProviderDispatchAdmission",
 ]

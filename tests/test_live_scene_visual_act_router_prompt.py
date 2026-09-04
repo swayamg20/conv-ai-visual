@@ -62,6 +62,24 @@ def test_stage_guidance_is_symmetric_and_selects_a_terminal_boundary() -> None:
     assert "Start with the right triangle" not in system
 
 
+def test_multiple_component_scene_requires_abstention_even_with_an_explicit_reference() -> None:
+    system, _ = _contents(
+        build_visual_act_decision_messages("Continue areas to the identity", EMPTY_SEMANTIC_SCENE)
+    )
+
+    multi_component_rule = next(
+        line
+        for line in system.splitlines()
+        if line.startswith("- If the accepted scene contains multiple components")
+    )
+    assert multi_component_rule == (
+        '- If the accepted scene contains multiple components, abstain with "unsupported_intent"; '
+        "never emit start_visual or continue_visual, even when the request explicitly identifies "
+        "one component."
+    )
+    assert "make the reference ambiguous" not in system
+
+
 def test_field_rules_have_no_model_owned_start_metadata_or_copyable_placeholders() -> None:
     system, _ = _contents(
         build_visual_act_decision_messages("Make this visual", EMPTY_SEMANTIC_SCENE)

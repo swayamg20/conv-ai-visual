@@ -24,6 +24,7 @@ class VisualActRoutingErrorCode(StrEnum):
 
     COMPONENT_ALREADY_EXISTS = "component_already_exists"
     COMPONENT_NOT_FOUND = "component_not_found"
+    MULTIPLE_COMPONENTS_UNSUPPORTED = "multiple_components_unsupported"
     NON_FORWARD_TARGET = "non_forward_target"
 
 
@@ -57,6 +58,8 @@ def resolve_visual_act(
         return None
     if not isinstance(decision, (StartVisualDecision, ContinueVisualDecision)):
         raise TypeError("decision must be a VisualActDecision")
+    if len(scene.components) > 1:
+        raise VisualActRoutingError(VisualActRoutingErrorCode.MULTIPLE_COMPONENTS_UNSUPPORTED)
 
     if isinstance(decision, StartVisualDecision):
         if scene.components:

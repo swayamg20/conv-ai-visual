@@ -16,7 +16,11 @@ from murmur.canvas.state import register_canvas_tool
 from murmur.chat import ChatService
 from murmur.core import MurmurError
 from murmur.core.config import config
-from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
+from murmur.live_scene import (
+    SceneAuthoringAdmission,
+    SceneAuthoringService,
+    SceneProviderDispatchAdmission,
+)
 from murmur.live_scene.provider import scene_model_client_options
 from murmur.llm.factory import create_llm_client
 from murmur.persistence import init_db
@@ -67,11 +71,15 @@ def create_application(
                 **scene_model_client_options(scene_provider, scene_model),
             )
 
+        scene_provider_admission = SceneProviderDispatchAdmission(
+            requests_per_minute=config.MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE,
+        )
         scene_authoring_service = SceneAuthoringService(
             client_factory=create_scene_client,
             temperature=config.MURMUR_SCENE_LLM_TEMPERATURE,
             max_tokens=config.MURMUR_SCENE_LLM_MAX_TOKENS,
             timeout_seconds=config.MURMUR_SCENE_LLM_TIMEOUT_SECONDS,
+            before_provider_dispatch=scene_provider_admission.acquire,
         )
     scene_authoring_admission = scene_authoring_admission or SceneAuthoringAdmission(
         global_limit=config.MURMUR_SCENE_GLOBAL_CONCURRENCY,

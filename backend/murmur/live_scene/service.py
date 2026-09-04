@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from collections.abc import AsyncIterator, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
@@ -16,6 +16,7 @@ from murmur.core.async_cleanup import (
     DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
     close_async_resource,
 )
+from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import (
     MAX_ACCEPTED_PATCHES,
     MAX_SAFE_SEQUENCE,
@@ -40,12 +41,14 @@ from murmur.live_scene.semantic_compiler import (
 from murmur.live_scene.semantic_contracts import (
     MAX_SEMANTIC_COMPONENTS,
     PYTHAGOREAN_ROLE_ORDER,
+    AbstainVisualDecision,
     CompiledTeachingBeat,
     CompiledVisualAtom,
     CompilerCertificateV1,
     PythagoreanAreaIdentityState,
     SemanticSceneState,
     TeachingBeatDraft,
+    VisualActAbstainReason,
     compiler_certificate_sha256,
     roles_through,
     semantic_scene_sha256,
@@ -57,6 +60,7 @@ from murmur.live_scene.semantic_service_contracts import (
     SemanticAtomMetadata,
     SemanticLiveSceneRequest,
     SemanticScenePatchEvent,
+    SemanticSceneStreamDeclinedEvent,
     SemanticSceneStreamEvent,
 )
 from murmur.live_scene.semantic_stream_parser import (
@@ -69,6 +73,15 @@ from murmur.live_scene.semantic_verifier import (
 )
 from murmur.live_scene.semantic_wire import encode_semantic_scene_stream_event
 from murmur.live_scene.stream_parser import ScenePatchStreamError, ScenePatchStreamParser
+from murmur.live_scene.visual_act_engine import (
+    DEFAULT_VISUAL_ACT_MAX_TOKENS,
+    VisualActEngineError,
+    VisualActEngineErrorCode,
+    VisualActRoutingEngine,
+    VisualActRoutingRepairing,
+    VisualActRoutingResult,
+)
+from murmur.live_scene.visual_act_lowering import lower_resolved_visual_act
 from murmur.live_scene.wire import SceneStreamWireError, encode_scene_stream_event
 
 _REPAIR_MESSAGE = "The first visual draft needed correction. The last board is safe while I retry."
@@ -81,6 +94,7 @@ _PROVIDER_ERROR_MESSAGE = (
 _PROVIDER_TIMEOUT_MESSAGE = (
     "The visual generator took too long. The last board is safe; please try again."
 )
+_PROVIDER_RATE_LIMIT_MESSAGE = "Visual model capacity is busy. Please try again shortly."
 _CONTEXT_LIMIT_MESSAGE = (
     "This board is too large for another model pass. The current board remains safe."
 )
@@ -96,6 +110,115 @@ _SEMANTIC_CAPACITY_MESSAGE = (
 _SEMANTIC_INTEGRITY_MESSAGE = (
     "The verified visual runtime rejected an internal result. The current board remains safe."
 )
+_SEMANTIC_NAMESPACE_MESSAGE = (
+    "The current board conflicts with this verified visual. Reset the board before trying again."
+)
+_UNSUPPORTED_VISUAL_MESSAGE = (
+    "This request does not match a visual I can draw yet. The current board is unchanged."
+)
+_NO_FORWARD_VISUAL_MESSAGE = (
+    "That visual is already complete at this stage. The current board is unchanged."
+)
+_ROUTING_REPAIR_MESSAGE = (
+    "The first visual direction needed correction. The current board is safe while I retry."
+)
+
+_VISUAL_ROUTING_FAILURES: dict[
+    VisualActEngineErrorCode,
+    tuple[str, str],
+] = {
+    VisualActEngineErrorCode.CONTEXT_INVALID: (
+        "context_too_large",
+        _CONTEXT_LIMIT_MESSAGE,
+    ),
+    VisualActEngineErrorCode.PROVIDER_RATE_LIMIT: (
+        "provider_rate_limited",
+        _PROVIDER_RATE_LIMIT_MESSAGE,
+    ),
+    VisualActEngineErrorCode.PROVIDER_TIMEOUT: (
+        "provider_timeout",
+        _PROVIDER_TIMEOUT_MESSAGE,
+    ),
+    VisualActEngineErrorCode.PROVIDER_ERROR: (
+        "provider_error",
+        _PROVIDER_ERROR_MESSAGE,
+    ),
+    VisualActEngineErrorCode.INVALID_VISUAL_ACT: (
+        "invalid_visual_act",
+        _INVALID_STREAM_MESSAGE,
+    ),
+    VisualActEngineErrorCode.INTERNAL_ERROR: (
+        "semantic_integrity_error",
+        _SEMANTIC_INTEGRITY_MESSAGE,
+    ),
+}
+
+
+def _provider_failure_message(code: str) -> str:
+    if code == "provider_timeout":
+        return _PROVIDER_TIMEOUT_MESSAGE
+    if code == "provider_rate_limited":
+        return _PROVIDER_RATE_LIMIT_MESSAGE
+    return _PROVIDER_ERROR_MESSAGE
+
+
+def _visual_decline_message(reason: VisualActAbstainReason) -> str:
+    if reason is VisualActAbstainReason.UNSUPPORTED_INTENT:
+        return _UNSUPPORTED_VISUAL_MESSAGE
+    return _NO_FORWARD_VISUAL_MESSAGE
+
+
+def _semantic_failure_event(
+    *,
+    generation: int,
+    attempt: int,
+    revision: int,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> SceneStreamFailedEvent:
+    event = SceneStreamFailedEvent(
+        generation=generation,
+        attempt=attempt,
+        code=code,
+        message=message,
+        last_accepted_revision=revision,
+        retryable=retryable,
+    )
+    encode_semantic_scene_stream_event(event)
+    return event
+
+
+def _semantic_integrity_failure_event(
+    *,
+    generation: int,
+    attempt: int,
+    revision: int,
+) -> SceneStreamFailedEvent:
+    return _semantic_failure_event(
+        generation=generation,
+        attempt=attempt,
+        revision=revision,
+        code="semantic_integrity_error",
+        message=_SEMANTIC_INTEGRITY_MESSAGE,
+        retryable=False,
+    )
+
+
+def _semantic_repairing_event(
+    *,
+    generation: int,
+    revision: int,
+) -> SceneStreamRepairingEvent:
+    event = SceneStreamRepairingEvent(
+        generation=generation,
+        from_attempt=1,
+        to_attempt=2,
+        last_accepted_revision=revision,
+        message=_ROUTING_REPAIR_MESSAGE,
+    )
+    encode_semantic_scene_stream_event(event)
+    return event
 
 
 class SceneModelClient(Protocol):
@@ -124,6 +247,14 @@ class _SemanticBaseError(ValueError):
 
 class _SemanticRepairableError(ValueError):
     """Fixed safe reason a different model-authored teaching beat can repair."""
+
+
+class _SemanticCapacityError(_SemanticRepairableError):
+    """The requested suffix does not fit, though a smaller future request may."""
+
+
+class _SemanticNamespaceCollisionError(_SemanticRepairableError):
+    """Accepted low-level state occupies a server-owned semantic node ID."""
 
 
 class _SemanticInvariantError(RuntimeError):
@@ -438,15 +569,13 @@ def _preflight_semantic_intent(
 
     atom_count = len(missing_roles)
     if atom_count > state.remaining_atom_budget:
-        raise _SemanticRepairableError("semantic_intent: atom batch exceeded the remaining budget")
+        raise _SemanticCapacityError("semantic_intent: atom batch exceeded the remaining budget")
     if atom_count > MAX_SAFE_SEQUENCE - state.scene.revision:
-        raise _SemanticRepairableError(
-            "semantic_intent: low-level revision budget was insufficient"
-        )
+        raise _SemanticCapacityError("semantic_intent: low-level revision budget was insufficient")
     if atom_count > MAX_SAFE_SEQUENCE - state.semantic_scene.revision:
-        raise _SemanticRepairableError("semantic_intent: semantic revision budget was insufficient")
+        raise _SemanticCapacityError("semantic_intent: semantic revision budget was insufficient")
     if atom_count > MAX_SCENE_NODES - len(state.scene.nodes):
-        raise _SemanticRepairableError("semantic_intent: low-level node budget was insufficient")
+        raise _SemanticCapacityError("semantic_intent: low-level node budget was insufficient")
 
     existing_ids = {node.id for node in state.scene.nodes}
     missing_node_ids = {
@@ -454,7 +583,7 @@ def _preflight_semantic_intent(
         for role_index in range(len(current_roles), len(target_roles))
     }
     if existing_ids.intersection(missing_node_ids):
-        raise _SemanticRepairableError(
+        raise _SemanticNamespaceCollisionError(
             "semantic_intent: a missing-role node ID collided with the accepted scene"
         )
 
@@ -662,6 +791,29 @@ def _prepare_semantic_batch(
     return _PreparedSemanticBatch(atoms=tuple(prepared_atoms))
 
 
+def _compile_semantic_batch(
+    state: _SemanticGenerationState,
+    beat: TeachingBeatDraft,
+    *,
+    attempt: int,
+) -> _PreparedSemanticBatch:
+    """Compile and independently validate one admitted semantic beat."""
+
+    _preflight_semantic_intent(state, beat)
+    compiled_candidate = compile_teaching_beat(beat, state.semantic_scene)
+    if compiled_candidate.beat != beat:
+        raise _SemanticInvariantError("semantic_batch: compiler changed the teaching beat")
+    try:
+        compiled = CompiledTeachingBeat.model_validate(
+            compiled_candidate.model_dump(mode="json", by_alias=True),
+        )
+    except (AttributeError, TypeError, ValidationError):
+        raise _SemanticInvariantError(
+            "semantic_batch: compiler result failed independent validation"
+        ) from None
+    return _prepare_semantic_batch(state, compiled, attempt=attempt)
+
+
 async def _next_before_deadline(
     stream: AsyncIterator[str | bytes],
     *,
@@ -689,6 +841,7 @@ class SceneAuthoringService:
         temperature: float = 0.2,
         max_tokens: int = 4_096,
         timeout_seconds: float = 20.0,
+        before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if (client is None) == (client_factory is None):
             raise ValueError("provide exactly one of client or client_factory")
@@ -717,6 +870,8 @@ class SceneAuthoringService:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be finite and positive")
+        if before_provider_dispatch is not None and not callable(before_provider_dispatch):
+            raise TypeError("before_provider_dispatch must be callable")
 
         self._client = client
         self._client_factory = client_factory
@@ -724,6 +879,7 @@ class SceneAuthoringService:
         self._temperature = float(temperature)
         self._max_tokens = max_tokens
         self._timeout_seconds = float(timeout_seconds)
+        self._before_provider_dispatch = before_provider_dispatch
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
             DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -734,6 +890,10 @@ class SceneAuthoringService:
             return self._client
         assert self._client_factory is not None
         return self._client_factory()
+
+    async def _admit_provider_dispatch(self) -> None:
+        if self._before_provider_dispatch is not None:
+            await self._before_provider_dispatch()
 
     async def _stream_attempt(
         self,
@@ -749,6 +909,7 @@ class SceneAuthoringService:
         upstream: object | None = None
 
         try:
+            await self._admit_provider_dispatch()
             upstream = client.stream(
                 messages,
                 temperature=self._temperature,
@@ -785,6 +946,8 @@ class SceneAuthoringService:
             outcome.invalid_reason = str(exc)
         except TimeoutError:
             outcome.provider_failure_code = "provider_timeout"
+        except SceneAdmissionError:
+            outcome.provider_failure_code = "provider_rate_limited"
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -811,6 +974,7 @@ class SceneAuthoringService:
         beat: TeachingBeatDraft | None = None
 
         try:
+            await self._admit_provider_dispatch()
             upstream = client.stream(
                 messages,
                 temperature=self._temperature,
@@ -841,6 +1005,8 @@ class SceneAuthoringService:
             outcome.invalid_reason = exc.repair_hint
         except TimeoutError:
             outcome.provider_failure_code = "provider_timeout"
+        except SceneAdmissionError:
+            outcome.provider_failure_code = "provider_rate_limited"
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -860,25 +1026,7 @@ class SceneAuthoringService:
             return
 
         try:
-            _preflight_semantic_intent(state, beat)
-            compiled_candidate = compile_teaching_beat(beat, state.semantic_scene)
-            if compiled_candidate.beat != beat:
-                raise _SemanticInvariantError(
-                    "semantic_batch: compiler changed the parsed teaching beat"
-                )
-            try:
-                compiled = CompiledTeachingBeat.model_validate(
-                    compiled_candidate.model_dump(mode="json", by_alias=True),
-                )
-            except (AttributeError, TypeError, ValidationError):
-                raise _SemanticInvariantError(
-                    "semantic_batch: compiler result failed independent validation"
-                ) from None
-            outcome.batch = _prepare_semantic_batch(
-                state,
-                compiled,
-                attempt=attempt,
-            )
+            outcome.batch = _compile_semantic_batch(state, beat, attempt=attempt)
         except _SemanticRepairableError as exc:
             outcome.invalid_reason = str(exc)
         except (
@@ -992,16 +1140,11 @@ class SceneAuthoringService:
                     await attempt_stream.aclose()
 
                 if outcome.provider_failure_code is not None:
-                    message = (
-                        _PROVIDER_TIMEOUT_MESSAGE
-                        if outcome.provider_failure_code == "provider_timeout"
-                        else _PROVIDER_ERROR_MESSAGE
-                    )
                     yield SceneStreamFailedEvent(
                         generation=request.generation,
                         attempt=attempt,
                         code=outcome.provider_failure_code,
-                        message=message,
+                        message=_provider_failure_message(outcome.provider_failure_code),
                         last_accepted_revision=state.scene.revision,
                         retryable=True,
                     )
@@ -1033,6 +1176,214 @@ class SceneAuthoringService:
                     retryable=True,
                 )
                 return
+        finally:
+            if owns_client:
+                await _close_upstream(
+                    client,
+                    timeout_seconds=self._cleanup_timeout_seconds,
+                )
+
+    async def stream_routed_semantic_events(
+        self,
+        request: SemanticLiveSceneRequest,
+    ) -> AsyncIterator[SemanticSceneStreamEvent]:
+        """Route one visual act, then compile only server-owned semantic atoms."""
+
+        if not isinstance(request, SemanticLiveSceneRequest):
+            raise TypeError("request must be a SemanticLiveSceneRequest")
+
+        started_at = self._clock()
+        atom_limit = min(
+            MAX_COMPILED_ATOMS,
+            MAX_SAFE_SEQUENCE - request.base_scene.revision,
+            MAX_SAFE_SEQUENCE - request.base_semantic_scene.revision,
+            MAX_SCENE_NODES - len(request.base_scene.nodes),
+        )
+        state = _SemanticGenerationState(
+            generation=request.generation,
+            scene=request.base_scene,
+            semantic_scene=request.base_semantic_scene,
+            atom_limit=atom_limit,
+            started_at=started_at,
+            clock=self._clock,
+        )
+
+        started = SceneStreamStartedEvent(
+            generation=request.generation,
+            attempt=1,
+            base_revision=state.scene.revision,
+        )
+        encode_semantic_scene_stream_event(started)
+        yield started
+
+        if atom_limit <= 0:
+            revision_limited = (
+                request.base_scene.revision >= MAX_SAFE_SEQUENCE
+                or request.base_semantic_scene.revision >= MAX_SAFE_SEQUENCE
+            )
+            yield _semantic_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="revision_limit" if revision_limited else "semantic_capacity_limit",
+                message=(
+                    _REVISION_LIMIT_MESSAGE if revision_limited else _SEMANTIC_CAPACITY_MESSAGE
+                ),
+                retryable=False,
+            )
+            return
+
+        try:
+            _validate_semantic_base(state.scene, state.semantic_scene)
+        except _SemanticBaseError:
+            yield _semantic_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="semantic_base_mismatch",
+                message=_SEMANTIC_BASE_MISMATCH_MESSAGE,
+                retryable=False,
+            )
+            return
+
+        client: SceneModelClient | None = None
+        owns_client = self._client is None
+        try:
+            try:
+                client = self._resolve_client()
+            except Exception:
+                yield _semantic_failure_event(
+                    generation=request.generation,
+                    attempt=1,
+                    revision=state.scene.revision,
+                    code="provider_error",
+                    message=_PROVIDER_ERROR_MESSAGE,
+                    retryable=True,
+                )
+                return
+
+            routing: VisualActRoutingResult | None = None
+            repair_announced = False
+            try:
+                engine = VisualActRoutingEngine(
+                    client,
+                    max_tokens=min(self._max_tokens, DEFAULT_VISUAL_ACT_MAX_TOKENS),
+                    timeout_seconds=self._timeout_seconds,
+                    before_dispatch=self._admit_provider_dispatch,
+                )
+                async for step in engine.stream_route(
+                    prompt=request.prompt,
+                    semantic_scene=state.semantic_scene,
+                ):
+                    if isinstance(step, VisualActRoutingRepairing):
+                        if repair_announced:
+                            raise RuntimeError("visual routing emitted duplicate repair boundaries")
+                        repair_announced = True
+                        yield _semantic_repairing_event(
+                            generation=request.generation,
+                            revision=state.scene.revision,
+                        )
+                    elif isinstance(step, VisualActRoutingResult) and routing is None:
+                        routing = step
+                    else:
+                        raise RuntimeError("visual routing emitted an invalid lifecycle step")
+            except VisualActEngineError as exc:
+                attempt = 2 if repair_announced else 1
+                code, message = _VISUAL_ROUTING_FAILURES[exc.code]
+                yield _semantic_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                    code=code,
+                    message=message,
+                    retryable=exc.retryable,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                yield _semantic_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=2 if repair_announced else 1,
+                    revision=state.scene.revision,
+                )
+                return
+
+            if routing is None or routing.repaired != repair_announced:
+                yield _semantic_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=2 if repair_announced else 1,
+                    revision=state.scene.revision,
+                )
+                return
+
+            attempt = routing.provider_attempts
+
+            decision = routing.decision
+            resolved = routing.resolved
+            if isinstance(decision, AbstainVisualDecision) != (resolved is None):
+                yield _semantic_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                )
+                return
+
+            if isinstance(decision, AbstainVisualDecision):
+                declined = SemanticSceneStreamDeclinedEvent(
+                    generation=request.generation,
+                    attempt=attempt,
+                    final_revision=state.scene.revision,
+                    reason_code=decision.reason_code,
+                    message=_visual_decline_message(decision.reason_code),
+                )
+                encode_semantic_scene_stream_event(declined)
+                yield declined
+                return
+
+            assert resolved is not None
+            try:
+                beat = lower_resolved_visual_act(
+                    resolved,
+                    generation=request.generation,
+                )
+                batch = _compile_semantic_batch(state, beat, attempt=attempt)
+            except _SemanticCapacityError:
+                yield _semantic_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                    code="semantic_capacity_limit",
+                    message=_SEMANTIC_CAPACITY_MESSAGE,
+                    retryable=True,
+                )
+                return
+            except _SemanticNamespaceCollisionError:
+                yield _semantic_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                    code="semantic_namespace_collision",
+                    message=_SEMANTIC_NAMESPACE_MESSAGE,
+                    retryable=False,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                yield _semantic_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                )
+                return
+
+            for prepared_atom in batch.atoms:
+                state.commit_atom(prepared_atom)
+                yield prepared_atom.event
+            completed = state.completed_event(repaired=attempt == 2)
+            encode_semantic_scene_stream_event(completed)
+            yield completed
         finally:
             if owns_client:
                 await _close_upstream(
@@ -1179,16 +1530,11 @@ class SceneAuthoringService:
                     return
 
                 if outcome.provider_failure_code is not None:
-                    message = (
-                        _PROVIDER_TIMEOUT_MESSAGE
-                        if outcome.provider_failure_code == "provider_timeout"
-                        else _PROVIDER_ERROR_MESSAGE
-                    )
                     failed = SceneStreamFailedEvent(
                         generation=request.generation,
                         attempt=attempt,
                         code=outcome.provider_failure_code,
-                        message=message,
+                        message=_provider_failure_message(outcome.provider_failure_code),
                         last_accepted_revision=state.scene.revision,
                         retryable=True,
                     )

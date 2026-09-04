@@ -23,7 +23,8 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 03:49 IST: Added a pure server-owned lowering seam from a resolved route to the existing verified compiler input. Target stage now deterministically selects the teaching act and bounded narration, generation selects a bounded beat ID, and continuation compilation emits only the exact missing suffix. Eighty resolver, lowering, and compiler tests pass with Ruff clean.
 - [x] 2026-09-05 03:52 IST: Added a semantic-only declined terminal for successful abstention. Its strict backend and browser contracts preserve an unchanged paired frontier, retain a closed reason code, render a calm `No visual change` state, ignore late frames, and allow the next generation immediately. Fifty-seven backend and forty-nine frontend tests pass; TypeScript type checking is clean.
 - [x] 2026-09-05 03:55 IST: Hardened the routing boundary before service integration: a repair lifecycle step now reaches consumers before the second provider dispatch, the qualified 2,048-token router ceiling is explicit for downstream caps, and a second component start fails closed until deterministic layout can prevent overlapping geometry. One hundred focused engine, resolver, prompt, and lowering tests pass provider-free.
-- [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
+- [x] 2026-09-05 03:56 IST: Reconnected the guarded semantic SSE route through router, lowering, compiler, verifier, and certificate emission. Added no-mutation decline and failure terminals, exact repair timing, a distinct ten-dispatch-per-minute provider ceiling that counts repairs, and fail-closed single-component policy. Two hundred thirty-three backend tests pass provider-free with Ruff clean.
+- [ ] Update the browser lab's Gate 1.1 copy, replace the legacy semantic probe with routed-path evidence, and run browser rendering and interruption checks.
 
 ## Surprises & Discoveries
 
@@ -39,6 +40,8 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - The completed-prefix request needed the one allowed repair before returning `no_forward_progress`; the other nine cases passed on their first attempt. The repaired result is correct, but it identifies completed-state abstention as the weakest prompt edge in this sample.
 - The first compiler uses fixed absolute coordinates. Allocating `areas-2` would therefore pass verification but place an indistinguishable second construction directly over `areas`; second starts must abstain until deterministic layout is part of the compiler.
 - A router-owned retry cannot be represented faithfully if `route()` returns only after both attempts. The engine now exposes a lifecycle stream so the service can emit its repair boundary before, rather than after, the second paid dispatch.
+- Request admission and paid-call admission are different limits: one accepted user request may make two provider calls after a repair. Reusing the request-rate setting for both would couple product UX to the Azure deployment quota, so the provider-dispatch ceiling needs its own configuration.
+- The existing manual semantic probe calls the legacy model-authored `TeachingBeatDraft` path directly. It cannot certify Gate 1.2's router-to-compiler integration and must not be cited as routed-path evidence without migration.
 
 ## Decision Log
 
@@ -57,10 +60,14 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - 2026-09-05, Codex: Lower accepted routes into the existing `TeachingBeatDraft` instead of creating a second compiler surface. The server derives act, narration, directive, and `route-{generation:x}` beat identity; abstentions cannot cross this lowering boundary.
 - 2026-09-05, Codex: Represent abstention with semantic-only `semantic_scene_stream_declined`, not zero-patch completion or failure. It carries the unchanged revision and a closed reason, records no completion metrics, does not enter the raw protocol, and leaves the browser startable from the exact same frontier.
 - 2026-09-05, Codex: Expose the router's one repair as an engine lifecycle step before its second dispatch. The synchronous `route()` convenience API consumes that step for evaluator compatibility; the live semantic service can translate it into SSE without misreporting retry timing.
+- 2026-09-05, Codex: Guard each actual provider dispatch with `MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE`, independently of per-user request admission. Reject immediately rather than queue, count a repair as a second dispatch, and classify the same exhaustion consistently on raw, legacy semantic, and routed semantic paths.
+- 2026-09-05, Codex: Keep the current compiler's supported live scene to one component. Any non-abstain route against a multi-component accepted scene fails closed, even when the prompt names one component explicitly, until deterministic multi-component layout exists.
 
 ## Outcomes & Retrospective
 
-The isolated router gate passed against Azure `gpt-oss-120b`. The private report at `var/live-scene/evaluations/20260904T215957.626451Z/report.json` is mode `0600`, records clean source commit `b66c9dc307964cb77c8bab0af8068baea95e1e3f`, and has evidence scope `provider_to_visual_act_parser_and_resolver`. It contains no raw prompts or provider output. Its USD 0.021856950 figure is a conservative reservation upper bound, not actual billed usage. Compiler/runtime integration is now unlocked but not yet qualified.
+The isolated router gate passed against Azure `gpt-oss-120b`. The private report at `var/live-scene/evaluations/20260904T215957.626451Z/report.json` is mode `0600`, records clean source commit `b66c9dc307964cb77c8bab0af8068baea95e1e3f`, and has evidence scope `provider_to_visual_act_parser_and_resolver`. It contains no raw prompts or provider output. Its USD 0.021856950 figure is a conservative reservation upper bound, not actual billed usage.
+
+The guarded semantic HTTP path now uses that router, deterministic lowering, the existing verified compiler, and the strict semantic SSE/runtime contract. Provider-free tests prove successful start and continuation, both abstain reasons, one repair, repair-boundary cancellation, per-dispatch admission, atomic capacity and namespace failures, compiler exception containment, client cleanup, and unchanged frontend decline semantics. Browser rendering/interruption evidence and a routed live probe still remain before Gate 1.2 integration is fully qualified.
 
 ## Context and Orientation
 
@@ -93,6 +100,7 @@ After each offline milestone, run its focused tests and lint:
     .venv/bin/pytest -q tests/test_live_scene_visual_act_router_contracts.py
     .venv/bin/pytest -q tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
     .venv/bin/pytest -q tests/test_live_scene_visual_act_engine.py
+    .venv/bin/pytest -q tests/test_live_scene_routed_semantic_service.py tests/test_live_scene_semantic_api.py tests/test_live_scene_admission.py
     .venv/bin/ruff check backend/murmur/live_scene tests/test_live_scene_visual_act_router_contracts.py tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
     .venv/bin/ruff format --check backend/murmur/live_scene tests/test_live_scene_visual_act_router_contracts.py tests/test_live_scene_visual_act_router_prompt.py tests/test_live_scene_visual_act_router_parser.py
 

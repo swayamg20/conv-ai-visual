@@ -153,7 +153,7 @@ async def stream_development_semantic_live_scene(
         lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
     except SceneAdmissionError as exc:
         raise ApiError(429, str(exc)) from None
-    events = scene_service.stream_semantic_events(body)
+    events = scene_service.stream_routed_semantic_events(body)
     return _OwnedStreamingResponse(
         _encode_semantic_scene_events(events, lease),
         media_type="text/event-stream",

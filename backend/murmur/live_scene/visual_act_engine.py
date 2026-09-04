@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, TypeAlias, cast
@@ -14,6 +14,7 @@ from murmur.core.async_cleanup import (
     DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
     close_async_resource,
 )
+from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import MAX_SCENE_MODEL_OUTPUT_TOKENS
 from murmur.live_scene.semantic_contracts import SemanticSceneState, VisualActDecision
 from murmur.live_scene.semantic_prompt import build_visual_act_decision_messages
@@ -36,6 +37,9 @@ _ROUTING_REPAIR_HINTS = {
     ),
     VisualActRoutingErrorCode.COMPONENT_NOT_FOUND: (
         "visual_act_state: copy an accepted componentId exactly"
+    ),
+    VisualActRoutingErrorCode.MULTIPLE_COMPONENTS_UNSUPPORTED: (
+        "visual_act_state: abstain because multiple components are unsupported"
     ),
     VisualActRoutingErrorCode.NON_FORWARD_TARGET: (
         "visual_act_state: choose a strictly later target or abstain"
@@ -83,6 +87,7 @@ class VisualActEngineErrorCode(StrEnum):
     """Stable public failure categories for routing orchestration."""
 
     CONTEXT_INVALID = "context_invalid"
+    PROVIDER_RATE_LIMIT = "provider_rate_limit"
     PROVIDER_TIMEOUT = "provider_timeout"
     PROVIDER_ERROR = "provider_error"
     INVALID_VISUAL_ACT = "invalid_visual_act"
@@ -91,6 +96,7 @@ class VisualActEngineErrorCode(StrEnum):
 
 _ERROR_MESSAGES = {
     VisualActEngineErrorCode.CONTEXT_INVALID: "Visual routing context was invalid.",
+    VisualActEngineErrorCode.PROVIDER_RATE_LIMIT: "Visual routing capacity is busy.",
     VisualActEngineErrorCode.PROVIDER_TIMEOUT: "Visual routing timed out.",
     VisualActEngineErrorCode.PROVIDER_ERROR: "Visual routing provider failed.",
     VisualActEngineErrorCode.INVALID_VISUAL_ACT: "Visual routing returned no valid decision.",
@@ -98,6 +104,7 @@ _ERROR_MESSAGES = {
 }
 _ERROR_RETRYABLE = {
     VisualActEngineErrorCode.CONTEXT_INVALID: False,
+    VisualActEngineErrorCode.PROVIDER_RATE_LIMIT: True,
     VisualActEngineErrorCode.PROVIDER_TIMEOUT: True,
     VisualActEngineErrorCode.PROVIDER_ERROR: True,
     VisualActEngineErrorCode.INVALID_VISUAL_ACT: True,
@@ -179,6 +186,7 @@ class VisualActRoutingEngine:
         *,
         max_tokens: int = DEFAULT_VISUAL_ACT_MAX_TOKENS,
         timeout_seconds: float = 20.0,
+        before_dispatch: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if not callable(getattr(client, "stream", None)):
             raise TypeError("client must provide stream()")
@@ -195,10 +203,13 @@ class VisualActRoutingEngine:
             or timeout_seconds <= 0
         ):
             raise ValueError("timeout_seconds must be finite and positive")
+        if before_dispatch is not None and not callable(before_dispatch):
+            raise TypeError("before_dispatch must be callable")
 
         self._client = client
         self._max_tokens = max_tokens
         self._timeout_seconds = float(timeout_seconds)
+        self._before_dispatch = before_dispatch
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
             DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -296,6 +307,21 @@ class VisualActRoutingEngine:
         upstream: object | None = None
 
         try:
+            if self._before_dispatch is not None:
+                try:
+                    await self._before_dispatch()
+                except asyncio.CancelledError:
+                    raise
+                except SceneAdmissionError:
+                    raise VisualActEngineError(
+                        VisualActEngineErrorCode.PROVIDER_RATE_LIMIT,
+                        provider_attempts=0 if attempt == 1 else 1,
+                    ) from None
+                except Exception:
+                    raise VisualActEngineError(
+                        VisualActEngineErrorCode.INTERNAL_ERROR,
+                        provider_attempts=0 if attempt == 1 else 1,
+                    ) from None
             try:
                 upstream = self._client.stream(
                     messages,

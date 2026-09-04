@@ -441,7 +441,15 @@ def test_live_scene_request_rejects_client_identity_claims() -> None:
 def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch) -> None:
     captured: dict[str, object] = {}
     client_calls: list[tuple[str, str | None, dict[str, object]]] = []
+    dispatch_limits: list[int] = []
     expected_client = object()
+
+    class CapturingProviderDispatchAdmission:
+        def __init__(self, *, requests_per_minute: int) -> None:
+            dispatch_limits.append(requests_per_minute)
+
+        async def acquire(self) -> None:
+            return None
 
     class CapturingSceneAuthoringService:
         def __init__(
@@ -451,6 +459,7 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
             temperature: float,
             max_tokens: int,
             timeout_seconds: float,
+            before_provider_dispatch,
         ) -> None:
             captured.update(
                 {
@@ -458,6 +467,7 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "timeout_seconds": timeout_seconds,
+                    "before_provider_dispatch": before_provider_dispatch,
                 }
             )
 
@@ -466,12 +476,22 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
         return expected_client
 
     monkeypatch.setattr(application, "SceneAuthoringService", CapturingSceneAuthoringService)
+    monkeypatch.setattr(
+        application,
+        "SceneProviderDispatchAdmission",
+        CapturingProviderDispatchAdmission,
+    )
     monkeypatch.setattr(application, "create_llm_client", create_client)
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "azure_openai")
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MODEL", "murmur-gpt-oss-120b")
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TEMPERATURE", 0.2)
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MAX_TOKENS", 1234)
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TIMEOUT_SECONDS", 9.5)
+    monkeypatch.setattr(
+        application.config,
+        "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE",
+        7,
+    )
 
     app = application.create_application()
     monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "groq")
@@ -482,6 +502,8 @@ def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch
     assert captured["temperature"] == 0.2
     assert captured["max_tokens"] == 1234
     assert captured["timeout_seconds"] == 9.5
+    assert callable(captured["before_provider_dispatch"])
+    assert dispatch_limits == [7]
     assert captured["client_factory"]() is expected_client  # type: ignore[operator]
     assert client_calls == [
         (

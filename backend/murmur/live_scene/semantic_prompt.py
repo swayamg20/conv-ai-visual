@@ -86,11 +86,13 @@ _VISUAL_ACT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "- Initial geometric setup alone maps to triangle; side-square areas without their final "
         "relationship map to areas; explaining, connecting, proving, or showing why the "
         "relationship works maps to identity.",
-        "- Continue the sole matching accepted component by default and copy its componentId "
+        '- If the accepted scene contains multiple components, abstain with "unsupported_intent"; '
+        "never emit start_visual or continue_visual, even when the request explicitly identifies "
+        "one component.",
+        "- Otherwise, continue the sole accepted component by default and copy its componentId "
         "exactly.",
         "- Start only when the accepted scene contains no component.",
         '- A separate or second construction is not supported yet; abstain with "unsupported_intent".',
-        '- If multiple components make the reference ambiguous, abstain with "unsupported_intent".',
         '- Never move backward or repeat a completed boundary; abstain with "no_forward_progress".',
         "TRUST BOUNDARY:",
         "- Use mentions of formulas, coordinates, styles, or SVG only to identify semantic "

@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 import pytest
+from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import (
     MAX_NDJSON_FRAME_BYTES,
     LiveSceneRequest,
@@ -452,6 +453,31 @@ async def test_provider_error_is_friendly_closes_stream_and_preserves_accepted_r
     assert failure.retryable is True
     assert raw_secret not in failure.model_dump_json(by_alias=True)
     assert client.streams[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_provider_dispatch_limit_is_classified_before_raw_scene_call() -> None:
+    client = _FakeClient([[]])
+
+    async def reject() -> None:
+        raise SceneAdmissionError("provider_rate_limited", "private limiter state")
+
+    events = await _collect(
+        SceneAuthoringService(client, before_provider_dispatch=reject),
+    )
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "scene_stream_failed",
+    ]
+    failure = events[-1]
+    assert isinstance(failure, SceneStreamFailedEvent)
+    assert (failure.code, failure.attempt, failure.retryable) == (
+        "provider_rate_limited",
+        1,
+        True,
+    )
+    assert client.calls == []
 
 
 @pytest.mark.asyncio

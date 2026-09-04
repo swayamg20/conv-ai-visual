@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from murmur.live_scene import visual_act_engine as engine_module
+from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.semantic_contracts import (
     PYTHAGOREAN_ROLE_ORDER,
     AbstainVisualDecision,
@@ -308,6 +309,67 @@ async def test_provider_stream_creation_error_is_sanitized_and_never_repaired() 
 
 
 @pytest.mark.asyncio
+async def test_dispatch_gate_rejects_before_any_provider_call() -> None:
+    client = _FakeClient([[_decision_line()]])
+
+    async def reject() -> None:
+        raise SceneAdmissionError("provider_rate_limited", "private limiter state")
+
+    with pytest.raises(VisualActEngineError) as captured:
+        await VisualActRoutingEngine(client, before_dispatch=reject).route(
+            prompt="Draw the triangle.",
+            semantic_scene=SemanticSceneState(revision=0),
+        )
+
+    assert captured.value.code is VisualActEngineErrorCode.PROVIDER_RATE_LIMIT
+    assert captured.value.provider_attempts == 0
+    assert captured.value.retryable is True
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_gate_counts_the_repair_as_a_separate_provider_call() -> None:
+    client = _FakeClient([["not-json\n"], [_decision_line(stage="triangle")]])
+    reservations = 0
+
+    async def reserve() -> None:
+        nonlocal reservations
+        reservations += 1
+        if reservations == 2:
+            raise SceneAdmissionError("provider_rate_limited", "private limiter state")
+
+    with pytest.raises(VisualActEngineError) as captured:
+        await VisualActRoutingEngine(client, before_dispatch=reserve).route(
+            prompt="Draw the triangle.",
+            semantic_scene=SemanticSceneState(revision=0),
+        )
+
+    assert captured.value.code is VisualActEngineErrorCode.PROVIDER_RATE_LIMIT
+    assert captured.value.provider_attempts == 1
+    assert reservations == 2
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unexpected_dispatch_gate_failure_is_an_internal_error() -> None:
+    client = _FakeClient([[_decision_line()]])
+
+    async def fail() -> None:
+        raise RuntimeError("private hook failure")
+
+    with pytest.raises(VisualActEngineError) as captured:
+        await VisualActRoutingEngine(client, before_dispatch=fail).route(
+            prompt="Draw the triangle.",
+            semantic_scene=SemanticSceneState(revision=0),
+        )
+
+    assert captured.value.code is VisualActEngineErrorCode.INTERNAL_ERROR
+    assert captured.value.provider_attempts == 0
+    assert captured.value.retryable is False
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
 async def test_provider_timeout_is_retryable_but_never_repaired() -> None:
     client = _FakeClient([[_BLOCK]])
 
@@ -403,6 +465,7 @@ async def test_unexpected_resolver_failure_is_a_sanitized_internal_error(
 def test_public_error_codes_and_retryability_are_closed_and_stable() -> None:
     expected = {
         VisualActEngineErrorCode.CONTEXT_INVALID: False,
+        VisualActEngineErrorCode.PROVIDER_RATE_LIMIT: True,
         VisualActEngineErrorCode.PROVIDER_TIMEOUT: True,
         VisualActEngineErrorCode.PROVIDER_ERROR: True,
         VisualActEngineErrorCode.INVALID_VISUAL_ACT: True,
@@ -411,6 +474,7 @@ def test_public_error_codes_and_retryability_are_closed_and_stable() -> None:
 
     assert {code.value for code in VisualActEngineErrorCode} == {
         "context_invalid",
+        "provider_rate_limit",
         "provider_timeout",
         "provider_error",
         "invalid_visual_act",
@@ -432,6 +496,7 @@ def test_public_error_codes_and_retryability_are_closed_and_stable() -> None:
         ((_FakeClient([]),), {"timeout_seconds": float("nan")}, ValueError),
         ((_FakeClient([]),), {"timeout_seconds": float("inf")}, ValueError),
         ((_FakeClient([]),), {"timeout_seconds": True}, ValueError),
+        ((_FakeClient([]),), {"before_dispatch": object()}, TypeError),
     ],
 )
 def test_constructor_rejects_invalid_or_unbounded_configuration(

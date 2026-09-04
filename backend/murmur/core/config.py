@@ -169,6 +169,9 @@ class Config:
         os.getenv("MURMUR_SCENE_PER_USER_CONCURRENCY", "1")
     )
     MURMUR_SCENE_REQUESTS_PER_MINUTE: int = int(os.getenv("MURMUR_SCENE_REQUESTS_PER_MINUTE", "10"))
+    MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE: int = int(
+        os.getenv("MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE", "10")
+    )
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
     ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
         os.getenv("ALLOWED_CORS_ORIGINS"),
@@ -413,6 +416,10 @@ EXAMPLE — "Explain the Pythagorean theorem":
             )
         if cls.MURMUR_SCENE_REQUESTS_PER_MINUTE <= 0:
             raise ValueError("MURMUR_SCENE_REQUESTS_PER_MINUTE must be greater than zero")
+        if cls.MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE <= 0:
+            raise ValueError(
+                "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE must be greater than zero"
+            )
 
         # Validate TTS configuration
         if cls.TTS_PROVIDER == "elevenlabs" and not cls.ELEVENLABS_API_KEY:
