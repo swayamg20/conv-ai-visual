@@ -614,6 +614,78 @@ describe("SceneStreamRuntime semantic protocol", () => {
     );
   });
 
+  it("keeps reset authoritative when an interrupt receipt settles late", async () => {
+    const { renderer, runtime, run } = await startedRuntime();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+    run.invocation.onEvent(semanticPatch());
+    const playback = renderer.rendered[0].playback;
+    playback.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["areas__triangle"],
+    };
+
+    expect(runtime.interrupt()).toBe(true);
+    expect(runtime.getSnapshot().phase).toBe("interrupting");
+
+    runtime.reset();
+    const resetSnapshot = runtime.getSnapshot();
+    const publishCountAfterReset = listener.mock.calls.length;
+    expect(resetSnapshot).toMatchObject({
+      phase: "idle",
+      generation: 0,
+      committedScene: { revision: 0, nodes: [] },
+      provisionalScene: { revision: 0, nodes: [] },
+      accepted: [],
+    });
+    expect(semanticSnapshot(runtime)).toMatchObject({
+      committedScene: { revision: 0, components: [] },
+      provisionalScene: { revision: 0, components: [] },
+      accepted: [],
+    });
+
+    playback.settle(playback.cancelOutcome);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toBe(resetSnapshot);
+    expect(listener).toHaveBeenCalledTimes(publishCountAfterReset);
+    expect(semanticSnapshot(runtime).commitFrontier).toBeUndefined();
+  });
+
+  it("ignores an interrupt receipt that settles after disposal", async () => {
+    const { renderer, runtime, run } = await startedRuntime();
+    const listener = vi.fn();
+    runtime.subscribe(listener);
+    run.invocation.onEvent(semanticPatch());
+    const playback = renderer.rendered[0].playback;
+    playback.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["areas__triangle"],
+    };
+
+    expect(runtime.interrupt()).toBe(true);
+    expect(runtime.getSnapshot().phase).toBe("interrupting");
+    const snapshotBeforeDispose = runtime.getSnapshot();
+    runtime.dispose();
+    const publishCountAfterDispose = listener.mock.calls.length;
+
+    playback.settle(playback.cancelOutcome);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toBe(snapshotBeforeDispose);
+    expect(listener).toHaveBeenCalledTimes(publishCountAfterDispose);
+    expect(snapshotBeforeDispose).toMatchObject({
+      phase: "interrupting",
+      committedScene: { revision: 0, nodes: [] },
+      accepted: [],
+    });
+    expect(snapshotBeforeDispose.semantic).toMatchObject({
+      committedScene: { revision: 0, components: [] },
+      accepted: [],
+    });
+    expect(snapshotBeforeDispose.semantic?.commitFrontier).toBeUndefined();
+  });
+
   it("commits no atom when an interrupted presentation reports no exact node", async () => {
     const { renderer, harness, runtime, run } = await startedRuntime();
     run.invocation.onEvent(semanticPatch());
@@ -914,7 +986,8 @@ describe("SceneStreamRuntime semantic protocol", () => {
     warning.mockRestore();
   });
 
-  it("retains 33 paired semantic atoms without applying the raw 32-record history cap", async () => {
+  it("accepts exactly 128 paired atoms and fails closed on a presented 129th atom", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const renderer = new ControlledRenderer();
     const harness = runnerHarness();
     const runtime = new SceneStreamRuntime({
@@ -923,7 +996,7 @@ describe("SceneStreamRuntime semantic protocol", () => {
       runStream: harness.runStream,
       staggerMs: 0,
     });
-    const targetAtomCount = 33;
+    const targetAtomCount = 128;
     let acceptedAtomCount = 0;
 
     for (let generation = 1; acceptedAtomCount < targetAtomCount; generation += 1) {
@@ -989,6 +1062,96 @@ describe("SceneStreamRuntime semantic protocol", () => {
     expect(
       semanticSnapshot(runtime).accepted.at(-1)?.semanticScene.revision
     ).toBe(targetAtomCount);
+
+    const boundarySnapshot = runtime.getSnapshot();
+    const boundarySemantic = semanticSnapshot(runtime);
+    const boundaryRawLedger = boundarySnapshot.accepted;
+    const boundarySemanticLedger = boundarySemantic.accepted;
+    const event = semanticPatch({
+      generation: 17,
+      ordinal: 1,
+      baseRevision: targetAtomCount,
+      componentId: "areas17",
+      certificateSha256: digest(1_000 + targetAtomCount + 1),
+      previousCertificateSha256: digest(1_000 + targetAtomCount),
+    });
+    const token = (
+      runtime as unknown as { currentToken: object | null }
+    ).currentToken;
+    expect(token).not.toBeNull();
+    if (!token) throw new Error("semantic runtime did not retain its stream token");
+
+    const hypotheticalTarget = Object.freeze({
+      revision: targetAtomCount + 1,
+      nodes: Object.freeze([
+        ...boundarySnapshot.committedScene.nodes,
+        event.patch.operations[0].op === "put"
+          ? event.patch.operations[0].node
+          : (() => {
+              throw new Error("semantic test patch did not put its target node");
+            })(),
+      ]),
+    });
+    const hypotheticalSemanticTarget = Object.freeze({
+      revision: targetAtomCount + 1,
+      components: Object.freeze([
+        ...boundarySemantic.committedScene.components,
+        Object.freeze({
+          kind: "pythagorean_area_identity" as const,
+          id: "areas17",
+          revealedRoles: Object.freeze(["triangle" as const]),
+        }),
+      ]),
+      certificateHeadSha256: event.semantic.certificate.certificateSha256,
+    });
+    const transition = {
+      kind: "semantic" as const,
+      token,
+      source: "stream" as const,
+      target: hypotheticalTarget,
+      semanticTarget: hypotheticalSemanticTarget,
+      playback: new ControlledPlayback(),
+      event,
+    };
+    const internals = runtime as unknown as {
+      active: typeof transition | null;
+      provisionalScene: typeof hypotheticalTarget;
+      provisionalSemanticScene: typeof hypotheticalSemanticTarget;
+      onSemanticPlaybackFinished: (
+        active: typeof transition,
+        outcome: MotionPlaybackOutcome
+      ) => void;
+    };
+
+    // Public semantic admission cannot exceed 128 scene nodes. Inject only the
+    // already-presented settlement to exercise the independent history guard.
+    internals.active = transition;
+    internals.provisionalScene = hypotheticalTarget;
+    internals.provisionalSemanticScene = hypotheticalSemanticTarget;
+    internals.onSemanticPlaybackFinished(transition, {
+      status: "completed",
+      appliedStepIds: [event.semantic.receipt.nodeId],
+    });
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: boundarySnapshot.committedScene,
+      provisionalScene: boundarySnapshot.committedScene,
+      error: { code: "renderer_failed", retryable: false },
+    });
+    expect(runtime.getSnapshot().accepted).toEqual(boundaryRawLedger);
+    expect(runtime.getSnapshot().accepted).toHaveLength(targetAtomCount);
+    expect(semanticSnapshot(runtime)).toMatchObject({
+      committedScene: boundarySemantic.committedScene,
+      provisionalScene: boundarySemantic.committedScene,
+      accepted: boundarySemanticLedger,
+      commitFrontier: boundarySemantic.commitFrontier,
+    });
+    expect(semanticSnapshot(runtime).accepted).toHaveLength(targetAtomCount);
+    expect(() => runtime.start("Must reset after the history boundary")).toThrow(
+      expect.objectContaining({ code: "runtime_reset_required" })
+    );
+    warning.mockRestore();
   });
 
   it("replays the paired semantic ledger exactly without invoking the runner", async () => {
