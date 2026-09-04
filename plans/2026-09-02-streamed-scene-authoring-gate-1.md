@@ -29,12 +29,17 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - [x] 2026-09-03 00:10 IST: Pushed authoritative revision normalization for public interruption during pruned replay in `093c56e`; the next generation resumes from retained revision 5 rather than the synthetic display revision 1.
 - [x] 2026-09-03 00:14 IST: Pushed scene/chat output-budget isolation in `3f6d4e7`; a valid existing `LLM_MAX_TOKENS=8192` no longer crashes application startup while paid scenes are default-off.
 - [x] 2026-09-03 00:16 IST: Pushed constant-backed and blank-safe scene-budget defaults in `8b0e915`; an explicitly blank scene override remains equivalent to unset rather than failing during import.
-- [ ] Run a small live-provider corpus only after the user supplies the repository-required explicit cost budget.
 - [x] 2026-09-03 00:16 IST: Passed the full repository gates: 1,198 backend tests and Ruff at `3f6d4e7`, followed by all 11 focused config/API tests and Ruff at `8b0e915`; 368 frontend tests, exact-delta lint/typecheck, and all seven Chromium scenarios at `093c56e`; the production build generated all 11 pages at `8540130`.
 - [x] 2026-09-03 00:17 IST: Independent adversarial review returned **SHIP** for deterministic Gate 1 at pushed HEAD `8b0e915`, with no remaining P0-P2 findings and an independently verified production 404 for the lab route. The separate paid live-model product gate remains pending.
 - [x] 2026-09-04 03:10 IST: Connected Azure `gpt-oss-120b`, verified custom stack and queue prompts through canonical server/browser paths, and pushed provider, lab, truncation, low-reasoning, and server patch-target fixes through `9089b13`.
 - [x] 2026-09-04 03:13 IST: Re-ran the complete regression at `9089b13`: 1,234 backend tests and Ruff passed; 369 frontend tests, ESLint, TypeScript, and all eight Chromium scenarios passed with 20 ms deterministic first-visible p95.
 - [x] 2026-09-04 03:17 IST: Extended the cost-guarded live corpus runner to Azure GPT-OSS in `0581ba7`; its dry-run remains config- and network-free, and 39 focused tests plus Ruff passed.
+- [x] 2026-09-04 17:47 IST: Received an explicit $1 ceiling and began the strict live-provider browser corpus with stop-on-failure controls.
+- [x] 2026-09-04 18:01 IST: Diagnosed the first corpus rejection as out-of-board spatial planning, then pushed the centered example and complete-scene bounding-box guidance in `765023d` and fixed bounds-aware repair hints in `4d865ce`.
+- [x] 2026-09-04 18:14 IST: Reached three corpus prompts before a browser harness failure. The two completed lessons required repair, and BST exposed unresolved CSS-variable paint entering GSAP's draw tween. Pushed the renderer fix and provider-free browser regression in `878169d`.
+- [x] 2026-09-04 18:20 IST: Pushed interruption-safe authored-fill restoration in `17c785a`; the focused motion tests passed 11/11, the full frontend passed 370 tests with lint and typecheck clean, and the full backend passed 1,243 tests.
+- [x] 2026-09-04 18:23 IST: Completed the strict post-fix Azure corpus from pushed HEAD. All 10 prompts completed safely with zero browser errors, 9/10 were valid on attempt one, and patch-gap p95 was 486.7 ms. The gate failed at 2,792.9 ms median and 4,401.8 ms p95 prompt-to-visible, one clipped/overlapping scene, and 0/10 fully satisfactory lessons in human review.
+- [x] 2026-09-04 18:25 IST: Passed all nine provider-free Chromium scenarios after the renderer fixes. The suite covered the filled-draw regression, repair, failure, replay, interruption, desktop and both mobile viewports, with 30.8 ms deterministic complete-frame-to-visible p95.
 
 ## Surprises & Discoveries
 
@@ -56,6 +61,11 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - Environment variables may be present but blank in deployment systems. Scene-budget fallback must use the protocol constant and treat a blank value as unset, preserving the repository's previous configuration semantics.
 - Azure GPT-OSS exhausted the 4,096 completion-token cap while beginning an extra NDJSON frame; a metadata-only reproduction confirmed `finish_reason=length`. Hidden reasoning and visible JSON share this cap, so lowering reasoning effort and bounding authored frames is safer than raising the scene budget.
 - A prompt-only patch count is advisory. The server must stop after the same target so a useful accepted prefix cannot be reclassified as invalid because the model begins an unrequested trailing frame.
+- The original Pythagoras example placed a 345-pixel leg near the board bottom and left no valid room for later external area squares. Negative rectangle and text coordinates were a spatial-planning failure, not duplicate IDs or NDJSON framing.
+- A browser motion exception can violate the same single-flight guarantee as a bad model event. A valid theme-filled `draw` path triggered GSAP's `null.map` color-parser failure and left revision 0 active after the provider had completed. Resolving colors before animation and explicitly restoring them on completion or interruption closed the hang.
+- `safeTerminal` currently means protocol and playback state settled; it does not prove visual correctness. The attention output was classified safe while its large label was clipped and overlapped three word labels.
+- The completed corpus separated transport safety from product usefulness. Supply and demand labels were reversed, the displayed `x²` curve had the wrong shape, and Dijkstra omitted weights and relaxation. Mean teaching usefulness was 2.9/10, mean domain fidelity was 3.2/10, and 0/10 fully fulfilled their prompt.
+- Median server first patch was 2,627.6 ms and median browser first visible was 2,792.9 ms. Provider generation and raw-coordinate planning therefore account for most of the multi-second wait, although 199.9 ms frame-to-visible p95 still leaves browser-motion work to tighten.
 
 ## Decision Log
 
@@ -76,6 +86,9 @@ Gate 1 deliberately does not change the SVG/GSAP renderer, connect to voice, per
 - 2026-09-03, Codex: Synthetic adjacent revisions exist only inside pruned replay playback. Both the awaited playback outcome and the synchronous public interrupt path convert retained nodes back to the accepted record's authoritative revision.
 - 2026-09-03, Codex: The scene authoring output budget defaults directly to `MAX_SCENE_MODEL_OUTPUT_TOKENS` and never inherits `LLM_MAX_TOKENS`. Provider, model, and temperature may retain their compatible selection defaults, but a broader chat budget must not violate the bounded scene protocol or break default-off startup.
 - 2026-09-04, Codex: Azure GPT-OSS scene generation uses low reasoning, scene-owned temperature 0.2, three initial patches, and one repair patch. The service enforces the same patch targets and closes upstream immediately after they are reached.
+- 2026-09-04, Codex: Derive repair categories only from fixed internal validator paths and send an allowlisted spatial hint. Rejected model coordinates, IDs, narration, and chained exception values never enter the repair prompt.
+- 2026-09-04, Codex: Preserve the authored scene color contract around GSAP. Tween a resolved color, then restore the theme token both after completion and when an owner interrupts the timeline.
+- 2026-09-04, Codex: Mark the live-model Gate 1 product qualification **failed**. Keep the deterministic/runtime implementation, but do not connect it to voice until a higher-level authoring path meets latency, fidelity, and teaching-usefulness requirements.
 
 ## Outcomes & Retrospective
 
@@ -85,9 +98,11 @@ The desktop and mobile review confirmed the intended teaching-workstation hierar
 
 Independent adversarial review found no remaining P0-P2 issues and returned **SHIP** for the deterministic implementation at pushed HEAD `8b0e915`. It separately confirmed that a production server returns 404 for `/labs/live-scene` even when the development lab flag is set.
 
-Paid Azure integration evidence now exists for two custom prompts. A direct stack request completed three first-attempt patches at 2,468 ms first patch / 2,762 ms total. A browser queue request completed revision 3 with semantically correct queue, enqueue, and dequeue ink at 2,614 ms first patch / 4,947 ms total and no console errors; its bounded repair retained the two valid initial patches and added one repair patch. This proves connectivity, real prompt influence, progressive rendering, safe repair, and one warm browser sample within the 3-second p95 ceiling.
+The Azure integration and ten-prompt qualification are now complete. The post-fix corpus made exactly ten browser starts; all ten reached a safe completed terminal, nine were valid on the first attempt, and no browser error occurred. The 486.7 ms patch-gap p95 passed. The report is stored in the private ignored directory `/tmp/murmur-azure-corpus.zw3hDO`; its SHA-256 is `cae7e603ffb760bfb3fd923a1a1757c690a02a5ba0b0be85857f0b1244051512`.
 
-The overall Gate 1 product verdict remains **pending the required ten-prompt live corpus**. Two successful prompts cannot establish the 90% first-attempt-validity, 1.5-second median, or 3-second p95 requirements. Run the redacted corpus only after an explicit positive cost budget and then review the same outputs for visual usefulness in the browser.
+The overall Gate 1 product verdict is **failed**. Median browser prompt-to-first-visible was 2,792.9 ms and p95 was 4,401.8 ms, missing the 1,500 ms and 3,000 ms requirements. Human review scored mean teaching usefulness 2.9/10 and mean domain fidelity 3.2/10, with no prompt fully fulfilled. The technically progressive output mostly added static objects rather than demonstrating transformations, and several lessons were materially wrong.
+
+The conservative retry-inclusive ceiling across the qualification is approximately $0.8774, not a measured Azure bill, and remains below the authorized $1 limit. No more paid evidence is required at this checkpoint. The deterministic runtime and Azure integration remain useful foundations, but the next milestone must replace raw pixel planning with higher-level teaching semantics and deterministic layout, expose provisional ink instead of covering it, and reduce model time-to-first-patch before voice integration begins.
 
 ## Context and Orientation
 
