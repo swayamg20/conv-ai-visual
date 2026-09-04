@@ -208,9 +208,7 @@ def test_semantic_identifiers_are_strict_and_leave_room_for_child_suffixes() -> 
         _beat(beat_id=longest_valid_id, component_id=longest_valid_id)
     )
     assert len(beat.beat_id) == MAX_SEMANTIC_ID_CHARS
-    assert max(
-        len(f"{beat.directive.id}__{role.value}") for role in PYTHAGOREAN_ROLE_ORDER
-    ) <= 64
+    assert max(len(f"{beat.directive.id}__{role.value}") for role in PYTHAGOREAN_ROLE_ORDER) <= 64
 
     for invalid_id in (
         "P" + "a" * MAX_SEMANTIC_ID_CHARS,
@@ -270,9 +268,7 @@ def test_component_state_accepts_every_interruption_prefix(prefix_length: int) -
 )
 def test_component_state_rejects_gaps_duplicates_and_reordering(roles: list[str]) -> None:
     with pytest.raises(ValidationError, match="ordered Pythagorean role prefix"):
-        PythagoreanAreaIdentityState.model_validate(
-            {"id": "area-identity", "revealedRoles": roles}
-        )
+        PythagoreanAreaIdentityState.model_validate({"id": "area-identity", "revealedRoles": roles})
 
 
 def test_semantic_scene_has_strict_revision_unique_ids_and_immutable_components() -> None:
@@ -302,9 +298,7 @@ def test_verification_receipt_is_positive_bounded_and_unique() -> None:
             "componentId": "area-identity",
             "role": "triangle",
             "nodeId": "area-identity__triangle",
-            "obligationCodes": [
-                obligation.value for obligation in VerificationObligation
-            ],
+            "obligationCodes": [obligation.value for obligation in VerificationObligation],
         }
     )
     assert receipt.verified is True

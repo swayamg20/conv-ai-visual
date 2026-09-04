@@ -210,8 +210,7 @@ def test_semantic_beat_is_at_least_eighty_percent_smaller_than_raw_patches() -> 
 
     semantic_bytes = len(beat.model_dump_json(by_alias=True).encode("utf-8"))
     raw_patch_bytes = sum(
-        len(atom.patch.model_dump_json(by_alias=True).encode("utf-8"))
-        for atom in compiled.atoms
+        len(atom.patch.model_dump_json(by_alias=True).encode("utf-8")) for atom in compiled.atoms
     )
 
     assert semantic_bytes <= raw_patch_bytes * 0.2

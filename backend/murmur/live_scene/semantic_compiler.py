@@ -18,13 +18,21 @@ from murmur.live_scene.contracts import (
     TextSceneNode,
 )
 from murmur.live_scene.semantic_contracts import (
+    SEMANTIC_COMPILER_VERSION,
     CompiledTeachingBeat,
     CompiledVisualAtom,
+    CompilerCertificateBodyV1,
+    CompilerCertificateV1,
     PythagoreanAreaIdentityState,
     PythagoreanRole,
     SemanticSceneState,
     TeachingBeatDraft,
+    compiler_certificate_sha256,
     roles_through,
+    scene_patch_sha256,
+    semantic_scene_sha256,
+    teaching_beat_sha256,
+    verification_receipt_sha256,
 )
 from murmur.live_scene.semantic_verifier import verify_pythagorean_realization
 
@@ -212,6 +220,30 @@ def _serialize_nodes(nodes: tuple[SceneNode, ...]) -> tuple[dict[str, object], .
     return tuple(node.model_dump(mode="json", by_alias=True) for node in nodes)
 
 
+def _advance_semantic_scene(
+    scene: SemanticSceneState,
+    *,
+    component_id: str,
+    revealed_roles: tuple[PythagoreanRole, ...],
+    certificate_head_sha256: str | None,
+) -> SemanticSceneState:
+    component = PythagoreanAreaIdentityState(
+        id=component_id,
+        revealed_roles=revealed_roles,
+    )
+    if any(existing.id == component_id for existing in scene.components):
+        components = tuple(
+            component if existing.id == component_id else existing for existing in scene.components
+        )
+    else:
+        components = (*scene.components, component)
+    return SemanticSceneState(
+        revision=scene.revision + 1,
+        components=components,
+        certificate_head_sha256=certificate_head_sha256,
+    )
+
+
 def compile_teaching_beat(
     beat: TeachingBeatDraft,
     base_scene: SemanticSceneState,
@@ -232,43 +264,70 @@ def compile_teaching_beat(
     target_nodes = complete_nodes[: len(target_roles)]
     receipts = verify_pythagorean_realization(component_id, _serialize_nodes(target_nodes))
 
-    atoms = tuple(
-        CompiledVisualAtom(
-            atom_id=_atom_id(component_id, role),
+    atoms: list[CompiledVisualAtom] = []
+    current_scene = base_scene
+    beat_digest = teaching_beat_sha256(beat)
+    for index, role in enumerate(target_roles):
+        if index < len(current_roles):
+            continue
+
+        atom_id = _atom_id(component_id, role)
+        node = target_nodes[index]
+        patch = ScenePatchDraft(
+            patch_id=atom_id,
+            narration=beat.narration,
+            operations=(PutSceneOperation(op="put", node=node),),
+        )
+        receipt = receipts[index]
+        next_scene_without_head = _advance_semantic_scene(
+            current_scene,
+            component_id=component_id,
+            revealed_roles=target_roles[: index + 1],
+            certificate_head_sha256=None,
+        )
+        certificate_body = CompilerCertificateBodyV1(
+            compiler_version=SEMANTIC_COMPILER_VERSION,
+            atom_id=atom_id,
+            beat_id=beat.beat_id,
+            beat_sha256=beat_digest,
+            component_id=component_id,
+            role=role,
+            node_id=node.id,
+            atom_ordinal=index + 1,
+            base_semantic_revision=current_scene.revision,
+            result_semantic_revision=next_scene_without_head.revision,
+            base_scene_sha256=semantic_scene_sha256(current_scene),
+            result_scene_sha256=semantic_scene_sha256(next_scene_without_head),
+            patch_sha256=scene_patch_sha256(patch),
+            receipt_sha256=verification_receipt_sha256(receipt),
+            previous_certificate_sha256=current_scene.certificate_head_sha256,
+        )
+        certificate = CompilerCertificateV1(
+            body=certificate_body,
+            certificate_sha256=compiler_certificate_sha256(certificate_body),
+        )
+        atom = CompiledVisualAtom(
+            atom_id=atom_id,
             beat_id=beat.beat_id,
             component_id=component_id,
             role=role,
-            patch=ScenePatchDraft(
-                patch_id=_atom_id(component_id, role),
-                narration=beat.narration,
-                operations=(PutSceneOperation(op="put", node=target_nodes[index]),),
-            ),
-            receipt=receipts[index],
+            patch=patch,
+            receipt=receipt,
+            certificate=certificate,
         )
-        for index, role in enumerate(target_roles)
-        if index >= len(current_roles)
-    )
+        atoms.append(atom)
+        current_scene = _advance_semantic_scene(
+            current_scene,
+            component_id=component_id,
+            revealed_roles=target_roles[: index + 1],
+            certificate_head_sha256=certificate.certificate_sha256,
+        )
 
-    target_component = PythagoreanAreaIdentityState(
-        id=component_id,
-        revealed_roles=target_roles,
-    )
-    if current is None:
-        result_components = (*base_scene.components, target_component)
-    else:
-        result_components = tuple(
-            target_component if component.id == component_id else component
-            for component in base_scene.components
-        )
-    result_scene = SemanticSceneState(
-        revision=base_scene.revision + len(atoms),
-        components=result_components,
-    )
     return CompiledTeachingBeat(
         beat=beat,
         base_scene=base_scene,
-        result_scene=result_scene,
-        atoms=atoms,
+        result_scene=current_scene,
+        atoms=tuple(atoms),
     )
 
 

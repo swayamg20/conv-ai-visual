@@ -21,12 +21,26 @@ from murmur.live_scene.contracts import (
     LiveSceneContract,
     NarrationText,
     NonNegativeRevision,
+    PositiveRevision,
+    PositiveSequence,
     SceneNodeId,
     ScenePatchDraft,
+)
+from murmur.live_scene.semantic_integrity import (
+    COMPILER_CERTIFICATE_HASH_DOMAIN,
+    SCENE_PATCH_HASH_DOMAIN,
+    SEMANTIC_CANONICALIZATION,
+    SEMANTIC_HASH_ALGORITHM,
+    SEMANTIC_SCENE_HASH_DOMAIN,
+    TEACHING_BEAT_HASH_DOMAIN,
+    VERIFICATION_RECEIPT_HASH_DOMAIN,
+    canonical_sha256,
+    digest_matches,
 )
 
 MAX_SEMANTIC_ID_CHARS = 32
 MAX_SEMANTIC_COMPONENTS = MAX_SCENE_NODES
+SEMANTIC_COMPILER_VERSION = "murmur.pythagorean_area_identity.v1"
 
 SemanticId = Annotated[
     str,
@@ -40,6 +54,15 @@ SemanticId = Annotated[
 BeatId = SemanticId
 SemanticComponentId = SemanticId
 AtomId = SceneNodeId
+Sha256Digest = Annotated[
+    str,
+    StringConstraints(
+        strict=True,
+        min_length=64,
+        max_length=64,
+        pattern=r"^[0-9a-f]{64}$",
+    ),
+]
 
 
 class TeachingAct(StrEnum):
@@ -83,9 +106,7 @@ PYTHAGOREAN_ROLE_ORDER: tuple[PythagoreanRole, ...] = (
     PythagoreanRole.IDENTITY,
 )
 
-PYTHAGOREAN_STAGE_ROLES: Mapping[
-    PythagoreanStage, tuple[PythagoreanRole, ...]
-] = MappingProxyType(
+PYTHAGOREAN_STAGE_ROLES: Mapping[PythagoreanStage, tuple[PythagoreanRole, ...]] = MappingProxyType(
     {
         PythagoreanStage.TRIANGLE: PYTHAGOREAN_ROLE_ORDER[:1],
         PythagoreanStage.AREAS: PYTHAGOREAN_ROLE_ORDER[:7],
@@ -121,6 +142,15 @@ class TeachingBeatDraft(LiveSceneContract):
     directive: TeachingDirective
 
 
+def teaching_beat_sha256(beat: TeachingBeatDraft) -> str:
+    """Hash the complete model-authored semantic teaching request."""
+
+    return canonical_sha256(
+        beat.model_dump(mode="json", by_alias=True),
+        domain=TEACHING_BEAT_HASH_DOMAIN,
+    )
+
+
 class PythagoreanAreaIdentityState(LiveSceneContract):
     """Server-owned materialized prefix for one Pythagorean identity component."""
 
@@ -150,6 +180,11 @@ class SemanticSceneState(LiveSceneContract):
         tuple[SemanticComponentState, ...],
         Field(max_length=MAX_SEMANTIC_COMPONENTS),
     ] = ()
+    certificate_head_sha256: Sha256Digest | None = Field(
+        default=None,
+        alias="certificateHeadSha256",
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_unique_component_ids(self) -> Self:
@@ -198,6 +233,100 @@ class VerificationReceipt(LiveSceneContract):
         return self
 
 
+def scene_patch_sha256(patch: ScenePatchDraft) -> str:
+    """Hash the complete low-level patch, including model-authored narration."""
+
+    return canonical_sha256(
+        patch.model_dump(mode="json", by_alias=True),
+        domain=SCENE_PATCH_HASH_DOMAIN,
+    )
+
+
+def verification_receipt_sha256(receipt: VerificationReceipt) -> str:
+    """Hash the verifier's exact structural claims for one visual node."""
+
+    return canonical_sha256(
+        receipt.model_dump(mode="json", by_alias=True),
+        domain=VERIFICATION_RECEIPT_HASH_DOMAIN,
+    )
+
+
+def semantic_scene_sha256(scene: SemanticSceneState) -> str:
+    """Hash semantic contents while deliberately excluding the chain-head metadata."""
+
+    payload = {
+        "revision": scene.revision,
+        "components": [
+            component.model_dump(mode="json", by_alias=True) for component in scene.components
+        ],
+    }
+    return canonical_sha256(payload, domain=SEMANTIC_SCENE_HASH_DOMAIN)
+
+
+class CompilerCertificateBodyV1(LiveSceneContract):
+    """Versioned commitments made by the deterministic semantic compiler."""
+
+    v: Literal[1] = 1
+    issuer: Literal["semantic_compiler"] = "semantic_compiler"
+    compiler_version: Literal[SEMANTIC_COMPILER_VERSION] = Field(alias="compilerVersion")
+    canonicalization: Literal[SEMANTIC_CANONICALIZATION] = SEMANTIC_CANONICALIZATION
+    hash_algorithm: Literal[SEMANTIC_HASH_ALGORITHM] = Field(
+        default=SEMANTIC_HASH_ALGORITHM,
+        alias="hashAlgorithm",
+    )
+    atom_id: AtomId = Field(alias="atomId")
+    beat_id: BeatId = Field(alias="beatId")
+    beat_sha256: Sha256Digest = Field(alias="beatSha256")
+    component_id: SemanticComponentId = Field(alias="componentId")
+    role: PythagoreanRole
+    node_id: SceneNodeId = Field(alias="nodeId")
+    atom_ordinal: PositiveSequence = Field(alias="atomOrdinal")
+    base_semantic_revision: NonNegativeRevision = Field(alias="baseSemanticRevision")
+    result_semantic_revision: PositiveRevision = Field(alias="resultSemanticRevision")
+    base_scene_sha256: Sha256Digest = Field(alias="baseSceneSha256")
+    result_scene_sha256: Sha256Digest = Field(alias="resultSceneSha256")
+    patch_sha256: Sha256Digest = Field(alias="patchSha256")
+    receipt_sha256: Sha256Digest = Field(alias="receiptSha256")
+    previous_certificate_sha256: Sha256Digest | None = Field(
+        default=None,
+        alias="previousCertificateSha256",
+    )
+
+    @model_validator(mode="after")
+    def validate_transition_identity(self) -> Self:
+        if self.result_semantic_revision != self.base_semantic_revision + 1:
+            raise ValueError(
+                "certificate resultSemanticRevision must be one greater than baseSemanticRevision"
+            )
+        expected_ordinal = PYTHAGOREAN_ROLE_ORDER.index(self.role) + 1
+        if self.atom_ordinal != expected_ordinal:
+            raise ValueError("certificate atomOrdinal must be the absolute role ordinal")
+        return self
+
+
+def compiler_certificate_sha256(body: CompilerCertificateBodyV1) -> str:
+    """Hash the certificate body without creating a recursive self-reference."""
+
+    return canonical_sha256(
+        body.model_dump(mode="json", by_alias=True),
+        domain=COMPILER_CERTIFICATE_HASH_DOMAIN,
+    )
+
+
+class CompilerCertificateV1(LiveSceneContract):
+    """Self-checking compiler-integrity certificate, not renderer evidence."""
+
+    body: CompilerCertificateBodyV1
+    certificate_sha256: Sha256Digest = Field(alias="certificateSha256")
+
+    @model_validator(mode="after")
+    def validate_certificate_digest(self) -> Self:
+        expected = compiler_certificate_sha256(self.body)
+        if not digest_matches(self.certificate_sha256, expected):
+            raise ValueError("certificateSha256 must match the canonical certificate body")
+        return self
+
+
 class CompiledVisualAtom(LiveSceneContract):
     """One compiler-verified candidate for a low-level scene commit."""
 
@@ -207,6 +336,10 @@ class CompiledVisualAtom(LiveSceneContract):
     role: PythagoreanRole
     patch: ScenePatchDraft
     receipt: VerificationReceipt
+    certificate: CompilerCertificateV1 | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @model_validator(mode="after")
     def validate_bound_metadata(self) -> Self:
@@ -222,7 +355,51 @@ class CompiledVisualAtom(LiveSceneContract):
             raise ValueError("verification receipt componentId must match the atom componentId")
         if self.receipt.role != self.role:
             raise ValueError("verification receipt role must match the atom role")
+
+        if self.certificate is not None:
+            body = self.certificate.body
+            if body.atom_id != self.atom_id:
+                raise ValueError("certificate atomId must match the atom")
+            if body.beat_id != self.beat_id:
+                raise ValueError("certificate beatId must match the atom")
+            if body.component_id != self.component_id:
+                raise ValueError("certificate componentId must match the atom")
+            if body.role != self.role:
+                raise ValueError("certificate role must match the atom")
+            if body.node_id != operation.target_id:
+                raise ValueError("certificate nodeId must match the atom target")
+            if not digest_matches(body.patch_sha256, scene_patch_sha256(self.patch)):
+                raise ValueError("certificate patchSha256 must match the atom patch")
+            if not digest_matches(
+                body.receipt_sha256,
+                verification_receipt_sha256(self.receipt),
+            ):
+                raise ValueError("certificate receiptSha256 must match the verifier receipt")
         return self
+
+
+def _advance_semantic_scene(
+    scene: SemanticSceneState,
+    *,
+    component_id: SemanticComponentId,
+    revealed_roles: tuple[PythagoreanRole, ...],
+    certificate_head_sha256: Sha256Digest,
+) -> SemanticSceneState:
+    component = PythagoreanAreaIdentityState(
+        id=component_id,
+        revealed_roles=revealed_roles,
+    )
+    if any(existing.id == component_id for existing in scene.components):
+        components = tuple(
+            component if existing.id == component_id else existing for existing in scene.components
+        )
+    else:
+        components = (*scene.components, component)
+    return SemanticSceneState(
+        revision=scene.revision + 1,
+        components=components,
+        certificate_head_sha256=certificate_head_sha256,
+    )
 
 
 class CompiledTeachingBeat(LiveSceneContract):
@@ -245,7 +422,11 @@ class CompiledTeachingBeat(LiveSceneContract):
             None,
         )
         result_component = next(
-            (component for component in self.result_scene.components if component.id == component_id),
+            (
+                component
+                for component in self.result_scene.components
+                if component.id == component_id
+            ),
             None,
         )
 
@@ -276,6 +457,60 @@ class CompiledTeachingBeat(LiveSceneContract):
         )
         if result_others != base_others:
             raise ValueError("compiled teaching beat must preserve unrelated semantic components")
+
+        certification = tuple(atom.certificate is not None for atom in self.atoms)
+        if any(certification) and not all(certification):
+            raise ValueError("compiled teaching beat cannot mix certified and legacy atoms")
+
+        if not self.atoms:
+            if self.result_scene != self.base_scene:
+                raise ValueError("an empty compiled teaching beat must preserve the entire scene")
+            return self
+
+        if not any(certification):
+            if (
+                self.base_scene.certificate_head_sha256 is not None
+                or self.result_scene.certificate_head_sha256 is not None
+            ):
+                raise ValueError("legacy atoms cannot consume or produce a certificate chain head")
+            return self
+
+        current_scene = self.base_scene
+        expected_beat_sha256 = teaching_beat_sha256(self.beat)
+        for atom in self.atoms:
+            certificate = atom.certificate
+            if certificate is None:  # Defensive narrowing after the all-or-none check.
+                raise ValueError("compiled teaching beat certificate chain is incomplete")
+            body = certificate.body
+            if not digest_matches(body.beat_sha256, expected_beat_sha256):
+                raise ValueError("certificate beatSha256 must match the exact teaching beat")
+            if body.base_semantic_revision != current_scene.revision:
+                raise ValueError("certificate baseSemanticRevision must match the prior scene")
+            if not digest_matches(
+                body.base_scene_sha256,
+                semantic_scene_sha256(current_scene),
+            ):
+                raise ValueError("certificate baseSceneSha256 must match the prior scene")
+            if body.previous_certificate_sha256 != current_scene.certificate_head_sha256:
+                raise ValueError("certificate previousCertificateSha256 must match the chain head")
+
+            next_scene = _advance_semantic_scene(
+                current_scene,
+                component_id=component_id,
+                revealed_roles=target_roles[: body.atom_ordinal],
+                certificate_head_sha256=certificate.certificate_sha256,
+            )
+            if body.result_semantic_revision != next_scene.revision:
+                raise ValueError("certificate resultSemanticRevision must match the next scene")
+            if not digest_matches(
+                body.result_scene_sha256,
+                semantic_scene_sha256(next_scene),
+            ):
+                raise ValueError("certificate resultSceneSha256 must match the next scene")
+            current_scene = next_scene
+
+        if current_scene != self.result_scene:
+            raise ValueError("resultScene must equal the certified semantic chain result")
         return self
 
 
