@@ -13,7 +13,8 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 02:53 IST: Re-read `.agent/PLANS.md`, preserved the unrelated dirty voice checkout, and confirmed the clean `codex/realtime-scene-core` worktree matches `origin` at `9460a8e`.
 - [x] 2026-09-05 02:54 IST: Established a 137-test semantic baseline covering the current contracts, prompt, parser, and service.
 - [x] 2026-09-05 02:57 IST: Defined the three-variant decision union, server-owned component ID allocation, and pure forward-only resolver; 191 contract, prompt, parser, and service tests pass with Ruff clean.
-- [ ] Add a balanced, narration-free routing prompt and incremental decision parser without duplicating framing logic.
+- [x] 2026-09-05 03:01 IST: Generalized the existing bounded semantic NDJSON parser and added the decision parser without duplicating UTF-8, framing, lifecycle, or redaction logic; all 35 legacy and router parser tests pass.
+- [ ] Add a balanced, narration-free routing prompt.
 - [ ] Prove routing, abstention, prefix reuse, prompt-injection resistance, and model-surface isolation with deterministic tests.
 - [ ] Add a small cost-guarded decision evaluator and dry-run it without provider access.
 - [ ] Obtain an explicit spend boundary, run the smaller Azure decision corpus, and record the gate result.

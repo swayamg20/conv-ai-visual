@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import codecs
 import json
-from typing import Literal, Never
+from typing import Generic, Literal, Never, TypeVar
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from murmur.live_scene.contracts import LIVE_SCENE_SCHEMA_VERSION, MAX_NDJSON_FRAME_BYTES
-from murmur.live_scene.semantic_contracts import TeachingBeatDraft
+from murmur.live_scene.semantic_contracts import (
+    TEACHING_BEAT_DRAFT_ADAPTER,
+    VISUAL_ACT_DECISION_ADAPTER,
+    TeachingBeatDraft,
+    VisualActDecision,
+)
+
+_RecordT = TypeVar("_RecordT")
 
 
 class _DuplicateJsonKey(ValueError):
@@ -36,23 +43,35 @@ TeachingBeatStreamErrorCode = Literal[
     "invalid_beat",
     "parser_closed",
 ]
+VisualActDecisionStreamErrorCode = Literal[
+    "invalid_utf8",
+    "frame_too_large",
+    "invalid_json",
+    "invalid_decision",
+    "parser_closed",
+]
+SemanticModelStreamErrorCode = TeachingBeatStreamErrorCode | VisualActDecisionStreamErrorCode
 
-_DEFAULT_REPAIR_HINTS: dict[TeachingBeatStreamErrorCode, str] = {
+_DEFAULT_REPAIR_HINTS: dict[SemanticModelStreamErrorCode, str] = {
     "invalid_utf8": "invalid_utf8: output UTF-8 text only",
     "frame_too_large": "frame_too_large: shorten the teaching beat narration",
     "invalid_json": "invalid_json: emit one complete JSON object per NDJSON line",
     "invalid_beat": "invalid_beat: follow the TeachingBeat v1 schema exactly",
+    "invalid_decision": "invalid_decision: follow the VisualActDecision v1 schema exactly",
     "parser_closed": "parser_closed: restart with a fresh NDJSON stream",
 }
-_ALLOWED_REPAIR_HINTS = frozenset(_DEFAULT_REPAIR_HINTS.values())
+_VISUAL_DECISION_FRAME_TOO_LARGE_HINT = "frame_too_large: shorten the visual-act decision"
+_ALLOWED_REPAIR_HINTS = frozenset(
+    (*_DEFAULT_REPAIR_HINTS.values(), _VISUAL_DECISION_FRAME_TOO_LARGE_HINT)
+)
 
 
-class TeachingBeatStreamError(ValueError):
+class SemanticModelStreamError(ValueError):
     """Bounded parser failure that never carries rejected provider output."""
 
     def __init__(
         self,
-        code: TeachingBeatStreamErrorCode,
+        code: SemanticModelStreamErrorCode,
         message: str,
         *,
         frame_number: int | None = None,
@@ -67,19 +86,43 @@ class TeachingBeatStreamError(ValueError):
         self.repair_hint = selected_repair_hint
 
 
-class TeachingBeatStreamParser:
-    """Reconstruct strict ``TeachingBeatDraft`` records across arbitrary chunks.
+class TeachingBeatStreamError(SemanticModelStreamError):
+    """Compatibility error for model-authored teaching-beat streams."""
+
+
+class VisualActDecisionStreamError(SemanticModelStreamError):
+    """Error for model-authored visual-act decision streams."""
+
+
+class _StrictSemanticStreamParser(Generic[_RecordT]):
+    """Reconstruct one strict semantic record type across arbitrary chunks.
 
     Text and byte chunks share one incremental UTF-8 decoder. The parser becomes
     terminal after an error, :meth:`finish`, or :meth:`abort`, matching the raw
     scene-patch parser's lifecycle without coupling the two authoring contracts.
     """
 
-    def __init__(self, *, max_frame_bytes: int = MAX_NDJSON_FRAME_BYTES) -> None:
+    def __init__(
+        self,
+        *,
+        adapter: TypeAdapter[_RecordT],
+        error_type: type[SemanticModelStreamError],
+        invalid_record_code: Literal["invalid_beat", "invalid_decision"],
+        stream_label: str,
+        schema_label: str,
+        frame_too_large_hint: str,
+        max_frame_bytes: int = MAX_NDJSON_FRAME_BYTES,
+    ) -> None:
         if isinstance(max_frame_bytes, bool) or not isinstance(max_frame_bytes, int):
             raise TypeError("max_frame_bytes must be an integer")
         if max_frame_bytes <= 0 or max_frame_bytes > MAX_NDJSON_FRAME_BYTES:
             raise ValueError(f"max_frame_bytes must be between 1 and {MAX_NDJSON_FRAME_BYTES}")
+        self._adapter = adapter
+        self._error_type = error_type
+        self._invalid_record_code = invalid_record_code
+        self._stream_label = stream_label
+        self._schema_label = schema_label
+        self._frame_too_large_hint = frame_too_large_hint
         self._max_frame_bytes = max_frame_bytes
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
         self._buffer = ""
@@ -95,34 +138,40 @@ class TeachingBeatStreamParser:
     def closed(self) -> bool:
         return self._closed
 
-    def feed(self, chunk: str | bytes) -> tuple[TeachingBeatDraft, ...]:
-        """Consume one provider-neutral chunk and return completed beat frames."""
+    def feed(self, chunk: str | bytes) -> tuple[_RecordT, ...]:
+        """Consume one provider-neutral chunk and return completed records."""
 
         self._require_open()
         if not isinstance(chunk, (str, bytes)):
-            self._fail("invalid_beat", "teaching beat stream chunks must be text or bytes")
+            self._fail(
+                self._invalid_record_code,
+                f"{self._stream_label} stream chunks must be text or bytes",
+            )
         try:
             raw = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
             decoded = self._decoder.decode(raw, final=False)
         except (UnicodeDecodeError, UnicodeEncodeError):
-            self._fail("invalid_utf8", "teaching beat stream was not valid UTF-8")
+            self._fail("invalid_utf8", f"{self._stream_label} stream was not valid UTF-8")
         return self._consume(decoded)
 
-    def finish(self) -> tuple[TeachingBeatDraft, ...]:
+    def finish(self) -> tuple[_RecordT, ...]:
         """Flush UTF-8 state and accept one final frame without a newline."""
 
         self._require_open()
         try:
             decoded = self._decoder.decode(b"", final=True)
         except UnicodeDecodeError:
-            self._fail("invalid_utf8", "teaching beat stream ended with incomplete UTF-8")
+            self._fail(
+                "invalid_utf8",
+                f"{self._stream_label} stream ended with incomplete UTF-8",
+            )
 
-        beats = list(self._consume(decoded))
+        records = list(self._consume(decoded))
         if self._buffer.strip():
-            beats.append(self._parse_frame(self._buffer.removesuffix("\r")))
+            records.append(self._parse_frame(self._buffer.removesuffix("\r")))
         self._buffer = ""
         self._closed = True
-        return tuple(beats)
+        return tuple(records)
 
     def abort(self) -> None:
         """Discard an incomplete frame and reject all later chunks."""
@@ -130,17 +179,17 @@ class TeachingBeatStreamParser:
         self._buffer = ""
         self._closed = True
 
-    def _consume(self, decoded: str) -> tuple[TeachingBeatDraft, ...]:
+    def _consume(self, decoded: str) -> tuple[_RecordT, ...]:
         pending = self._buffer + decoded
         self._buffer = ""
-        beats: list[TeachingBeatDraft] = []
+        records: list[_RecordT] = []
 
         while True:
             newline = pending.find("\n")
             if newline < 0:
                 self._assert_frame_size(pending)
                 self._buffer = pending
-                return tuple(beats)
+                return tuple(records)
 
             frame = pending[:newline]
             pending = pending[newline + 1 :]
@@ -148,9 +197,9 @@ class TeachingBeatStreamParser:
                 frame = frame[:-1]
             if not frame.strip():
                 continue
-            beats.append(self._parse_frame(frame))
+            records.append(self._parse_frame(frame))
 
-    def _parse_frame(self, frame: str) -> TeachingBeatDraft:
+    def _parse_frame(self, frame: str) -> _RecordT:
         self._assert_frame_size(frame)
         next_frame = self._frame_count + 1
         try:
@@ -162,28 +211,28 @@ class TeachingBeatStreamParser:
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             self._fail(
                 "invalid_json",
-                "teaching beat stream frame was not valid JSON",
+                f"{self._stream_label} stream frame was not valid JSON",
                 frame_number=next_frame,
             )
         if not isinstance(payload, dict):
-            self._invalid_beat(next_frame)
+            self._invalid_record(next_frame)
         if type(payload.get("v")) is not int or payload.get("v") != LIVE_SCENE_SCHEMA_VERSION:
-            self._invalid_beat(next_frame)
+            self._invalid_record(next_frame)
         try:
-            beat = TeachingBeatDraft.model_validate(
+            record = self._adapter.validate_python(
                 payload,
                 by_alias=True,
                 by_name=False,
             )
         except ValidationError:
-            self._invalid_beat(next_frame)
+            self._invalid_record(next_frame)
         self._frame_count = next_frame
-        return beat
+        return record
 
-    def _invalid_beat(self, frame_number: int) -> Never:
+    def _invalid_record(self, frame_number: int) -> Never:
         self._fail(
-            "invalid_beat",
-            "teaching beat stream frame did not match TeachingBeat v1",
+            self._invalid_record_code,
+            f"{self._stream_label} stream frame did not match {self._schema_label}",
             frame_number=frame_number,
         )
 
@@ -191,24 +240,25 @@ class TeachingBeatStreamParser:
         try:
             size = len(frame.encode("utf-8"))
         except UnicodeEncodeError:
-            self._fail("invalid_utf8", "teaching beat stream was not valid UTF-8")
+            self._fail("invalid_utf8", f"{self._stream_label} stream was not valid UTF-8")
         if size > self._max_frame_bytes:
             self._fail(
                 "frame_too_large",
-                f"teaching beat stream frame exceeded {self._max_frame_bytes} bytes",
+                f"{self._stream_label} stream frame exceeded {self._max_frame_bytes} bytes",
                 frame_number=self._frame_count + 1,
+                repair_hint=self._frame_too_large_hint,
             )
 
     def _require_open(self) -> None:
         if self._closed or self._failed:
-            raise TeachingBeatStreamError(
+            raise self._error_type(
                 "parser_closed",
-                "teaching beat stream parser is closed",
+                f"{self._stream_label} stream parser is closed",
             )
 
     def _fail(
         self,
-        code: TeachingBeatStreamErrorCode,
+        code: SemanticModelStreamErrorCode,
         message: str,
         *,
         frame_number: int | None = None,
@@ -217,22 +267,56 @@ class TeachingBeatStreamParser:
         self._buffer = ""
         self._failed = True
         self._closed = True
-        error = TeachingBeatStreamError(
+        error = self._error_type(
             code,
             message,
             frame_number=frame_number,
             repair_hint=repair_hint,
         )
         # JSON and Pydantic exceptions may contain provider output. Suppress the
-        # active exception context so rejected teaching content cannot leak later.
+        # active exception context so rejected model content cannot leak later.
         raise error from None
+
+
+class TeachingBeatStreamParser(_StrictSemanticStreamParser[TeachingBeatDraft]):
+    """Reconstruct strict ``TeachingBeatDraft`` records across arbitrary chunks."""
+
+    def __init__(self, *, max_frame_bytes: int = MAX_NDJSON_FRAME_BYTES) -> None:
+        super().__init__(
+            adapter=TEACHING_BEAT_DRAFT_ADAPTER,
+            error_type=TeachingBeatStreamError,
+            invalid_record_code="invalid_beat",
+            stream_label="teaching beat",
+            schema_label="TeachingBeat v1",
+            frame_too_large_hint=_DEFAULT_REPAIR_HINTS["frame_too_large"],
+            max_frame_bytes=max_frame_bytes,
+        )
+
+
+class VisualActDecisionStreamParser(_StrictSemanticStreamParser[VisualActDecision]):
+    """Reconstruct strict ``VisualActDecision`` records across arbitrary chunks."""
+
+    def __init__(self, *, max_frame_bytes: int = MAX_NDJSON_FRAME_BYTES) -> None:
+        super().__init__(
+            adapter=VISUAL_ACT_DECISION_ADAPTER,
+            error_type=VisualActDecisionStreamError,
+            invalid_record_code="invalid_decision",
+            stream_label="visual-act decision",
+            schema_label="VisualActDecision v1",
+            frame_too_large_hint=_VISUAL_DECISION_FRAME_TOO_LARGE_HINT,
+            max_frame_bytes=max_frame_bytes,
+        )
 
 
 NDJSONTeachingBeatParser = TeachingBeatStreamParser
 
 __all__ = [
     "NDJSONTeachingBeatParser",
+    "SemanticModelStreamError",
     "TeachingBeatStreamError",
     "TeachingBeatStreamErrorCode",
     "TeachingBeatStreamParser",
+    "VisualActDecisionStreamError",
+    "VisualActDecisionStreamErrorCode",
+    "VisualActDecisionStreamParser",
 ]
