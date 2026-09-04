@@ -72,7 +72,7 @@ def resolve_visual_act(
         if len(scene.components) >= MAX_SEMANTIC_COMPONENTS:
             raise VisualActRoutingError(VisualActRoutingErrorCode.COMPONENT_CAPACITY)
         current_roles: tuple[PythagoreanRole, ...] = ()
-        component_kind = decision.component_kind
+        component_kind: PythagoreanComponentKind = "pythagorean_area_identity"
         component_id = _next_component_id(scene)
     else:
         component = next(

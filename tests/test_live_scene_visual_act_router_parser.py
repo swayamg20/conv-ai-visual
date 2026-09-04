@@ -22,7 +22,6 @@ def _line(decision: str) -> str:
         "start_visual": {
             "v": 1,
             "decision": "start_visual",
-            "componentKind": "pythagorean_area_identity",
             "targetStage": "triangle",
         },
         "continue_visual": {
@@ -119,6 +118,12 @@ def test_frame_limit_uses_a_decision_specific_fixed_hint() -> None:
     assert captured.value.code == "frame_too_large"
     assert captured.value.repair_hint == "frame_too_large: shorten the visual-act decision"
     assert "narration" not in captured.value.repair_hint
+
+
+def test_direct_decision_error_uses_decision_specific_fixed_hint() -> None:
+    error = VisualActDecisionStreamError("frame_too_large", "safe")
+
+    assert error.repair_hint == "frame_too_large: shorten the visual-act decision"
 
 
 def test_decision_parser_rejects_custom_repair_hints() -> None:

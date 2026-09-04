@@ -97,7 +97,6 @@ class StartVisualDecision(LiveSceneContract):
 
     v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
     decision: Literal["start_visual"] = "start_visual"
-    component_kind: PythagoreanComponentKind = Field(alias="componentKind")
     target_stage: PythagoreanStage = Field(alias="targetStage")
 
 

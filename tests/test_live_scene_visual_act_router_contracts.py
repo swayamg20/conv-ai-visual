@@ -30,7 +30,6 @@ def _start(stage: str = "identity") -> dict[str, object]:
     return {
         "v": LIVE_SCENE_SCHEMA_VERSION,
         "decision": "start_visual",
-        "componentKind": "pythagorean_area_identity",
         "targetStage": stage,
     }
 
@@ -71,7 +70,7 @@ def _scene(prefix_length: int, *, component_id: str = "areas") -> SemanticSceneS
         (
             _start(),
             StartVisualDecision,
-            {"v", "decision", "component_kind", "target_stage"},
+            {"v", "decision", "target_stage"},
         ),
         (
             _continue(),
@@ -146,6 +145,7 @@ def test_decision_rejects_non_routing_fields(forbidden: str) -> None:
         {**_start(), "componentId": "model-owned-id"},
         {**_abstain(), "targetStage": "identity"},
         {**_abstain(), "componentId": "areas"},
+        {**_start(), "componentKind": "pythagorean_area_identity"},
         {**_start(), "reasonCode": "unsupported_intent"},
         {**_continue(), "componentKind": "pythagorean_area_identity"},
     ],

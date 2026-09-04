@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import codecs
 import json
-from typing import Generic, Literal, Never, TypeVar
+from typing import ClassVar, Generic, Literal, Never, TypeVar
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -52,22 +52,17 @@ VisualActDecisionStreamErrorCode = Literal[
 ]
 SemanticModelStreamErrorCode = TeachingBeatStreamErrorCode | VisualActDecisionStreamErrorCode
 
-_DEFAULT_REPAIR_HINTS: dict[SemanticModelStreamErrorCode, str] = {
+_SHARED_REPAIR_HINTS: dict[SemanticModelStreamErrorCode, str] = {
     "invalid_utf8": "invalid_utf8: output UTF-8 text only",
-    "frame_too_large": "frame_too_large: shorten the teaching beat narration",
     "invalid_json": "invalid_json: emit one complete JSON object per NDJSON line",
-    "invalid_beat": "invalid_beat: follow the TeachingBeat v1 schema exactly",
-    "invalid_decision": "invalid_decision: follow the VisualActDecision v1 schema exactly",
     "parser_closed": "parser_closed: restart with a fresh NDJSON stream",
 }
-_VISUAL_DECISION_FRAME_TOO_LARGE_HINT = "frame_too_large: shorten the visual-act decision"
-_ALLOWED_REPAIR_HINTS = frozenset(
-    (*_DEFAULT_REPAIR_HINTS.values(), _VISUAL_DECISION_FRAME_TOO_LARGE_HINT)
-)
 
 
 class SemanticModelStreamError(ValueError):
     """Bounded parser failure that never carries rejected provider output."""
+
+    _REPAIR_HINTS: ClassVar[dict[SemanticModelStreamErrorCode, str]] = _SHARED_REPAIR_HINTS
 
     def __init__(
         self,
@@ -80,8 +75,11 @@ class SemanticModelStreamError(ValueError):
         super().__init__(message)
         self.code = code
         self.frame_number = frame_number
-        selected_repair_hint = repair_hint or _DEFAULT_REPAIR_HINTS[code]
-        if selected_repair_hint not in _ALLOWED_REPAIR_HINTS:
+        default_repair_hint = self._REPAIR_HINTS.get(code)
+        if default_repair_hint is None:
+            raise ValueError("code is not valid for this stream error")
+        selected_repair_hint = repair_hint or default_repair_hint
+        if selected_repair_hint not in self._REPAIR_HINTS.values():
             raise ValueError("repair_hint must be a fixed internal value")
         self.repair_hint = selected_repair_hint
 
@@ -89,9 +87,21 @@ class SemanticModelStreamError(ValueError):
 class TeachingBeatStreamError(SemanticModelStreamError):
     """Compatibility error for model-authored teaching-beat streams."""
 
+    _REPAIR_HINTS: ClassVar[dict[SemanticModelStreamErrorCode, str]] = {
+        **_SHARED_REPAIR_HINTS,
+        "frame_too_large": "frame_too_large: shorten the teaching beat narration",
+        "invalid_beat": "invalid_beat: follow the TeachingBeat v1 schema exactly",
+    }
+
 
 class VisualActDecisionStreamError(SemanticModelStreamError):
     """Error for model-authored visual-act decision streams."""
+
+    _REPAIR_HINTS: ClassVar[dict[SemanticModelStreamErrorCode, str]] = {
+        **_SHARED_REPAIR_HINTS,
+        "frame_too_large": "frame_too_large: shorten the visual-act decision",
+        "invalid_decision": "invalid_decision: follow the VisualActDecision v1 schema exactly",
+    }
 
 
 class _StrictSemanticStreamParser(Generic[_RecordT]):
@@ -110,7 +120,6 @@ class _StrictSemanticStreamParser(Generic[_RecordT]):
         invalid_record_code: Literal["invalid_beat", "invalid_decision"],
         stream_label: str,
         schema_label: str,
-        frame_too_large_hint: str,
         max_frame_bytes: int = MAX_NDJSON_FRAME_BYTES,
     ) -> None:
         if isinstance(max_frame_bytes, bool) or not isinstance(max_frame_bytes, int):
@@ -122,7 +131,6 @@ class _StrictSemanticStreamParser(Generic[_RecordT]):
         self._invalid_record_code = invalid_record_code
         self._stream_label = stream_label
         self._schema_label = schema_label
-        self._frame_too_large_hint = frame_too_large_hint
         self._max_frame_bytes = max_frame_bytes
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
         self._buffer = ""
@@ -246,7 +254,6 @@ class _StrictSemanticStreamParser(Generic[_RecordT]):
                 "frame_too_large",
                 f"{self._stream_label} stream frame exceeded {self._max_frame_bytes} bytes",
                 frame_number=self._frame_count + 1,
-                repair_hint=self._frame_too_large_hint,
             )
 
     def _require_open(self) -> None:
@@ -288,7 +295,6 @@ class TeachingBeatStreamParser(_StrictSemanticStreamParser[TeachingBeatDraft]):
             invalid_record_code="invalid_beat",
             stream_label="teaching beat",
             schema_label="TeachingBeat v1",
-            frame_too_large_hint=_DEFAULT_REPAIR_HINTS["frame_too_large"],
             max_frame_bytes=max_frame_bytes,
         )
 
@@ -303,7 +309,6 @@ class VisualActDecisionStreamParser(_StrictSemanticStreamParser[VisualActDecisio
             invalid_record_code="invalid_decision",
             stream_label="visual-act decision",
             schema_label="VisualActDecision v1",
-            frame_too_large_hint=_VISUAL_DECISION_FRAME_TOO_LARGE_HINT,
             max_frame_bytes=max_frame_bytes,
         )
 
