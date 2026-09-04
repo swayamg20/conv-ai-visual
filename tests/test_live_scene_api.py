@@ -1,0 +1,647 @@
+"""Route and application-composition tests for Gate 1 scene streaming."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from collections.abc import AsyncIterator
+from typing import Any
+
+import murmur.api.application as application
+import murmur.api.routers.live_scenes as live_scenes
+import pytest
+from fastapi.testclient import TestClient
+from murmur.api.dependencies import get_authenticated_user
+from murmur.api.errors import ApiError
+from murmur.api.routers.live_scenes import _encode_scene_events, _OwnedStreamingResponse
+from murmur.live_scene import (
+    LiveSceneRequest,
+    SceneAuthoringAdmission,
+    ScenePatchEvent,
+    SceneStreamCompletedEvent,
+    SceneStreamEvent,
+    SceneStreamStartedEvent,
+)
+from murmur.live_scene.provider import scene_model_client_options
+from starlette.requests import ClientDisconnect
+
+AUTHENTICATED_USER = {
+    "id": "scene-user",
+    "email": "scene-user@example.com",
+    "name": "Scene User",
+}
+
+
+def _request_body() -> dict[str, object]:
+    return {
+        "prompt": "Explain a request flowing through an API and database.",
+        "generation": 7,
+        "baseScene": {"revision": 0, "nodes": []},
+    }
+
+
+def _scene_events() -> tuple[SceneStreamEvent, ...]:
+    started = SceneStreamStartedEvent.model_validate(
+        {
+            "type": "scene_stream_started",
+            "generation": 7,
+            "attempt": 1,
+            "baseRevision": 0,
+        }
+    )
+    patch = ScenePatchEvent.model_validate(
+        {
+            "type": "scene_patch",
+            "generation": 7,
+            "attempt": 1,
+            "sequence": 1,
+            "baseRevision": 0,
+            "resultRevision": 1,
+            "patch": {
+                "v": 1,
+                "patchId": "api-node",
+                "narration": "First, draw the API boundary.",
+                "operations": [
+                    {
+                        "op": "put",
+                        "node": {
+                            "id": "api",
+                            "kind": "rect",
+                            "presentation": {"enter": "draw", "exit": "fade"},
+                            "x": 100.0,
+                            "y": 120.0,
+                            "width": 180.0,
+                            "height": 90.0,
+                            "style": {
+                                "stroke": "hsl(var(--chalk))",
+                                "strokeWidth": 3.0,
+                                "opacity": 1.0,
+                                "roughness": 1.0,
+                                "fill": "transparent",
+                            },
+                        },
+                    }
+                ],
+            },
+        }
+    )
+    completed = SceneStreamCompletedEvent.model_validate(
+        {
+            "type": "scene_stream_completed",
+            "generation": 7,
+            "finalRevision": 1,
+            "patchCount": 1,
+            "firstPatchMs": 12.5,
+            "totalMs": 24.0,
+            "repaired": False,
+        }
+    )
+    return started, patch, completed
+
+
+class FakeSceneAuthoringService:
+    def __init__(self, events: tuple[SceneStreamEvent, ...] = ()) -> None:
+        self.events = events
+        self.requests: list[LiveSceneRequest] = []
+
+    async def stream_events(
+        self,
+        request: LiveSceneRequest,
+    ) -> AsyncIterator[SceneStreamEvent]:
+        self.requests.append(request)
+        for event in self.events:
+            yield event
+
+
+class RecordingSceneAuthoringAdmission(SceneAuthoringAdmission):
+    def __init__(self) -> None:
+        super().__init__(global_limit=1, per_user_limit=1, requests_per_minute=10)
+        self.user_ids: list[str] = []
+
+    async def acquire(self, user_id: str):
+        self.user_ids.append(user_id)
+        return await super().acquire(user_id)
+
+
+class _ClosingSceneEvents:
+    def __init__(self, events: tuple[SceneStreamEvent, ...]) -> None:
+        self._events = iter(events)
+        self.entered = False
+        self.closed = False
+
+    def __aiter__(self) -> _ClosingSceneEvents:
+        return self
+
+    async def __anext__(self) -> SceneStreamEvent:
+        self.entered = True
+        return next(self._events)
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def _sse_payloads(response_text: str) -> list[dict[str, Any]]:
+    blocks = [block for block in response_text.split("\n\n") if block]
+    assert all(block.startswith("data: ") for block in blocks)
+    return [json.loads(block.removeprefix("data: ")) for block in blocks]
+
+
+def _test_client(
+    service: FakeSceneAuthoringService,
+    *,
+    authenticated: bool,
+    scene_authoring_enabled: bool = True,
+    admission: SceneAuthoringAdmission | None = None,
+    client_host: str = "127.0.0.1",
+) -> TestClient:
+    app = application.create_application(
+        scene_authoring_service=service,  # type: ignore[arg-type]
+        scene_authoring_admission=admission,
+        scene_authoring_enabled=scene_authoring_enabled,
+    )
+
+    def authenticate() -> dict[str, str | None]:
+        if not authenticated:
+            raise ApiError(401, "Not authenticated")
+        return AUTHENTICATED_USER
+
+    app.dependency_overrides[get_authenticated_user] = authenticate
+    return TestClient(app, client=(client_host, 50_000))
+
+
+@pytest.mark.asyncio
+async def test_sse_encoder_closes_inner_service_iterator_on_consumer_abort() -> None:
+    events = _ClosingSceneEvents(_scene_events())
+    encoded = _encode_scene_events(events)
+
+    assert (await anext(encoded)).startswith("data: ")
+    await encoded.aclose()
+
+    assert events.closed is True
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_closes_events_and_admission_when_send_disconnects() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("scene-user")
+    events = _ClosingSceneEvents(_scene_events())
+    response = _OwnedStreamingResponse(
+        _encode_scene_events(events),
+        admission_lease=lease,
+    )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/live-scenes/stream",
+        "raw_path": b"/api/live-scenes/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        if message["type"] == "http.response.body":
+            raise OSError("client disconnected")
+
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    assert events.closed is True
+    replacement = await admission.acquire("scene-user")
+    await replacement.aclose()
+
+
+@pytest.mark.asyncio
+async def test_streaming_response_releases_admission_when_headers_disconnect() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("scene-user")
+    events = _ClosingSceneEvents(_scene_events())
+    response = _OwnedStreamingResponse(
+        _encode_scene_events(events),
+        admission_lease=lease,
+    )
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/live-scenes/stream",
+        "raw_path": b"/api/live-scenes/stream",
+        "query_string": b"",
+        "root_path": "",
+        "headers": [],
+        "client": ("127.0.0.1", 12345),
+        "server": ("127.0.0.1", 8000),
+    }
+
+    async def receive() -> dict[str, str]:
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        assert message["type"] == "http.response.start"
+        raise OSError("client disconnected before the body started")
+
+    with pytest.raises(ClientDisconnect):
+        await response(scope, receive, send)  # type: ignore[arg-type]
+
+    assert events.entered is False
+    replacement = await admission.acquire("scene-user")
+    await replacement.aclose()
+
+
+def test_live_scene_stream_requires_authentication() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Not authenticated"}
+    assert service.requests == []
+
+
+@pytest.mark.parametrize(
+    "environment",
+    ["production", "staging", "test", "", "Development", " development "],
+)
+def test_development_lab_stream_is_hidden_outside_development(
+    monkeypatch,
+    environment: str,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", environment)
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json={})
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_development_lab_stream_is_hidden_without_explicit_flag(monkeypatch) -> None:
+    monkeypatch.delenv("MURMUR_SCENE_LAB", raising=False)
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json={})
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_development_lab_stream_uses_fixed_admission_identity_without_auth(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=False,
+        admission=admission,
+    )
+    body = _request_body()
+    body["prompt"] = "Draw the exact request I typed into the lab."
+    try:
+        response = client.post("/api/live-scenes/lab/stream", json=body)
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert _sse_payloads(response.text)[0]["type"] == "scene_stream_started"
+    assert admission.user_ids == ["live-scene-lab-development"]
+    assert len(service.requests) == 1
+    assert service.requests[0].prompt == "Draw the exact request I typed into the lab."
+
+
+def test_development_lab_stream_rejects_non_loopback_peers_and_spoofed_headers(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(
+        service,
+        authenticated=False,
+        client_host="192.0.2.10",
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/lab/stream",
+            json=_request_body(),
+            headers={
+                "Host": "127.0.0.1:8000",
+                "X-Forwarded-For": "127.0.0.1",
+            },
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "Not found"}
+    assert service.requests == []
+
+
+def test_lab_flag_does_not_bypass_authentication_on_product_stream(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=False)
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Not authenticated"}
+    assert service.requests == []
+
+
+def test_live_scene_stream_is_default_off_even_for_authenticated_users() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(
+        service,
+        authenticated=True,
+        scene_authoring_enabled=False,
+    )
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "Live scene generation is not enabled"}
+    assert service.requests == []
+
+
+def test_live_scene_stream_emits_canonical_camel_case_sse() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=True)
+    try:
+        response = client.post("/api/live-scenes/stream", json=_request_body())
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-accel-buffering"] == "no"
+    assert _sse_payloads(response.text) == [
+        {
+            "type": "scene_stream_started",
+            "generation": 7,
+            "attempt": 1,
+            "baseRevision": 0,
+        },
+        {
+            "type": "scene_patch",
+            "generation": 7,
+            "attempt": 1,
+            "sequence": 1,
+            "baseRevision": 0,
+            "resultRevision": 1,
+            "patch": {
+                "v": 1,
+                "patchId": "api-node",
+                "narration": "First, draw the API boundary.",
+                "operations": [
+                    {
+                        "op": "put",
+                        "node": {
+                            "id": "api",
+                            "kind": "rect",
+                            "presentation": {"enter": "draw", "exit": "fade"},
+                            "x": 100.0,
+                            "y": 120.0,
+                            "width": 180.0,
+                            "height": 90.0,
+                            "style": {
+                                "stroke": "hsl(var(--chalk))",
+                                "strokeWidth": 3.0,
+                                "opacity": 1.0,
+                                "roughness": 1.0,
+                                "fill": "transparent",
+                            },
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "type": "scene_stream_completed",
+            "generation": 7,
+            "finalRevision": 1,
+            "patchCount": 1,
+            "firstPatchMs": 12.5,
+            "totalMs": 24.0,
+            "repaired": False,
+        },
+    ]
+    assert len(service.requests) == 1
+    assert service.requests[0].model_dump(mode="json", by_alias=True) == _request_body()
+    assert not hasattr(service.requests[0], "user_id")
+
+
+def test_live_scene_request_rejects_client_identity_claims() -> None:
+    service = FakeSceneAuthoringService(_scene_events())
+    client = _test_client(service, authenticated=True)
+    body = _request_body()
+    body["userId"] = "attacker"
+    try:
+        response = client.post("/api/live-scenes/stream", json=body)
+    finally:
+        client.close()
+
+    assert response.status_code == 422
+    assert service.requests == []
+
+
+def test_default_scene_service_uses_a_lazy_configured_client_factory(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    client_calls: list[tuple[str, str | None, dict[str, object]]] = []
+    dispatch_limits: list[int] = []
+    expected_client = object()
+
+    class CapturingProviderDispatchAdmission:
+        def __init__(self, *, requests_per_minute: int) -> None:
+            dispatch_limits.append(requests_per_minute)
+
+        async def acquire(self) -> None:
+            return None
+
+    class CapturingSceneAuthoringService:
+        def __init__(
+            self,
+            *,
+            client_factory,
+            temperature: float,
+            max_tokens: int,
+            timeout_seconds: float,
+            before_provider_dispatch,
+        ) -> None:
+            captured.update(
+                {
+                    "client_factory": client_factory,
+                    "temperature": temperature,
+                    "max_tokens": max_tokens,
+                    "timeout_seconds": timeout_seconds,
+                    "before_provider_dispatch": before_provider_dispatch,
+                }
+            )
+
+    def create_client(provider: str, *, model: str | None = None, **kwargs: object):
+        client_calls.append((provider, model, kwargs))
+        return expected_client
+
+    monkeypatch.setattr(application, "SceneAuthoringService", CapturingSceneAuthoringService)
+    monkeypatch.setattr(
+        application,
+        "SceneProviderDispatchAdmission",
+        CapturingProviderDispatchAdmission,
+    )
+    monkeypatch.setattr(application, "create_llm_client", create_client)
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "azure_openai")
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MODEL", "murmur-gpt-oss-120b")
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TEMPERATURE", 0.2)
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MAX_TOKENS", 1234)
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_TIMEOUT_SECONDS", 9.5)
+    monkeypatch.setattr(
+        application.config,
+        "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE",
+        7,
+    )
+
+    app = application.create_application()
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_PROVIDER", "groq")
+    monkeypatch.setattr(application.config, "MURMUR_SCENE_LLM_MODEL", "later-model")
+
+    assert app.state.scene_authoring_service.__class__ is CapturingSceneAuthoringService
+    assert client_calls == []
+    assert captured["temperature"] == 0.2
+    assert captured["max_tokens"] == 1234
+    assert captured["timeout_seconds"] == 9.5
+    assert callable(captured["before_provider_dispatch"])
+    assert dispatch_limits == [7]
+    assert captured["client_factory"]() is expected_client  # type: ignore[operator]
+    assert client_calls == [
+        (
+            "azure_openai",
+            "murmur-gpt-oss-120b",
+            {"reasoning_effort": "low", "transport_max_retries": 0},
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "expected"),
+    [
+        ("openai", "gpt-4o-mini", {"transport_max_retries": 0}),
+        ("azure_openai", "gpt-4o", {"transport_max_retries": 0}),
+        ("groq", "gpt-oss-120b", {"transport_max_retries": 0}),
+        ("gemini", "gemini-2.0-flash", {"transport_max_retries": 0}),
+    ],
+)
+def test_scene_client_options_disable_hidden_openai_compatible_retries(
+    provider: str,
+    model: str,
+    expected: dict[str, object],
+) -> None:
+    assert scene_model_client_options(provider, model) == expected
+
+
+def test_scene_config_inherits_provider_selection_but_owns_generation_controls() -> None:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("MURMUR_SCENE_LLM_"):
+            env.pop(name)
+    env.update(
+        {
+            "PYTHON_DOTENV_DISABLED": "1",
+            "LLM_PROVIDER": "openai",
+            "OPENAI_MODEL": "existing-model",
+            "LLM_MAX_TOKENS": "8192",
+            "LLM_TEMPERATURE": "0.35",
+        }
+    )
+    script = """
+import json
+from murmur.core.config import config
+print(json.dumps({
+    'provider': config.MURMUR_SCENE_LLM_PROVIDER,
+    'model': config.MURMUR_SCENE_LLM_MODEL,
+    'max_tokens': config.MURMUR_SCENE_LLM_MAX_TOKENS,
+    'temperature': config.MURMUR_SCENE_LLM_TEMPERATURE,
+    'timeout_seconds': config.MURMUR_SCENE_LLM_TIMEOUT_SECONDS,
+}))
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "provider": "openai",
+        "model": "existing-model",
+        "max_tokens": 4096,
+        "temperature": 0.2,
+        "timeout_seconds": 20.0,
+    }
+
+
+def test_disabled_scene_startup_ignores_existing_chat_output_budget() -> None:
+    env = os.environ.copy()
+    for name in tuple(env):
+        if name.startswith("MURMUR_SCENE_"):
+            env.pop(name)
+    env.update(
+        {
+            "PYTHON_DOTENV_DISABLED": "1",
+            "MURMUR_SCENE_ENABLED": "false",
+            "MURMUR_SCENE_LLM_MAX_TOKENS": "",
+            "LLM_MAX_TOKENS": "8192",
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "import main"],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert completed.returncode == 0, completed.stderr

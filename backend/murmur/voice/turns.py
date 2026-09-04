@@ -88,7 +88,7 @@ async def _run_sdl_steps(
     service: VoiceTurnContext,
     pc_id: str,
     sdl: dict[str, Any],
-) -> None:
+) -> bool:
     """
     Step-pipelined SDL: stream per-step TTS + visual commands.
 
@@ -99,6 +99,7 @@ async def _run_sdl_steps(
     ch = voice_session.datachannel
     steps = sdl.get("steps", [])
     seq_id = f"seq_{uuid.uuid4().hex[:8]}"
+    completed = False
 
     if ch and ch.readyState == "open":
         ch.send(
@@ -114,103 +115,108 @@ async def _run_sdl_steps(
 
     voice_session.tts_active = True
 
-    for step_idx, step in enumerate(steps):
-        if not voice_session.tts_active:
-            break  # interrupted
+    try:
+        for step_idx, step in enumerate(steps):
+            if not voice_session.tts_active:
+                break
 
-        say_text = step.get("say", "").strip()
+            say_text = step.get("say", "").strip()
 
-        # Generate TTS for this step's say text
-        if say_text and service.synthesizer.available():
-            total_audio_bytes = 0
+            # Generate TTS for this step's say text
+            if say_text and service.synthesizer.available():
+                total_audio_bytes = 0
 
-            async def emit_step_audio(
-                audio_chunk: bytes,
-                step_index: int = step_idx,
-            ) -> None:
-                nonlocal total_audio_bytes
-                if not voice_session.tts_active:
-                    raise asyncio.CancelledError("TTS interrupted")
+                async def emit_step_audio(
+                    audio_chunk: bytes,
+                    step_index: int = step_idx,
+                ) -> None:
+                    nonlocal total_audio_bytes
+                    if not voice_session.tts_active:
+                        raise asyncio.CancelledError("TTS interrupted")
 
-                # Send sdl_step on first chunk so frontend starts animation with audio
-                if total_audio_bytes == 0 and ch and ch.readyState == "open":
+                    # Send sdl_step on first chunk so frontend starts animation with audio
+                    if total_audio_bytes == 0 and ch and ch.readyState == "open":
+                        ch.send(
+                            json.dumps(
+                                {
+                                    "type": "sdl_step",
+                                    "sequence_id": seq_id,
+                                    "step_index": step_index,
+                                }
+                            )
+                        )
+
+                    total_audio_bytes += len(audio_chunk)
+                    if ch and ch.readyState == "open":
+                        ch.send(
+                            json.dumps(
+                                {
+                                    "type": "tts_chunk",
+                                    "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                                    "sequence_id": seq_id,
+                                    "step_index": step_index,
+                                }
+                            )
+                        )
+
+                try:
+                    await service.synthesizer.stream(say_text, emit_step_audio)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[%s] SDL step %d TTS failed: %s", pc_id, step_idx, exc)
+
+                # Audio duration from PCM byte count: 16-bit (2 bytes) @ 16kHz
+                audio_duration_ms = round(total_audio_bytes / 32) if total_audio_bytes > 0 else 0
+                if ch and ch.readyState == "open":
+                    ch.send(
+                        json.dumps(
+                            {
+                                "type": "tts_step_complete",
+                                "sequence_id": seq_id,
+                                "step_index": step_idx,
+                                "audio_duration_ms": audio_duration_ms,
+                            }
+                        )
+                    )
+            else:
+                # No speech for this step — send sdl_step and complete immediately
+                if ch and ch.readyState == "open":
                     ch.send(
                         json.dumps(
                             {
                                 "type": "sdl_step",
                                 "sequence_id": seq_id,
-                                "step_index": step_index,
+                                "step_index": step_idx,
                             }
                         )
                     )
-
-                total_audio_bytes += len(audio_chunk)
-                if ch and ch.readyState == "open":
                     ch.send(
                         json.dumps(
                             {
-                                "type": "tts_chunk",
-                                "audio": base64.b64encode(audio_chunk).decode("utf-8"),
+                                "type": "tts_step_complete",
                                 "sequence_id": seq_id,
-                                "step_index": step_index,
+                                "step_index": step_idx,
+                                "audio_duration_ms": 0,
                             }
                         )
                     )
-
-            try:
-                await service.synthesizer.stream(say_text, emit_step_audio)
-            except asyncio.CancelledError:
-                break
-            except Exception as exc:
-                logger.warning("[%s] SDL step %d TTS failed: %s", pc_id, step_idx, exc)
-
-            # Audio duration from PCM byte count: 16-bit (2 bytes) @ 16kHz
-            audio_duration_ms = round(total_audio_bytes / 32) if total_audio_bytes > 0 else 0
-            if ch and ch.readyState == "open":
-                ch.send(
-                    json.dumps(
-                        {
-                            "type": "tts_step_complete",
-                            "sequence_id": seq_id,
-                            "step_index": step_idx,
-                            "audio_duration_ms": audio_duration_ms,
-                        }
-                    )
-                )
         else:
-            # No speech for this step — send sdl_step and complete immediately
-            if ch and ch.readyState == "open":
-                ch.send(
-                    json.dumps(
-                        {
-                            "type": "sdl_step",
-                            "sequence_id": seq_id,
-                            "step_index": step_idx,
-                        }
-                    )
+            completed = True
+    finally:
+        voice_session.tts_active = False
+        if ch and ch.readyState == "open":
+            ch.send(
+                json.dumps(
+                    {
+                        "type": "sdl_complete",
+                        "sequence_id": seq_id,
+                        "reason": "completed" if completed else "interrupted",
+                    }
                 )
-                ch.send(
-                    json.dumps(
-                        {
-                            "type": "tts_step_complete",
-                            "sequence_id": seq_id,
-                            "step_index": step_idx,
-                            "audio_duration_ms": 0,
-                        }
-                    )
-                )
-
-    # Sequence complete
-    voice_session.tts_active = False
-    if ch and ch.readyState == "open":
-        ch.send(
-            json.dumps(
-                {
-                    "type": "sdl_complete",
-                    "sequence_id": seq_id,
-                }
             )
-        )
+
+    return not completed
 
 
 async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> None:
@@ -392,7 +398,8 @@ async def _run_turn(service: VoiceTurnContext, pc_id: str, user_text: str) -> No
             logger.info(
                 "[%s] Starting SDL step pipeline (%d steps)", pc_id, len(pending_sdl["steps"])
             )
-            await _run_sdl_steps(service, pc_id, pending_sdl)
+            if await _run_sdl_steps(service, pc_id, pending_sdl):
+                tts_interrupted = True
 
     except asyncio.CancelledError:
         logger.info("[%s] Turn processing cancelled (new turn arrived)", pc_id)

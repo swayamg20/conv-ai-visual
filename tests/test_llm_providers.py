@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
-from murmur.llm import OpenAIClient, create_llm_client
+from murmur.llm import GeminiClient, OpenAIClient, create_llm_client
 
 
 @pytest.mark.asyncio
@@ -64,6 +64,240 @@ async def test_openai_stream_normalizes_text_tool_arguments_and_usage() -> None:
     assert completed["tool_calls"][0].arguments == {"query": "free body"}
 
 
+@pytest.mark.asyncio
+async def test_openai_text_stream_and_owned_http_client_close_on_consumer_abort() -> None:
+    class ProviderStream:
+        def __init__(self) -> None:
+            self.closed = False
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="first patch"))]
+            )
+
+        async def close(self) -> None:
+            self.closed = True
+
+    provider_stream = ProviderStream()
+
+    class Completions:
+        async def create(self, **_kwargs):
+            return provider_stream
+
+    class HttpClient:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(completions=Completions())
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    http_client = HttpClient()
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.client = http_client
+    client.model = "test-model"
+    client.max_tokens_parameter = "max_tokens"
+    client.default_params = {}
+    chunks = client.stream([{"role": "user", "content": "draw"}])
+
+    assert await anext(chunks) == "first patch"
+    await chunks.aclose()
+    await client.aclose()
+
+    assert provider_stream.closed is True
+    assert http_client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_azure_stream_uses_max_completion_tokens() -> None:
+    captured = {}
+
+    class ProviderStream:
+        def __init__(self) -> None:
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return SimpleNamespace(
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="azure patch"))]
+            )
+
+        async def close(self) -> None:
+            return None
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return ProviderStream()
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    client.model = "murmur-gpt-oss-120b"
+    client.max_tokens_parameter = "max_completion_tokens"
+    client.default_params = {"reasoning_effort": "low"}
+
+    chunks = client.stream(
+        [{"role": "user", "content": "draw"}],
+        temperature=0.7,
+        max_tokens=64,
+    )
+
+    assert await anext(chunks) == "azure patch"
+    await chunks.aclose()
+    assert captured["model"] == "murmur-gpt-oss-120b"
+    assert captured["temperature"] == 0.7
+    assert captured["max_completion_tokens"] == 64
+    assert captured["reasoning_effort"] == "low"
+    assert "max_tokens" not in captured
+
+
+def test_openai_request_params_enforce_configured_token_field() -> None:
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.default_params = {"max_tokens": 999}
+    client.max_tokens_parameter = "max_completion_tokens"
+
+    assert client._request_params(None, {}) == {}
+    assert client._request_params(64, {"max_tokens": 128}) == {"max_completion_tokens": 64}
+
+    client.default_params = {"max_completion_tokens": 999}
+    client.max_tokens_parameter = "max_tokens"
+
+    assert client._request_params(64, {}) == {"max_tokens": 64}
+
+
+def test_openai_request_params_allow_call_to_override_default_reasoning_effort() -> None:
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.default_params = {"reasoning_effort": "low"}
+    client.max_tokens_parameter = "max_completion_tokens"
+
+    assert client._request_params(64, {"reasoning_effort": "medium"}) == {
+        "reasoning_effort": "medium",
+        "max_completion_tokens": 64,
+    }
+
+
+def test_openai_transport_retry_ceiling_is_sdk_only(monkeypatch) -> None:
+    captured = {}
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("openai.AsyncOpenAI", FakeAsyncOpenAI)
+
+    client = OpenAIClient(
+        api_key="server-key",
+        model="murmur-gpt-oss-120b",
+        transport_max_retries=0,
+        reasoning_effort="low",
+    )
+
+    assert captured == {"api_key": "server-key", "max_retries": 0}
+    assert client.default_params == {"reasoning_effort": "low"}
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "0"])
+def test_openai_rejects_invalid_transport_retry_ceiling(monkeypatch, value) -> None:
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **_kwargs: object())
+
+    with pytest.raises(ValueError, match="transport_max_retries"):
+        OpenAIClient(
+            api_key="server-key",
+            model="murmur-gpt-oss-120b",
+            transport_max_retries=value,
+        )
+
+
+def test_gemini_zero_transport_retry_ceiling_disables_gapic_retries(monkeypatch) -> None:
+    configured: dict[str, object] = {}
+    model = object()
+
+    monkeypatch.setattr(
+        "google.generativeai.configure",
+        lambda **kwargs: configured.update(kwargs),
+    )
+    monkeypatch.setattr("google.generativeai.GenerativeModel", lambda _model: model)
+
+    client = GeminiClient(
+        api_key="server-key",
+        model="gemini-test",
+        transport_max_retries=0,
+    )
+
+    assert configured == {"api_key": "server-key"}
+    assert client.model is model
+    assert client.request_options == {"retry": None}
+    assert client.default_params == {}
+
+
+@pytest.mark.parametrize("value", [-1, 1, True, False, 1.5, "0"])
+def test_gemini_rejects_nonzero_or_invalid_transport_retry_ceiling(
+    monkeypatch,
+    value,
+) -> None:
+    monkeypatch.setattr("google.generativeai.configure", lambda **_kwargs: None)
+
+    with pytest.raises(ValueError, match="transport_max_retries"):
+        GeminiClient(
+            api_key="server-key",
+            model="gemini-test",
+            transport_max_retries=value,
+        )
+
+
+@pytest.mark.asyncio
+async def test_gemini_text_stream_closes_provider_response_on_consumer_abort() -> None:
+    class ProviderResponse:
+        def __init__(self) -> None:
+            self.closed = False
+            self._sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._sent:
+                raise StopAsyncIteration
+            self._sent = True
+            return SimpleNamespace(text="first patch")
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    provider_response = ProviderResponse()
+
+    captured: dict[str, object] = {}
+
+    class Chat:
+        async def send_message_async(self, *_args, **kwargs):
+            captured.update(kwargs)
+            return provider_response
+
+    client = GeminiClient.__new__(GeminiClient)
+    client.model = SimpleNamespace(start_chat=lambda **_kwargs: Chat())
+    client.default_params = {}
+    client.request_options = {"retry": None}
+    chunks = client.stream([{"role": "user", "content": "draw"}])
+
+    assert await anext(chunks) == "first patch"
+    await chunks.aclose()
+
+    assert provider_response.closed is True
+    assert captured["request_options"] == {"retry": None}
+
+
 def test_factory_routes_groq_through_openai_compatible_endpoint(monkeypatch) -> None:
     captured = {}
 
@@ -78,6 +312,52 @@ def test_factory_routes_groq_through_openai_compatible_endpoint(monkeypatch) -> 
     assert client.api_key == "key"
     assert client.model == "model"
     assert captured["base_url"] == "https://api.groq.com/openai/v1"
+    assert "max_tokens_parameter" not in captured
+
+
+def test_factory_routes_azure_deployment_through_openai_v1_endpoint(monkeypatch) -> None:
+    captured = {}
+
+    def fake_openai_client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr("murmur.llm.factory.OpenAIClient", fake_openai_client)
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_ENDPOINT",
+        "https://murmur-resource.openai.azure.com/",
+    )
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_DEPLOYMENT",
+        "murmur-gpt-oss-120b",
+    )
+    monkeypatch.setattr("murmur.llm.factory.config.AZURE_OPENAI_API_KEY", "server-key")
+
+    client = create_llm_client("azure_openai")
+
+    assert client.api_key == "server-key"
+    assert client.model == "murmur-gpt-oss-120b"
+    assert captured["base_url"] == "https://murmur-resource.openai.azure.com/openai/v1/"
+    assert captured["max_tokens_parameter"] == "max_completion_tokens"
+
+
+def test_factory_rejects_invalid_azure_endpoint_before_client_construction(monkeypatch) -> None:
+    constructed = False
+
+    def fake_openai_client(**_kwargs):
+        nonlocal constructed
+        constructed = True
+
+    monkeypatch.setattr("murmur.llm.factory.OpenAIClient", fake_openai_client)
+    monkeypatch.setattr(
+        "murmur.llm.factory.config.AZURE_OPENAI_ENDPOINT",
+        "https://example.com",
+    )
+
+    with pytest.raises(ValueError, match="Azure OpenAI resource hostname"):
+        create_llm_client("azure_openai", api_key="server-key", model="deployment")
+
+    assert constructed is False
 
 
 def test_factory_rejects_unknown_provider() -> None:

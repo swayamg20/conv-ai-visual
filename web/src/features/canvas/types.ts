@@ -1,5 +1,30 @@
 import type { gsap } from "gsap";
 
+import type { MotionPlan } from "@/lib/live-scene";
+
+export type MotionPlaybackStatus = "completed" | "cancelled" | "failed";
+
+export interface MotionPlaybackOutcome {
+  readonly status: MotionPlaybackStatus;
+  /** Plan step IDs whose target state is materially committed to the retained SVG. */
+  readonly appliedStepIds: readonly string[];
+  readonly error?: string;
+}
+
+export interface MotionPlayback {
+  /** Post-presentation receipt; resolves only after the terminal DOM crosses its barrier. */
+  readonly finished: Promise<MotionPlaybackOutcome>;
+  pause(): void;
+  resume(): void;
+  /** Settle synchronously; use `finished` when a post-presentation receipt is required. */
+  cancel(): MotionPlaybackOutcome;
+}
+
+export interface MotionPlaybackOptions {
+  /** Delay between starting adjacent plan steps. */
+  staggerMs?: number;
+}
+
 export interface CanvasOperation {
   id?: string;
   action: string;
@@ -104,6 +129,10 @@ export interface SVGCanvasHandle {
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
+  playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
+  emphasizeElement(id: string, color?: string): void;
+  /** Stop queued work and settle each active motion to its canonical terminal state. */
+  cancelMotion(): void;
   clear(): void;
   saveAsImage(): void;
   zoomIn(): void;

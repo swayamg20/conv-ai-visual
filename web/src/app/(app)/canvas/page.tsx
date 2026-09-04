@@ -5,8 +5,13 @@ import { motion } from "framer-motion";
 import { Mic, Settings, ChevronUp, BarChart3 } from "lucide-react";
 import Link from "next/link";
 // Switch removed - canvas is always enabled
-import { gsap } from "gsap";
 import { SVGCanvas } from "@/components/svg-canvas";
+import {
+  endStepTimelineSequence,
+  killStepTimelines,
+  type SDLSequenceEndReason,
+  type SDLStepTimelineMap,
+} from "@/features/canvas/sequence-lifecycle";
 import type {
   CanvasOperation,
   SVGCanvasHandle,
@@ -52,14 +57,14 @@ export default function Home() {
 
   // ── Step-pipelined voice+visual sync ──
   // Tracks per-step paused timelines keyed by "sequenceId:stepIndex"
-  const stepTimelinesRef = useRef<Map<string, { tl: gsap.core.Timeline; started: boolean }>>(new Map());
+  const stepTimelinesRef = useRef<SDLStepTimelineMap>(new Map());
 
   const handleSDLStart = useCallback((sdl: SDLScene, sequenceId: string, totalSteps: number) => {
+    killStepTimelines(stepTimelinesRef.current);
     // Compile entire scene once (preserves cross-step layout positioning)
     const plan = compileScene(sdl, { width: 800, height: 600 });
 
     // Create a paused timeline for each step
-    stepTimelinesRef.current.clear();
     for (let i = 0; i < plan.steps.length; i++) {
       const step = plan.steps[i];
       if (step.commands.length > 0) {
@@ -99,22 +104,15 @@ export default function Home() {
         }
       }
     }
-    stepTimelinesRef.current.delete(key);
   }, []);
 
-  const handleSDLComplete = useCallback((sequenceId: string) => {
-    // Kill all timelines for this sequence (cleanup on completion or interruption)
-    const keys = Array.from(stepTimelinesRef.current.keys());
-    for (const key of keys) {
-      if (key.startsWith(`${sequenceId}:`)) {
-        const entry = stepTimelinesRef.current.get(key);
-        if (entry) {
-          if (!entry.started) {
-            entry.tl.play(); // Play any un-started steps on normal completion
-          }
-        }
-        stepTimelinesRef.current.delete(key);
-      }
+  const handleSDLComplete = useCallback((
+    sequenceId: string,
+    reason: SDLSequenceEndReason
+  ) => {
+    endStepTimelineSequence(stepTimelinesRef.current, sequenceId, reason);
+    if (reason === "interrupted") {
+      canvasRef.current?.cancelMotion();
     }
   }, []);
 

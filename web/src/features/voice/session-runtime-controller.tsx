@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import type { ConnectionStatus as IndicatorState } from "@/components/status-indicator";
 import type { VoiceState } from "@/components/voice-orb";
 import type { CanvasOperation } from "@/features/canvas/types";
+import type { SDLSequenceEndReason } from "@/features/canvas/sequence-lifecycle";
 import type { SDLScene } from "@/lib/scene-kit";
 import {
   useVoiceSession,
@@ -35,7 +36,10 @@ export interface SessionVoiceCallbacks {
     stepIndex: number,
     audioDurationMs: number
   ) => void;
-  readonly onSDLComplete: (sequenceId: string) => void;
+  readonly onSDLComplete: (
+    sequenceId: string,
+    reason: SDLSequenceEndReason
+  ) => void;
   readonly onPipelineMetrics: (metrics: Record<string, unknown>) => void;
   readonly onError: (message: string) => void;
   readonly onLog: (message: string) => void;

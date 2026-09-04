@@ -7,6 +7,8 @@
 
 import { gsap } from "gsap";
 
+const drawOnFillRestorers = new WeakMap<gsap.core.Timeline, () => void>();
+
 gsap.config({
   autoSleep: 60,
   force3D: true,
@@ -98,6 +100,35 @@ export function createTimeline(config?: gsap.TimelineVars): gsap.core.Timeline {
   });
 }
 
+/** Resolve theme tokens before passing colors to GSAP's numeric color parser. */
+export function resolveCssColor(color: string): string {
+  let expanded = color;
+  for (let depth = 0; depth < 4 && expanded.includes("var("); depth += 1) {
+    expanded = expanded.replace(
+      /var\((--[\w-]+)(?:,\s*([^)]*))?\)/g,
+      (_match, property: string, fallback = "") =>
+        getComputedStyle(document.documentElement).getPropertyValue(property).trim() ||
+        fallback.trim()
+    );
+  }
+  const modernHsl = expanded.match(
+    /^hsl\(\s*([^\s,]+)\s+([^\s,]+)\s+([^\s,/]+)(?:\s*\/\s*([^)]+))?\s*\)$/i
+  );
+  if (modernHsl) {
+    const [, hue, saturation, lightness, alpha] = modernHsl;
+    expanded = alpha
+      ? `hsla(${hue}, ${saturation}, ${lightness}, ${alpha.trim()})`
+      : `hsl(${hue}, ${saturation}, ${lightness})`;
+  }
+  const probe = document.createElement("span");
+  probe.style.color = expanded;
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  const resolved = getComputedStyle(probe).color;
+  probe.remove();
+  return resolved && !resolved.includes("var(") ? resolved : expanded;
+}
+
 // ============= Draw-On Animation (the big visual win) =============
 
 /**
@@ -139,18 +170,49 @@ export function animateDrawOn(
   });
 
   // Reveal any fill after the stroke animation completes
-  const filledPaths = Array.from(paths).filter(
-    (p) => p.getAttribute("fill") && p.getAttribute("fill") !== "none"
-  );
+  const filledPaths = Array.from(paths).flatMap((path) => {
+    const authoredFill = path.getAttribute("fill");
+    if (!authoredFill || authoredFill === "none") return [];
+
+    const resolvedFill = resolveCssColor(authoredFill);
+    if (!resolvedFill || resolvedFill.includes("var(")) return [];
+
+    return [{ path, authoredFill, resolvedFill }];
+  });
   if (filledPaths.length > 0) {
-    filledPaths.forEach((p) => {
-      const originalFill = p.getAttribute("fill")!;
-      gsap.set(p, { fill: "transparent" });
-      tl.to(p, { fill: originalFill, duration: DURATION.fast, ease: EASING.smooth }, "-=0.1");
+    let restored = false;
+    const restoreAuthoredFills = () => {
+      if (restored) return;
+      restored = true;
+      filledPaths.forEach(({ path, authoredFill }) => {
+        path.style.removeProperty("fill");
+        path.setAttribute("fill", authoredFill);
+      });
+      drawOnFillRestorers.delete(tl);
+    };
+    drawOnFillRestorers.set(tl, restoreAuthoredFills);
+    tl.eventCallback("onComplete", restoreAuthoredFills);
+    filledPaths.forEach(({ path, resolvedFill }) => {
+      path.setAttribute("fill", resolvedFill);
+      gsap.set(path, { fill: "transparent" });
+      tl.to(
+        path,
+        {
+          fill: resolvedFill,
+          duration: DURATION.fast,
+          ease: EASING.smooth,
+        },
+        "-=0.1"
+      );
     });
   }
 
   return tl;
+}
+
+/** Restore authored fills when an owner interrupts a draw-on timeline. */
+export function settleDrawOn(animation: gsap.core.Timeline): void {
+  drawOnFillRestorers.get(animation)?.();
 }
 
 /**

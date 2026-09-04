@@ -3,18 +3,32 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import Any, Literal
 
+from murmur.core.async_cleanup import close_async_resource
 from murmur.llm.base import LLMClient
 from murmur.tools.contracts import ToolCall
 
 logger = logging.getLogger(__name__)
 
 
+async def _close_provider_resource(resource: object | None) -> None:
+    if not await close_async_resource(resource):
+        logger.warning("OpenAI provider resource cleanup did not finish cleanly")
+
+
 class OpenAIClient(LLMClient):
     """LLM client for OpenAI API (and compatible APIs like Groq, Together, etc.)."""
 
-    def __init__(self, api_key: str, model: str, base_url: str | None = None, **default_params):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        base_url: str | None = None,
+        max_tokens_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
+        transport_max_retries: int | None = None,
+        **default_params,
+    ):
         """
         Initialize OpenAI client.
 
@@ -22,6 +36,8 @@ class OpenAIClient(LLMClient):
             api_key: OpenAI API key (or Groq/Together key for compatible APIs)
             model: Model name (e.g., "gpt-4o-mini", "llama-3.3-70b-versatile")
             base_url: Optional base URL override (e.g., "https://api.groq.com/openai/v1")
+            max_tokens_parameter: Provider request field used for the output-token limit
+            transport_max_retries: Optional SDK-level HTTP retry ceiling
             **default_params: Default parameters to include in all requests
         """
         from openai import AsyncOpenAI
@@ -29,9 +45,18 @@ class OpenAIClient(LLMClient):
         client_kwargs: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kwargs["base_url"] = base_url
+        if transport_max_retries is not None:
+            if (
+                isinstance(transport_max_retries, bool)
+                or not isinstance(transport_max_retries, int)
+                or transport_max_retries < 0
+            ):
+                raise ValueError("transport_max_retries must be a non-negative integer")
+            client_kwargs["max_retries"] = transport_max_retries
 
         self.client = AsyncOpenAI(**client_kwargs)
         self.model = model
+        self.max_tokens_parameter = max_tokens_parameter
         self.default_params = default_params
         try:
             provider_label = base_url.split("//")[1].split("/")[0] if base_url else "openai"
@@ -40,6 +65,17 @@ class OpenAIClient(LLMClient):
         logger.info(
             f"OpenAI-compatible client initialized: model={model}, endpoint={provider_label}"
         )
+
+    def _request_params(self, max_tokens: int | None, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """Merge provider parameters and translate the shared output-token abstraction."""
+        request_params = {**self.default_params, **kwargs}
+        alternate_parameter = (
+            "max_completion_tokens" if self.max_tokens_parameter == "max_tokens" else "max_tokens"
+        )
+        request_params.pop(alternate_parameter, None)
+        if max_tokens is not None:
+            request_params[self.max_tokens_parameter] = max_tokens
+        return request_params
 
     async def complete(
         self,
@@ -54,8 +90,7 @@ class OpenAIClient(LLMClient):
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
-                **{**self.default_params, **kwargs},
+                **self._request_params(max_tokens, kwargs),
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as e:
@@ -70,14 +105,14 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
+        stream = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
                 stream=True,
-                **{**self.default_params, **kwargs},
+                **self._request_params(max_tokens, kwargs),
             )
 
             async for chunk in stream:
@@ -86,6 +121,8 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logger.exception(f"OpenAI stream error: {e}")
             raise
+        finally:
+            await _close_provider_resource(stream)
 
     async def complete_with_tools(
         self,
@@ -101,9 +138,8 @@ class OpenAIClient(LLMClient):
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
                 tools=tools if tools else None,
-                **{**self.default_params, **kwargs},
+                **self._request_params(max_tokens, kwargs),
             )
             return response
         except Exception as e:
@@ -119,15 +155,15 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
+        stream = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=temperature,
-                max_tokens=max_tokens,
                 tools=tools if tools else None,
                 stream=True,
-                **{**self.default_params, **kwargs},
+                **self._request_params(max_tokens, kwargs),
             )
 
             async for chunk in stream:
@@ -135,6 +171,12 @@ class OpenAIClient(LLMClient):
         except Exception as e:
             logger.exception(f"OpenAI stream with tools error: {e}")
             raise
+        finally:
+            await _close_provider_resource(stream)
+
+    async def aclose(self) -> None:
+        """Close the owned OpenAI-compatible HTTP client."""
+        await _close_provider_resource(self.client)
 
     async def iter_stream_tool_events(
         self, stream: AsyncGenerator[Any, None]

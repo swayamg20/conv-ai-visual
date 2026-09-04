@@ -1,0 +1,149 @@
+"""Admission controls for paid live-scene generations."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+from murmur.live_scene import (
+    SceneAdmissionError,
+    SceneAuthoringAdmission,
+    SceneProviderDispatchAdmission,
+)
+
+
+@pytest.mark.asyncio
+async def test_admission_enforces_per_user_and_global_concurrency() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=2,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    first = await admission.acquire("user-a")
+
+    with pytest.raises(SceneAdmissionError, match="already active") as same_user:
+        await admission.acquire("user-a")
+    assert same_user.value.code == "user_busy"
+
+    second = await admission.acquire("user-b")
+    with pytest.raises(SceneAdmissionError, match="busy") as global_capacity:
+        await admission.acquire("user-c")
+    assert global_capacity.value.code == "capacity_reached"
+
+    await first.aclose()
+    replacement = await admission.acquire("user-c")
+    await replacement.aclose()
+    await second.aclose()
+    await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_admission_applies_a_per_user_rolling_rate_limit() -> None:
+    now = 100.0
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=2,
+        clock=lambda: now,
+    )
+
+    for _ in range(2):
+        lease = await admission.acquire("user-a")
+        await lease.aclose()
+    with pytest.raises(SceneAdmissionError, match="Too many") as limited:
+        await admission.acquire("user-a")
+    assert limited.value.code == "rate_limited"
+
+    now += 60.0
+    lease = await admission.acquire("user-a")
+    await lease.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lease_close_can_be_retried_without_leaking_capacity() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("user-a")
+    await admission._lock.acquire()
+    closing = asyncio.create_task(lease.aclose())
+    await asyncio.sleep(0)
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    admission._lock.release()
+
+    await asyncio.gather(lease.aclose(), lease.aclose())
+    replacement = await admission.acquire("user-a")
+    await replacement.aclose()
+
+
+@pytest.mark.asyncio
+async def test_rejected_identities_are_not_retained() -> None:
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+    )
+    lease = await admission.acquire("active-user")
+
+    for index in range(100):
+        with pytest.raises(SceneAdmissionError, match="busy"):
+            await admission.acquire(f"rejected-user-{index}")
+
+    assert set(admission._active_by_user) == {"active-user"}
+    assert set(admission._starts_by_user) == {"active-user"}
+    await lease.aclose()
+
+
+@pytest.mark.asyncio
+async def test_expired_rate_limit_identities_are_evicted() -> None:
+    now = 100.0
+    admission = SceneAuthoringAdmission(
+        global_limit=1,
+        per_user_limit=1,
+        requests_per_minute=10,
+        clock=lambda: now,
+    )
+
+    for index in range(100):
+        lease = await admission.acquire(f"expired-user-{index}")
+        await lease.aclose()
+    assert len(admission._starts_by_user) == 100
+
+    now += 60.0
+    fresh = await admission.acquire("fresh-user")
+
+    assert set(admission._starts_by_user) == {"fresh-user"}
+    assert list(admission._start_expirations) == [(now, "fresh-user")]
+    await fresh.aclose()
+
+
+@pytest.mark.asyncio
+async def test_provider_dispatch_admission_counts_every_call_globally() -> None:
+    now = 100.0
+    admission = SceneProviderDispatchAdmission(
+        requests_per_minute=2,
+        clock=lambda: now,
+    )
+
+    await asyncio.gather(admission.acquire(), admission.acquire())
+    with pytest.raises(SceneAdmissionError, match="capacity is busy") as limited:
+        await admission.acquire()
+    assert limited.value.code == "provider_rate_limited"
+
+    now += 60.0
+    await admission.acquire()
+
+
+@pytest.mark.parametrize("requests_per_minute", [0, -1, True, 1.5])
+def test_provider_dispatch_admission_rejects_invalid_limits(
+    requests_per_minute: object,
+) -> None:
+    with pytest.raises(ValueError, match="positive integer"):
+        SceneProviderDispatchAdmission(
+            requests_per_minute=requests_per_minute,  # type: ignore[arg-type]
+        )

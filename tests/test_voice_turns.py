@@ -1,12 +1,13 @@
 """End-to-end local contract for one confirmed LLM-to-TTS voice turn."""
 
+import asyncio
 import json
 from types import SimpleNamespace
 
 import pytest
 from murmur.runtime import RuntimeRegistry
 from murmur.voice.synthesis import SynthesisResult
-from murmur.voice.turns import schedule_turn
+from murmur.voice.turns import _run_sdl_steps, schedule_turn
 
 
 class _FakeChannel:
@@ -108,3 +109,86 @@ async def test_confirmed_turn_streams_sentences_and_metrics(monkeypatch) -> None
     } <= message_types
     assert voice_session.turn_task is None
     assert voice_session.tts_active is False
+
+
+@pytest.mark.asyncio
+async def test_interrupted_sdl_reports_sequence_identity_and_reason() -> None:
+    runtime = RuntimeRegistry()
+    voice_session = runtime.register_voice(
+        "peer",
+        SimpleNamespace(),
+        user_id="owner",
+        agent_id=None,
+        persistent_session_id=None,
+        canvas_mode=True,
+    )
+    channel = _FakeChannel()
+    voice_session.datachannel = channel
+
+    class _InterruptingSynthesizer:
+        def available(self) -> bool:
+            return True
+
+        async def stream(self, _sentence, emit) -> SynthesisResult:
+            voice_session.tts_active = False
+            await emit(b"stale audio")
+            raise AssertionError("interrupted audio should not finish")
+
+    context = SimpleNamespace(runtime=runtime, synthesizer=_InterruptingSynthesizer())
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_sdl_steps(
+            context,
+            "peer",
+            {
+                "steps": [
+                    {"say": "First step", "show": [{"action": "text"}]},
+                    {"say": "Future step", "show": [{"action": "circle"}]},
+                ]
+            },
+        )
+
+    messages = [json.loads(payload) for payload in channel.messages]
+    started = next(message for message in messages if message["type"] == "sdl_start")
+    ended = next(message for message in messages if message["type"] == "sdl_complete")
+    assert ended == {
+        "type": "sdl_complete",
+        "sequence_id": started["sequence_id"],
+        "reason": "interrupted",
+    }
+    assert not any(message["type"] == "tts_step_complete" for message in messages)
+    assert voice_session.tts_active is False
+
+
+@pytest.mark.asyncio
+async def test_completed_sdl_reports_completed_without_changing_step_events() -> None:
+    runtime = RuntimeRegistry()
+    voice_session = runtime.register_voice(
+        "peer",
+        SimpleNamespace(),
+        user_id="owner",
+        agent_id=None,
+        persistent_session_id=None,
+        canvas_mode=True,
+    )
+    channel = _FakeChannel()
+    voice_session.datachannel = channel
+    synthesizer = _FakeSynthesizer()
+    context = SimpleNamespace(runtime=runtime, synthesizer=synthesizer)
+
+    interrupted = await _run_sdl_steps(
+        context,
+        "peer",
+        {"steps": [{"say": "Only step", "show": [{"action": "text"}]}]},
+    )
+
+    messages = [json.loads(payload) for payload in channel.messages]
+    started = next(message for message in messages if message["type"] == "sdl_start")
+    ended = next(message for message in messages if message["type"] == "sdl_complete")
+    assert interrupted is False
+    assert ended == {
+        "type": "sdl_complete",
+        "sequence_id": started["sequence_id"],
+        "reason": "completed",
+    }
+    assert any(message["type"] == "tts_step_complete" for message in messages)

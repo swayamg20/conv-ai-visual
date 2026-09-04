@@ -2,11 +2,103 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyBackendError,
+  INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
   INITIAL_VOICE_LIFECYCLE_STATE,
   lifecycleSignalForBackendError,
+  reduceSDLPlaybackLifecycle,
   reduceVoiceLifecycle,
   type VoiceLifecycleState,
 } from "./webrtc-lifecycle";
+
+describe("legacy WebRTC SDL playback lifecycle", () => {
+  it("keeps the sequence interruptible after backend completion while audio is buffered", () => {
+    const started = reduceSDLPlaybackLifecycle(
+      INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
+      { type: "sequence_started", sequenceId: "seq-1" }
+    );
+    const buffered = reduceSDLPlaybackLifecycle(started.state, {
+      type: "audio_scheduled",
+      sequenceId: "seq-1",
+    });
+    const backendComplete = reduceSDLPlaybackLifecycle(buffered.state, {
+      type: "backend_complete",
+      sequenceId: "seq-1",
+      reason: "completed",
+    });
+
+    expect(backendComplete).toEqual({
+      state: {
+        activeSequenceId: "seq-1",
+        backendComplete: true,
+        playbackPending: true,
+      },
+    });
+
+    const interrupted = reduceSDLPlaybackLifecycle(backendComplete.state, {
+      type: "interrupted",
+    });
+    expect(interrupted).toEqual({
+      state: INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
+      ended: { sequenceId: "seq-1", reason: "interrupted" },
+    });
+    expect(
+      reduceSDLPlaybackLifecycle(interrupted.state, { type: "playback_drained" })
+    ).toEqual({ state: INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE });
+  });
+
+  it("finishes a transmitted sequence only after pending playback drains", () => {
+    const started = reduceSDLPlaybackLifecycle(
+      INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
+      { type: "sequence_started", sequenceId: "seq-1" }
+    );
+    const buffered = reduceSDLPlaybackLifecycle(started.state, {
+      type: "audio_scheduled",
+      sequenceId: "seq-1",
+    });
+    const backendComplete = reduceSDLPlaybackLifecycle(buffered.state, {
+      type: "backend_complete",
+      sequenceId: "seq-1",
+      reason: "completed",
+    });
+
+    expect(
+      reduceSDLPlaybackLifecycle(backendComplete.state, {
+        type: "playback_drained",
+      })
+    ).toEqual({
+      state: INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
+      ended: { sequenceId: "seq-1", reason: "completed" },
+    });
+  });
+
+  it("does not mistake an inter-step audio gap for sequence completion", () => {
+    const started = reduceSDLPlaybackLifecycle(
+      INITIAL_SDL_PLAYBACK_LIFECYCLE_STATE,
+      { type: "sequence_started", sequenceId: "seq-1" }
+    );
+    const firstChunk = reduceSDLPlaybackLifecycle(started.state, {
+      type: "audio_scheduled",
+      sequenceId: "seq-1",
+    });
+    const gap = reduceSDLPlaybackLifecycle(firstChunk.state, {
+      type: "playback_drained",
+    });
+
+    expect(gap).toEqual({
+      state: {
+        activeSequenceId: "seq-1",
+        backendComplete: false,
+        playbackPending: false,
+      },
+    });
+    expect(
+      reduceSDLPlaybackLifecycle(gap.state, {
+        type: "audio_scheduled",
+        sequenceId: "seq-1",
+      }).state.playbackPending
+    ).toBe(true);
+  });
+});
 
 describe("legacy WebRTC lifecycle", () => {
   it("does not treat an open data channel as genuine voice readiness", () => {

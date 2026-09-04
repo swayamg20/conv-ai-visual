@@ -3,8 +3,11 @@
 import os
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
+from murmur.live_scene.contracts import MAX_SCENE_MODEL_OUTPUT_TOKENS
 
 
 def default_env_path() -> Path:
@@ -24,6 +27,67 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
     if not value:
         return list(default)
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def normalize_azure_openai_endpoint(endpoint: str) -> str:
+    """Normalize an Azure OpenAI resource endpoint to its OpenAI v1 base URL."""
+    value = endpoint.strip()
+    if not value:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not be empty")
+
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be a valid HTTPS URL") from exc
+
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must be a valid HTTPS URL")
+    if parsed.username is not None or parsed.password is not None or port is not None:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not contain credentials or a port")
+    if parsed.query or parsed.fragment:
+        raise ValueError("AZURE_OPENAI_ENDPOINT must not contain a query or fragment")
+
+    hostname = parsed.hostname.lower()
+    azure_suffixes = (".openai.azure.com", ".services.ai.azure.com")
+    resource_name = next(
+        (hostname[: -len(suffix)] for suffix in azure_suffixes if hostname.endswith(suffix)),
+        "",
+    )
+    if (
+        not resource_name
+        or resource_name.startswith("-")
+        or resource_name.endswith("-")
+        or any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in resource_name
+        )
+    ):
+        raise ValueError("AZURE_OPENAI_ENDPOINT must use an Azure OpenAI resource hostname")
+
+    path = parsed.path.rstrip("/")
+    if path not in {"", "/openai/v1"}:
+        raise ValueError(
+            "AZURE_OPENAI_ENDPOINT must be the resource root or its /openai/v1 endpoint"
+        )
+
+    return f"https://{hostname}/openai/v1/"
+
+
+def _provider_model(
+    provider: str,
+    *,
+    openai_model: str,
+    azure_openai_deployment: str,
+    groq_model: str,
+    gemini_model: str,
+) -> str:
+    """Resolve the configured model for one supported LLM provider."""
+    return {
+        "openai": openai_model,
+        "azure_openai": azure_openai_deployment,
+        "groq": groq_model,
+        "gemini": gemini_model,
+    }.get(provider.lower(), "")
 
 
 class Config:
@@ -52,6 +116,13 @@ class Config:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
+    # Azure OpenAI v1 config. The deployment name is passed as the API's model value.
+    AZURE_OPENAI_API_KEY: str = os.getenv("AZURE_OPENAI_API_KEY", "")
+    AZURE_OPENAI_ENDPOINT: str = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
+    AZURE_OPENAI_DEPLOYMENT: str = os.getenv(
+        "AZURE_OPENAI_DEPLOYMENT", "murmur-gpt-oss-120b"
+    ).strip()
+
     # Groq config (OpenAI-compatible, ultra-fast inference)
     GROQ_API_KEY: Optional[str] = os.getenv("GROQ_API_KEY")
     GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -69,6 +140,35 @@ class Config:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = (
         int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
+    )
+    # Gate 1 live-scene authoring can be tuned independently while inheriting
+    # the existing LLM selection when no scene-specific override is supplied.
+    # Its bounded output budget must not inherit the unbounded chat setting:
+    # scenes are default-off, and an otherwise valid chat budget must never
+    # make application construction fail.
+    MURMUR_SCENE_ENABLED: bool = os.getenv("MURMUR_SCENE_ENABLED", "false").lower() == "true"
+    MURMUR_SCENE_LLM_PROVIDER: str = os.getenv("MURMUR_SCENE_LLM_PROVIDER") or LLM_PROVIDER
+    MURMUR_SCENE_LLM_MODEL: str = os.getenv("MURMUR_SCENE_LLM_MODEL") or _provider_model(
+        MURMUR_SCENE_LLM_PROVIDER,
+        openai_model=OPENAI_MODEL,
+        azure_openai_deployment=AZURE_OPENAI_DEPLOYMENT,
+        groq_model=GROQ_MODEL,
+        gemini_model=GEMINI_MODEL,
+    )
+    MURMUR_SCENE_LLM_MAX_TOKENS: int = int(
+        os.getenv("MURMUR_SCENE_LLM_MAX_TOKENS") or MAX_SCENE_MODEL_OUTPUT_TOKENS
+    )
+    MURMUR_SCENE_LLM_TIMEOUT_SECONDS: float = float(
+        os.getenv("MURMUR_SCENE_LLM_TIMEOUT_SECONDS", "20.0")
+    )
+    MURMUR_SCENE_LLM_TEMPERATURE: float = float(os.getenv("MURMUR_SCENE_LLM_TEMPERATURE", "0.2"))
+    MURMUR_SCENE_GLOBAL_CONCURRENCY: int = int(os.getenv("MURMUR_SCENE_GLOBAL_CONCURRENCY", "4"))
+    MURMUR_SCENE_PER_USER_CONCURRENCY: int = int(
+        os.getenv("MURMUR_SCENE_PER_USER_CONCURRENCY", "1")
+    )
+    MURMUR_SCENE_REQUESTS_PER_MINUTE: int = int(os.getenv("MURMUR_SCENE_REQUESTS_PER_MINUTE", "10"))
+    MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE: int = int(
+        os.getenv("MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE", "10")
     )
     LLM_MAX_CONTEXT_MESSAGES: int = int(os.getenv("LLM_MAX_CONTEXT_MESSAGES", "20"))
     ALLOWED_CORS_ORIGINS: list[str] = _parse_csv_env(
@@ -257,6 +357,18 @@ EXAMPLE — "Explain the Pythagorean theorem":
                 raise ValueError(
                     "OPENAI_API_KEY environment variable is required for provider=openai"
                 )
+        elif provider == "azure_openai":
+            if not cls.AZURE_OPENAI_API_KEY:
+                raise ValueError(
+                    "AZURE_OPENAI_API_KEY environment variable is required "
+                    "for provider=azure_openai"
+                )
+            normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
+            if not cls.AZURE_OPENAI_DEPLOYMENT:
+                raise ValueError(
+                    "AZURE_OPENAI_DEPLOYMENT environment variable is required "
+                    "for provider=azure_openai"
+                )
         elif provider == "groq":
             if not cls.GROQ_API_KEY:
                 raise ValueError("GROQ_API_KEY environment variable is required for provider=groq")
@@ -267,7 +379,52 @@ EXAMPLE — "Explain the Pythagorean theorem":
                 )
         else:
             raise ValueError(
-                f"Unknown LLM_PROVIDER: {provider}. Supported providers: openai, groq, gemini"
+                "Unknown LLM_PROVIDER: "
+                f"{provider}. Supported providers: openai, azure_openai, groq, gemini"
+            )
+
+        scene_provider = cls.MURMUR_SCENE_LLM_PROVIDER.lower()
+        if scene_provider not in {"openai", "azure_openai", "groq", "gemini"}:
+            raise ValueError(
+                "Unknown MURMUR_SCENE_LLM_PROVIDER: "
+                f"{scene_provider}. Supported providers: openai, azure_openai, groq, gemini"
+            )
+        if cls.MURMUR_SCENE_ENABLED:
+            scene_api_keys = {
+                "openai": ("OPENAI_API_KEY", cls.OPENAI_API_KEY),
+                "azure_openai": ("AZURE_OPENAI_API_KEY", cls.AZURE_OPENAI_API_KEY),
+                "groq": ("GROQ_API_KEY", cls.GROQ_API_KEY),
+                "gemini": ("GEMINI_API_KEY", cls.GEMINI_API_KEY),
+            }
+            scene_api_key_name, scene_api_key = scene_api_keys[scene_provider]
+            if not scene_api_key:
+                raise ValueError(
+                    f"{scene_api_key_name} environment variable is required "
+                    f"for MURMUR_SCENE_LLM_PROVIDER={scene_provider}"
+                )
+            if scene_provider == "azure_openai":
+                normalize_azure_openai_endpoint(cls.AZURE_OPENAI_ENDPOINT)
+        if not cls.MURMUR_SCENE_LLM_MODEL:
+            raise ValueError("MURMUR_SCENE_LLM_MODEL must not be empty")
+        if not 1 <= cls.MURMUR_SCENE_LLM_MAX_TOKENS <= MAX_SCENE_MODEL_OUTPUT_TOKENS:
+            raise ValueError(
+                f"MURMUR_SCENE_LLM_MAX_TOKENS must be between 1 and {MAX_SCENE_MODEL_OUTPUT_TOKENS}"
+            )
+        if cls.MURMUR_SCENE_LLM_TIMEOUT_SECONDS <= 0:
+            raise ValueError("MURMUR_SCENE_LLM_TIMEOUT_SECONDS must be greater than zero")
+        if not 0 <= cls.MURMUR_SCENE_LLM_TEMPERATURE <= 2:
+            raise ValueError("MURMUR_SCENE_LLM_TEMPERATURE must be between zero and two")
+        if cls.MURMUR_SCENE_GLOBAL_CONCURRENCY <= 0:
+            raise ValueError("MURMUR_SCENE_GLOBAL_CONCURRENCY must be greater than zero")
+        if not 1 <= cls.MURMUR_SCENE_PER_USER_CONCURRENCY <= cls.MURMUR_SCENE_GLOBAL_CONCURRENCY:
+            raise ValueError(
+                "MURMUR_SCENE_PER_USER_CONCURRENCY must be between 1 and the global limit"
+            )
+        if cls.MURMUR_SCENE_REQUESTS_PER_MINUTE <= 0:
+            raise ValueError("MURMUR_SCENE_REQUESTS_PER_MINUTE must be greater than zero")
+        if cls.MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE <= 0:
+            raise ValueError(
+                "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE must be greater than zero"
             )
 
         # Validate TTS configuration

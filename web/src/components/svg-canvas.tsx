@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -27,6 +28,7 @@ import type {
   TeachingSequence,
   TeachingStep,
 } from "@/features/canvas/types";
+import { createSvgMotionExecutor } from "@/features/live-scene/svg-motion-executor";
 import { useCanvasViewport } from "@/features/canvas/viewport";
 import { getCanvasPalette, GRID_SNAP, renderGrid } from "@/lib/canvas-utils";
 import {
@@ -122,6 +124,25 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         generateId,
       });
     }, [generateId]);
+
+    const sceneMotionExecutor = useMemo(
+      () =>
+        createSvgMotionExecutor({
+          elements: elementsRef.current,
+          getSvg: () => svgRef.current,
+          getRenderer: primitiveRenderer,
+          getHighlightColor: () => paletteRef.current.error,
+          invalidate: () => forceRender((revision) => revision + 1),
+        }),
+      [primitiveRenderer]
+    );
+
+    useEffect(
+      () => () => {
+        sceneMotionExecutor.dispose();
+      },
+      [sceneMotionExecutor]
+    );
 
     const renderFunctionPlot = useCallback(
       (plot: FunctionPlotData) => {
@@ -397,12 +418,24 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       [buildTimeline]
     );
 
-    const clear = useCallback(() => {
+    const playMotionPlan = sceneMotionExecutor.play;
+    const emphasizeElement = sceneMotionExecutor.emphasize;
+    const cancelMotion = useCallback(() => {
+      sceneMotionExecutor.cancel();
       sequenceQueueRef.current.forEach((timeline) => timeline.kill());
       sequenceQueueRef.current.length = 0;
       isPlayingRef.current = false;
       timelinesRef.current.forEach((timeline) => timeline.kill());
       timelinesRef.current.clear();
+
+      const svg = svgRef.current;
+      if (!svg) return;
+      const canvasTargets = [svg, ...Array.from(svg.querySelectorAll("*"))];
+      gsap.getTweensOf(canvasTargets).forEach((animation) => animation.kill());
+    }, [sceneMotionExecutor]);
+
+    const clear = useCallback(() => {
+      cancelMotion();
       panRef.current = { x: 0, y: 0 };
       applyViewBox(zoomLevel, panRef.current, true);
 
@@ -412,25 +445,12 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         forceRender((revision) => revision + 1);
         return;
       }
-      const children = Array.from(svg.children).filter(
-        (element) => element.id !== "canvas-grid" && element.tagName !== "defs"
-      );
-      if (children.length === 0) {
-        elementsRef.current.clear();
-        forceRender((revision) => revision + 1);
-        return;
-      }
-      gsap.to(children, {
-        opacity: 0,
-        duration: DURATION.fast,
-        ease: EASING.smooth,
-        onComplete: () => {
-          children.forEach((element) => element.remove());
-          elementsRef.current.clear();
-          forceRender((revision) => revision + 1);
-        },
-      });
-    }, [applyViewBox, panRef, zoomLevel]);
+      Array.from(svg.children)
+        .filter((element) => element.id !== "canvas-grid")
+        .forEach((element) => element.remove());
+      elementsRef.current.clear();
+      forceRender((revision) => revision + 1);
+    }, [applyViewBox, cancelMotion, panRef, zoomLevel]);
 
     const saveAsImage = useCallback(() => {
       const svg = svgRef.current;
@@ -447,6 +467,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         createSequence,
         createPausedSequence,
         renderFunctionPlot,
+        playMotionPlan,
+        emphasizeElement,
+        cancelMotion,
         clear,
         saveAsImage,
         zoomIn,
@@ -456,10 +479,13 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       }),
       [
         animate,
+        cancelMotion,
         clear,
         createPausedSequence,
         createSequence,
+        emphasizeElement,
         panTo,
+        playMotionPlan,
         render,
         renderFunctionPlot,
         renderLatex,

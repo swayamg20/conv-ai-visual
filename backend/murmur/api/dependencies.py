@@ -7,6 +7,7 @@ from fastapi import Depends, Request
 from murmur.api.authentication import FirebaseAuthenticationUnavailable, get_current_user
 from murmur.api.errors import ApiError
 from murmur.chat import ChatService
+from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
 from murmur.persistence.models import AgentModel
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.runtime import RuntimeRegistry
@@ -64,6 +65,28 @@ def get_chat_service(request: Request) -> ChatService:
 
 
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
+
+
+def get_scene_authoring_service(request: Request) -> SceneAuthoringService:
+    return cast(SceneAuthoringService, request.app.state.scene_authoring_service)
+
+
+SceneAuthoringServiceDependency = Annotated[
+    SceneAuthoringService,
+    Depends(get_scene_authoring_service),
+]
+
+
+def get_scene_authoring_admission(request: Request) -> SceneAuthoringAdmission:
+    if not bool(getattr(request.app.state, "scene_authoring_enabled", False)):
+        raise ApiError(503, "Live scene generation is not enabled")
+    return cast(SceneAuthoringAdmission, request.app.state.scene_authoring_admission)
+
+
+SceneAuthoringAdmissionDependency = Annotated[
+    SceneAuthoringAdmission,
+    Depends(get_scene_authoring_admission),
+]
 
 
 def get_voice_service(request: Request) -> VoiceService:
