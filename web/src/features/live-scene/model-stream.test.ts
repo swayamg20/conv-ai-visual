@@ -1,17 +1,32 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createSceneState } from "@/lib/live-scene";
+import { createSceneState, createSemanticSceneState } from "@/lib/live-scene";
 
 import {
+  consumeSemanticSceneStreamResponse,
   consumeSceneStreamResponse,
+  decodeSemanticSceneStreamEvent,
   decodeSceneStreamEvent,
+  parseSemanticSceneStreamEvent,
   parseSceneStreamEvent,
+  runSemanticSceneModelStream,
   runSceneModelStream,
   SceneModelStreamError,
+  type SemanticSceneStreamEvent,
+  type SemanticSceneStreamRunInvocation,
+  type SemanticSceneStreamRunner,
   type SceneStreamEvent,
 } from "./model-stream";
 
 const encoder = new TextEncoder();
+const semanticDigests = {
+  beat: "2985081a36afc4116b715142c8384af329e752ce57ba41bed8e42b3b03955458",
+  base: "a8a338405d84e56a062bb45ec4800cfb09e8af57bbcec8560069464ff3f7dee0",
+  result: "2f47395b2aa4c0e994301c2698a2ebb5814b176d23f30035348728bfb1b54ae8",
+  patch: "4cc1d990a304e1dc5c9a291c774cca4b4c0775c5413daae1ab9ac76a13af01f2",
+  receipt: "518b80fd923323c07939edb97a9dad39aebd3ec475518be0074c85b890fbee47",
+  certificate: "28ab5dd89fb5a900354b63a1279c2c5566eebc99f8f9142500a082d1436f485d",
+} as const;
 
 function textNode(id = "lesson-title", text = "Build a triangle") {
   return {
@@ -43,6 +58,103 @@ function patchEvent(overrides: Record<string, unknown> = {}) {
       patchId: "patch-1",
       narration: "Draw π → 😀",
       operations: [{ op: "put", node: textNode() }],
+    },
+    ...overrides,
+  };
+}
+
+function semanticPatchEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "semantic_scene_patch",
+    generation: 1,
+    attempt: 1,
+    sequence: 1,
+    baseRevision: 0,
+    resultRevision: 1,
+    patch: {
+      v: 1,
+      patchId: "areas__atom_triangle",
+      narration: "Relate the three square areas.",
+      operations: [
+        {
+          op: "put",
+          node: {
+            id: "areas__triangle",
+            kind: "path",
+            presentation: { enter: "draw", exit: "fade" },
+            points: [
+              [320, 260],
+              [440, 260],
+              [320, 420],
+            ],
+            closed: true,
+            style: {
+              stroke: "hsl(var(--chalk))",
+              strokeWidth: 4,
+              opacity: 1,
+              roughness: 0.45,
+              fill: "transparent",
+            },
+          },
+        },
+      ],
+    },
+    semantic: {
+      beat: {
+        v: 1,
+        beatId: "beat-identity",
+        narration: "Relate the three square areas.",
+        act: "derive",
+        directive: {
+          kind: "pythagorean_area_identity",
+          id: "areas",
+          revealThrough: "identity",
+        },
+      },
+      atomId: "areas__atom_triangle",
+      componentId: "areas",
+      role: "triangle",
+      atomOrdinal: 1,
+      semanticBaseRevision: 0,
+      semanticResultRevision: 1,
+      receipt: {
+        issuer: "semantic_verifier",
+        componentId: "areas",
+        role: "triangle",
+        nodeId: "areas__triangle",
+        obligationCodes: [
+          "stable_id",
+          "unique_ids",
+          "board_bounds",
+          "right_angle",
+          "hypotenuse_ratio",
+        ],
+        verified: true,
+      },
+      certificate: {
+        body: {
+          v: 1,
+          issuer: "semantic_compiler",
+          compilerVersion: "murmur.pythagorean_area_identity.v1",
+          canonicalization: "murmur-json-v1",
+          hashAlgorithm: "sha256",
+          atomId: "areas__atom_triangle",
+          beatId: "beat-identity",
+          beatSha256: semanticDigests.beat,
+          componentId: "areas",
+          role: "triangle",
+          nodeId: "areas__triangle",
+          atomOrdinal: 1,
+          baseSemanticRevision: 0,
+          resultSemanticRevision: 1,
+          baseSceneSha256: semanticDigests.base,
+          resultSceneSha256: semanticDigests.result,
+          patchSha256: semanticDigests.patch,
+          receiptSha256: semanticDigests.receipt,
+          previousCertificateSha256: null,
+        },
+        certificateSha256: semanticDigests.certificate,
+      },
     },
     ...overrides,
   };
@@ -177,6 +289,58 @@ describe("scene model stream event decoder", () => {
   });
 });
 
+describe("semantic scene model stream event decoder", () => {
+  it("decodes exact lifecycle events and compiler-certified patch events", () => {
+    const inputs = [
+      startedEvent(),
+      semanticPatchEvent(),
+      {
+        type: "scene_stream_completed",
+        generation: 1,
+        finalRevision: 1,
+        patchCount: 1,
+        firstPatchMs: 8,
+        totalMs: 12,
+        repaired: false,
+      },
+    ];
+
+    const decoded = inputs.map(decodeSemanticSceneStreamEvent);
+
+    expect(decoded.map((event) => event.type)).toEqual([
+      "scene_stream_started",
+      "semantic_scene_patch",
+      "scene_stream_completed",
+    ]);
+    expect(decoded.every(Object.isFrozen)).toBe(true);
+    expect(decoded[1]).toMatchObject({
+      semantic: {
+        componentId: "areas",
+        role: "triangle",
+        atomOrdinal: 1,
+      },
+    });
+    expect(parseSemanticSceneStreamEvent(JSON.stringify(inputs[1]))).toEqual(
+      decoded[1]
+    );
+  });
+
+  it("keeps raw and semantic patch discriminators on separate trust paths", () => {
+    expect(errorCode(() => decodeSceneStreamEvent(semanticPatchEvent()))).toBe(
+      "invalid_event"
+    );
+    expect(errorCode(() => decodeSemanticSceneStreamEvent(patchEvent()))).toBe(
+      "invalid_event"
+    );
+
+    const extraMetadata = semanticPatchEvent();
+    Object.assign(extraMetadata.semantic, { providerTrace: "unsafe" });
+    expect(
+      errorCode(() => decodeSemanticSceneStreamEvent(extraMetadata))
+    ).toBe("invalid_event");
+  });
+});
+
 describe("scene model stream transport", () => {
   it("consumes CRLF SSE across arbitrary UTF-8 and network splits", async () => {
     const values = [startedEvent(), patchEvent(), failedEvent({ lastAcceptedRevision: 1 })];
@@ -221,6 +385,30 @@ describe("scene model stream transport", () => {
         vi.fn()
       )
     ).rejects.toMatchObject({ code: "invalid_json" });
+  });
+
+  it("cancels on callback failure without masking that original error", async () => {
+    const callbackError = new Error("consumer rejected the scene event");
+    const cancelSpy = vi.fn(() => {
+      throw new Error("transport cancellation failed");
+    });
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode(sseFrame(startedEvent())));
+        },
+        cancel: cancelSpy,
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+
+    await expect(
+      consumeSceneStreamResponse(response, () => {
+        throw callbackError;
+      })
+    ).rejects.toBe(callbackError);
+    expect(cancelSpy).toHaveBeenCalledOnce();
+    expect(cancelSpy).toHaveBeenCalledWith(callbackError);
   });
 
   it("posts the exact request, headers, and abort signal to the live-scene endpoint", async () => {
@@ -297,5 +485,113 @@ describe("scene model stream transport", () => {
     expect(url).toBe("http://127.0.0.1:8000/api/live-scenes/lab/stream");
     expect(init?.headers).toEqual({ "Content-Type": "application/json" });
     expect(JSON.parse(String(init?.body))).toEqual(request);
+  });
+});
+
+describe("semantic scene model stream transport", () => {
+  it("uses the shared byte-safe SSE loop for semantic events", async () => {
+    const values = [
+      startedEvent(),
+      semanticPatchEvent(),
+      failedEvent({ lastAcceptedRevision: 1 }),
+    ];
+    const wire = encoder.encode(
+      values.map((value) => sseFrame(value, value.type, "\r\n")).join("")
+    );
+    const chunks = Array.from(wire, (byte) => Uint8Array.of(byte));
+    const received: SemanticSceneStreamEvent[] = [];
+
+    await consumeSemanticSceneStreamResponse(streamedResponse(chunks), (event) => {
+      received.push(event);
+    });
+
+    expect(received.map((event) => event.type)).toEqual([
+      "scene_stream_started",
+      "semantic_scene_patch",
+      "scene_stream_failed",
+    ]);
+  });
+
+  it("cancels a never-ending response after a malformed semantic event", async () => {
+    const cancelSpy = vi.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode("data: {bad-json\n\n"));
+        },
+        cancel: cancelSpy,
+      }),
+      { status: 200, headers: { "Content-Type": "text/event-stream" } }
+    );
+
+    let originalError: unknown;
+    try {
+      await consumeSemanticSceneStreamResponse(response, vi.fn());
+    } catch (error) {
+      originalError = error;
+    }
+
+    expect(originalError).toMatchObject({ code: "invalid_json" });
+    expect(cancelSpy).toHaveBeenCalledOnce();
+    expect(cancelSpy).toHaveBeenCalledWith(originalError);
+  });
+
+  it("posts paired snapshots to the fixed auth-free semantic lab endpoint", async () => {
+    const controller = new AbortController();
+    const request = {
+      prompt: "Explain the Pythagorean area identity",
+      generation: 4,
+      baseScene: createSceneState({ revision: 0, nodes: [] }),
+      baseSemanticScene: createSemanticSceneState({
+        revision: 0,
+        components: [],
+      }),
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      streamedResponse([
+        encoder.encode(
+          sseFrame(startedEvent({ generation: 4 })) +
+            sseFrame(
+              failedEvent({ generation: 4 }),
+              "scene_stream_failed"
+            )
+        ),
+      ])
+    );
+    const onEvent = vi.fn();
+    const invocation: SemanticSceneStreamRunInvocation = {
+      request,
+      signal: controller.signal,
+      onEvent,
+    };
+    const runner: SemanticSceneStreamRunner = async (streamInvocation) => {
+      await runSemanticSceneModelStream({
+        apiUrl: "http://127.0.0.1:8000/",
+        headers: { "X-Test": "semantic-gate" },
+        fetchImpl,
+        ...streamInvocation,
+      });
+    };
+
+    await runner(invocation);
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe(
+      "http://127.0.0.1:8000/api/live-scenes/lab/semantic/stream"
+    );
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Test": "semantic-gate",
+      },
+      signal: controller.signal,
+    });
+    expect(JSON.parse(String(init?.body))).toEqual(request);
+    expect(onEvent.mock.calls.map(([event]) => event.type)).toEqual([
+      "scene_stream_started",
+      "scene_stream_failed",
+    ]);
   });
 });

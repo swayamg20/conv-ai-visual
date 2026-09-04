@@ -1,4 +1,9 @@
-import type { SceneState } from "@/lib/live-scene";
+import {
+  decodeSemanticScenePatchEvent,
+  type SceneState,
+  type SemanticScenePatchEvent,
+  type SemanticSceneState,
+} from "@/lib/live-scene";
 import {
   decodeScenePatchEvent,
   LIVE_SCENE_MAX_ACCEPTED_PATCHES,
@@ -49,10 +54,30 @@ export type SceneStreamEvent =
   | SceneStreamCompletedEvent
   | SceneStreamFailedEvent;
 
+type SceneStreamLifecycleEvent =
+  | SceneStreamStartedEvent
+  | SceneStreamRepairingEvent
+  | SceneStreamCompletedEvent
+  | SceneStreamFailedEvent;
+
+export type SemanticSceneStreamEvent =
+  | SceneStreamStartedEvent
+  | SemanticScenePatchEvent
+  | SceneStreamRepairingEvent
+  | SceneStreamCompletedEvent
+  | SceneStreamFailedEvent;
+
 export interface SceneStreamRequest {
   readonly prompt: string;
   readonly generation: number;
   readonly baseScene: SceneState;
+}
+
+export interface SemanticSceneStreamRequest {
+  readonly prompt: string;
+  readonly generation: number;
+  readonly baseScene: SceneState;
+  readonly baseSemanticScene: SemanticSceneState;
 }
 
 export interface RunSceneStreamOptions {
@@ -65,12 +90,30 @@ export interface RunSceneStreamOptions {
   readonly fetchImpl?: typeof fetch;
 }
 
+export interface SemanticSceneStreamRunInvocation {
+  readonly request: SemanticSceneStreamRequest;
+  readonly signal: AbortSignal;
+  readonly onEvent: (event: SemanticSceneStreamEvent) => void;
+}
+
+export type SemanticSceneStreamRunner = (
+  invocation: SemanticSceneStreamRunInvocation
+) => Promise<void>;
+
+export interface RunSemanticSceneStreamOptions
+  extends SemanticSceneStreamRunInvocation {
+  readonly apiUrl: string;
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly fetchImpl?: typeof fetch;
+}
+
 export type SceneStreamEndpoint = "product" | "developmentLab";
 
 const SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
   product: "/api/live-scenes/stream",
   developmentLab: "/api/live-scenes/lab/stream",
 };
+const SEMANTIC_SCENE_STREAM_PATH = "/api/live-scenes/lab/semantic/stream";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -184,14 +227,17 @@ function boundedString(
   return normalized;
 }
 
-/** Decode one complete SSE data value at the browser trust boundary. */
-export function decodeSceneStreamEvent(value: unknown): SceneStreamEvent {
+function decodeSceneStreamEventWithPatch<PatchEvent>(
+  value: unknown,
+  patchType: string,
+  decodePatch: (input: unknown) => PatchEvent
+): SceneStreamLifecycleEvent | PatchEvent {
   const input = record(value, "scene stream event");
   const type = input.type;
 
-  if (type === "scene_patch") {
+  if (type === patchType) {
     try {
-      return decodeScenePatchEvent(input);
+      return decodePatch(input);
     } catch (error) {
       throw new SceneModelStreamError(
         "invalid_event",
@@ -319,6 +365,26 @@ export function decodeSceneStreamEvent(value: unknown): SceneStreamEvent {
   throw new SceneModelStreamError("invalid_event", "event type is unsupported");
 }
 
+/** Decode one complete raw-patch SSE data value at the browser trust boundary. */
+export function decodeSceneStreamEvent(value: unknown): SceneStreamEvent {
+  return decodeSceneStreamEventWithPatch(
+    value,
+    "scene_patch",
+    decodeScenePatchEvent
+  );
+}
+
+/** Decode one complete compiler-certified semantic SSE data value. */
+export function decodeSemanticSceneStreamEvent(
+  value: unknown
+): SemanticSceneStreamEvent {
+  return decodeSceneStreamEventWithPatch(
+    value,
+    "semantic_scene_patch",
+    decodeSemanticScenePatchEvent
+  );
+}
+
 export function parseSceneStreamEvent(data: string): SceneStreamEvent {
   let value: unknown;
   try {
@@ -329,10 +395,22 @@ export function parseSceneStreamEvent(data: string): SceneStreamEvent {
   return decodeSceneStreamEvent(value);
 }
 
-/** Consume a response with a stateful UTF-8/SSE decoder. */
-export async function consumeSceneStreamResponse(
+export function parseSemanticSceneStreamEvent(
+  data: string
+): SemanticSceneStreamEvent {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new SceneModelStreamError("invalid_json", "SSE data must be valid JSON");
+  }
+  return decodeSemanticSceneStreamEvent(value);
+}
+
+async function consumeDecodedSceneStreamResponse<Event>(
   response: Response,
-  onEvent: (event: SceneStreamEvent) => void
+  onEvent: (event: Event) => void,
+  parseEvent: (data: string) => Event
 ): Promise<void> {
   if (!response.ok) {
     throw new SceneModelStreamError(
@@ -351,15 +429,46 @@ export async function consumeSceneStreamResponse(
       const { done, value } = await reader.read();
       if (done) break;
       for (const event of decoder.push(value)) {
-        onEvent(parseSceneStreamEvent(event.data));
+        onEvent(parseEvent(event.data));
       }
     }
     for (const event of decoder.finish()) {
-      onEvent(parseSceneStreamEvent(event.data));
+      onEvent(parseEvent(event.data));
     }
+  } catch (error) {
+    try {
+      await reader.cancel(error);
+    } catch {
+      // The stream/parse/callback failure is the error callers need.
+    }
+    throw error;
   } finally {
     reader.releaseLock();
   }
+}
+
+/** Consume a raw-patch response with a stateful UTF-8/SSE decoder. */
+export async function consumeSceneStreamResponse(
+  response: Response,
+  onEvent: (event: SceneStreamEvent) => void
+): Promise<void> {
+  await consumeDecodedSceneStreamResponse(
+    response,
+    onEvent,
+    parseSceneStreamEvent
+  );
+}
+
+/** Consume a semantic response through the same byte-safe SSE transport. */
+export async function consumeSemanticSceneStreamResponse(
+  response: Response,
+  onEvent: (event: SemanticSceneStreamEvent) => void
+): Promise<void> {
+  await consumeDecodedSceneStreamResponse(
+    response,
+    onEvent,
+    parseSemanticSceneStreamEvent
+  );
 }
 
 /** Start one authenticated provider stream without importing Firebase into fixture code. */
@@ -381,4 +490,24 @@ export async function runSceneModelStream(
     }
   );
   await consumeSceneStreamResponse(response, options.onEvent);
+}
+
+/** Start one compiler-certified semantic stream against the development lab. */
+export async function runSemanticSceneModelStream(
+  options: RunSemanticSceneStreamOptions
+): Promise<void> {
+  const requestFetch = options.fetchImpl ?? fetch;
+  const response = await requestFetch(
+    `${options.apiUrl.replace(/\/$/, "")}${SEMANTIC_SCENE_STREAM_PATH}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...options.headers,
+      },
+      body: JSON.stringify(options.request),
+      signal: options.signal,
+    }
+  );
+  await consumeSemanticSceneStreamResponse(response, options.onEvent);
 }
