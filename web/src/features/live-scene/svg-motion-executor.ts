@@ -14,6 +14,7 @@ import {
   DURATION,
   EASING,
   resolveCssColor,
+  settleDrawOn,
 } from "@/lib/gsap-setup";
 import type { MotionPlan, MotionStep, SceneNode } from "@/lib/live-scene";
 
@@ -303,12 +304,16 @@ function executeMotionStep(
     };
   }
   if (step.effect === "draw" && node.kind !== "text" && node.kind !== "latex") {
+    const animation = animateDrawOn(element, DURATION.drawSlow, EASING.draw);
+    const settleDraw = () => {
+      settleDrawOn(animation);
+      gsap.set(element, { opacity: node.style.opacity });
+    };
     return {
       appliedOnStart: true,
-      animation: animateDrawOn(element, DURATION.drawSlow, EASING.draw),
-      complete: () => {
-        gsap.set(element, { opacity: node.style.opacity });
-      },
+      animation,
+      complete: settleDraw,
+      cancel: settleDraw,
     };
   }
   return {

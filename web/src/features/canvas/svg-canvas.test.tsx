@@ -379,6 +379,57 @@ describe("SVGCanvas", () => {
     await act(async () => root.unmount());
   });
 
+  it("restores an authored theme fill when draw motion is cancelled", async () => {
+    document.documentElement.style.setProperty("--test-fill", "38 91% 55%");
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+    });
+
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const scene = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "filled-triangle",
+          kind: "path",
+          points: [
+            [40, 180],
+            [160, 40],
+            [280, 180],
+          ],
+          closed: true,
+          presentation: { enter: "draw", exit: "fade" },
+          style: {
+            stroke: "#ffffff",
+            strokeWidth: 4,
+            fill: "hsl(var(--test-fill))",
+            opacity: 1,
+            roughness: 0,
+          },
+        },
+      ],
+    });
+
+    let playback: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
+    act(() => {
+      playback = canvas.current?.playMotionPlan(planSceneTransition(empty, scene));
+      playback?.cancel();
+    });
+
+    await expect(playback?.finished).resolves.toMatchObject({ status: "cancelled" });
+    const path = host.querySelector<SVGPathElement>("#filled-triangle path");
+    expect(path?.getAttribute("fill")).toBe("hsl(var(--test-fill))");
+    expect(path?.style.fill).toBe("");
+
+    document.documentElement.style.removeProperty("--test-fill");
+    await act(async () => root.unmount());
+  });
+
   it("resolves CSS variable colors before running an emphasis tween", async () => {
     document.documentElement.style.setProperty("--test-stroke", "252 36% 64%");
     document.documentElement.style.setProperty("--test-highlight", "38 91% 55%");

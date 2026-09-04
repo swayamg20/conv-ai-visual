@@ -7,6 +7,8 @@
 
 import { gsap } from "gsap";
 
+const drawOnFillRestorers = new WeakMap<gsap.core.Timeline, () => void>();
+
 gsap.config({
   autoSleep: 60,
   force3D: true,
@@ -178,7 +180,19 @@ export function animateDrawOn(
     return [{ path, authoredFill, resolvedFill }];
   });
   if (filledPaths.length > 0) {
-    filledPaths.forEach(({ path, authoredFill, resolvedFill }) => {
+    let restored = false;
+    const restoreAuthoredFills = () => {
+      if (restored) return;
+      restored = true;
+      filledPaths.forEach(({ path, authoredFill }) => {
+        path.style.removeProperty("fill");
+        path.setAttribute("fill", authoredFill);
+      });
+      drawOnFillRestorers.delete(tl);
+    };
+    drawOnFillRestorers.set(tl, restoreAuthoredFills);
+    tl.eventCallback("onComplete", restoreAuthoredFills);
+    filledPaths.forEach(({ path, resolvedFill }) => {
       path.setAttribute("fill", resolvedFill);
       gsap.set(path, { fill: "transparent" });
       tl.to(
@@ -187,10 +201,6 @@ export function animateDrawOn(
           fill: resolvedFill,
           duration: DURATION.fast,
           ease: EASING.smooth,
-          onComplete: () => {
-            path.style.removeProperty("fill");
-            path.setAttribute("fill", authoredFill);
-          },
         },
         "-=0.1"
       );
@@ -198,6 +208,11 @@ export function animateDrawOn(
   }
 
   return tl;
+}
+
+/** Restore authored fills when an owner interrupts a draw-on timeline. */
+export function settleDrawOn(animation: gsap.core.Timeline): void {
+  drawOnFillRestorers.get(animation)?.();
 }
 
 /**
