@@ -14,8 +14,8 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - [x] 2026-09-05 02:54 IST: Established a 137-test semantic baseline covering the current contracts, prompt, parser, and service.
 - [x] 2026-09-05 02:57 IST: Defined the three-variant decision union, server-owned component ID allocation, and pure forward-only resolver; 191 contract, prompt, parser, and service tests pass with Ruff clean.
 - [x] 2026-09-05 03:01 IST: Generalized the existing bounded semantic NDJSON parser and added the decision parser without duplicating UTF-8, framing, lifecycle, or redaction logic; all 35 legacy and router parser tests pass.
-- [ ] Add a balanced, narration-free routing prompt.
-- [ ] Prove routing, abstention, prefix reuse, prompt-injection resistance, and model-surface isolation with deterministic tests.
+- [x] 2026-09-05 03:05 IST: Added a narration-free routing prompt with symmetric triangle, areas, and identity definitions, explicit unsupported/no-progress abstention, no contentful example, and shared bounded context construction.
+- [x] 2026-09-05 03:05 IST: Proved strict routing, abstention, prefix reuse, injection containment, parser redaction, and model-surface isolation provider-free; 212 focused semantic tests pass with scoped Ruff checks clean.
 - [ ] Add a small cost-guarded decision evaluator and dry-run it without provider access.
 - [ ] Obtain an explicit spend boundary, run the smaller Azure decision corpus, and record the gate result.
 - [ ] If and only if the decision corpus passes, adapt accepted decisions into the existing compiler/runtime and run browser interruption checks.
@@ -26,6 +26,7 @@ The observable outcome of the offline milestones is a provider-neutral router co
 - The current system prompt contains one concrete example, and that example is specifically `introduce` plus `triangle`. The live corpus subsequently chose `introduce` for 13 of 19 outputs and `triangle` for 10 of 19. This correlation motivates a balanced router prompt but does not prove the model's internal cause.
 - The semantic parser already implements the difficult bounded NDJSON and UTF-8 lifecycle. Gate 1.2 should reuse that framing machinery rather than copying another parser.
 - A new component ID has no pedagogical meaning. Letting the model invent one adds a failure mode without adding expressive power, so start decisions can be smaller and the server can allocate the first free stable ID.
+- The existing prompt and the new router need identical prompt, semantic-snapshot, repair-error, and atom-budget bounds. Extracting one private context builder preserved all legacy prompt tests and avoided a second validation path.
 
 ## Decision Log
 
