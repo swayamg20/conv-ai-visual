@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import type { SVGCanvasHandle } from "@/features/canvas/types";
 import { cn } from "@/lib/utils";
 
+import type { SemanticSceneStreamRunner } from "./model-stream";
 import {
   SceneStreamRuntime,
   type SceneStreamRenderer,
@@ -82,14 +83,26 @@ const BUSY_PHASES = new Set<SceneStreamRuntimePhase>([
   "replaying",
 ]);
 
-export interface ModelSceneDemoProps {
-  readonly runStream: SceneStreamRunner;
+interface ModelSceneDemoCommonProps {
   readonly sourceLabel?: string;
+  readonly startLabel?: string;
   readonly defaultPrompt?: string;
   readonly suggestions?: readonly string[];
   readonly scenarioControl?: ReactNode;
   readonly backHref?: string;
 }
+
+export type ModelSceneDemoProps = ModelSceneDemoCommonProps &
+  (
+    | {
+        readonly protocol?: "raw";
+        readonly runStream: SceneStreamRunner;
+      }
+    | {
+        readonly protocol: "semantic";
+        readonly runStream: SemanticSceneStreamRunner;
+      }
+  );
 
 class CanvasRendererBridge implements SceneStreamRenderer {
   private handle: SVGCanvasHandle | null = null;
@@ -117,23 +130,52 @@ function generationLabel(generation: number, attempt: number): string {
   return `generation ${generation}${attempt > 0 ? ` · attempt ${attempt}` : ""}`;
 }
 
-export function ModelSceneDemo({
-  runStream,
-  sourceLabel = "Live model",
-  defaultPrompt = DEFAULT_PROMPT,
-  suggestions = DEFAULT_SUGGESTIONS,
-  scenarioControl,
-  backHref = "/canvas",
-}: ModelSceneDemoProps) {
+function readableSemanticRole(role: string): string {
+  return role.replaceAll("_", " ").replace(/\b([abc])2\b/g, "$1²");
+}
+
+function shortCertificate(value: string): string {
+  return `${value.slice(0, 10)}…${value.slice(-4)}`;
+}
+
+export function ModelSceneDemo(props: ModelSceneDemoProps) {
+  const {
+    sourceLabel = "Live model",
+    startLabel,
+    defaultPrompt = DEFAULT_PROMPT,
+    suggestions = DEFAULT_SUGGESTIONS,
+    scenarioControl,
+    backHref = "/canvas",
+  } = props;
   const canvasRef = useRef<SVGCanvasHandle>(null);
   const lifecycleRef = useRef<object | null>(null);
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [formError, setFormError] = useState<string | null>(null);
   const [renderer] = useState(() => new CanvasRendererBridge());
   // Callers remount this component when changing stream sources (the lab keys by scenario).
-  const [runtime] = useState(
-    () => new SceneStreamRuntime({ renderer, runStream, staggerMs: 72 })
-  );
+  // Keep the rendered trust vocabulary pinned to that same mounted protocol.
+  const [{ runtime, protocol: runtimeProtocol }] = useState(() => {
+    if (props.protocol === "semantic") {
+      return {
+        protocol: "semantic" as const,
+        runtime: new SceneStreamRuntime({
+          renderer,
+          protocol: "semantic",
+          runStream: props.runStream,
+          staggerMs: 72,
+        }),
+      };
+    }
+    return {
+      protocol: "raw" as const,
+      runtime: new SceneStreamRuntime({
+        renderer,
+        protocol: "raw",
+        runStream: props.runStream,
+        staggerMs: 72,
+      }),
+    };
+  });
   const snapshot = useSyncExternalStore(
     runtime.subscribe,
     runtime.getSnapshot,
@@ -156,11 +198,30 @@ export function ModelSceneDemo({
     };
   }, [renderer, runtime]);
 
+  const isSemantic = runtimeProtocol === "semantic";
+  const semanticSnapshot = isSemantic ? snapshot.semantic : undefined;
+  const acceptedCount = semanticSnapshot?.accepted.length ?? snapshot.accepted.length;
+  const phaseLabel =
+    isSemantic && snapshot.phase === "idle"
+      ? "Ready for verified acts"
+      : isSemantic && snapshot.phase === "streaming"
+        ? "Presenting verified acts"
+        : isSemantic && snapshot.phase === "completing"
+          ? "Settling final act"
+          : isSemantic && snapshot.phase === "completed"
+            ? "Verified acts presented"
+            : isSemantic && snapshot.phase === "interrupted"
+              ? "Stopped at presented frontier"
+              : isSemantic && snapshot.phase === "replaying"
+                ? "Replaying presented acts"
+                : PHASE_LABELS[snapshot.phase];
   const isBusy = BUSY_PHASES.has(snapshot.phase);
   const canInterrupt = isBusy && snapshot.phase !== "interrupting";
-  const canReplay = snapshot.accepted.length > 0 && !isBusy;
+  const canReplay = acceptedCount > 0 && !isBusy;
   const isEmpty = snapshot.committedScene.nodes.length === 0;
   const requiresReset = snapshot.phase === "failed" && snapshot.error?.retryable === false;
+  const resolvedStartLabel =
+    startLabel ?? (isSemantic ? "Present verified acts" : "Generate live");
 
   const startGeneration = useCallback(
     (event?: FormEvent) => {
@@ -212,15 +273,19 @@ export function ModelSceneDemo({
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h1 className="truncate text-sm font-semibold tracking-tight sm:text-lg">
-                  Model-authored board
+                  {isSemantic ? "Verified-act board" : "Model-authored board"}
                 </h1>
                 <span className="rounded-full border border-amber/25 bg-amber/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber">
-                  <span className="sm:hidden">G1</span>
-                  <span className="hidden sm:inline">Gate 1</span>
+                  <span className="sm:hidden">{isSemantic ? "G1.1" : "G1"}</span>
+                  <span className="hidden sm:inline">
+                    {isSemantic ? "Gate 1.1" : "Gate 1"}
+                  </span>
                 </span>
               </div>
               <p className="hidden text-xs text-muted-foreground sm:block">
-                Useful ink appears before the model finishes thinking.
+                {isSemantic
+                  ? "One deterministic visual act at a time, committed after presentation."
+                  : "Useful ink appears before the model finishes thinking."}
               </p>
             </div>
           </div>
@@ -233,10 +298,10 @@ export function ModelSceneDemo({
           <div className="mb-5 flex items-start justify-between gap-4">
             <div>
               <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                Teacher&apos;s desk
+                {isSemantic ? "Board controls" : "Teacher's desk"}
               </p>
               <h2 className="text-2xl font-semibold tracking-[-0.025em]">
-                Shape the explanation
+                {isSemantic ? "Direct the visual proof" : "Shape the explanation"}
               </h2>
             </div>
             <Sparkles className="mt-1 h-5 w-5 shrink-0 text-amber" />
@@ -251,7 +316,7 @@ export function ModelSceneDemo({
                 })}
               />
               <div className="min-w-0">
-                <p className="truncate text-sm font-medium">{PHASE_LABELS[snapshot.phase]}</p>
+                <p className="truncate text-sm font-medium">{phaseLabel}</p>
                 <p className="truncate font-mono text-[10px] text-muted-foreground">
                   {generationLabel(snapshot.generation, snapshot.attempt)}
                 </p>
@@ -280,7 +345,11 @@ export function ModelSceneDemo({
                 placeholder="Example: Show why the angle is 90 degrees…"
               />
               <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-                <span>Interrupt whenever the explanation changes direction.</span>
+                <span>
+                  {isSemantic
+                    ? "Stop after the current act; anything queued stays off the board."
+                    : "Interrupt whenever the explanation changes direction."}
+                </span>
                 <span className="shrink-0 font-mono">{prompt.length}/2000</span>
               </div>
             </div>
@@ -316,8 +385,10 @@ export function ModelSceneDemo({
                 {requiresReset
                   ? "Reset to continue"
                   : snapshot.phase === "failed"
-                    ? "Try again"
-                    : "Generate live"}
+                    ? isSemantic
+                      ? "Retry act stream"
+                      : "Try again"
+                    : resolvedStartLabel}
               </Button>
               <Button
                 type="button"
@@ -327,7 +398,7 @@ export function ModelSceneDemo({
                 className="min-h-11 gap-2 border-amber/35 hover:bg-amber/10"
               >
                 <StopCircle className="h-4 w-4 text-amber" />
-                Interrupt
+                {isSemantic ? "Stop after this act" : "Interrupt"}
               </Button>
               <Button
                 type="button"
@@ -337,7 +408,7 @@ export function ModelSceneDemo({
                 className="min-h-11 gap-2"
               >
                 <Play className="h-4 w-4" />
-                Replay accepted
+                {isSemantic ? "Replay presented" : "Replay accepted"}
               </Button>
               <Button
                 type="button"
@@ -347,14 +418,14 @@ export function ModelSceneDemo({
                 className="min-h-11 gap-2 text-muted-foreground"
               >
                 <Square className="h-3.5 w-3.5" />
-                Reset board
+                {isSemantic ? "Wipe board" : "Reset board"}
               </Button>
             </div>
           </form>
 
           <div className="mt-5 min-h-[5.5rem] border-l-2 border-lavender/45 pl-4" aria-live="polite">
             <p className="mb-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-lavender">
-              Live narration
+              {isSemantic ? "Narration · not fact-checked" : "Live narration"}
             </p>
             <p className="text-sm leading-6 text-foreground/85">{snapshot.narration}</p>
             {(snapshot.error || formError) && (
@@ -374,21 +445,70 @@ export function ModelSceneDemo({
             <div className="mb-3 flex items-end justify-between gap-3">
               <div>
                 <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-muted-foreground">
-                  Semantic history
+                  {isSemantic ? "Presentation frontier" : "Semantic history"}
                 </p>
                 <h3 id="accepted-ledger-title" className="mt-0.5 text-sm font-medium">
-                  Accepted patch ledger
+                  {isSemantic ? "Presented act ledger" : "Accepted patch ledger"}
                 </h3>
               </div>
               <span className="font-mono text-[10px] text-muted-foreground">
-                {snapshot.accepted.length} accepted
+                {acceptedCount} {isSemantic ? "presented" : "accepted"}
               </span>
             </div>
 
-            {snapshot.accepted.length === 0 ? (
+            {acceptedCount === 0 ? (
               <p className="text-xs leading-5 text-muted-foreground">
-                Only validated, visible revisions land here. Future and rejected work never does.
+                {isSemantic
+                  ? "An act lands here only after the browser acknowledges its post-paint settlement."
+                  : "Only validated, visible revisions land here. Future and rejected work never does."}
               </p>
+            ) : isSemantic && semanticSnapshot ? (
+              <ol
+                className="max-h-80 space-y-4 overflow-y-auto border-l border-chalk-faint/25 pl-4 pr-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring xl:max-h-[42vh]"
+                aria-label="Presented visual acts"
+                tabIndex={0}
+              >
+                {semanticSnapshot.accepted.map((record, index) => {
+                  const semantic = record.event.semantic;
+                  return (
+                    <li
+                      key={`${record.event.generation}-${semantic.atomId}`}
+                      className="relative pb-4 last:pb-0"
+                    >
+                      <span className="absolute -left-[1.19rem] top-1 flex h-2.5 w-2.5 rounded-full border-2 border-background bg-sage" />
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-xs font-semibold capitalize">
+                            {readableSemanticRole(semantic.role)}
+                          </p>
+                          <p className="mt-0.5 truncate font-mono text-[9px] text-muted-foreground">
+                            atom {semantic.atomId}
+                          </p>
+                        </div>
+                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground">
+                          act {index + 1} · s{record.semanticScene.revision}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 space-y-2 border-t border-chalk-faint/15 pt-2 text-[10px] leading-4 text-muted-foreground">
+                        <div>
+                          <p className="font-medium text-foreground/80">Server verifier claim</p>
+                          <p>{semantic.receipt.obligationCodes.join(" · ")}</p>
+                        </div>
+                        <p className="font-mono" title={semantic.certificate.certificateSha256}>
+                          compiler certificate {shortCertificate(semantic.certificate.certificateSha256)}
+                        </p>
+                        <div>
+                          <p className="font-medium text-foreground/80">
+                            Browser post-paint acknowledgement · {record.presentation.settlement}
+                          </p>
+                          <p className="truncate font-mono">node {record.presentation.nodeId}</p>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
             ) : (
               <ol className="max-h-52 overflow-y-auto border-l border-chalk-faint/25 pl-4 pr-1 xl:max-h-[30vh]">
                 {snapshot.accepted.map((record, index) => (
@@ -413,6 +533,18 @@ export function ModelSceneDemo({
                 ))}
               </ol>
             )}
+
+            {isSemantic && (
+              <div
+                className="mt-4 border-t border-chalk-faint/20 pt-3 text-[10px] leading-4 text-muted-foreground"
+                aria-label="Verified act trust boundary"
+              >
+                Server compiler certificates and verifier obligations are claims received by
+                the browser. The browser separately acknowledges the exact node after its
+                presentation settles; it does not re-run cryptography or geometry. Narration
+                remains explanatory copy and is not fact-checked by this gate.
+              </div>
+            )}
           </section>
         </aside>
 
@@ -424,16 +556,25 @@ export function ModelSceneDemo({
                   <Radio className={cn("h-4 w-4", { "animate-pulse": isBusy })} />
                 </span>
                 <div>
-                  <p className="text-sm font-medium">Persistent live board</p>
+                  <p className="text-sm font-medium">
+                    {isSemantic ? "Exact presentation frontier" : "Persistent live board"}
+                  </p>
                   <p className="text-xs text-muted-foreground">
-                    Streamed patches · stable object identity · SVG motion
+                    {isSemantic
+                      ? "Server-issued atoms · stable roles · post-paint acknowledgement"
+                      : "Streamed patches · stable object identity · SVG motion"}
                   </p>
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted-foreground">
                 <span className="rounded-md border border-chalk-faint/20 bg-void/60 px-2 py-1">
-                  revision {snapshot.committedScene.revision}
+                  {isSemantic ? "scene" : "revision"} {snapshot.committedScene.revision}
                 </span>
+                {semanticSnapshot && (
+                  <span className="rounded-md border border-sage/25 bg-sage/8 px-2 py-1 text-sage">
+                    semantic {semanticSnapshot.committedScene.revision}
+                  </span>
+                )}
                 {snapshot.activeRevision !== undefined && (
                   <span className="rounded-md border border-amber/25 bg-amber/8 px-2 py-1 text-amber">
                     drawing r{snapshot.activeRevision}
@@ -463,12 +604,22 @@ export function ModelSceneDemo({
                       <Sparkles className="mx-auto mb-3 h-5 w-5 text-amber" />
                     )}
                     <p className="mb-1 text-sm font-medium">
-                      {isBusy ? "Waiting for the first accepted patch…" : "Ask for a visual explanation."}
+                      {isBusy
+                        ? isSemantic
+                          ? "Waiting for the first presented act…"
+                          : "Waiting for the first accepted patch…"
+                        : isSemantic
+                          ? "Give the board a proof to compose."
+                          : "Ask for a visual explanation."}
                     </p>
                     <p className="text-xs leading-5 text-muted-foreground">
                       {isBusy
-                        ? "The first useful idea will appear before the full answer is complete."
-                        : "Murmur will grow this board piece by piece, and you can interrupt at any moment."}
+                        ? isSemantic
+                          ? "Each atom joins the committed frontier only after its presentation crosses the browser paint barrier."
+                          : "The first useful idea will appear before the full answer is complete."
+                        : isSemantic
+                          ? "Murmur will place one deterministic visual act at a time; stop after any act."
+                          : "Murmur will grow this board piece by piece, and you can interrupt at any moment."}
                     </p>
                   </div>
                 </div>
@@ -477,35 +628,71 @@ export function ModelSceneDemo({
           </div>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-3">
-            <div className="border-l-2 border-sage/45 px-3 py-1">
-              <div className="flex items-center gap-1.5 text-xs font-medium">
-                <CheckCircle2 className="h-3.5 w-3.5 text-sage" />
-                Accepted state
-              </div>
-              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                {snapshot.committedScene.nodes.length} stable object{snapshot.committedScene.nodes.length === 1 ? "" : "s"} on the board.
-              </p>
-            </div>
-            <div className="border-l-2 border-lavender/45 px-3 py-1">
-              <div className="flex items-center gap-1.5 text-xs font-medium">
-                <RotateCcw className="h-3.5 w-3.5 text-lavender" />
-                Interruption-safe
-              </div>
-              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                Visible ink is retained; old-generation work is rejected.
-              </p>
-            </div>
-            <div className="border-l-2 border-amber/45 px-3 py-1">
-              <div className="flex items-center gap-1.5 text-xs font-medium">
-                <Clock3 className="h-3.5 w-3.5 text-amber" />
-                Stream timing
-              </div>
-              <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
-                {snapshot.completion
-                  ? `First patch ${Math.round(snapshot.completion.firstPatchMs)} ms · total ${Math.round(snapshot.completion.totalMs)} ms.`
-                  : "Measured from request to accepted model patch."}
-              </p>
-            </div>
+            {isSemantic ? (
+              <>
+                <div className="border-l-2 border-sage/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-sage" />
+                    Server claim
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    Compiler certificate and verifier obligations arrive with each atom.
+                  </p>
+                </div>
+                <div className="border-l-2 border-lavender/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <Radio className="h-3.5 w-3.5 text-lavender" />
+                    Browser acknowledgement
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    The exact node commits after presentation settles, independently of the
+                    server claim.
+                  </p>
+                </div>
+                <div className="border-l-2 border-amber/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <AlertTriangle className="h-3.5 w-3.5 text-amber" />
+                    Narration boundary
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    Teaching text is not fact-checked by Gate 1.1.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="border-l-2 border-sage/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-sage" />
+                    Accepted state
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    {snapshot.committedScene.nodes.length} stable object
+                    {snapshot.committedScene.nodes.length === 1 ? "" : "s"} on the board.
+                  </p>
+                </div>
+                <div className="border-l-2 border-lavender/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <RotateCcw className="h-3.5 w-3.5 text-lavender" />
+                    Interruption-safe
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    Visible ink is retained; old-generation work is rejected.
+                  </p>
+                </div>
+                <div className="border-l-2 border-amber/45 px-3 py-1">
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <Clock3 className="h-3.5 w-3.5 text-amber" />
+                    Stream timing
+                  </div>
+                  <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                    {snapshot.completion
+                      ? `First patch ${Math.round(snapshot.completion.firstPatchMs)} ms · total ${Math.round(snapshot.completion.totalMs)} ms.`
+                      : "Measured from request to accepted model patch."}
+                  </p>
+                </div>
+              </>
+            )}
           </div>
 
           <details className="mt-4 rounded-xl border border-chalk-faint/15 bg-slate/20 px-4 py-3 text-xs text-muted-foreground">
@@ -517,6 +704,13 @@ export function ModelSceneDemo({
               <div><dt className="text-muted-foreground">attempt</dt><dd className="mt-0.5 text-foreground">{snapshot.attempt}</dd></div>
               <div><dt className="text-muted-foreground">sequence</dt><dd className="mt-0.5 text-foreground">{snapshot.sequence}</dd></div>
               <div><dt className="text-muted-foreground">provisional</dt><dd className="mt-0.5 text-foreground">r{snapshot.provisionalScene.revision}</dd></div>
+              {semanticSnapshot && (
+                <>
+                  <div><dt className="text-muted-foreground">semantic</dt><dd className="mt-0.5 text-foreground">s{semanticSnapshot.committedScene.revision}</dd></div>
+                  <div><dt className="text-muted-foreground">presented acts</dt><dd className="mt-0.5 text-foreground">{semanticSnapshot.accepted.length}</dd></div>
+                  <div><dt className="text-muted-foreground">frontier</dt><dd className="mt-0.5 truncate text-foreground">{semanticSnapshot.commitFrontier?.atomId ?? "none"}</dd></div>
+                </>
+              )}
             </dl>
           </details>
         </section>

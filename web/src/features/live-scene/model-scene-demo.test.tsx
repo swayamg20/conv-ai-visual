@@ -41,7 +41,9 @@ vi.mock("@/components/svg-canvas", async () => {
 });
 
 import { ModelSceneDemo } from "./model-scene-demo";
+import type { SemanticSceneStreamRunner } from "./model-stream";
 import { createSceneFixtureEvents, createSceneFixtureRunner } from "./scene-stream-fixture";
+import { createSemanticSceneFixtureRunner } from "./semantic-scene-stream-fixture";
 import type { SceneStreamRunner } from "./stream-runtime";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
@@ -58,6 +60,26 @@ async function mount(runStream: SceneStreamRunner): Promise<MountedDemo> {
   const root = createRoot(container);
   await act(async () => {
     root.render(<ModelSceneDemo runStream={runStream} suggestions={[]} />);
+  });
+  return { container, root };
+}
+
+async function mountSemantic(
+  runStream: SemanticSceneStreamRunner,
+  startLabel?: string
+): Promise<MountedDemo> {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <ModelSceneDemo
+        protocol="semantic"
+        runStream={runStream}
+        suggestions={[]}
+        startLabel={startLabel}
+      />
+    );
   });
   return { container, root };
 }
@@ -117,6 +139,59 @@ describe("ModelSceneDemo", () => {
     expect(demo.container.textContent).toContain("revision 4");
     expect(demo.container.textContent).toContain("First patch 340 ms · total 1460 ms.");
     expect(demo.container.textContent).toContain("Read the equation as an area statement");
+
+    await act(async () => demo.root.unmount());
+  });
+
+  it("presents semantic acts with an explicit three-party trust ledger", async () => {
+    const demo = await mountSemantic(
+      createSemanticSceneFixtureRunner({ eventDelayMs: 0, chunkDelayMs: 0 })
+    );
+
+    expect(demo.container.textContent).toContain("Gate 1.1");
+    expect(demo.container.textContent).toContain("Presented act ledger");
+    expect(demo.container.textContent).toContain("0 presented");
+
+    await act(async () => {
+      button(demo.container, "Present verified acts").click();
+      await flushWork();
+    });
+
+    expect(canvas.playMotionPlan).toHaveBeenCalledTimes(8);
+    expect(demo.container.textContent).toContain("Verified acts presented");
+    expect(demo.container.textContent).toContain("8 presented");
+    expect(demo.container.textContent).toContain("atom areas__atom_triangle");
+    expect(demo.container.textContent).toContain("stable_id · unique_ids · board_bounds");
+    expect(demo.container.textContent).toContain(
+      "compiler certificate 28ab5dd89f…485d"
+    );
+    expect(demo.container.textContent).toContain(
+      "Browser post-paint acknowledgement · completed"
+    );
+    expect(demo.container.textContent).toContain("node areas__triangle");
+    expect(demo.container.textContent).toContain(
+      "Server compiler certificates and verifier obligations are claims received by the browser."
+    );
+    expect(demo.container.textContent).toContain(
+      "it does not re-run cryptography or geometry."
+    );
+    expect(demo.container.textContent).toContain(
+      "Narration remains explanatory copy and is not fact-checked by this gate."
+    );
+
+    await act(async () => demo.root.unmount());
+  });
+
+  it("accepts a semantic start label without changing board controls", async () => {
+    const demo = await mountSemantic(
+      createSemanticSceneFixtureRunner({ eventDelayMs: 0, chunkDelayMs: 0 }),
+      "Compose the proof"
+    );
+
+    expect(button(demo.container, "Compose the proof").disabled).toBe(false);
+    expect(button(demo.container, "Stop after this act").disabled).toBe(true);
+    expect(button(demo.container, "Replay presented").disabled).toBe(true);
+    expect(button(demo.container, "Wipe board").disabled).toBe(true);
 
     await act(async () => demo.root.unmount());
   });
