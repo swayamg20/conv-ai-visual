@@ -19,6 +19,8 @@ import {
 } from "@/lib/live-scene/patch";
 
 import type {
+  SemanticSceneDeclineReason,
+  SemanticSceneStreamDeclinedEvent,
   SceneStreamCompletedEvent,
   SceneStreamEvent,
   SceneStreamFailedEvent,
@@ -45,6 +47,7 @@ export type SceneStreamRuntimePhase =
   | "repairing"
   | "completing"
   | "completed"
+  | "declined"
   | "failed"
   | "interrupting"
   | "interrupted"
@@ -102,6 +105,10 @@ export interface SceneStreamCompletionMetrics {
   readonly repaired: boolean;
 }
 
+export interface SemanticSceneStreamDecline {
+  readonly reasonCode: SemanticSceneDeclineReason;
+}
+
 export interface SceneStreamRuntimeSnapshot {
   readonly phase: SceneStreamRuntimePhase;
   readonly generation: number;
@@ -115,6 +122,7 @@ export interface SceneStreamRuntimeSnapshot {
   readonly narration: string;
   readonly error?: SceneStreamRuntimeFailure;
   readonly completion?: SceneStreamCompletionMetrics;
+  readonly decline?: SemanticSceneStreamDecline;
   readonly semantic?: SemanticSceneStreamRuntimeSnapshot;
 }
 
@@ -175,7 +183,7 @@ interface RuntimeToken {
 interface StreamControl {
   readonly token: RuntimeToken;
   readonly controller: AbortController;
-  terminal: "completed" | "failed" | undefined;
+  terminal: "completed" | "declined" | "failed" | undefined;
   networkSettled: boolean;
 }
 
@@ -338,6 +346,7 @@ export class SceneStreamRuntime {
   private narration = "Ready for a visual explanation.";
   private failure: SceneStreamRuntimeFailure | undefined;
   private completion: SceneStreamCompletionMetrics | undefined;
+  private decline: SemanticSceneStreamDecline | undefined;
   private snapshot: SceneStreamRuntimeSnapshot;
   private disposed = false;
 
@@ -431,6 +440,7 @@ export class SceneStreamRuntime {
     this.narration = "Preparing the live board…";
     this.failure = undefined;
     this.completion = undefined;
+    this.decline = undefined;
     this.publish();
 
     const run =
@@ -558,6 +568,7 @@ export class SceneStreamRuntime {
     this.narration = "Ready for a visual explanation.";
     this.failure = undefined;
     this.completion = undefined;
+    this.decline = undefined;
     this.publish();
   }
 
@@ -587,6 +598,8 @@ export class SceneStreamRuntime {
     this.phase = "replaying";
     this.narration = `Replaying ${records.length} accepted revision${records.length === 1 ? "" : "s"}.`;
     this.failure = undefined;
+    this.completion = undefined;
+    this.decline = undefined;
     this.publish();
 
     for (const [replayIndex, record] of records.entries()) {
@@ -699,6 +712,7 @@ export class SceneStreamRuntime {
     this.narration = `Replaying ${records.length} accepted semantic atom${records.length === 1 ? "" : "s"}.`;
     this.failure = undefined;
     this.completion = undefined;
+    this.decline = undefined;
     this.publish();
 
     for (const [replayIndex, record] of records.entries()) {
@@ -982,6 +996,9 @@ export class SceneStreamRuntime {
         case "scene_stream_completed":
           this.acceptCompleted(token, event);
           break;
+        case "semantic_scene_stream_declined":
+          this.acceptSemanticDeclined(token, event);
+          break;
         case "scene_stream_failed":
           this.acceptFailed(token, event);
           break;
@@ -1153,6 +1170,34 @@ export class SceneStreamRuntime {
       repaired: event.repaired,
     });
     this.settlePhase();
+    this.publishIfCurrent(token);
+  }
+
+  private acceptSemanticDeclined(
+    token: RuntimeToken,
+    event: SemanticSceneStreamDeclinedEvent
+  ): void {
+    if (
+      this.attempt === 0 ||
+      event.attempt !== this.attempt ||
+      event.finalRevision !== this.provisionalScene.revision ||
+      this.sequence !== 0 ||
+      this.active !== null ||
+      this.queue.length !== 0 ||
+      !this.pairedProvisionalRevisionsAgree()
+    ) {
+      throw new SceneStreamRuntimeError(
+        "invalid_event",
+        "Declined event does not match an unchanged semantic generation boundary"
+      );
+    }
+    const control = this.requireControl(token);
+    control.terminal = "declined";
+    this.phase = "declined";
+    this.narration = event.message;
+    this.failure = undefined;
+    this.completion = undefined;
+    this.decline = Object.freeze({ reasonCode: event.reasonCode });
     this.publishIfCurrent(token);
   }
 
@@ -1849,6 +1894,7 @@ export class SceneStreamRuntime {
       narration: this.narration,
       ...(this.failure ? { error: this.failure } : {}),
       ...(this.completion ? { completion: this.completion } : {}),
+      ...(this.decline ? { decline: this.decline } : {}),
       ...(semantic ? { semantic } : {}),
     });
   }

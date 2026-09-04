@@ -13,6 +13,7 @@ from pydantic import Field, TypeAdapter, model_validator
 
 from murmur.live_scene.contracts import (
     AttemptNumber,
+    FriendlyMessage,
     LiveSceneContract,
     NonNegativeRevision,
     PositiveRevision,
@@ -35,6 +36,7 @@ from murmur.live_scene.semantic_contracts import (
     SemanticSceneState,
     TeachingBeatDraft,
     VerificationReceipt,
+    VisualActAbstainReason,
     roles_through,
     teaching_beat_sha256,
     verification_receipt_sha256,
@@ -143,9 +145,21 @@ class SemanticScenePatchEvent(LiveSceneContract):
         return self
 
 
+class SemanticSceneStreamDeclinedEvent(LiveSceneContract):
+    """Successful semantic terminal that deliberately leaves the scene unchanged."""
+
+    type: Literal["semantic_scene_stream_declined"] = "semantic_scene_stream_declined"
+    generation: PositiveSequence
+    attempt: AttemptNumber
+    final_revision: NonNegativeRevision = Field(alias="finalRevision")
+    reason_code: VisualActAbstainReason = Field(alias="reasonCode")
+    message: FriendlyMessage
+
+
 SemanticSceneStreamEvent: TypeAlias = Annotated[
     SceneStreamStartedEvent
     | SemanticScenePatchEvent
+    | SemanticSceneStreamDeclinedEvent
     | SceneStreamRepairingEvent
     | SceneStreamCompletedEvent
     | SceneStreamFailedEvent,
@@ -173,6 +187,7 @@ __all__ = [
     "SemanticAtomSequence",
     "SemanticLiveSceneRequest",
     "SemanticScenePatchEvent",
+    "SemanticSceneStreamDeclinedEvent",
     "SemanticSceneStreamEvent",
     "dump_semantic_scene_stream_event",
 ]

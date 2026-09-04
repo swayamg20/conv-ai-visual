@@ -288,6 +288,24 @@ function failed(lastAcceptedRevision: number): SemanticSceneStreamEvent {
   });
 }
 
+function declined(options: {
+  generation?: number;
+  attempt?: number;
+  finalRevision?: number;
+  reasonCode?: "unsupported_intent" | "no_forward_progress";
+  message?: string;
+} = {}): SemanticSceneStreamEvent {
+  return decodeSemanticSceneStreamEvent({
+    type: "semantic_scene_stream_declined",
+    generation: options.generation ?? 1,
+    attempt: options.attempt ?? 1,
+    finalRevision: options.finalRevision ?? 0,
+    reasonCode: options.reasonCode ?? "unsupported_intent",
+    message:
+      options.message ?? "This request does not have a supported visual yet.",
+  });
+}
+
 function completePlayback(playback: ControlledPlayback, ordinal: number): void {
   playback.settle({
     status: "completed",
@@ -320,6 +338,134 @@ async function startedRuntime() {
 }
 
 describe("SceneStreamRuntime semantic protocol", () => {
+  it("settles an abstention as a successful unchanged terminal and can continue immediately", async () => {
+    const { renderer, harness, runtime, run } = await startedRuntime();
+
+    run.invocation.onEvent(declined());
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "declined",
+      generation: 1,
+      attempt: 1,
+      sequence: 0,
+      committedScene: { revision: 0, nodes: [] },
+      provisionalScene: { revision: 0, nodes: [] },
+      queuedPatchCount: 0,
+      narration: "This request does not have a supported visual yet.",
+      decline: { reasonCode: "unsupported_intent" },
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
+    expect(runtime.getSnapshot().completion).toBeUndefined();
+    expect(semanticSnapshot(runtime)).toMatchObject({
+      committedScene: { revision: 0, components: [] },
+      provisionalScene: { revision: 0, components: [] },
+      accepted: [],
+    });
+    expect(renderer.playMotionPlan).not.toHaveBeenCalled();
+    expect(runtime.interrupt()).toBe(false);
+
+    const terminalSnapshot = runtime.getSnapshot();
+    run.invocation.onEvent(semanticPatch());
+    run.completion.resolve();
+    await flushMicrotasks();
+    expect(runtime.getSnapshot()).toBe(terminalSnapshot);
+
+    expect(runtime.start("Try another supported visual")).toBe(2);
+    await flushMicrotasks();
+    expect(harness.runs[1].invocation.request).toMatchObject({
+      generation: 2,
+      baseScene: { revision: 0, nodes: [] },
+      baseSemanticScene: { revision: 0, components: [] },
+    });
+    expect(runtime.getSnapshot().decline).toBeUndefined();
+  });
+
+  it("accepts a repaired abstention only after the matching repair lifecycle", async () => {
+    const { renderer, runtime, run } = await startedRuntime();
+    run.invocation.onEvent(
+      decodeSemanticSceneStreamEvent({
+        type: "scene_stream_repairing",
+        generation: 1,
+        fromAttempt: 1,
+        toAttempt: 2,
+        lastAcceptedRevision: 0,
+        message: "Checking the visual route again.",
+      })
+    );
+    run.invocation.onEvent(
+      declined({
+        attempt: 2,
+        reasonCode: "no_forward_progress",
+        message: "That visual is already complete.",
+      })
+    );
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "declined",
+      attempt: 2,
+      sequence: 0,
+      narration: "That visual is already complete.",
+      decline: { reasonCode: "no_forward_progress" },
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+    });
+    expect(renderer.playMotionPlan).not.toHaveBeenCalled();
+  });
+
+  it("preserves an existing presented frontier when the next route cannot advance", async () => {
+    const { renderer, harness, runtime, run } = await startedRuntime();
+    run.invocation.onEvent(semanticPatch());
+    run.invocation.onEvent(completed({ finalRevision: 1, patchCount: 1 }));
+    completePlayback(renderer.rendered[0].playback, 1);
+    run.completion.resolve();
+    await flushMicrotasks();
+
+    runtime.start("Repeat the already presented triangle");
+    await flushMicrotasks();
+    const secondRun = harness.runs[1];
+    secondRun.invocation.onEvent(started(2, 1));
+    secondRun.invocation.onEvent(
+      declined({
+        generation: 2,
+        finalRevision: 1,
+        reasonCode: "no_forward_progress",
+        message: "That visual cannot move forward from its current stage.",
+      })
+    );
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "declined",
+      generation: 2,
+      sequence: 0,
+      committedScene: { revision: 1 },
+      provisionalScene: { revision: 1 },
+      accepted: [{ scene: { revision: 1 } }],
+      decline: { reasonCode: "no_forward_progress" },
+    });
+    expect(semanticSnapshot(runtime)).toMatchObject({
+      committedScene: { revision: 1 },
+      provisionalScene: { revision: 1 },
+      accepted: [{ semanticScene: { revision: 1 } }],
+    });
+    expect(renderer.playMotionPlan).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a declined terminal outside an unchanged semantic boundary", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const { renderer, runtime, run } = await startedRuntime();
+
+    run.invocation.onEvent(declined({ finalRevision: 1 }));
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+      error: { code: "invalid_stream_event", retryable: true },
+    });
+    expect(renderer.playMotionPlan).not.toHaveBeenCalled();
+    warning.mockRestore();
+  });
+
   it("keeps paired admitted state provisional until serialized post-presentation receipts commit", async () => {
     const { renderer, runtime, run } = await startedRuntime();
 

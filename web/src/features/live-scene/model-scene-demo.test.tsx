@@ -41,7 +41,10 @@ vi.mock("@/components/svg-canvas", async () => {
 });
 
 import { ModelSceneDemo } from "./model-scene-demo";
-import type { SemanticSceneStreamRunner } from "./model-stream";
+import {
+  decodeSemanticSceneStreamEvent,
+  type SemanticSceneStreamRunner,
+} from "./model-stream";
 import { createSceneFixtureEvents, createSceneFixtureRunner } from "./scene-stream-fixture";
 import { createSemanticSceneFixtureRunner } from "./semantic-scene-stream-fixture";
 import type { SceneStreamRunner } from "./stream-runtime";
@@ -192,6 +195,48 @@ describe("ModelSceneDemo", () => {
     expect(button(demo.container, "Stop after this act").disabled).toBe(true);
     expect(button(demo.container, "Replay presented").disabled).toBe(true);
     expect(button(demo.container, "Wipe board").disabled).toBe(true);
+
+    await act(async () => demo.root.unmount());
+  });
+
+  it("shows a declined semantic route as a calm unchanged outcome", async () => {
+    const declinedRunner: SemanticSceneStreamRunner = async (invocation) => {
+      invocation.onEvent(
+        decodeSemanticSceneStreamEvent({
+          type: "scene_stream_started",
+          generation: invocation.request.generation,
+          attempt: 1,
+          baseRevision: invocation.request.baseScene.revision,
+        })
+      );
+      invocation.onEvent(
+        decodeSemanticSceneStreamEvent({
+          type: "semantic_scene_stream_declined",
+          generation: invocation.request.generation,
+          attempt: 1,
+          finalRevision: invocation.request.baseScene.revision,
+          reasonCode: "unsupported_intent",
+          message: "This request does not have a supported visual yet.",
+        })
+      );
+    };
+    const demo = await mountSemantic(declinedRunner);
+
+    await act(async () => {
+      button(demo.container, "Present verified acts").click();
+      await flushWork();
+    });
+
+    expect(canvas.playMotionPlan).not.toHaveBeenCalled();
+    expect(demo.container.textContent).toContain("No visual change");
+    expect(demo.container.textContent).toContain(
+      "This request does not have a supported visual yet."
+    );
+    expect(demo.container.textContent).toContain("0 presented");
+    expect(demo.container.textContent).toContain("scene 0");
+    expect(demo.container.querySelector('[role="alert"]')).toBeNull();
+    expect(button(demo.container, "Present verified acts").disabled).toBe(false);
+    expect(button(demo.container, "Stop after this act").disabled).toBe(true);
 
     await act(async () => demo.root.unmount());
   });

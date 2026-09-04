@@ -183,6 +183,18 @@ function failedEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function declinedEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    type: "semantic_scene_stream_declined",
+    generation: 1,
+    attempt: 1,
+    finalRevision: 0,
+    reasonCode: "unsupported_intent",
+    message: "  This request does not have a supported visual yet.  ",
+    ...overrides,
+  };
+}
+
 function sseFrame(value: unknown, event = "message", lineEnding = "\n"): string {
   return `event: ${event}${lineEnding}data: ${JSON.stringify(value)}${lineEnding}${lineEnding}`;
 }
@@ -323,6 +335,40 @@ describe("semantic scene model stream event decoder", () => {
     expect(parseSemanticSceneStreamEvent(JSON.stringify(inputs[1]))).toEqual(
       decoded[1]
     );
+  });
+
+  it("decodes a semantic-only declined terminal and rejects it on the raw path", () => {
+    const input = declinedEvent();
+    const decoded = decodeSemanticSceneStreamEvent(input);
+
+    expect(decoded).toEqual({
+      type: "semantic_scene_stream_declined",
+      generation: 1,
+      attempt: 1,
+      finalRevision: 0,
+      reasonCode: "unsupported_intent",
+      message: "This request does not have a supported visual yet.",
+    });
+    expect(Object.isFrozen(decoded)).toBe(true);
+    expect(parseSemanticSceneStreamEvent(JSON.stringify(input))).toEqual(decoded);
+    expect(errorCode(() => decodeSceneStreamEvent(input))).toBe("invalid_event");
+  });
+
+  it("rejects malformed semantic declined terminals", () => {
+    const invalid = [
+      declinedEvent({ extra: true }),
+      declinedEvent({ attempt: 0 }),
+      declinedEvent({ finalRevision: -1 }),
+      declinedEvent({ reasonCode: "model_unsure" }),
+      declinedEvent({ reasonCode: " unsupported_intent " }),
+      declinedEvent({ message: "   " }),
+    ];
+
+    for (const value of invalid) {
+      expect(errorCode(() => decodeSemanticSceneStreamEvent(value))).toBe(
+        "invalid_event"
+      );
+    }
   });
 
   it("keeps raw and semantic patch discriminators on separate trust paths", () => {

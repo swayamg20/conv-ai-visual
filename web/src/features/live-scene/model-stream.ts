@@ -47,6 +47,19 @@ export interface SceneStreamFailedEvent {
   readonly retryable: boolean;
 }
 
+export type SemanticSceneDeclineReason =
+  | "unsupported_intent"
+  | "no_forward_progress";
+
+export interface SemanticSceneStreamDeclinedEvent {
+  readonly type: "semantic_scene_stream_declined";
+  readonly generation: number;
+  readonly attempt: number;
+  readonly finalRevision: number;
+  readonly reasonCode: SemanticSceneDeclineReason;
+  readonly message: string;
+}
+
 export type SceneStreamEvent =
   | SceneStreamStartedEvent
   | ScenePatchEvent
@@ -65,6 +78,7 @@ export type SemanticSceneStreamEvent =
   | SemanticScenePatchEvent
   | SceneStreamRepairingEvent
   | SceneStreamCompletedEvent
+  | SemanticSceneStreamDeclinedEvent
   | SceneStreamFailedEvent;
 
 export interface SceneStreamRequest {
@@ -227,6 +241,49 @@ function boundedString(
   return normalized;
 }
 
+function semanticSceneDeclineReason(value: unknown): SemanticSceneDeclineReason {
+  const reason = boundedString(value, "declined reasonCode", 64, false);
+  if (reason !== "unsupported_intent" && reason !== "no_forward_progress") {
+    throw new SceneModelStreamError(
+      "invalid_event",
+      "declined reasonCode is unsupported"
+    );
+  }
+  return reason;
+}
+
+function decodeSemanticSceneStreamDeclinedEvent(
+  value: unknown
+): SemanticSceneStreamDeclinedEvent {
+  const input = record(value, "semantic declined event");
+  exactKeys(
+    input,
+    [
+      "type",
+      "generation",
+      "attempt",
+      "finalRevision",
+      "reasonCode",
+      "message",
+    ],
+    "semantic declined event"
+  );
+  if (input.type !== "semantic_scene_stream_declined") {
+    throw new SceneModelStreamError(
+      "invalid_event",
+      "semantic declined event has an unsupported type"
+    );
+  }
+  return Object.freeze({
+    type: input.type,
+    generation: safeInteger(input.generation, "declined generation", 1),
+    attempt: safeInteger(input.attempt, "declined attempt", 1, 2),
+    finalRevision: safeInteger(input.finalRevision, "declined finalRevision", 0),
+    reasonCode: semanticSceneDeclineReason(input.reasonCode),
+    message: boundedString(input.message, "declined message", 512),
+  });
+}
+
 function decodeSceneStreamEventWithPatch<PatchEvent>(
   value: unknown,
   patchType: string,
@@ -378,8 +435,12 @@ export function decodeSceneStreamEvent(value: unknown): SceneStreamEvent {
 export function decodeSemanticSceneStreamEvent(
   value: unknown
 ): SemanticSceneStreamEvent {
+  const input = record(value, "semantic scene stream event");
+  if (input.type === "semantic_scene_stream_declined") {
+    return decodeSemanticSceneStreamDeclinedEvent(input);
+  }
   return decodeSceneStreamEventWithPatch(
-    value,
+    input,
     "semantic_scene_patch",
     decodeSemanticScenePatchEvent
   );
