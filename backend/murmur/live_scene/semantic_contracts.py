@@ -175,13 +175,13 @@ class VerificationObligation(StrEnum):
 
 
 class VerificationReceipt(LiveSceneContract):
-    """Compiler-issued structural checks for one not-yet-materialized visual node.
+    """Verifier-issued structural checks for one not-yet-materialized visual node.
 
     A receipt does not acknowledge browser materialization and does not verify the
     model-authored narration carried by the surrounding scene patch.
     """
 
-    issuer: Literal["semantic_compiler"] = "semantic_compiler"
+    issuer: Literal["semantic_verifier"] = "semantic_verifier"
     component_id: SemanticComponentId = Field(alias="componentId")
     role: PythagoreanRole
     node_id: SceneNodeId = Field(alias="nodeId")

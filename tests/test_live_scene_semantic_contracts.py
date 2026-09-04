@@ -309,7 +309,7 @@ def test_verification_receipt_is_positive_bounded_and_unique() -> None:
     )
     assert receipt.verified is True
     wire = receipt.model_dump(mode="json", by_alias=True)
-    assert wire["issuer"] == "semantic_compiler"
+    assert wire["issuer"] == "semantic_verifier"
     assert wire["nodeId"] == "area-identity__triangle"
 
     invalid = receipt.model_dump(mode="json", by_alias=True)
@@ -333,7 +333,7 @@ def test_verification_receipt_is_positive_bounded_and_unique() -> None:
             VerificationReceipt.model_validate(invalid)
 
     invalid = receipt.model_dump(mode="json", by_alias=True)
-    invalid["issuer"] = "renderer"
+    invalid["issuer"] = "semantic_compiler"
     with pytest.raises(ValidationError):
         VerificationReceipt.model_validate(invalid)
 
