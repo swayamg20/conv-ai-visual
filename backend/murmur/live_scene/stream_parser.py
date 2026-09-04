@@ -35,6 +35,59 @@ ScenePatchStreamErrorCode = Literal[
     "parser_closed",
 ]
 
+_DEFAULT_REPAIR_HINTS: dict[ScenePatchStreamErrorCode, str] = {
+    "invalid_utf8": "invalid_utf8: output UTF-8 text only",
+    "frame_too_large": "frame_too_large: reduce the operations in one patch",
+    "invalid_json": "invalid_json: emit one complete JSON object per NDJSON line",
+    "invalid_patch": "invalid_patch: follow the ScenePatch v1 schema exactly",
+    "parser_closed": "parser_closed: restart with a fresh NDJSON stream",
+}
+_SCENE_BOUNDS_REPAIR_HINT = (
+    "scene_bounds: resize or reposition nodes using stable IDs; keep every point inside "
+    "800x600, x and y at least 0, x plus width at most 800, and y plus height at most 600"
+)
+_ALLOWED_REPAIR_HINTS = frozenset((*_DEFAULT_REPAIR_HINTS.values(), _SCENE_BOUNDS_REPAIR_HINT))
+_RANGE_ERROR_TYPES = frozenset(
+    {
+        "finite_number",
+        "greater_than",
+        "greater_than_equal",
+        "less_than",
+        "less_than_equal",
+    }
+)
+_BOUNDED_NODE_FIELDS = frozenset({"height", "points", "width", "x", "y"})
+_SCENE_NODE_KINDS = frozenset({"latex", "line", "path", "rect", "text"})
+
+
+def _validation_repair_hint(exc: ValidationError) -> str:
+    """Classify schema failures using only fixed hints, never model-authored values."""
+
+    for error in exc.errors(
+        include_url=False,
+        include_context=False,
+        include_input=False,
+    ):
+        location = error.get("loc", ())
+        error_type = error.get("type")
+        if (
+            not isinstance(location, tuple)
+            or len(location) < 5
+            or location[0] != "operations"
+            or not isinstance(location[1], int)
+            or location[1] < 0
+            or location[2:4] != ("put", "node")
+            or location[4] not in _SCENE_NODE_KINDS
+        ):
+            continue
+        if error_type in _RANGE_ERROR_TYPES and any(
+            part in _BOUNDED_NODE_FIELDS for part in location[5:]
+        ):
+            return _SCENE_BOUNDS_REPAIR_HINT
+        if error_type == "value_error" and location[4:] == ("rect",):
+            return _SCENE_BOUNDS_REPAIR_HINT
+    return _DEFAULT_REPAIR_HINTS["invalid_patch"]
+
 
 class ScenePatchStreamError(ValueError):
     """Bounded parser failure safe to classify without exposing model output."""
@@ -45,10 +98,15 @@ class ScenePatchStreamError(ValueError):
         message: str,
         *,
         frame_number: int | None = None,
+        repair_hint: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.frame_number = frame_number
+        selected_repair_hint = repair_hint or _DEFAULT_REPAIR_HINTS[code]
+        if selected_repair_hint not in _ALLOWED_REPAIR_HINTS:
+            raise ValueError("repair_hint must be a fixed internal value")
+        self.repair_hint = selected_repair_hint
 
 
 class ScenePatchStreamParser:
@@ -91,8 +149,8 @@ class ScenePatchStreamParser:
         try:
             raw = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
             decoded = self._decoder.decode(raw, final=False)
-        except (UnicodeDecodeError, UnicodeEncodeError) as exc:
-            self._fail("invalid_utf8", "scene stream was not valid UTF-8", cause=exc)
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            self._fail("invalid_utf8", "scene stream was not valid UTF-8")
         return self._consume(decoded)
 
     def finish(self) -> tuple[ScenePatchDraft, ...]:
@@ -101,8 +159,8 @@ class ScenePatchStreamParser:
         self._require_open()
         try:
             decoded = self._decoder.decode(b"", final=True)
-        except UnicodeDecodeError as exc:
-            self._fail("invalid_utf8", "scene stream ended with incomplete UTF-8", cause=exc)
+        except UnicodeDecodeError:
+            self._fail("invalid_utf8", "scene stream ended with incomplete UTF-8")
 
         patches = list(self._consume(decoded))
         if self._buffer.strip():
@@ -146,12 +204,11 @@ class ScenePatchStreamParser:
                 parse_constant=_reject_nonstandard_constant,
                 object_pairs_hook=_reject_duplicate_keys,
             )
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             self._fail(
                 "invalid_json",
                 "scene stream frame was not valid JSON",
                 frame_number=next_frame,
-                cause=exc,
             )
         if not isinstance(payload, dict):
             self._fail(
@@ -176,7 +233,7 @@ class ScenePatchStreamParser:
                 "invalid_patch",
                 "scene stream frame did not match ScenePatch v1",
                 frame_number=next_frame,
-                cause=exc,
+                repair_hint=_validation_repair_hint(exc),
             )
         self._frame_count = next_frame
         return patch
@@ -184,8 +241,8 @@ class ScenePatchStreamParser:
     def _assert_frame_size(self, frame: str) -> None:
         try:
             size = len(frame.encode("utf-8"))
-        except UnicodeEncodeError as exc:
-            self._fail("invalid_utf8", "scene stream was not valid UTF-8", cause=exc)
+        except UnicodeEncodeError:
+            self._fail("invalid_utf8", "scene stream was not valid UTF-8")
         if size > self._max_frame_bytes:
             self._fail(
                 "frame_too_large",
@@ -203,15 +260,20 @@ class ScenePatchStreamParser:
         message: str,
         *,
         frame_number: int | None = None,
-        cause: BaseException | None = None,
+        repair_hint: str | None = None,
     ) -> None:
         self._buffer = ""
         self._failed = True
         self._closed = True
-        error = ScenePatchStreamError(code, message, frame_number=frame_number)
-        if cause is None:
-            raise error
-        raise error from cause
+        error = ScenePatchStreamError(
+            code,
+            message,
+            frame_number=frame_number,
+            repair_hint=repair_hint,
+        )
+        # Provider output may appear in JSON/Pydantic exceptions. Suppress the active
+        # exception context so a later traceback cannot disclose the rejected frame.
+        raise error from None
 
 
 # Explicit alias for callers that describe the wire format rather than its payload.

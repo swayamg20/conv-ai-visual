@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 
 import pytest
 from murmur.live_scene import ScenePatchStreamError, ScenePatchStreamParser
@@ -187,6 +188,123 @@ def test_error_identifies_the_frame_after_prior_valid_output() -> None:
 
     assert captured.value.frame_number == 2
     assert parser.frame_count == 1
+
+
+def test_out_of_bounds_patch_exposes_only_a_fixed_safe_repair_hint() -> None:
+    payload = json.loads(_patch_line("private-patch", "private narration"))
+    payload["operations"][0]["node"] = {
+        "id": "private-text",
+        "kind": "text",
+        "presentation": {"enter": "fade", "exit": "fade"},
+        "x": -12_345,
+        "y": 120,
+        "text": "private model text",
+        "style": {
+            "color": "hsl(var(--chalk))",
+            "fontSize": 18,
+            "opacity": 1,
+            "anchor": "start",
+        },
+    }
+    payload["operations"].append(
+        {
+            "op": "put",
+            "node": {
+                "id": "private-rect",
+                "kind": "rect",
+                "presentation": {"enter": "draw", "exit": "fade"},
+                "x": -50,
+                "y": -25,
+                "width": 100,
+                "height": 100,
+                "style": {
+                    "stroke": "hsl(var(--lavender))",
+                    "strokeWidth": 3,
+                    "opacity": 1,
+                    "roughness": 0.5,
+                    "fill": "transparent",
+                },
+            },
+        }
+    )
+    parser = ScenePatchStreamParser()
+
+    with pytest.raises(ScenePatchStreamError) as captured:
+        parser.feed(json.dumps(payload, separators=(",", ":")) + "\n")
+
+    assert captured.value.code == "invalid_patch"
+    assert captured.value.repair_hint == (
+        "scene_bounds: resize or reposition nodes using stable IDs; keep every point inside "
+        "800x600, x and y at least 0, x plus width at most 800, and y plus height at most 600"
+    )
+    assert len(captured.value.repair_hint) <= 320
+    assert "private" not in captured.value.repair_hint
+    assert "12345" not in captured.value.repair_hint
+
+
+def test_rectangle_overflow_uses_the_same_fixed_scene_bounds_hint() -> None:
+    payload = json.loads(_patch_line("overflow-patch"))
+    payload["operations"][0]["node"] = {
+        "id": "overflow-rect",
+        "kind": "rect",
+        "presentation": {"enter": "draw", "exit": "fade"},
+        "x": 750,
+        "y": 550,
+        "width": 100,
+        "height": 100,
+        "style": {
+            "stroke": "hsl(var(--lavender))",
+            "strokeWidth": 3,
+            "opacity": 1,
+            "roughness": 0.5,
+            "fill": "transparent",
+        },
+    }
+    parser = ScenePatchStreamParser()
+
+    with pytest.raises(ScenePatchStreamError) as captured:
+        parser.feed(json.dumps(payload, separators=(",", ":")) + "\n")
+
+    assert captured.value.repair_hint.startswith("scene_bounds:")
+
+
+def test_generic_invalid_patch_exposes_a_fixed_schema_repair_hint() -> None:
+    parser = ScenePatchStreamParser()
+
+    with pytest.raises(ScenePatchStreamError) as captured:
+        parser.feed('{"v":1,"patchId":"patch-a","narration":"Draw it","operations":[]}\n')
+
+    assert captured.value.repair_hint == (
+        "invalid_patch: follow the ScenePatch v1 schema exactly"
+    )
+
+
+def test_invalid_patch_traceback_suppresses_raw_model_values() -> None:
+    raw_sentinel = "private-coordinate-sentinel"
+    payload = json.loads(_patch_line("patch-a"))
+    payload["operations"][0]["node"]["points"][0][0] = raw_sentinel
+    parser = ScenePatchStreamParser()
+
+    with pytest.raises(ScenePatchStreamError) as captured:
+        parser.feed(json.dumps(payload, separators=(",", ":")) + "\n")
+
+    rendered_traceback = "".join(
+        traceback.format_exception(
+            type(captured.value),
+            captured.value,
+            captured.value.__traceback__,
+        )
+    )
+    assert raw_sentinel not in rendered_traceback
+
+
+def test_stream_error_rejects_non_allowlisted_repair_hints() -> None:
+    with pytest.raises(ValueError, match="fixed internal value"):
+        ScenePatchStreamError(
+            "invalid_patch",
+            "fixed public message",
+            repair_hint="private model-authored value",
+        )
 
 
 def test_frame_size_is_measured_in_utf8_bytes_and_is_bounded() -> None:

@@ -310,6 +310,52 @@ async def test_repairs_from_partial_snapshot_with_stable_node_order_and_remainin
 
 
 @pytest.mark.asyncio
+async def test_repair_receives_safe_scene_bounds_guidance_without_model_values() -> None:
+    invalid_node = _line("private-out-of-bounds-node")
+    invalid_node["points"] = [[-12_345, 20], [200, 220]]
+    invalid = _patch_line(
+        "private-invalid-patch",
+        _put(invalid_node),
+        narration="private narration",
+    )
+    repaired = _patch_line("safe-repair", _put(_line("visible-node")))
+    accepted = _patch_line("accepted-patch", _put(_line("accepted-node")))
+    client = _FakeClient([[accepted + "\n" + invalid + "\n"], [repaired + "\n"]])
+    service = SceneAuthoringService(client)
+
+    events = await _collect(service)
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "scene_patch",
+        "scene_stream_repairing",
+        "scene_patch",
+        "scene_stream_completed",
+    ]
+    assert isinstance(events[-1], SceneStreamCompletedEvent)
+    snapshot = _repair_snapshot(client)
+    assert snapshot["revision"] == 1
+    assert [node["id"] for node in snapshot["nodes"]] == ["accepted-node"]  # type: ignore[index]
+    repair_user = client.calls[1]["messages"][1]["content"]  # type: ignore[index]
+    repair_error = json.loads(
+        next(
+            line.removeprefix("SANITIZED_VALIDATION_ERROR_JSON:")
+            for line in repair_user.splitlines()
+            if line.startswith("SANITIZED_VALIDATION_ERROR_JSON:")
+        )
+    )
+    assert repair_error == (
+        "scene_bounds: resize or reposition nodes using stable IDs; keep every point inside "
+        "800x600, x and y at least 0, x plus width at most 800, and y plus height at most 600"
+    )
+    assert len(repair_error) <= 320
+    assert "private" not in repair_error
+    assert "12345" not in repair_error
+    assert "private" not in "".join(event.model_dump_json() for event in events)
+    assert "private" not in repair_user
+
+
+@pytest.mark.asyncio
 async def test_repair_completes_after_one_valid_patch_without_parsing_trailing_garbage() -> None:
     first = _patch_line("patch-one", _put(_line("node-one")))
     second = _patch_line("patch-two", _put(_line("node-two")))

@@ -328,7 +328,7 @@ class SceneAuthoringService:
                     if state.budget_reached or outcome.patch_count >= patch_target:
                         break
         except ScenePatchStreamError as exc:
-            outcome.invalid_reason = f"{exc.code}: model patch frame was rejected"
+            outcome.invalid_reason = exc.repair_hint
         except _ScenePatchApplicationError as exc:
             outcome.invalid_reason = str(exc)
         except TimeoutError:
