@@ -6,15 +6,17 @@ export type MotionPlaybackStatus = "completed" | "cancelled" | "failed";
 
 export interface MotionPlaybackOutcome {
   readonly status: MotionPlaybackStatus;
-  /** Plan step IDs that are materially represented by the retained SVG. */
+  /** Plan step IDs whose target state is materially committed to the retained SVG. */
   readonly appliedStepIds: readonly string[];
   readonly error?: string;
 }
 
 export interface MotionPlayback {
+  /** Post-presentation receipt; resolves only after the terminal DOM crosses its barrier. */
   readonly finished: Promise<MotionPlaybackOutcome>;
   pause(): void;
   resume(): void;
+  /** Settle synchronously; use `finished` when a post-presentation receipt is required. */
   cancel(): MotionPlaybackOutcome;
 }
 
@@ -129,7 +131,7 @@ export interface SVGCanvasHandle {
   renderFunctionPlot(plot: FunctionPlotData): void;
   playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
   emphasizeElement(id: string, color?: string): void;
-  /** Stop scheduled and active drawing work without removing visible SVG elements. */
+  /** Stop queued work and settle each active motion to its canonical terminal state. */
   cancelMotion(): void;
   clear(): void;
   saveAsImage(): void;

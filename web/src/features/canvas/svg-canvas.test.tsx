@@ -172,7 +172,7 @@ describe("SVGCanvas", () => {
     await act(async () => root.unmount());
   });
 
-  it("retains one stable DOM identity when a same-id update is interrupted", async () => {
+  it("commits one canonical DOM identity when a same-id update is interrupted", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const root = createRoot(host);
@@ -223,12 +223,12 @@ describe("SVGCanvas", () => {
 
     await expect(update?.finished).resolves.toMatchObject({
       status: "cancelled",
-      appliedStepIds: [],
+      appliedStepIds: ["stable-title"],
     });
     const stableElements = host.querySelectorAll("[data-element-id='stable-title']");
     expect(stableElements).toHaveLength(1);
-    expect(stableElements[0]).toBe(before);
-    expect(stableElements[0].querySelector("text")?.textContent).toBe("Old title");
+    expect(stableElements[0]).not.toBe(before);
+    expect(stableElements[0].querySelector("text")?.textContent).toBe("New title");
     expect(getComputedStyle(stableElements[0]).opacity).toBe("1");
     expect(host.querySelector("[data-element-id='stable-title--outgoing']")).toBeNull();
 
@@ -273,6 +273,11 @@ describe("SVGCanvas", () => {
     });
     await initial?.finished;
     const before = host.querySelector("[data-element-id='moving-title']");
+    before?.setAttribute("clip-path", "url(#stale-reveal)");
+    before?.setAttribute(
+      "style",
+      `${before.getAttribute("style") ?? ""}; clip-path: url(#stale-reveal)`
+    );
     let update: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
       update = canvas.current?.playMotionPlan(planSceneTransition(first, moved));
@@ -286,12 +291,16 @@ describe("SVGCanvas", () => {
     const after = host.querySelector("[data-element-id='moving-title']");
     expect(after).toBe(before);
     expect(after?.querySelector("text")?.getAttribute("x")).toBe("80");
+    expect(after?.getAttribute("clip-path")).toBeNull();
+    expect((after as SVGElement | null)?.style.transform).toBe("");
+    expect((after as SVGElement | null)?.style.transformOrigin).toBe("");
+    expect((after as SVGElement | null)?.style.clipPath).toBe("");
     expect(gsap.getProperty(after as Element, "scale")).toBe(1);
 
     await act(async () => root.unmount());
   });
 
-  it("rolls back an interrupted removal and keeps the visible node opaque", async () => {
+  it("commits an interrupted removal to its canonical terminal state", async () => {
     const host = document.createElement("div");
     document.body.appendChild(host);
     const root = createRoot(host);
@@ -332,11 +341,11 @@ describe("SVGCanvas", () => {
 
     await expect(removal?.finished).resolves.toMatchObject({
       status: "cancelled",
-      appliedStepIds: [],
+      appliedStepIds: ["retained-note"],
     });
     const after = host.querySelector("[data-element-id='retained-note']");
-    expect(after).toBe(before);
-    expect(getComputedStyle(after as Element).opacity).toBe("1");
+    expect(before).not.toBeNull();
+    expect(after).toBeNull();
 
     await act(async () => root.unmount());
   });
@@ -421,10 +430,20 @@ describe("SVGCanvas", () => {
       playback?.cancel();
     });
 
-    await expect(playback?.finished).resolves.toMatchObject({ status: "cancelled" });
+    await expect(playback?.finished).resolves.toMatchObject({
+      status: "cancelled",
+      appliedStepIds: ["filled-triangle"],
+    });
+    const group = host.querySelector<SVGGElement>("#filled-triangle");
     const path = host.querySelector<SVGPathElement>("#filled-triangle path");
+    expect(group?.style.opacity).toBe("1");
+    expect(group?.getAttribute("clip-path")).toBeNull();
     expect(path?.getAttribute("fill")).toBe("hsl(var(--test-fill))");
     expect(path?.style.fill).toBe("");
+    expect(path?.getAttribute("stroke-dasharray")).toBeNull();
+    expect(path?.getAttribute("stroke-dashoffset")).toBeNull();
+    expect(path?.style.strokeDasharray).toBe("");
+    expect(path?.style.strokeDashoffset).toBe("");
 
     document.documentElement.style.removeProperty("--test-fill");
     await act(async () => root.unmount());

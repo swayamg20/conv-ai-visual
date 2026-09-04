@@ -26,9 +26,17 @@ interface ManagedMotionPlayback {
 
 interface StartedMotion {
   readonly animation: gsap.core.Animation | null;
-  readonly appliedOnStart?: boolean;
-  readonly complete?: () => void;
-  readonly cancel?: () => void;
+  /** Materialize the target node with no transient animation state left behind. */
+  commit(): void;
+  /** Restore the exact pre-step node when rendering the step fails. */
+  rollback(): void;
+}
+
+export type SvgPresentationBarrier = () => Promise<void>;
+
+export interface SvgMotionExecutorOptions {
+  /** Resolves after canonical DOM has crossed a browser presentation boundary. */
+  readonly presentationBarrier?: SvgPresentationBarrier;
 }
 
 export interface SvgMotionExecutorContext {
@@ -167,6 +175,69 @@ function rememberElement(
   context.invalidate();
 }
 
+function restoreElementSnapshot(element: SVGElement, snapshot: SVGElement): void {
+  gsap.killTweensOf(element);
+  gsap.set(element, { clearProps: "all" });
+  for (const attribute of Array.from(element.attributes)) {
+    element.removeAttribute(attribute.name);
+  }
+  for (const attribute of Array.from(snapshot.attributes)) {
+    element.setAttribute(attribute.name, attribute.value);
+  }
+  element.replaceChildren(
+    ...Array.from(snapshot.childNodes, (child) => child.cloneNode(true))
+  );
+}
+
+function restoreElementPosition(
+  element: SVGElement,
+  parent: Node | null,
+  nextSibling: Node | null
+): void {
+  if (!parent || element.parentNode === parent) return;
+  parent.insertBefore(
+    element,
+    nextSibling?.parentNode === parent ? nextSibling : null
+  );
+}
+
+function settleElementPresentation(element: SVGElement, node: SceneNode): void {
+  element.removeAttribute("clip-path");
+  element.style.removeProperty("clip-path");
+  element
+    .querySelectorAll<SVGElement>("*")
+    .forEach((child) => {
+      child.removeAttribute("clip-path");
+      child.style.removeProperty("clip-path");
+    });
+  element.removeAttribute("transform");
+  gsap.set(element, { opacity: node.style.opacity });
+  gsap.set(element, { clearProps: "transform,transformOrigin" });
+  element.style.removeProperty("transform");
+  element.style.removeProperty("transform-origin");
+}
+
+function clearDrawResidue(element: SVGElement): void {
+  element.querySelectorAll<SVGElement>("path").forEach((path) => {
+    path.removeAttribute("stroke-dasharray");
+    path.removeAttribute("stroke-dashoffset");
+    path.style.removeProperty("stroke-dasharray");
+    path.style.removeProperty("stroke-dashoffset");
+  });
+}
+
+function browserPresentationBarrier(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => resolve());
+      });
+      return;
+    }
+    setTimeout(resolve, 0);
+  });
+}
+
 function executeMotionStep(
   context: SvgMotionExecutorContext,
   step: MotionStep
@@ -177,30 +248,44 @@ function executeMotionStep(
   if (step.type === "remove") {
     const target = context.elements.get(step.id);
     if (!target) throw new Error(`Missing remove target: ${step.id}`);
-    const complete = () => {
+    const snapshot = target.element.cloneNode(true) as SVGElement;
+    const parent = target.element.parentNode;
+    const nextSibling = target.element.nextSibling;
+    let state: "pending" | "committed" | "rolledback" = "pending";
+    const commit = () => {
+      if (state === "committed") return;
+      if (state === "rolledback") {
+        throw new Error(`Cannot recommit rolled-back remove target: ${step.id}`);
+      }
       target.element.remove();
       if (context.elements.get(step.id)?.element === target.element) {
         context.elements.delete(step.id);
       }
       context.invalidate();
+      state = "committed";
     };
-    const cancel = () => {
-      gsap.set(target.element, { opacity: step.node.style.opacity });
+    const rollback = () => {
+      if (state === "rolledback") return;
+      restoreElementSnapshot(target.element, snapshot);
+      restoreElementPosition(target.element, parent, nextSibling);
       context.elements.set(step.id, target);
       context.invalidate();
+      state = "rolledback";
     };
     if (step.effect === "none") {
-      return { animation: null, complete };
+      return { animation: null, commit, rollback };
     }
-    return {
-      animation: gsap.to(target.element, {
+    try {
+      const animation = gsap.to(target.element, {
         opacity: 0,
         duration: DURATION.fast,
         ease: EASING.smooth,
-      }),
-      complete,
-      cancel,
-    };
+      });
+      return { animation, commit, rollback };
+    } catch (error) {
+      rollback();
+      throw error;
+    }
   }
 
   const node = step.type === "enter" ? step.node : step.next;
@@ -212,65 +297,100 @@ function executeMotionStep(
     if (step.transition === "transform") {
       const replacement = createSceneElement(context, node, node.id);
       if (!replacement) throw new Error(`Could not render update target: ${node.id}`);
-      outgoing.replaceChildren(...Array.from(replacement.childNodes));
-      outgoing.removeAttribute("clip-path");
-      gsap.set(outgoing, { opacity: node.style.opacity, scale: 0.98 });
-      rememberElement(context, node, outgoing);
-      const finishTransform = () => {
-        gsap.set(outgoing, { opacity: node.style.opacity, scale: 1 });
+      const snapshot = outgoing.cloneNode(true) as SVGElement;
+      let state: "pending" | "committed" | "rolledback" = "pending";
+      const commit = () => {
+        if (state === "committed") return;
+        if (state === "rolledback") {
+          throw new Error(`Cannot recommit rolled-back update target: ${step.id}`);
+        }
+        settleElementPresentation(outgoing, node);
+        rememberElement(context, node, outgoing);
+        state = "committed";
       };
-      return {
-        appliedOnStart: true,
-        animation: gsap.to(outgoing, {
+      const rollback = () => {
+        if (state === "rolledback") return;
+        restoreElementSnapshot(outgoing, snapshot);
+        rememberElement(context, step.previous, outgoing);
+        state = "rolledback";
+      };
+      try {
+        outgoing.replaceChildren(...Array.from(replacement.childNodes));
+        outgoing.removeAttribute("clip-path");
+        gsap.set(outgoing, { opacity: node.style.opacity, scale: 0.98 });
+        rememberElement(context, node, outgoing);
+        const animation = gsap.to(outgoing, {
           opacity: node.style.opacity,
           scale: 1,
           duration: DURATION.stateChange,
           ease: EASING.teaching,
-        }),
-        complete: finishTransform,
-        cancel: finishTransform,
-      };
+        });
+        return { animation, commit, rollback };
+      } catch (error) {
+        rollback();
+        throw error;
+      }
     }
 
     const incoming = createSceneElement(context, node, `${node.id}--incoming`);
     if (!incoming) throw new Error(`Could not render update target: ${node.id}`);
-
-    outgoing.setAttribute("id", `${node.id}--outgoing`);
-    outgoing.setAttribute("data-element-id", `${node.id}--outgoing`);
-    incoming.setAttribute("id", node.id);
-    incoming.setAttribute("data-element-id", node.id);
-    gsap.set(incoming, { opacity: 0 });
-    svg.appendChild(incoming);
-    rememberElement(context, node, incoming);
-
-    const complete = () => {
+    const outgoingSnapshot = outgoing.cloneNode(true) as SVGElement;
+    const outgoingParent = outgoing.parentNode;
+    const outgoingNextSibling = outgoing.nextSibling;
+    let state: "pending" | "committed" | "rolledback" = "pending";
+    const commit = () => {
+      if (state === "committed") return;
+      if (state === "rolledback") {
+        throw new Error(`Cannot recommit rolled-back update target: ${step.id}`);
+      }
       outgoing.remove();
-      gsap.set(incoming, { opacity: node.style.opacity });
-      context.invalidate();
+      incoming.setAttribute("id", node.id);
+      incoming.setAttribute("data-element-id", node.id);
+      settleElementPresentation(incoming, node);
+      rememberElement(context, node, incoming);
+      state = "committed";
     };
-    const cancel = () => {
+    const rollback = () => {
+      if (state === "rolledback") return;
       incoming.remove();
-      outgoing.setAttribute("id", step.previous.id);
-      outgoing.setAttribute("data-element-id", step.previous.id);
-      gsap.set(outgoing, { opacity: step.previous.style.opacity });
+      restoreElementSnapshot(outgoing, outgoingSnapshot);
+      restoreElementPosition(outgoing, outgoingParent, outgoingNextSibling);
       rememberElement(context, step.previous, outgoing);
+      state = "rolledback";
     };
-    const timeline = gsap.timeline();
-    timeline.to(outgoing, {
-      opacity: 0,
-      duration: DURATION.normal,
-      ease: EASING.smooth,
-    });
-    timeline.to(
-      incoming,
-      {
-        opacity: node.style.opacity,
+    try {
+      outgoing.setAttribute("id", `${node.id}--outgoing`);
+      outgoing.setAttribute("data-element-id", `${node.id}--outgoing`);
+      incoming.setAttribute("id", node.id);
+      incoming.setAttribute("data-element-id", node.id);
+      gsap.set(incoming, { opacity: 0 });
+      if (outgoingParent) {
+        outgoingParent.insertBefore(incoming, outgoing.nextSibling);
+      } else {
+        svg.appendChild(incoming);
+      }
+      rememberElement(context, node, incoming);
+
+      const timeline = gsap.timeline();
+      timeline.to(outgoing, {
+        opacity: 0,
         duration: DURATION.normal,
-        ease: EASING.teaching,
-      },
-      "<"
-    );
-    return { animation: timeline, complete, cancel };
+        ease: EASING.smooth,
+      });
+      timeline.to(
+        incoming,
+        {
+          opacity: node.style.opacity,
+          duration: DURATION.normal,
+          ease: EASING.teaching,
+        },
+        "<"
+      );
+      return { animation: timeline, commit, rollback };
+    } catch (error) {
+      rollback();
+      throw error;
+    }
   }
 
   if (context.elements.has(node.id)) {
@@ -278,17 +398,40 @@ function executeMotionStep(
   }
   const element = createSceneElement(context, node);
   if (!element) throw new Error(`Could not render enter target: ${node.id}`);
-  svg.appendChild(element);
-  rememberElement(context, node, element);
+  let animation: gsap.core.Animation | null = null;
+  let drawAnimation: gsap.core.Timeline | null = null;
+  let state: "pending" | "committed" | "rolledback" = "pending";
+  const commit = () => {
+    if (state === "committed") return;
+    if (state === "rolledback") {
+      throw new Error(`Cannot recommit rolled-back enter target: ${step.id}`);
+    }
+    if (drawAnimation) {
+      settleDrawOn(drawAnimation);
+      clearDrawResidue(element);
+    }
+    settleElementPresentation(element, node);
+    rememberElement(context, node, element);
+    state = "committed";
+  };
+  const rollback = () => {
+    if (state === "rolledback") return;
+    element.remove();
+    if (context.elements.get(node.id)?.element === element) {
+      context.elements.delete(node.id);
+    }
+    context.invalidate();
+    state = "rolledback";
+  };
 
-  if (step.effect === "none") {
-    gsap.set(element, { opacity: node.style.opacity });
-    return { animation: null, appliedOnStart: true };
-  }
-  if (step.effect === "scale") {
-    return {
-      appliedOnStart: true,
-      animation: gsap.fromTo(
+  try {
+    svg.appendChild(element);
+    rememberElement(context, node, element);
+
+    if (step.effect === "none") {
+      animation = null;
+    } else if (step.effect === "scale") {
+      animation = gsap.fromTo(
         element,
         { opacity: 0, scale: 0.85, transformOrigin: "center center" },
         {
@@ -297,58 +440,60 @@ function executeMotionStep(
           duration: DURATION.normal,
           ease: EASING.back,
         }
-      ),
-      complete: () => {
-        gsap.set(element, { opacity: node.style.opacity, scale: 1 });
-      },
-    };
+      );
+    } else if (
+      step.effect === "draw" &&
+      node.kind !== "text" &&
+      node.kind !== "latex"
+    ) {
+      drawAnimation = animateDrawOn(element, DURATION.drawSlow, EASING.draw);
+      animation = drawAnimation;
+    } else {
+      animation = gsap.fromTo(
+        element,
+        { opacity: 0 },
+        {
+          opacity: node.style.opacity,
+          duration: DURATION.fast,
+          ease: EASING.teaching,
+        }
+      );
+    }
+    return { animation, commit, rollback };
+  } catch (error) {
+    rollback();
+    throw error;
   }
-  if (step.effect === "draw" && node.kind !== "text" && node.kind !== "latex") {
-    const animation = animateDrawOn(element, DURATION.drawSlow, EASING.draw);
-    const settleDraw = () => {
-      settleDrawOn(animation);
-      gsap.set(element, { opacity: node.style.opacity });
-    };
-    return {
-      appliedOnStart: true,
-      animation,
-      complete: settleDraw,
-      cancel: settleDraw,
-    };
-  }
-  return {
-    appliedOnStart: true,
-    animation: gsap.fromTo(
-      element,
-      { opacity: 0 },
-      {
-        opacity: node.style.opacity,
-        duration: DURATION.fast,
-        ease: EASING.teaching,
-      }
-    ),
-    complete: () => {
-      gsap.set(element, { opacity: node.style.opacity });
-    },
-  };
 }
 
 /** Own every timer and tween required to materialize one deterministic motion plan. */
 export function createSvgMotionExecutor(
-  context: SvgMotionExecutorContext
+  context: SvgMotionExecutorContext,
+  options: SvgMotionExecutorOptions = {}
 ): SvgMotionExecutor {
   const playbacks = new Set<ManagedMotionPlayback>();
   const emphasisAnimations = new Map<gsap.core.Animation, () => void>();
+  let mutationEpoch = 0;
+  const presentationBarrier =
+    options.presentationBarrier ?? browserPresentationBarrier;
 
   const play = (
     plan: MotionPlan,
-    options: MotionPlaybackOptions = {}
+    playbackOptions: MotionPlaybackOptions = {}
   ): MotionPlayback => {
+    if (playbacks.size > 0) {
+      throw new Error(
+        "A motion plan is still active or awaiting its presentation receipt"
+      );
+    }
+    const playbackEpoch = ++mutationEpoch;
     const animations = new Set<gsap.core.Animation>();
-    const cancellers = new Set<() => void>();
+    const activeMotions = new Map<string, StartedMotion>();
+    const transactions: { readonly step: MotionStep; readonly motion: StartedMotion }[] = [];
     const appliedStepIds = new Set<string>();
-    const staggerSeconds = Math.max(0, options.staggerMs ?? 90) / 1000;
+    const staggerSeconds = Math.max(0, playbackOptions.staggerMs ?? 90) / 1000;
     let completedSteps = 0;
+    let settlementStarted = false;
     let settledOutcome: MotionPlaybackOutcome | null = null;
     let resolveFinished!: (outcome: MotionPlaybackOutcome) => void;
     const finished = new Promise<MotionPlaybackOutcome>((resolve) => {
@@ -370,28 +515,86 @@ export function createSvgMotionExecutor(
           : { error: error instanceof Error ? error.message : String(error) }),
       });
 
+    const combineErrors = (primary: unknown, cleanupErrors: readonly unknown[]) => {
+      if (cleanupErrors.length === 0) return primary;
+      const message = [primary, ...cleanupErrors]
+        .map((error) => (error instanceof Error ? error.message : String(error)))
+        .join("; cleanup failed: ");
+      return new Error(message);
+    };
+
+    const rollbackTransactions = (
+      entries: readonly { readonly step: MotionStep; readonly motion: StartedMotion }[]
+    ): unknown[] => {
+      const cleanupErrors: unknown[] = [];
+      for (const { step, motion } of [...entries].reverse()) {
+        try {
+          motion.rollback();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+        activeMotions.delete(step.id);
+        appliedStepIds.delete(step.id);
+      }
+      return cleanupErrors;
+    };
+
+    const stopAnimations = (): unknown[] => {
+      const cleanupErrors: unknown[] = [];
+      animations.forEach((animation) => {
+        try {
+          animation.kill();
+        } catch (error) {
+          cleanupErrors.push(error);
+        }
+      });
+      animations.clear();
+      return cleanupErrors;
+    };
+
     const settle = (
       status: MotionPlaybackOutcome["status"],
       error?: unknown
     ): MotionPlaybackOutcome => {
       if (settledOutcome) return settledOutcome;
+      settlementStarted = true;
       settledOutcome = outcome(status, error);
-      playbacks.delete(controller);
-      resolveFinished(settledOutcome);
+      void Promise.resolve()
+        .then(() => presentationBarrier())
+        .then(() => {
+          transactions.length = 0;
+          playbacks.delete(controller);
+          resolveFinished(settledOutcome as MotionPlaybackOutcome);
+        })
+        .catch((barrierError: unknown) => {
+          const cleanupErrors =
+            mutationEpoch === playbackEpoch
+              ? rollbackTransactions(transactions)
+              : [];
+          transactions.length = 0;
+          appliedStepIds.clear();
+          settledOutcome = outcome(
+            "failed",
+            combineErrors(barrierError, cleanupErrors)
+          );
+          playbacks.delete(controller);
+          resolveFinished(settledOutcome);
+        });
       return settledOutcome;
     };
 
-    const cancelActiveWork = () => {
-      animations.forEach((animation) => animation.kill());
-      animations.clear();
-      cancellers.forEach((cancel) => cancel());
-      cancellers.clear();
-    };
-
     const fail = (error: unknown) => {
-      if (settledOutcome) return;
-      cancelActiveWork();
-      settle("failed", error);
+      if (settlementStarted) return;
+      settlementStarted = true;
+      const stopErrors = stopAnimations();
+      const activeTransactions = transactions.filter(({ step }) =>
+        activeMotions.has(step.id)
+      );
+      const cleanupErrors = [
+        ...stopErrors,
+        ...rollbackTransactions(activeTransactions),
+      ];
+      settle("failed", combineErrors(error, cleanupErrors));
     };
 
     const completeStep = () => {
@@ -400,16 +603,16 @@ export function createSvgMotionExecutor(
     };
 
     const startStep = (step: MotionStep) => {
-      if (settledOutcome) return;
+      if (settlementStarted) return;
       try {
         const started = executeMotionStep(context, step);
-        if (started.appliedOnStart) appliedStepIds.add(step.id);
-        if (started.cancel) cancellers.add(started.cancel);
+        activeMotions.set(step.id, started);
+        transactions.push({ step, motion: started });
 
         if (!started.animation) {
-          started.complete?.();
+          started.commit();
           appliedStepIds.add(step.id);
-          if (started.cancel) cancellers.delete(started.cancel);
+          activeMotions.delete(step.id);
           completeStep();
           return;
         }
@@ -418,10 +621,11 @@ export function createSvgMotionExecutor(
           paused: true,
           onComplete: () => {
             animations.delete(wrapper);
+            if (settlementStarted) return;
             try {
-              started.complete?.();
+              started.commit();
               appliedStepIds.add(step.id);
-              if (started.cancel) cancellers.delete(started.cancel);
+              activeMotions.delete(step.id);
               completeStep();
             } catch (error) {
               fail(error);
@@ -441,8 +645,32 @@ export function createSvgMotionExecutor(
       resume: () => animations.forEach((animation) => animation.resume()),
       cancel: () => {
         if (settledOutcome) return settledOutcome;
-        cancelActiveWork();
-        return settle("cancelled");
+        settlementStarted = true;
+        const stopErrors = stopAnimations();
+        const activeTransactions = transactions.filter(({ step }) =>
+          activeMotions.has(step.id)
+        );
+        if (stopErrors.length > 0) {
+          const cleanupErrors = rollbackTransactions(activeTransactions);
+          return settle(
+            "failed",
+            combineErrors(stopErrors[0], [
+              ...stopErrors.slice(1),
+              ...cleanupErrors,
+            ])
+          );
+        }
+        try {
+          for (const { step, motion } of activeTransactions) {
+            motion.commit();
+            appliedStepIds.add(step.id);
+          }
+          activeMotions.clear();
+          return settle("cancelled");
+        } catch (error) {
+          const cleanupErrors = rollbackTransactions(activeTransactions);
+          return settle("failed", combineErrors(error, cleanupErrors));
+        }
       },
     };
     playbacks.add(controller);
@@ -451,6 +679,7 @@ export function createSvgMotionExecutor(
       settle("completed");
     } else {
       plan.steps.forEach((step, index) => {
+        if (settlementStarted) return;
         const delay = index * staggerSeconds;
         if (delay === 0) {
           startStep(step);
@@ -510,6 +739,7 @@ export function createSvgMotionExecutor(
 
   const cancel = () => {
     playbacks.forEach((playback) => playback.cancel());
+    mutationEpoch += 1;
     playbacks.clear();
     emphasisAnimations.forEach((restore, animation) => {
       animation.kill();
