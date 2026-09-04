@@ -45,6 +45,8 @@ def test_build_scene_messages_encodes_the_fixed_gate_0_authoring_contract() -> N
     assert "fontFamily" in system
     assert "Never emit other CSS" in system
     assert "stable semantic node IDs" in system
+    assert "plan the bounding box of the complete TARGET_PATCH_COUNT construction" in system
+    assert "every later square, label, arrow" in system
     assert "exactly TARGET_PATCH_COUNT" in system
     assert "at most 8 operations per patch" in system
     assert "End every complete patch object with a newline" in system
@@ -59,6 +61,7 @@ def test_build_scene_messages_encodes_the_fixed_gate_0_authoring_contract() -> N
     assert example["v"] == 1
     assert example["operations"][0]["op"] == "put"
     assert example["operations"][0]["node"]["kind"] == "line"
+    assert example["operations"][0]["node"]["points"] == [[330, 310], [490, 310]]
 
     assert "REMAINING_PATCH_BUDGET:5" in user
     assert "TARGET_PATCH_COUNT:3" in user

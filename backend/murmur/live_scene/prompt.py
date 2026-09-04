@@ -17,9 +17,9 @@ _UNSAFE_ERROR_CHARS = re.compile(r"[^A-Za-z0-9 .,:;_/()\[\]-]+")
 _WHITESPACE = re.compile(r"\s+")
 
 _PYTHAGORAS_EXAMPLE = (
-    '{"v":1,"patchId":"pythagoras-leg-a","narration":"Draw the horizontal leg.",'
+    '{"v":1,"patchId":"pythagoras-leg-a","narration":"Draw a compact leg with room for the full proof.",'
     '"operations":[{"op":"put","node":{"id":"triangle-leg-a","kind":"line",'
-    '"points":[[180,405],[525,405]],"style":{"stroke":"hsl(var(--lavender))",'
+    '"points":[[330,310],[490,310]],"style":{"stroke":"hsl(var(--lavender))",'
     '"strokeWidth":4,"opacity":1,"roughness":0.75},'
     '"presentation":{"enter":"draw","exit":"fade"}}}]}'
 )
@@ -73,6 +73,9 @@ _SYSTEM_PROMPT = "\n".join(
         "that exist, and keep the resulting scene at or below 128 nodes.",
         "- Keep narration, text, and latex values non-empty and at most 512 characters each.",
         "AUTHORING BEHAVIOR:",
+        "- Before patch 1, plan the bounding box of the complete TARGET_PATCH_COUNT "
+        "construction. Size and center initial geometry so every later square, label, arrow, "
+        "and annotation remains fully inside the 800x600 board.",
         "- Emit exactly TARGET_PATCH_COUNT complete progressive patches, then stop immediately. "
         "Never begin another patch after reaching that target and never exceed the supplied "
         "remaining patch budget.",
