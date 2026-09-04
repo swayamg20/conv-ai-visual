@@ -18,7 +18,7 @@ This is a model-to-server qualification, not yet a complete browser or learner-v
 - [x] 2026-09-05 02:08 IST: Ran the first paid calibration. It completed on attempt one with the expected `introduce` / `triangle` beat and one compiler-certified atom, so the bounded campaign continued.
 - [x] 2026-09-05 02:11 IST: Completed all twenty cases sequentially from clean pushed source `3bdf246`. Nineteen completed, the deliberate backward request failed closed after one repair, all twenty had safe terminals, and twenty-one provider attempts reserved at most USD 0.0389322.
 - [x] 2026-09-05 02:12 IST: Calculated the split result: protocol and resume-prefix behavior passed; strict semantic expectation accuracy was 10/18, requested-stage accuracy was 10/17, and the two unsupported prompts were forced into unrelated Pythagorean output. Median server first atom was 1,485.046 ms and p95 was 3,450.351 ms, so the server qualification failed.
-- [ ] Record the decision, run focused regression checks, commit coherent checkpoints, push, and prove local/remote parity.
+- [x] 2026-09-05 02:14 IST: Passed 57 focused semantic API/service/probe tests plus Ruff and formatting; audited the private 0600 report for forbidden fields and sensitive literals; pushed the result in `1217ab2`; and proved local `HEAD` equals its upstream SHA.
 
 ## Surprises & Discoveries
 
