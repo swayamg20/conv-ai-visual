@@ -22,6 +22,11 @@ from murmur.live_scene import (
     SceneStreamEvent,
     encode_scene_stream_event,
 )
+from murmur.live_scene.semantic_service_contracts import (
+    SemanticLiveSceneRequest,
+    SemanticSceneStreamEvent,
+)
+from murmur.live_scene.semantic_wire import encode_semantic_scene_stream_event
 
 router = APIRouter(prefix="/api/live-scenes", tags=["live-scenes"])
 
@@ -38,11 +43,7 @@ def _require_development_scene_lab(request: Request) -> None:
         is_loopback = peer_address.is_loopback
     except ValueError:
         is_loopback = False
-    if (
-        os.getenv("MURMUR_SCENE_LAB") != "1"
-        or environment != "development"
-        or not is_loopback
-    ):
+    if os.getenv("MURMUR_SCENE_LAB") != "1" or environment != "development" or not is_loopback:
         raise ApiError(404, "Not found")
 
 
@@ -64,6 +65,22 @@ async def _encode_scene_events(
     try:
         async for event in events:
             yield encode_scene_stream_event(event)
+    finally:
+        try:
+            await close_async_resource(events)
+        finally:
+            if lease is not None:
+                await lease.aclose()
+
+
+async def _encode_semantic_scene_events(
+    events: AsyncIterator[SemanticSceneStreamEvent],
+    lease: SceneAdmissionLease | None = None,
+) -> AsyncIterator[str]:
+    """Encode strict semantic events and release every owned upstream resource."""
+    try:
+        async for event in events:
+            yield encode_semantic_scene_stream_event(event)
     finally:
         try:
             await close_async_resource(events)
@@ -121,4 +138,35 @@ async def stream_development_live_scene(
     )
 
 
-__all__ = ["router", "stream_development_live_scene", "stream_live_scene"]
+@router.post(
+    "/lab/semantic/stream",
+    include_in_schema=False,
+    dependencies=[Depends(_require_development_scene_lab)],
+)
+async def stream_development_semantic_live_scene(
+    body: SemanticLiveSceneRequest,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream compiler-verified semantic atoms in the guarded development lab."""
+    try:
+        lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
+    except SceneAdmissionError as exc:
+        raise ApiError(429, str(exc)) from None
+    events = scene_service.stream_semantic_events(body)
+    return _OwnedStreamingResponse(
+        _encode_semantic_scene_events(events, lease),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+__all__ = [
+    "router",
+    "stream_development_live_scene",
+    "stream_development_semantic_live_scene",
+    "stream_live_scene",
+]
