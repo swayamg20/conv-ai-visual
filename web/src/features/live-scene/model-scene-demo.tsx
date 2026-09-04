@@ -55,6 +55,7 @@ const PHASE_LABELS: Record<SceneStreamRuntimePhase, string> = {
   completing: "Finishing motion",
   completed: "Explanation complete",
   failed: "Stream stopped",
+  interrupting: "Settling visible work",
   interrupted: "Interrupted safely",
   replaying: "Replaying accepted work",
 };
@@ -67,6 +68,7 @@ const PHASE_DOTS: Record<SceneStreamRuntimePhase, string> = {
   completing: "bg-sage",
   completed: "bg-sage",
   failed: "bg-ember",
+  interrupting: "bg-lavender",
   interrupted: "bg-lavender",
   replaying: "bg-amber",
 };
@@ -76,6 +78,7 @@ const BUSY_PHASES = new Set<SceneStreamRuntimePhase>([
   "streaming",
   "repairing",
   "completing",
+  "interrupting",
   "replaying",
 ]);
 
@@ -154,7 +157,7 @@ export function ModelSceneDemo({
   }, [renderer, runtime]);
 
   const isBusy = BUSY_PHASES.has(snapshot.phase);
-  const canInterrupt = isBusy;
+  const canInterrupt = isBusy && snapshot.phase !== "interrupting";
   const canReplay = snapshot.accepted.length > 0 && !isBusy;
   const isEmpty = snapshot.committedScene.nodes.length === 0;
   const requiresReset = snapshot.phase === "failed" && snapshot.error?.retryable === false;

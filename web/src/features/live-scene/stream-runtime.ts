@@ -1,13 +1,20 @@
 import type { MotionPlayback, MotionPlaybackOutcome, SVGCanvasHandle } from "@/features/canvas/types";
 import {
+  applySemanticScenePatch,
+  createSemanticSceneState,
   createSceneState,
+  decodeSemanticScenePatchEvent,
   materializeSceneTransition,
   planSceneTransition,
+  type MotionPlan,
   type SceneState,
+  type SemanticScenePatchEvent,
+  type SemanticSceneState,
 } from "@/lib/live-scene";
 import {
   applyScenePatch,
   LIVE_SCENE_MAX_ACCEPTED_PATCHES,
+  LIVE_SCENE_MAX_NODES,
   type ScenePatchEvent,
 } from "@/lib/live-scene/patch";
 
@@ -16,9 +23,16 @@ import type {
   SceneStreamEvent,
   SceneStreamFailedEvent,
   SceneStreamRequest,
+  SemanticSceneStreamEvent,
+  SemanticSceneStreamRequest,
+  SemanticSceneStreamRunner,
 } from "./model-stream";
 
 const EMPTY_SCENE = createSceneState({ revision: 0, nodes: [] });
+const EMPTY_SEMANTIC_SCENE = createSemanticSceneState({
+  revision: 0,
+  components: [],
+});
 const MAX_PROMPT_LENGTH = 2_000;
 
 export const LIVE_SCENE_MAX_PATCH_QUEUE = LIVE_SCENE_MAX_ACCEPTED_PATCHES;
@@ -32,6 +46,7 @@ export type SceneStreamRuntimePhase =
   | "completing"
   | "completed"
   | "failed"
+  | "interrupting"
   | "interrupted"
   | "replaying";
 
@@ -43,6 +58,36 @@ export interface AcceptedSceneRevision {
   readonly patchId: string;
   readonly narration: string;
   readonly materialized: boolean;
+}
+
+/**
+ * Deterministic, in-memory acknowledgement that one semantic atom crossed the
+ * renderer's post-paint barrier. It is not proof of compiler geometry or
+ * client authenticity.
+ */
+export interface SemanticPresentationReceipt {
+  readonly type: "semantic_atom_presented";
+  readonly atomId: string;
+  readonly nodeId: string;
+  readonly certificateSha256: string;
+  readonly sceneRevision: number;
+  readonly semanticRevision: number;
+  readonly settlement: "completed" | "cancelled";
+  readonly appliedStepIds: readonly [string];
+}
+
+export interface AcceptedSemanticRevision {
+  readonly scene: SceneState;
+  readonly semanticScene: SemanticSceneState;
+  readonly event: SemanticScenePatchEvent;
+  readonly presentation: SemanticPresentationReceipt;
+}
+
+export interface SemanticSceneStreamRuntimeSnapshot {
+  readonly committedScene: SemanticSceneState;
+  readonly provisionalScene: SemanticSceneState;
+  readonly accepted: readonly AcceptedSemanticRevision[];
+  readonly commitFrontier?: SemanticPresentationReceipt;
 }
 
 export interface SceneStreamRuntimeFailure {
@@ -70,6 +115,7 @@ export interface SceneStreamRuntimeSnapshot {
   readonly narration: string;
   readonly error?: SceneStreamRuntimeFailure;
   readonly completion?: SceneStreamCompletionMetrics;
+  readonly semantic?: SemanticSceneStreamRuntimeSnapshot;
 }
 
 export type SceneStreamRenderer = Pick<
@@ -87,15 +133,25 @@ export type SceneStreamRunner = (
   invocation: SceneStreamRunInvocation
 ) => Promise<void>;
 
-export interface SceneStreamRuntimeOptions {
+interface CommonSceneStreamRuntimeOptions {
   readonly renderer: SceneStreamRenderer;
-  readonly runStream: SceneStreamRunner;
   readonly queueLimit?: number;
   readonly staggerMs?: number;
 }
 
+export type SceneStreamRuntimeOptions =
+  | (CommonSceneStreamRuntimeOptions & {
+      readonly protocol?: "raw";
+      readonly runStream: SceneStreamRunner;
+    })
+  | (CommonSceneStreamRuntimeOptions & {
+      readonly protocol: "semantic";
+      readonly runStream: SemanticSceneStreamRunner;
+    });
+
 export type SceneStreamRuntimeErrorCode =
   | "runtime_busy"
+  | "runtime_reset_required"
   | "invalid_prompt"
   | "invalid_event"
   | "queue_overflow";
@@ -123,12 +179,24 @@ interface StreamControl {
   networkSettled: boolean;
 }
 
-interface QueuedPatch {
+interface RawQueuedPatch {
+  readonly kind: "raw";
   readonly event: ScenePatchEvent;
   readonly target: SceneState;
 }
 
-interface ActiveTransition {
+interface SemanticQueuedPatch {
+  readonly kind: "semantic";
+  readonly event: SemanticScenePatchEvent;
+  readonly target: SceneState;
+  readonly semanticTarget: SemanticSceneState;
+  readonly plan: MotionPlan;
+}
+
+type QueuedPatch = RawQueuedPatch | SemanticQueuedPatch;
+
+interface RawActiveTransition {
+  readonly kind: "raw";
   readonly token: RuntimeToken;
   readonly source: "stream" | "replay";
   readonly previous: SceneState;
@@ -138,8 +206,21 @@ interface ActiveTransition {
   readonly replayIndex?: number;
 }
 
+interface SemanticActiveTransition {
+  readonly kind: "semantic";
+  readonly token: RuntimeToken;
+  readonly source: "stream" | "replay";
+  readonly target: SceneState;
+  readonly semanticTarget: SemanticSceneState;
+  readonly playback: MotionPlayback;
+  readonly event: SemanticScenePatchEvent;
+  readonly replayIndex?: number;
+}
+
+type ActiveTransition = RawActiveTransition | SemanticActiveTransition;
+
 function acceptedRecord(
-  event: ScenePatchEvent,
+  event: ScenePatchEvent | SemanticScenePatchEvent,
   scene: SceneState,
   materialized: boolean
 ): AcceptedSceneRevision {
@@ -172,16 +253,66 @@ function abortError(error: unknown): boolean {
 }
 
 function committedTransitionWork(
-  transition: ActiveTransition,
+  transition: RawActiveTransition,
   retained: SceneState
 ): boolean {
   return retained.revision === transition.target.revision;
 }
 
+type SemanticPresentationEvaluation =
+  | {
+      readonly kind: "presented";
+      readonly receipt: SemanticPresentationReceipt;
+    }
+  | { readonly kind: "not_presented" }
+  | { readonly kind: "invalid" };
+
+function evaluateSemanticPresentation(
+  transition: SemanticActiveTransition,
+  outcome: MotionPlaybackOutcome
+): SemanticPresentationEvaluation {
+  const expectedNodeId = transition.event.semantic.receipt.nodeId;
+  const exactTarget =
+    outcome.appliedStepIds.length === 1 &&
+    outcome.appliedStepIds[0] === expectedNodeId;
+
+  if (
+    exactTarget &&
+    (outcome.status === "completed" || outcome.status === "cancelled")
+  ) {
+    const appliedStepIds = Object.freeze([expectedNodeId]) as readonly [string];
+    return Object.freeze({
+      kind: "presented",
+      receipt: Object.freeze({
+        type: "semantic_atom_presented",
+        atomId: transition.event.semantic.atomId,
+        nodeId: expectedNodeId,
+        certificateSha256:
+          transition.event.semantic.certificate.certificateSha256,
+        sceneRevision: transition.target.revision,
+        semanticRevision: transition.semanticTarget.revision,
+        settlement: outcome.status,
+        appliedStepIds,
+      }),
+    });
+  }
+
+  if (outcome.status === "cancelled" && outcome.appliedStepIds.length === 0) {
+    return Object.freeze({ kind: "not_presented" });
+  }
+  return Object.freeze({ kind: "invalid" });
+}
+
+function sameCanonicalValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 /** Framework-neutral, single-flight owner for one progressively authored board. */
 export class SceneStreamRuntime {
+  private readonly protocol: "raw" | "semantic";
   private readonly renderer: SceneStreamRenderer;
-  private readonly runStream: SceneStreamRunner;
+  private readonly runRawStream: SceneStreamRunner | undefined;
+  private readonly runSemanticStream: SemanticSceneStreamRunner | undefined;
   private readonly queueLimit: number;
   private readonly staggerMs: number;
   private readonly listeners = new Set<() => void>();
@@ -195,9 +326,14 @@ export class SceneStreamRuntime {
   private sequence = 0;
   private committedScene = EMPTY_SCENE;
   private provisionalScene = EMPTY_SCENE;
+  private committedSemanticScene = EMPTY_SEMANTIC_SCENE;
+  private provisionalSemanticScene = EMPTY_SEMANTIC_SCENE;
   private accepted: AcceptedSceneRevision[] = [];
+  private acceptedSemantic: AcceptedSemanticRevision[] = [];
   private queue: QueuedPatch[] = [];
   private active: ActiveTransition | null = null;
+  private pendingInterruptToken: RuntimeToken | null = null;
+  private semanticReplayPrefixLength = 0;
   private patchIds = new Set<string>();
   private narration = "Ready for a visual explanation.";
   private failure: SceneStreamRuntimeFailure | undefined;
@@ -206,8 +342,15 @@ export class SceneStreamRuntime {
   private disposed = false;
 
   constructor(options: SceneStreamRuntimeOptions) {
+    this.protocol = options.protocol ?? "raw";
     this.renderer = options.renderer;
-    this.runStream = options.runStream;
+    if (options.protocol === "semantic") {
+      this.runSemanticStream = options.runStream;
+      this.runRawStream = undefined;
+    } else {
+      this.runRawStream = options.runStream;
+      this.runSemanticStream = undefined;
+    }
     this.queueLimit = options.queueLimit ?? LIVE_SCENE_MAX_PATCH_QUEUE;
     this.staggerMs = options.staggerMs ?? 70;
     if (
@@ -236,6 +379,16 @@ export class SceneStreamRuntime {
   /** Start a new generation from the exact committed scene. */
   start(promptValue: string): number {
     this.assertUsable();
+    if (
+      this.protocol === "semantic" &&
+      this.phase === "failed" &&
+      this.failure?.retryable === false
+    ) {
+      throw new SceneStreamRuntimeError(
+        "runtime_reset_required",
+        "Reset the board or successfully replay its accepted prefix before starting another semantic generation"
+      );
+    }
     if (this.isBusy()) {
       throw new SceneStreamRuntimeError(
         "runtime_busy",
@@ -269,23 +422,49 @@ export class SceneStreamRuntime {
     this.sequence = 0;
     this.patchIds = new Set();
     this.queue = [];
+    this.semanticReplayPrefixLength = 0;
     this.provisionalScene = this.committedScene;
+    if (this.protocol === "semantic") {
+      this.provisionalSemanticScene = this.committedSemanticScene;
+    }
     this.phase = "connecting";
     this.narration = "Preparing the live board…";
     this.failure = undefined;
     this.completion = undefined;
     this.publish();
 
-    const request = Object.freeze({
-      prompt,
-      generation,
-      baseScene: this.committedScene,
-    });
-    const invocation: SceneStreamRunInvocation = Object.freeze({
-      request,
-      signal: controller.signal,
-      onEvent: (event: SceneStreamEvent) => this.acceptStreamEvent(token, event),
-    });
+    const run =
+      this.protocol === "semantic"
+        ? () => {
+            const request: SemanticSceneStreamRequest = Object.freeze({
+              prompt,
+              generation,
+              baseScene: this.committedScene,
+              baseSemanticScene: this.committedSemanticScene,
+            });
+            return this.runSemanticStream!(
+              Object.freeze({
+                request,
+                signal: controller.signal,
+                onEvent: (event: SemanticSceneStreamEvent) =>
+                  this.acceptSemanticStreamEvent(token, event),
+              })
+            );
+          }
+        : () => {
+            const request: SceneStreamRequest = Object.freeze({
+              prompt,
+              generation,
+              baseScene: this.committedScene,
+            });
+            const invocation: SceneStreamRunInvocation = Object.freeze({
+              request,
+              signal: controller.signal,
+              onEvent: (event: SceneStreamEvent) =>
+                this.acceptStreamEvent(token, event),
+            });
+            return this.runRawStream!(invocation);
+          };
     void Promise.resolve()
       .then(() => {
         if (
@@ -295,7 +474,7 @@ export class SceneStreamRuntime {
         ) {
           return;
         }
-        return this.runStream(invocation);
+        return run();
       })
       .then(() => this.onNetworkSettled(token))
       .catch((error: unknown) => this.onNetworkError(token, error));
@@ -306,6 +485,9 @@ export class SceneStreamRuntime {
   interrupt(): boolean {
     this.assertUsable();
     if (!this.isBusy()) return false;
+    if (this.protocol === "semantic") {
+      return this.interruptSemantic();
+    }
 
     const active = this.active;
     this.currentToken = null;
@@ -314,7 +496,7 @@ export class SceneStreamRuntime {
     this.queue = [];
     this.active = null;
 
-    if (active) {
+    if (active?.kind === "raw") {
       const outcome = active.playback.cancel();
       const materialized = this.retainedScene(active, outcome);
       const committed = committedTransitionWork(active, materialized);
@@ -366,7 +548,12 @@ export class SceneStreamRuntime {
     this.sequence = 0;
     this.committedScene = EMPTY_SCENE;
     this.provisionalScene = EMPTY_SCENE;
+    this.committedSemanticScene = EMPTY_SEMANTIC_SCENE;
+    this.provisionalSemanticScene = EMPTY_SEMANTIC_SCENE;
     this.accepted = [];
+    this.acceptedSemantic = [];
+    this.pendingInterruptToken = null;
+    this.semanticReplayPrefixLength = 0;
     this.patchIds = new Set();
     this.narration = "Ready for a visual explanation.";
     this.failure = undefined;
@@ -382,6 +569,10 @@ export class SceneStreamRuntime {
         "runtime_busy",
         "A scene generation or replay is still active"
       );
+    }
+    if (this.protocol === "semantic") {
+      await this.replaySemanticAccepted();
+      return;
     }
     if (this.accepted.length === 0) return;
 
@@ -420,7 +611,8 @@ export class SceneStreamRuntime {
         return;
       }
 
-      const transition: ActiveTransition = {
+      const transition: RawActiveTransition = {
+        kind: "raw",
         token,
         source: "replay",
         previous: this.committedScene,
@@ -483,6 +675,209 @@ export class SceneStreamRuntime {
     this.publish();
   }
 
+  private async replaySemanticAccepted(): Promise<void> {
+    if (this.acceptedSemantic.length === 0) return;
+    if (this.accepted.length !== this.acceptedSemantic.length) {
+      throw new SceneStreamRuntimeError(
+        "invalid_event",
+        "Paired semantic acceptance ledgers are out of sync"
+      );
+    }
+
+    this.invalidateCurrentToken(true);
+    const records = [...this.acceptedSemantic];
+    const token = this.createToken("replay", this.generation);
+    this.currentToken = token;
+    this.renderer.cancelMotion();
+    this.renderer.clear();
+    this.committedScene = EMPTY_SCENE;
+    this.provisionalScene = EMPTY_SCENE;
+    this.committedSemanticScene = EMPTY_SEMANTIC_SCENE;
+    this.provisionalSemanticScene = EMPTY_SEMANTIC_SCENE;
+    this.sequence = 0;
+    this.phase = "replaying";
+    this.narration = `Replaying ${records.length} accepted semantic atom${records.length === 1 ? "" : "s"}.`;
+    this.failure = undefined;
+    this.completion = undefined;
+    this.publish();
+
+    for (const [replayIndex, record] of records.entries()) {
+      if (this.currentToken !== token) return;
+
+      let applied: ReturnType<typeof applySemanticScenePatch>;
+      try {
+        applied = applySemanticScenePatch(
+          this.committedScene,
+          this.committedSemanticScene,
+          record.event
+        );
+        if (
+          !sameCanonicalValue(applied.scene, record.scene) ||
+          !sameCanonicalValue(applied.semanticScene, record.semanticScene) ||
+          !this.semanticRecordMatchesEvent(record)
+        ) {
+          throw new Error(
+            "Stored semantic atom no longer reproduces its paired accepted state"
+          );
+        }
+      } catch (error) {
+        this.finishSemanticReplayFailure(
+          token,
+          error instanceof Error
+            ? error.message
+            : "Stored semantic atom could not be re-applied",
+          replayIndex
+        );
+        return;
+      }
+
+      let playback: MotionPlayback;
+      try {
+        playback = this.renderer.playMotionPlan(applied.plan, {
+          staggerMs: this.staggerMs,
+        });
+      } catch {
+        this.finishSemanticReplayFailure(
+          token,
+          "The accepted semantic atom could not start replay",
+          replayIndex
+        );
+        return;
+      }
+
+      const transition: SemanticActiveTransition = {
+        kind: "semantic",
+        token,
+        source: "replay",
+        target: applied.scene,
+        semanticTarget: applied.semanticScene,
+        playback,
+        event: record.event,
+        replayIndex,
+      };
+      this.active = transition;
+      this.provisionalScene = transition.target;
+      this.provisionalSemanticScene = transition.semanticTarget;
+      this.publish();
+
+      let outcome: MotionPlaybackOutcome;
+      try {
+        outcome = await playback.finished;
+      } catch {
+        outcome = { status: "failed", appliedStepIds: [] };
+      }
+      if (this.currentToken !== token || this.active !== transition) return;
+      if (this.pendingInterruptToken === token) {
+        this.finishSemanticInterruption(transition, outcome);
+        return;
+      }
+
+      this.active = null;
+      const presentation = evaluateSemanticPresentation(transition, outcome);
+      if (
+        presentation.kind !== "presented" ||
+        presentation.receipt.settlement !== "completed"
+      ) {
+        this.finishSemanticReplayFailure(
+          token,
+          presentation.kind === "not_presented"
+            ? "Semantic replay did not present its target node"
+            : presentation.kind === "invalid"
+              ? "Semantic replay returned an invalid presentation receipt"
+              : "Semantic replay was cancelled without an explicit interruption",
+          replayIndex
+        );
+        return;
+      }
+
+      try {
+        this.replaceSemanticAccepted(
+          replayIndex,
+          transition,
+          presentation.receipt
+        );
+      } catch (error) {
+        this.finishSemanticReplayFailure(
+          token,
+          error instanceof Error
+            ? error.message
+            : "Semantic replay receipt could not replace the stored frontier",
+          replayIndex
+        );
+        return;
+      }
+      this.semanticReplayPrefixLength = replayIndex + 1;
+      this.committedScene = transition.target;
+      this.provisionalScene = transition.target;
+      this.committedSemanticScene = transition.semanticTarget;
+      this.provisionalSemanticScene = transition.semanticTarget;
+      this.sequence = record.event.sequence;
+      this.publish();
+    }
+
+    if (this.currentToken !== token) return;
+    const authoritativeFinal =
+      this.acceptedSemantic[this.acceptedSemantic.length - 1];
+    this.committedScene = authoritativeFinal.scene;
+    this.provisionalScene = authoritativeFinal.scene;
+    this.committedSemanticScene = authoritativeFinal.semanticScene;
+    this.provisionalSemanticScene = authoritativeFinal.semanticScene;
+    this.sequence = this.lastAcceptedSequence(this.generation);
+    this.currentToken = null;
+    this.semanticReplayPrefixLength = 0;
+    this.phase = "completed";
+    this.narration = "Replay reached the same accepted semantic frontier.";
+    this.publish();
+  }
+
+  private semanticRecordMatchesEvent(record: AcceptedSemanticRevision): boolean {
+    const semantic = record.event.semantic;
+    return (
+      record.presentation.type === "semantic_atom_presented" &&
+      record.presentation.atomId === semantic.atomId &&
+      record.presentation.nodeId === semantic.receipt.nodeId &&
+      record.presentation.certificateSha256 ===
+        semantic.certificate.certificateSha256 &&
+      record.presentation.sceneRevision === record.scene.revision &&
+      record.presentation.semanticRevision === record.semanticScene.revision &&
+      record.presentation.appliedStepIds.length === 1 &&
+      record.presentation.appliedStepIds[0] === semantic.receipt.nodeId
+    );
+  }
+
+  private finishSemanticReplayFailure(
+    token: RuntimeToken,
+    detail: string,
+    acceptedPrefixLength: number
+  ): void {
+    if (this.currentToken !== token) return;
+    this.currentToken = null;
+    this.pendingInterruptToken = null;
+    this.semanticReplayPrefixLength = 0;
+    this.active = null;
+    this.queue = [];
+    this.truncateSemanticHistory(acceptedPrefixLength);
+    const lastAccepted =
+      this.acceptedSemantic[this.acceptedSemantic.length - 1];
+    this.committedScene = lastAccepted?.scene ?? EMPTY_SCENE;
+    this.provisionalScene = this.committedScene;
+    this.committedSemanticScene =
+      lastAccepted?.semanticScene ?? EMPTY_SEMANTIC_SCENE;
+    this.provisionalSemanticScene = this.committedSemanticScene;
+    this.sequence = this.lastAcceptedSequence(this.generation);
+    this.phase = "failed";
+    this.completion = undefined;
+    this.failure = runtimeFailure(
+      "renderer_failed",
+      "Replay could not establish a trustworthy semantic frontier. Reset it or replay the accepted prefix before continuing.",
+      false
+    );
+    this.narration =
+      "Replay integrity was lost. Reset or replay the accepted prefix before continuing.";
+    console.warn("[LiveScene] Semantic replay failure:", detail);
+    this.publish();
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.invalidateCurrentToken(true);
@@ -532,6 +927,11 @@ export class SceneStreamRuntime {
         case "scene_stream_failed":
           this.acceptFailed(token, event);
           break;
+        default:
+          throw new SceneStreamRuntimeError(
+            "invalid_event",
+            "Semantic scene events are not accepted by the raw runtime"
+          );
       }
     } catch (error) {
       this.failProtocol(
@@ -541,8 +941,73 @@ export class SceneStreamRuntime {
     }
   }
 
+  private acceptSemanticStreamEvent(
+    token: RuntimeToken,
+    event: SemanticSceneStreamEvent
+  ): void {
+    const control = this.streamControl;
+    if (
+      this.currentToken !== token ||
+      !control ||
+      control.token !== token ||
+      control.terminal
+    ) {
+      return;
+    }
+    if (event.generation !== token.generation) {
+      this.failProtocol(
+        token,
+        "Semantic scene event generation does not match the active request"
+      );
+      return;
+    }
+
+    try {
+      switch (event.type) {
+        case "scene_stream_started":
+          this.acceptStarted(token, event.attempt, event.baseRevision);
+          break;
+        case "scene_stream_repairing":
+          this.acceptRepairing(
+            token,
+            event.fromAttempt,
+            event.toAttempt,
+            event.lastAcceptedRevision,
+            event.message
+          );
+          break;
+        case "semantic_scene_patch":
+          this.acceptSemanticPatch(token, event);
+          break;
+        case "scene_stream_completed":
+          this.acceptCompleted(token, event);
+          break;
+        case "scene_stream_failed":
+          this.acceptFailed(token, event);
+          break;
+        default:
+          throw new SceneStreamRuntimeError(
+            "invalid_event",
+            "Raw scene patches are not accepted by the semantic runtime"
+          );
+      }
+    } catch (error) {
+      this.failProtocol(
+        token,
+        error instanceof Error
+          ? error.message
+          : "Semantic scene event validation failed"
+      );
+    }
+  }
+
   private acceptStarted(token: RuntimeToken, attempt: number, baseRevision: number): void {
-    if (this.attempt !== 0 || attempt !== 1 || baseRevision !== this.provisionalScene.revision) {
+    if (
+      this.attempt !== 0 ||
+      attempt !== 1 ||
+      baseRevision !== this.provisionalScene.revision ||
+      !this.pairedProvisionalRevisionsAgree()
+    ) {
       throw new SceneStreamRuntimeError(
         "invalid_event",
         "Started event does not match the active generation boundary"
@@ -565,7 +1030,8 @@ export class SceneStreamRuntime {
       this.attempt !== 1 ||
       fromAttempt !== 1 ||
       toAttempt !== 2 ||
-      lastAcceptedRevision !== this.provisionalScene.revision
+      lastAcceptedRevision !== this.provisionalScene.revision ||
+      !this.pairedProvisionalRevisionsAgree()
     ) {
       throw new SceneStreamRuntimeError(
         "invalid_event",
@@ -604,7 +1070,62 @@ export class SceneStreamRuntime {
     this.provisionalScene = target;
     this.sequence = event.sequence;
     this.patchIds.add(event.patch.patchId);
-    this.queue.push(Object.freeze({ event, target }));
+    this.queue.push(Object.freeze({ kind: "raw", event, target }));
+    this.phase = "streaming";
+    this.narration = event.patch.narration;
+    this.publishIfCurrent(token);
+    this.pump(token);
+  }
+
+  private acceptSemanticPatch(
+    token: RuntimeToken,
+    eventValue: SemanticScenePatchEvent
+  ): void {
+    if (
+      this.attempt === 0 ||
+      eventValue.attempt !== this.attempt ||
+      eventValue.sequence !== this.sequence + 1 ||
+      eventValue.baseRevision !== this.provisionalScene.revision ||
+      eventValue.semantic.semanticBaseRevision !==
+        this.provisionalSemanticScene.revision
+    ) {
+      throw new SceneStreamRuntimeError(
+        "invalid_event",
+        "Semantic atom does not match the active attempt, sequence, or paired provisional revision"
+      );
+    }
+    if (this.patchIds.has(eventValue.patch.patchId)) {
+      throw new SceneStreamRuntimeError(
+        "invalid_event",
+        "Semantic patch ID was already accepted"
+      );
+    }
+    if (this.queue.length >= this.queueLimit) {
+      throw new SceneStreamRuntimeError(
+        "queue_overflow",
+        `Semantic atom queue exceeds ${this.queueLimit} entries`
+      );
+    }
+
+    const event = decodeSemanticScenePatchEvent(eventValue);
+    const applied = applySemanticScenePatch(
+      this.provisionalScene,
+      this.provisionalSemanticScene,
+      event
+    );
+    this.provisionalScene = applied.scene;
+    this.provisionalSemanticScene = applied.semanticScene;
+    this.sequence = event.sequence;
+    this.patchIds.add(event.patch.patchId);
+    this.queue.push(
+      Object.freeze({
+        kind: "semantic",
+        event,
+        target: applied.scene,
+        semanticTarget: applied.semanticScene,
+        plan: applied.plan,
+      })
+    );
     this.phase = "streaming";
     this.narration = event.patch.narration;
     this.publishIfCurrent(token);
@@ -616,7 +1137,8 @@ export class SceneStreamRuntime {
       this.attempt === 0 ||
       event.finalRevision !== this.provisionalScene.revision ||
       event.patchCount !== this.sequence ||
-      event.repaired !== (this.attempt === 2)
+      event.repaired !== (this.attempt === 2) ||
+      !this.pairedProvisionalRevisionsAgree()
     ) {
       throw new SceneStreamRuntimeError(
         "invalid_event",
@@ -638,7 +1160,8 @@ export class SceneStreamRuntime {
     if (
       this.attempt === 0 ||
       event.attempt !== this.attempt ||
-      event.lastAcceptedRevision !== this.provisionalScene.revision
+      event.lastAcceptedRevision !== this.provisionalScene.revision ||
+      !this.pairedProvisionalRevisionsAgree()
     ) {
       throw new SceneStreamRuntimeError(
         "invalid_event",
@@ -658,6 +1181,10 @@ export class SceneStreamRuntime {
     if (this.currentToken !== token || this.active || this.queue.length === 0) return;
     const queued = this.queue.shift();
     if (!queued) return;
+    if (queued.kind === "semantic") {
+      this.pumpSemantic(token, queued);
+      return;
+    }
     if (queued.event.baseRevision !== this.committedScene.revision) {
       this.failRenderer(token, "Queued patch no longer follows the committed scene");
       return;
@@ -672,7 +1199,8 @@ export class SceneStreamRuntime {
       return;
     }
 
-    const transition: ActiveTransition = {
+    const transition: RawActiveTransition = {
+      kind: "raw",
       token,
       source: "stream",
       previous: this.committedScene,
@@ -692,14 +1220,62 @@ export class SceneStreamRuntime {
       );
   }
 
+  private pumpSemantic(token: RuntimeToken, queued: SemanticQueuedPatch): void {
+    if (
+      queued.event.baseRevision !== this.committedScene.revision ||
+      queued.event.semantic.semanticBaseRevision !==
+        this.committedSemanticScene.revision
+    ) {
+      this.failSemanticRenderer(
+        token,
+        "Queued semantic atom no longer follows the paired committed frontier"
+      );
+      return;
+    }
+
+    let playback: MotionPlayback;
+    try {
+      playback = this.renderer.playMotionPlan(queued.plan, {
+        staggerMs: this.staggerMs,
+      });
+    } catch {
+      this.failSemanticRenderer(
+        token,
+        "The visual board could not start this semantic atom"
+      );
+      return;
+    }
+
+    const transition: SemanticActiveTransition = {
+      kind: "semantic",
+      token,
+      source: "stream",
+      target: queued.target,
+      semanticTarget: queued.semanticTarget,
+      playback,
+      event: queued.event,
+    };
+    this.active = transition;
+    this.publishIfCurrent(token);
+    void playback.finished
+      .then((outcome) => this.onSemanticPlaybackFinished(transition, outcome))
+      .catch(() =>
+        this.onSemanticPlaybackFinished(transition, {
+          status: "failed",
+          appliedStepIds: [],
+        })
+      );
+  }
+
   private onPlaybackFinished(
-    transition: ActiveTransition,
+    transition: RawActiveTransition,
     outcome: MotionPlaybackOutcome
   ): void {
     if (
       this.currentToken !== transition.token ||
       this.active !== transition ||
-      transition.source !== "stream"
+      transition.source !== "stream" ||
+      transition.kind !== "raw"
     ) {
       return;
     }
@@ -742,8 +1318,248 @@ export class SceneStreamRuntime {
     this.publish();
   }
 
+  private onSemanticPlaybackFinished(
+    transition: SemanticActiveTransition,
+    outcome: MotionPlaybackOutcome
+  ): void {
+    if (
+      this.currentToken !== transition.token ||
+      this.active !== transition ||
+      transition.source !== "stream"
+    ) {
+      return;
+    }
+
+    if (this.pendingInterruptToken === transition.token) {
+      this.finishSemanticInterruption(transition, outcome);
+      return;
+    }
+
+    this.active = null;
+    const presentation = evaluateSemanticPresentation(transition, outcome);
+    if (
+      presentation.kind !== "presented" ||
+      presentation.receipt.settlement !== "completed"
+    ) {
+      this.failSemanticRenderer(
+        transition.token,
+        presentation.kind === "not_presented"
+          ? "Semantic playback ended without presenting its target node"
+          : presentation.kind === "invalid"
+            ? "Semantic playback returned an invalid presentation receipt"
+            : "Semantic playback was cancelled without an explicit interruption"
+      );
+      return;
+    }
+
+    try {
+      this.appendSemanticAccepted(transition, presentation.receipt);
+    } catch (error) {
+      this.failSemanticRenderer(
+        transition.token,
+        error instanceof Error
+          ? error.message
+          : "Semantic acceptance history could not advance"
+      );
+      return;
+    }
+    this.committedScene = transition.target;
+    this.committedSemanticScene = transition.semanticTarget;
+    this.publish();
+    this.pump(transition.token);
+    this.settlePhase();
+    this.publishIfCurrent(transition.token);
+  }
+
+  private interruptSemantic(): boolean {
+    if (this.pendingInterruptToken) return true;
+
+    const active = this.active;
+    const control = this.streamControl;
+    this.streamControl = null;
+    control?.controller.abort();
+    this.queue = [];
+    this.failure = undefined;
+    this.completion = undefined;
+
+    if (active?.kind === "semantic") {
+      this.pendingInterruptToken = active.token;
+      this.provisionalScene = active.target;
+      this.provisionalSemanticScene = active.semanticTarget;
+      this.phase = "interrupting";
+      this.narration = "Settling the visible semantic atom…";
+      this.publish();
+      try {
+        // The synchronous outcome is intentionally ignored. Only `finished`
+        // crosses the renderer's post-paint presentation barrier.
+        active.playback.cancel();
+      } catch (error) {
+        console.warn("[LiveScene] Semantic playback cancellation threw:", error);
+      }
+      return true;
+    }
+
+    if (this.currentToken?.kind === "replay") {
+      this.truncateSemanticHistory(this.semanticReplayPrefixLength);
+    }
+    this.currentToken = null;
+    this.active = null;
+    this.semanticReplayPrefixLength = 0;
+    this.provisionalScene = this.committedScene;
+    this.provisionalSemanticScene = this.committedSemanticScene;
+    this.sequence = this.lastAcceptedSequence(this.generation);
+    this.phase = "interrupted";
+    this.narration = "Generation interrupted. The last presented atom is safe.";
+    this.publish();
+    return true;
+  }
+
+  private finishSemanticInterruption(
+    transition: SemanticActiveTransition,
+    outcome: MotionPlaybackOutcome
+  ): void {
+    if (
+      this.currentToken !== transition.token ||
+      this.active !== transition ||
+      this.pendingInterruptToken !== transition.token
+    ) {
+      return;
+    }
+
+    const presentation = evaluateSemanticPresentation(transition, outcome);
+    let invalid = presentation.kind === "invalid";
+    if (presentation.kind === "presented") {
+      if (transition.source === "stream") {
+        try {
+          this.appendSemanticAccepted(transition, presentation.receipt);
+        } catch (error) {
+          invalid = true;
+          console.warn("[LiveScene] Semantic frontier could not advance:", error);
+        }
+      } else {
+        try {
+          const replayIndex = transition.replayIndex ?? -1;
+          this.replaceSemanticAccepted(
+            replayIndex,
+            transition,
+            presentation.receipt
+          );
+          this.semanticReplayPrefixLength = replayIndex + 1;
+          this.truncateSemanticHistory(this.semanticReplayPrefixLength);
+        } catch (error) {
+          invalid = true;
+          console.warn(
+            "[LiveScene] Semantic replay frontier could not advance:",
+            error
+          );
+        }
+      }
+      if (!invalid) {
+        this.committedScene = transition.target;
+        this.committedSemanticScene = transition.semanticTarget;
+      }
+    } else if (transition.source === "replay") {
+      this.truncateSemanticHistory(transition.replayIndex ?? 0);
+    }
+
+    this.active = null;
+    this.currentToken = null;
+    this.pendingInterruptToken = null;
+    this.semanticReplayPrefixLength = 0;
+    this.queue = [];
+    this.provisionalScene = this.committedScene;
+    this.provisionalSemanticScene = this.committedSemanticScene;
+    this.sequence = this.lastAcceptedSequence(this.generation);
+    this.completion = undefined;
+
+    if (invalid) {
+      this.phase = "failed";
+      this.failure = runtimeFailure(
+        "renderer_failed",
+        "The visible board no longer has a trustworthy semantic frontier. Reset it or replay the accepted prefix before continuing.",
+        false
+      );
+      this.narration =
+        "Presentation integrity was lost. Reset or replay the accepted prefix before continuing.";
+    } else {
+      this.phase = "interrupted";
+      this.failure = undefined;
+      this.narration =
+        "Generation interrupted. The last presented semantic atom is safe.";
+    }
+    this.publish();
+  }
+
+  private appendSemanticAccepted(
+    transition: SemanticActiveTransition,
+    presentation: SemanticPresentationReceipt
+  ): void {
+    if (this.accepted.length !== this.acceptedSemantic.length) {
+      throw new Error("Paired semantic acceptance ledgers are out of sync");
+    }
+    if (this.acceptedSemantic.length >= LIVE_SCENE_MAX_NODES) {
+      throw new Error(
+        `Semantic acceptance history exceeds ${LIVE_SCENE_MAX_NODES} atoms`
+      );
+    }
+
+    const rawRecord = acceptedRecord(
+      transition.event,
+      transition.target,
+      presentation.settlement === "cancelled"
+    );
+    const semanticRecord: AcceptedSemanticRevision = Object.freeze({
+      scene: transition.target,
+      semanticScene: transition.semanticTarget,
+      event: transition.event,
+      presentation,
+    });
+    this.accepted = [...this.accepted, rawRecord];
+    this.acceptedSemantic = [...this.acceptedSemantic, semanticRecord];
+  }
+
+  private replaceSemanticAccepted(
+    index: number,
+    transition: SemanticActiveTransition,
+    presentation: SemanticPresentationReceipt
+  ): void {
+    if (
+      index < 0 ||
+      index >= this.acceptedSemantic.length ||
+      this.accepted.length !== this.acceptedSemantic.length
+    ) {
+      throw new Error("Semantic replay index is outside the paired ledger");
+    }
+    const rawRecord = acceptedRecord(
+      transition.event,
+      transition.target,
+      presentation.settlement === "cancelled"
+    );
+    const semanticRecord: AcceptedSemanticRevision = Object.freeze({
+      scene: transition.target,
+      semanticScene: transition.semanticTarget,
+      event: transition.event,
+      presentation,
+    });
+    this.accepted = this.accepted.map((record, recordIndex) =>
+      recordIndex === index ? rawRecord : record
+    );
+    this.acceptedSemantic = this.acceptedSemantic.map((record, recordIndex) =>
+      recordIndex === index ? semanticRecord : record
+    );
+  }
+
+  private truncateSemanticHistory(prefixLength: number): void {
+    const safeLength = Math.max(
+      0,
+      Math.min(prefixLength, this.acceptedSemantic.length)
+    );
+    this.accepted = this.accepted.slice(0, safeLength);
+    this.acceptedSemantic = this.acceptedSemantic.slice(0, safeLength);
+  }
+
   private retainedScene(
-    transition: ActiveTransition,
+    transition: RawActiveTransition,
     outcome: MotionPlaybackOutcome
   ): SceneState {
     if (outcome.status === "completed") return transition.target;
@@ -759,7 +1575,7 @@ export class SceneStreamRuntime {
   }
 
   private authoritativeRetainedScene(
-    transition: ActiveTransition,
+    transition: RawActiveTransition,
     retained: SceneState
   ): SceneState {
     if (
@@ -786,7 +1602,7 @@ export class SceneStreamRuntime {
   }
 
   private reconcileInterruptedReplay(
-    transition: ActiveTransition,
+    transition: RawActiveTransition,
     retained: SceneState,
     committed: boolean
   ): void {
@@ -849,6 +1665,32 @@ export class SceneStreamRuntime {
     );
     this.narration = "The visual update stopped. Your last accepted board is safe.";
     console.warn("[LiveScene] Renderer failure:", detail);
+    this.publish();
+  }
+
+  private failSemanticRenderer(token: RuntimeToken, detail: string): void {
+    if (this.currentToken !== token) return;
+    const control = this.streamControl;
+    this.streamControl = null;
+    control?.controller.abort();
+    this.currentToken = null;
+    this.pendingInterruptToken = null;
+    this.semanticReplayPrefixLength = 0;
+    this.active = null;
+    this.queue = [];
+    this.provisionalScene = this.committedScene;
+    this.provisionalSemanticScene = this.committedSemanticScene;
+    this.sequence = this.lastAcceptedSequence(this.generation);
+    this.phase = "failed";
+    this.completion = undefined;
+    this.failure = runtimeFailure(
+      "renderer_failed",
+      "The visible board no longer has a trustworthy semantic frontier. Reset it or replay the accepted prefix before continuing.",
+      false
+    );
+    this.narration =
+      "Presentation integrity was lost. Reset or replay the accepted prefix before continuing.";
+    console.warn("[LiveScene] Semantic renderer failure:", detail);
     this.publish();
   }
 
@@ -923,6 +1765,13 @@ export class SceneStreamRuntime {
     return control;
   }
 
+  private pairedProvisionalRevisionsAgree(): boolean {
+    return (
+      this.protocol === "raw" ||
+      this.provisionalScene.revision === this.provisionalSemanticScene.revision
+    );
+  }
+
   private createToken(kind: RuntimeToken["kind"], generation: number): RuntimeToken {
     return Object.freeze({ id: ++this.tokenSequence, kind, generation });
   }
@@ -931,6 +1780,8 @@ export class SceneStreamRuntime {
     if (abort) this.streamControl?.controller.abort();
     this.currentToken = null;
     this.streamControl = null;
+    this.pendingInterruptToken = null;
+    this.semanticReplayPrefixLength = 0;
   }
 
   private isBusy(): boolean {
@@ -941,6 +1792,7 @@ export class SceneStreamRuntime {
       this.phase === "streaming" ||
       this.phase === "repairing" ||
       this.phase === "completing" ||
+      this.phase === "interrupting" ||
       this.phase === "replaying"
     );
   }
@@ -961,6 +1813,29 @@ export class SceneStreamRuntime {
   }
 
   private buildSnapshot(): SceneStreamRuntimeSnapshot {
+    const replayingSemanticPrefix =
+      this.protocol === "semantic" && this.currentToken?.kind === "replay";
+    const visibleAccepted = replayingSemanticPrefix
+      ? this.accepted.slice(0, this.semanticReplayPrefixLength)
+      : this.accepted;
+    const visibleSemanticAccepted = replayingSemanticPrefix
+      ? this.acceptedSemantic.slice(0, this.semanticReplayPrefixLength)
+      : this.acceptedSemantic;
+    const semantic =
+      this.protocol === "semantic"
+        ? Object.freeze({
+            committedScene: this.committedSemanticScene,
+            provisionalScene: this.provisionalSemanticScene,
+            accepted: Object.freeze([...visibleSemanticAccepted]),
+            ...(visibleSemanticAccepted.length > 0
+              ? {
+                  commitFrontier:
+                    visibleSemanticAccepted[visibleSemanticAccepted.length - 1]
+                      .presentation,
+                }
+              : {}),
+          })
+        : undefined;
     return Object.freeze({
       phase: this.phase,
       generation: this.generation,
@@ -968,12 +1843,13 @@ export class SceneStreamRuntime {
       sequence: this.sequence,
       committedScene: this.committedScene,
       provisionalScene: this.provisionalScene,
-      accepted: Object.freeze([...this.accepted]),
+      accepted: Object.freeze([...visibleAccepted]),
       queuedPatchCount: this.queue.length,
       ...(this.active ? { activeRevision: this.active.target.revision } : {}),
       narration: this.narration,
       ...(this.failure ? { error: this.failure } : {}),
       ...(this.completion ? { completion: this.completion } : {}),
+      ...(semantic ? { semantic } : {}),
     });
   }
 
