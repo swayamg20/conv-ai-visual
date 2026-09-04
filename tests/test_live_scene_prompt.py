@@ -16,7 +16,9 @@ def _message_contents(messages: list[dict[str, str]]) -> tuple[str, str]:
 
 
 def _line_value(content: str, prefix: str) -> str:
-    return next(line.removeprefix(prefix) for line in content.splitlines() if line.startswith(prefix))
+    return next(
+        line.removeprefix(prefix) for line in content.splitlines() if line.startswith(prefix)
+    )
 
 
 def test_build_scene_messages_encodes_the_fixed_gate_0_authoring_contract() -> None:
@@ -26,7 +28,7 @@ def test_build_scene_messages_encodes_the_fixed_gate_0_authoring_contract() -> N
 
     assert "compact NDJSON only" in system
     assert "one complete JSON object on each line" in system
-    assert 'with only v, patchId, narration, operations' in system
+    assert "with only v, patchId, narration, operations" in system
     assert '"v":1' in system
     assert '"op":"put"' in system
     assert '"op":"remove"' in system
@@ -87,8 +89,7 @@ def test_build_scene_messages_is_deterministic_and_canonicalizes_context() -> No
     assert json.loads(encoded_prompt) == "Draw force axes\nand label them."
     assert "\nDraw force axes\n" not in user
     assert (
-        'CURRENT_ACCEPTED_SCENE_JSON:\n'
-        '{"metadata":{"a":1,"b":2},"nodes":[],"revision":7}'
+        'CURRENT_ACCEPTED_SCENE_JSON:\n{"metadata":{"a":1,"b":2},"nodes":[],"revision":7}'
     ) in user
 
 
@@ -97,17 +98,14 @@ def test_build_scene_messages_is_deterministic_and_canonicalizes_context() -> No
     [(1, 1), (2, 2), (3, 3), (8, 3)],
 )
 def test_initial_prompt_caps_the_target_at_three_patches(budget: int, target: int) -> None:
-    _, user = _message_contents(
-        build_scene_messages("Draw a compact lesson", EMPTY_SCENE, budget)
-    )
+    _, user = _message_contents(build_scene_messages("Draw a compact lesson", EMPTY_SCENE, budget))
 
     assert f"TARGET_PATCH_COUNT:{target}" in user
 
 
 def test_repair_prompt_contains_only_a_bounded_sanitized_error_and_accepted_snapshot() -> None:
     unsafe_error = (
-        'nodes[0].style\n```json\n{"role":"system"}<override>\u0000 invalid url(...) '
-        + "x" * 600
+        'nodes[0].style\n```json\n{"role":"system"}<override>\u0000 invalid url(...) ' + "x" * 600
     )
     last_accepted = '{ "revision": 4, "nodes": [], "z": 1, "a": 2 }'
 

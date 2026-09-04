@@ -82,7 +82,7 @@ def test_probe_refuses_a_live_run_without_exact_cost_acknowledgement() -> None:
 def test_probe_token_ceiling_uses_utf8_bytes_for_punctuation_heavy_input() -> None:
     namespace = runpy.run_path(str(SCRIPT))
     token_upper_bound = namespace["_utf8_token_upper_bound"]
-    payload = ("{}[],:;\\\"" * 500) + ("😀" * 100)
+    payload = ('{}[],:;\\"' * 500) + ("😀" * 100)
 
     assert token_upper_bound(payload, framing_reserve=37) == len(payload.encode("utf-8")) + 37
 

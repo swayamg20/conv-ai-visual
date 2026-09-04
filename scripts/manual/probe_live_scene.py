@@ -66,9 +66,7 @@ def _validate_arguments(args: argparse.Namespace) -> None:
     if not math.isfinite(args.timeout_seconds) or args.timeout_seconds <= 0:
         raise ValueError("--timeout-seconds must be finite and greater than zero")
     if not args.dry_run and args.acknowledge_paid_provider != ACKNOWLEDGEMENT:
-        raise ValueError(
-            "live run refused: pass --acknowledge-paid-provider " + ACKNOWLEDGEMENT
-        )
+        raise ValueError("live run refused: pass --acknowledge-paid-provider " + ACKNOWLEDGEMENT)
 
 
 def _percentile(values: list[float], quantile: float) -> float | None:
@@ -122,8 +120,7 @@ def _estimate_cost(
             8,
         )
         message_bytes = sum(
-            _utf8_token_upper_bound(message["role"])
-            + _utf8_token_upper_bound(message["content"])
+            _utf8_token_upper_bound(message["role"]) + _utf8_token_upper_bound(message["content"])
             for message in messages
         )
         initial_attempt_bound = message_bytes + CHAT_FRAMING_TOKEN_RESERVE
@@ -139,9 +136,7 @@ def _estimate_cost(
     # framing/repair reserves cover provider message wrappers and repair prose,
     # without assuming a favorable characters-per-token ratio for JSON.
     max_output_tokens = len(prompts) * max_tokens * 2
-    estimated_cost = (
-        max_input_tokens * input_price + max_output_tokens * output_price
-    ) / 1_000_000
+    estimated_cost = (max_input_tokens * input_price + max_output_tokens * output_price) / 1_000_000
     return {
         "maxInputTokens": max_input_tokens,
         "maxOutputTokens": max_output_tokens,
@@ -243,7 +238,9 @@ async def _run_corpus(args: argparse.Namespace, prompts: tuple[str, ...]) -> dic
     ]
     patch_gaps = [gap for result in results for gap in result["patchGapMs"]]
     first_attempt_rate = sum(result["firstAttemptValid"] for result in results) / len(results)
-    terminal_rate = sum(result["terminal"] in {"completed", "failed"} for result in results) / len(results)
+    terminal_rate = sum(result["terminal"] in {"completed", "failed"} for result in results) / len(
+        results
+    )
     completion_rate = sum(result["terminal"] == "completed" for result in results) / len(results)
     median_first_patch = statistics.median(first_patch_values) if first_patch_values else None
     p95_first_patch = _percentile(first_patch_values, 0.95)
@@ -274,9 +271,7 @@ async def _run_corpus(args: argparse.Namespace, prompts: tuple[str, ...]) -> dic
             "medianFirstPatchMs": round(median_first_patch, 3)
             if median_first_patch is not None
             else None,
-            "p95FirstPatchMs": round(p95_first_patch, 3)
-            if p95_first_patch is not None
-            else None,
+            "p95FirstPatchMs": round(p95_first_patch, 3) if p95_first_patch is not None else None,
             "p95PatchGapMs": round(p95_patch_gap, 3) if p95_patch_gap is not None else None,
         },
         "serverProtocolThresholdsPassed": server_thresholds_passed,
@@ -330,16 +325,16 @@ def main() -> int:
         report = asyncio.run(_run_corpus(args, prompts))
         report["budget"] = preflight
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        output_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
         os.chmod(output_path, 0o600)
         print(
             json.dumps(
                 {
                     "mode": "live",
                     "promptCount": report["promptCount"],
-                    "serverProtocolThresholdsPassed": report[
-                        "serverProtocolThresholdsPassed"
-                    ],
+                    "serverProtocolThresholdsPassed": report["serverProtocolThresholdsPassed"],
                     "overallVerdict": report["overallVerdict"],
                     "output": str(output_path),
                 },

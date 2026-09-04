@@ -27,6 +27,7 @@ def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]
         result[key] = value
     return result
 
+
 ScenePatchStreamErrorCode = Literal[
     "invalid_utf8",
     "frame_too_large",
@@ -122,9 +123,7 @@ class ScenePatchStreamParser:
         if isinstance(max_frame_bytes, bool) or not isinstance(max_frame_bytes, int):
             raise TypeError("max_frame_bytes must be an integer")
         if max_frame_bytes <= 0 or max_frame_bytes > MAX_NDJSON_FRAME_BYTES:
-            raise ValueError(
-                f"max_frame_bytes must be between 1 and {MAX_NDJSON_FRAME_BYTES}"
-            )
+            raise ValueError(f"max_frame_bytes must be between 1 and {MAX_NDJSON_FRAME_BYTES}")
         self._max_frame_bytes = max_frame_bytes
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
         self._buffer = ""

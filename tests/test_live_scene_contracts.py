@@ -312,8 +312,7 @@ def test_patch_rejects_duplicate_targets_empty_operations_and_excess_narration()
 
     invalid = _patch()
     invalid["operations"] = [
-        {"op": "put", "node": _line(f"node-{index}")}
-        for index in range(MAX_PATCH_OPERATIONS + 1)
+        {"op": "put", "node": _line(f"node-{index}")} for index in range(MAX_PATCH_OPERATIONS + 1)
     ]
     with pytest.raises(ValidationError, match="at most"):
         ScenePatchDraft.model_validate(invalid)

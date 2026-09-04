@@ -52,8 +52,7 @@ _SYSTEM_PROMPT = "\n".join(
         '- latex: {"id":ID,"kind":"latex","x":number,"y":number,"latex":"LaTeX",'
         '"style":{"color":COLOR,"fontSize":number,"opacity":number},'
         '"presentation":PRESENTATION}',
-        '- STROKE={"stroke":COLOR,"strokeWidth":number,"opacity":number,'
-        '"roughness":number}',
+        '- STROKE={"stroke":COLOR,"strokeWidth":number,"opacity":number,"roughness":number}',
         '- SHAPE={"stroke":COLOR,"strokeWidth":number,"opacity":number,'
         '"roughness":number,"fill":FILL}',
         '- PRESENTATION={"enter":"draw|fade|scale|none","exit":"fade|none"}',
@@ -159,9 +158,7 @@ def scene_patch_target(remaining_patch_budget: int, *, repair: bool) -> int:
     """Choose the bounded number of frames the prompt and server will accept."""
 
     budget = _validate_patch_budget(remaining_patch_budget)
-    configured_target = (
-        _REPAIR_TARGET_PATCH_COUNT if repair else _INITIAL_TARGET_PATCH_COUNT
-    )
+    configured_target = _REPAIR_TARGET_PATCH_COUNT if repair else _INITIAL_TARGET_PATCH_COUNT
     return min(configured_target, budget)
 
 

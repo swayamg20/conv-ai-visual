@@ -70,9 +70,7 @@ class OpenAIClient(LLMClient):
         """Merge provider parameters and translate the shared output-token abstraction."""
         request_params = {**self.default_params, **kwargs}
         alternate_parameter = (
-            "max_completion_tokens"
-            if self.max_tokens_parameter == "max_tokens"
-            else "max_tokens"
+            "max_completion_tokens" if self.max_tokens_parameter == "max_tokens" else "max_tokens"
         )
         request_params.pop(alternate_parameter, None)
         if max_tokens is not None:

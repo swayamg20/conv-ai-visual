@@ -113,4 +113,3 @@ def test_fixture_is_exact_backend_generated_semantic_transcript() -> None:
         (index, index + 1) for index in range(8)
     ]
     assert [event.semantic.role for event in parsed] == list(PYTHAGOREAN_ROLE_ORDER)
-

@@ -126,9 +126,7 @@ def test_accepts_multiple_frames_crlf_blank_lines_and_final_frame_without_newlin
         ),
     ],
 )
-def test_prose_fences_malformed_json_and_invalid_drafts_fail_closed(
-    frame: str, code: str
-) -> None:
+def test_prose_fences_malformed_json_and_invalid_drafts_fail_closed(frame: str, code: str) -> None:
     parser = ScenePatchStreamParser()
 
     with pytest.raises(ScenePatchStreamError) as captured:
@@ -274,9 +272,7 @@ def test_generic_invalid_patch_exposes_a_fixed_schema_repair_hint() -> None:
     with pytest.raises(ScenePatchStreamError) as captured:
         parser.feed('{"v":1,"patchId":"patch-a","narration":"Draw it","operations":[]}\n')
 
-    assert captured.value.repair_hint == (
-        "invalid_patch: follow the ScenePatch v1 schema exactly"
-    )
+    assert captured.value.repair_hint == ("invalid_patch: follow the ScenePatch v1 schema exactly")
 
 
 def test_invalid_patch_traceback_suppresses_raw_model_values() -> None:

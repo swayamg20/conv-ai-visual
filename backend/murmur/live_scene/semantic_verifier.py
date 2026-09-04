@@ -78,7 +78,9 @@ def _parse_serialized_nodes(
         try:
             parsed.append(SCENE_NODE_ADAPTER.validate_python(value))
         except (TypeError, ValidationError, ValueError) as exc:
-            raise SemanticVerificationError("serialized node violates the low-level contract") from exc
+            raise SemanticVerificationError(
+                "serialized node violates the low-level contract"
+            ) from exc
     return tuple(parsed)
 
 
@@ -174,13 +176,11 @@ def _verify_square(
         _fail(f"{role.value} is not attached to its triangle side")
 
     edges = tuple(
-        _vector(points[index], points[(index + 1) % len(points)])
-        for index in range(len(points))
+        _vector(points[index], points[(index + 1) % len(points)]) for index in range(len(points))
     )
     attached_length = _length(_vector(*attached_edge))
     if any(
-        not isclose(_length(edge), attached_length, abs_tol=_VERIFICATION_EPSILON)
-        for edge in edges
+        not isclose(_length(edge), attached_length, abs_tol=_VERIFICATION_EPSILON) for edge in edges
     ):
         _fail(f"{role.value} edge length does not match its triangle side")
     if any(
@@ -234,10 +234,7 @@ def _box_inside_polygon(box: Box, polygon: Sequence[Point]) -> bool:
 
 def _boxes_intersect(left: Box, right: Box) -> bool:
     return not (
-        left[2] < right[0]
-        or right[2] < left[0]
-        or left[3] < right[1]
-        or right[3] < left[1]
+        left[2] < right[0] or right[2] < left[0] or left[3] < right[1] or right[3] < left[1]
     )
 
 
