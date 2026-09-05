@@ -25,4 +25,6 @@ After verifying current provider pricing and receiving an explicit user budget, 
       --acknowledge-paid-provider I_ACCEPT_PROVIDER_COST \
       --require-server-thresholds
 
-These thresholds cover provider-to-server protocol validity and patch arrival only. The redacted report deliberately stores no authored scene bodies, so it cannot measure browser first-visible latency or judge educational/visual usefulness. Run the same prompts through the enabled product UI, record browser timing separately, and visually review the board before calling Gate 1 passed.
+These thresholds cover provider-to-server protocol validity and patch arrival only. The redacted report deliberately stores no authored scene bodies, so it cannot measure browser first-visible latency or judge educational/visual usefulness. This ten-prompt corpus remains the raw-patch baseline; to inspect it in a browser, open `/labs/live-scene`, use **Raw coordinates** with **Azure · paid** in the explicitly enabled loopback development lab, and record browser timing separately.
+
+The authenticated `/canvas/generate` product surface now accepts only the verified Pythagorean slice. Its genuine signed-in Azure qualification is a separate, cost-approved action using a supported Pythagorean prompt; do not treat the raw corpus or the provider-free browser suite as that qualification.

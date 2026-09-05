@@ -46,6 +46,7 @@ Browser -- authenticated bootstrap --> FastAPI control plane
 | `murmur.voice` | Legacy WebRTC runtime plus Voice V2 bootstrap contracts, LiveKit control adapter, worker authorization, provider profiles, event bridge, and cleanup |
 | `murmur.runtime` | Typed process-local session records, activity tracking, supervision, and shutdown |
 | `murmur.llm` | Provider-neutral client contract, OpenAI-compatible and Gemini adapters, routing, streaming, and tool rounds |
+| `murmur.live_scene` | Bounded visual-act routing, deterministic scene compilation and verification, admission, and semantic SSE contracts |
 | `murmur.memory` | Token-bounded conversation context, durable memory adapters, and cross-session prompt assembly |
 | `murmur.tools` | Model-facing schemas, database handler resolution, inline-code restrictions, and execution policy |
 | `murmur.canvas` | Backend canvas state, operation validation, and built-in visual tool registration |
@@ -128,6 +129,24 @@ semantic step
 ```
 
 The canonical TypeScript contract lives in `web/src/features/canvas/types.ts`. Chat, WebRTC, the SDL compiler, and the renderer all depend on that feature type; the transport hooks do not own visual data.
+
+### Verified live-scene flow
+
+The authenticated `/canvas/generate` surface uses a separate semantic live-scene path:
+
+```text
+browser + Firebase bearer
+  -> POST /api/live-scenes/semantic/stream
+  -> trusted-user admission
+  -> start / continue / abstain routing
+  -> server-owned teaching beat
+  -> deterministic compile + verification
+  -> semantic SSE atom
+  -> browser presentation barrier
+  -> paired low-level + semantic frontier
+```
+
+The browser advances the frontier only after an atom is presented, so interruption and replay retain the exact visible prefix. That frontier is ephemeral and held in memory by the mounted browser runtime; it is not server-persisted proof across refreshes, devices, or sessions. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
 
 ## Extension rules
 
