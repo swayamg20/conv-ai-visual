@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import semanticTranscript from "../src/features/live-scene/fixtures/pythagorean-area-identity.v1.json";
 
@@ -16,7 +16,7 @@ interface SemanticLateWindow extends Window {
   readonly __releaseLateSemanticFrames?: () => void;
 }
 
-const SEMANTIC_NODE_IDS = [
+const IDENTITY_SEMANTIC_NODE_IDS = [
   "areas__triangle",
   "areas__square_a",
   "areas__label_a2",
@@ -25,6 +25,22 @@ const SEMANTIC_NODE_IDS = [
   "areas__square_c",
   "areas__label_c2",
   "areas__identity",
+] as const;
+
+const PROOF_SEMANTIC_NODE_IDS = [
+  "areas__altitude",
+  "areas__partition",
+  "areas__region_a",
+  "areas__region_a_label",
+  "areas__region_b",
+  "areas__region_b_label",
+  "areas__projection_identity",
+  "areas__proof_conclusion",
+] as const;
+
+const SEMANTIC_NODE_IDS = [
+  ...IDENTITY_SEMANTIC_NODE_IDS,
+  ...PROOF_SEMANTIC_NODE_IDS,
 ] as const;
 
 function semanticSse(events: readonly object[]): string {
@@ -198,6 +214,27 @@ function percentile(samples: readonly number[], percentileValue: number): number
   return sorted[Math.max(0, Math.ceil(sorted.length * percentileValue) - 1)];
 }
 
+async function canonicalSvgMarkup(svg: Locator): Promise<string> {
+  return svg.evaluate((root) => {
+    const serialize = (node: Node): string => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return JSON.stringify(node.nodeValue ?? "");
+      }
+      if (!(node instanceof Element)) return "";
+      const attributes = Array.from(node.attributes)
+        .map(({ name, value }) => [name, value] as const)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+        .join(" ");
+      const opening = attributes
+        ? `<${node.namespaceURI}:${node.localName} ${attributes}>`
+        : `<${node.namespaceURI}:${node.localName}>`;
+      return `${opening}${Array.from(node.childNodes).map(serialize).join("")}</${node.namespaceURI}:${node.localName}>`;
+    };
+    return serialize(root);
+  });
+}
+
 async function openLab(page: Page): Promise<void> {
   await page.goto("/labs/live-scene");
   await expect(page.getByRole("heading", { name: "Verified-act board" })).toBeVisible();
@@ -237,16 +274,27 @@ async function chooseSource(
     .click();
 }
 
-async function expectSemanticBoard(page: Page): Promise<void> {
-  for (const nodeId of SEMANTIC_NODE_IDS) {
-    await expect(page.locator(`#${nodeId}`)).toBeVisible();
+async function expectSemanticBoard(
+  page: Page,
+  nodeIds: readonly string[] = SEMANTIC_NODE_IDS
+): Promise<void> {
+  for (const nodeId of nodeIds) {
+    const node = page.locator(`#${nodeId}`);
+    if (nodeId === "areas__proof_conclusion") {
+      // A horizontal SVG path has a zero-height geometric bounding box even
+      // though its stroke is painted. Assert the rendered path itself.
+      await expect(node).toBeAttached();
+      await expect(node.locator("path")).toHaveAttribute("d", /\S/);
+    } else {
+      await expect(node).toBeVisible();
+    }
   }
   await expect(
     page.locator("[id$='--incoming'], [id$='--outgoing']")
   ).toHaveCount(0);
 }
 
-test("defaults to the zero-network verified fixture and presents all eight stable acts", async ({
+test("stops the zero-network fixture at identity, then appends the proof", async ({
   page,
 }) => {
   const liveSceneRequests: string[] = [];
@@ -271,7 +319,24 @@ test("defaults to the zero-network verified fixture and presents all eight stabl
   await expect(page.getByLabel("Verified act trust boundary")).toContainText(
     "does not re-run cryptography or geometry"
   );
+  await expectSemanticBoard(page, IDENTITY_SEMANTIC_NODE_IDS);
+
+  await page
+    .getByLabel("What should the board teach?")
+    .fill("I do not understand why the areas are equal; dissect the large square");
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("scene 16", { exact: true })).toBeVisible();
+  await expect(page.getByText("semantic 16", { exact: true })).toBeVisible();
+  await expect(
+    page.getByRole("list", { name: "Presented visual acts" }).locator("li")
+  ).toHaveCount(16);
   await expectSemanticBoard(page);
+  await expect(page.locator("#areas__projection_identity")).toContainText(
+    "AH = a²/c · HB = b²/c"
+  );
   expect(liveSceneRequests).toEqual([]);
 });
 
@@ -305,22 +370,64 @@ test("interrupts at one presented semantic act, resumes the exact suffix, and re
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
   await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
   await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
-  await expectSemanticBoard(page);
+  await expectSemanticBoard(page, IDENTITY_SEMANTIC_NODE_IDS);
 
   await page.getByRole("button", { name: "Replay presented" }).click();
   await expect(page.getByText("Replaying presented acts", { exact: true })).toBeVisible();
   await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
   await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
-  await expectSemanticBoard(page);
+  await expectSemanticBoard(page, IDENTITY_SEMANTIC_NODE_IDS);
   await expect(
     page.getByText("frontier", { exact: true }).locator("..").locator("dd")
   ).toHaveText("areas__atom_identity");
   expect(liveSceneRequests).toEqual([]);
 });
 
+test("stops mid-proof at the settled partition and resumes only the proof suffix", async ({
+  page,
+}) => {
+  const liveSceneRequests: string[] = [];
+  await page.route("**/api/live-scenes/**", async (route) => {
+    liveSceneRequests.push(route.request().url());
+    await route.abort("blockedbyclient");
+  });
+
+  await openLab(page);
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
+
+  await page
+    .getByLabel("What should the board teach?")
+    .fill("I do not understand why the areas are equal; dissect the large square");
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByText("9 presented", { exact: true })).toBeVisible();
+  await expect(page.locator("#areas__altitude")).toBeVisible();
+  await page.getByRole("button", { name: "Stop drawing" }).click();
+
+  await expect(page.getByText("Stopped at presented frontier", { exact: true })).toBeVisible();
+  await expect(page.getByText("10 presented", { exact: true })).toBeVisible();
+  await expect(page.locator("#areas__altitude")).toBeVisible();
+  await expect(page.locator("#areas__partition")).toBeVisible();
+  await expect(page.locator("#areas__region_a")).not.toBeVisible();
+  await page.getByText("Stream diagnostics", { exact: true }).click();
+  await expect(
+    page.getByText("frontier", { exact: true }).locator("..").locator("dd")
+  ).toHaveText("areas__atom_partition");
+
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible();
+  await expectSemanticBoard(page);
+  await expect(
+    page.getByText("frontier", { exact: true }).locator("..").locator("dd")
+  ).toHaveText("areas__atom_proof_conclusion");
+  expect(liveSceneRequests).toEqual([]);
+});
+
 test("retains the semantic frontier and rejects deliberately late atoms", async ({ page }) => {
   const generation = 1;
-  const atoms = semanticTranscript.events.map((_event, index) =>
+  const atoms = semanticTranscript.events.slice(0, 8).map((_event, index) =>
     semanticFixtureAtom(index, generation, index + 1)
   );
   const events = [
@@ -372,9 +479,13 @@ test("retains the semantic frontier and rejects deliberately late atoms", async 
   ).toBe(1);
 });
 
-test("posts paired semantic bases only to the intercepted paid Azure route", async ({ page }) => {
-  const prompt = "Teach the Pythagorean area identity through verified areas";
-  let postedBody: unknown;
+test("posts the identity frontier for proof and replays with no semantic request", async ({
+  page,
+}) => {
+  const identityPrompt = "Teach the Pythagorean area identity through verified areas";
+  const proofPrompt =
+    "I do not understand why the areas are equal; dissect the large square";
+  const postedBodies: Array<Record<string, unknown>> = [];
   let authorization: string | undefined;
   let requestPath: string | undefined;
   let rawRouteCalls = 0;
@@ -383,32 +494,35 @@ test("posts paired semantic bases only to the intercepted paid Azure route", asy
     await route.abort("blockedbyclient");
   });
   await page.route("**/api/live-scenes/lab/semantic/stream", async (route) => {
-    postedBody = route.request().postDataJSON();
+    const postedBody = route.request().postDataJSON() as Record<string, unknown>;
+    postedBodies.push(postedBody);
     authorization = route.request().headers().authorization;
     requestPath = new URL(route.request().url()).pathname;
+    const generation = postedBody.generation as number;
+    const baseRevision = (postedBody.baseScene as { revision: number }).revision;
+    const turnEndRevision = baseRevision < 8 ? 8 : 16;
+    const atoms = semanticTranscript.events
+      .slice(baseRevision, turnEndRevision)
+      .map((_event, index) =>
+        semanticFixtureAtom(baseRevision + index, generation, index + 1)
+      );
     await route.fulfill({
       status: 200,
       contentType: "text/event-stream",
       headers: { "Access-Control-Allow-Origin": "*" },
-      body: [
+      body: semanticSse([
+        semanticStarted(generation, baseRevision),
+        ...atoms,
         {
-          type: "scene_stream_started",
-          generation: 1,
-          attempt: 1,
-          baseRevision: 0,
+          type: "scene_stream_completed",
+          generation,
+          finalRevision: turnEndRevision,
+          patchCount: atoms.length,
+          firstPatchMs: 20,
+          totalMs: 60,
+          repaired: false,
         },
-        {
-          type: "scene_stream_failed",
-          generation: 1,
-          attempt: 1,
-          code: "provider_error",
-          message: "The test intercepted the semantic provider stream.",
-          lastAcceptedRevision: 0,
-          retryable: true,
-        },
-      ]
-        .map((event) => `data: ${JSON.stringify(event)}\n\n`)
-        .join(""),
+      ]),
     });
   });
 
@@ -417,19 +531,74 @@ test("posts paired semantic bases only to the intercepted paid Azure route", asy
   await expect(page.getByRole("radio", { name: "Azure · paid" })).toBeChecked();
   await expect(page.getByText("Verified acts · Azure paid", { exact: true })).toBeVisible();
   await expect(page.getByText(/consumes paid Azure quota/i)).toBeVisible();
-  await page.getByLabel("What should the board teach?").fill(prompt);
+  await page.getByLabel("What should the board teach?").fill(identityPrompt);
   await page.getByRole("button", { name: "Run paid Azure lesson" }).click();
-  await expect(page.getByText("Stream stopped", { exact: true })).toBeVisible();
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
+
+  await page.getByLabel("What should the board teach?").fill(proofPrompt);
+  await page.getByRole("button", { name: "Run paid Azure lesson" }).click();
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible();
+  await expectSemanticBoard(page);
+  await page.getByText("Stream diagnostics", { exact: true }).click();
+
+  const canvas = page
+    .getByRole("region", { name: "Live visual board" })
+    .locator('svg[viewBox="0 0 800 600"]');
+  const markupBeforeReplay = await canonicalSvgMarkup(canvas);
+  const frontierValue = page
+    .getByText("frontier", { exact: true })
+    .locator("..")
+    .locator("dd");
+  const frontierBeforeReplay = await frontierValue.textContent();
+  const requestCountBeforeReplay = postedBodies.length;
+  expect(requestCountBeforeReplay).toBe(2);
+
+  await page.getByRole("button", { name: "Replay presented" }).click();
+  await expect(page.getByText("Replaying presented acts", { exact: true })).toBeVisible();
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible({
+    timeout: 30_000,
+  });
 
   expect(requestPath).toBe("/api/live-scenes/lab/semantic/stream");
   expect(authorization).toBeUndefined();
   expect(rawRouteCalls).toBe(0);
-  expect(postedBody).toMatchObject({
-    prompt,
+  expect(postedBodies).toHaveLength(requestCountBeforeReplay);
+  expect(postedBodies).toHaveLength(2);
+  expect(postedBodies[0]).toMatchObject({
+    prompt: identityPrompt,
     generation: 1,
     baseScene: { revision: 0, nodes: [] },
     baseSemanticScene: { revision: 0, components: [] },
   });
+  expect(postedBodies[1]).toMatchObject({
+    prompt: proofPrompt,
+    generation: 2,
+    baseScene: {
+      revision: 8,
+      nodes: IDENTITY_SEMANTIC_NODE_IDS.map((id) => ({ id })),
+    },
+    baseSemanticScene: {
+      revision: 8,
+      certificateHeadSha256:
+        semanticTranscript.events[7].semantic.certificate.certificateSha256,
+      components: [
+        {
+          id: "areas",
+          revealedRoles: IDENTITY_SEMANTIC_NODE_IDS.map((id) =>
+            id.replace("areas__", "")
+          ),
+        },
+      ],
+    },
+  });
+  expect(await canonicalSvgMarkup(canvas)).toBe(markupBeforeReplay);
+  await expect(frontierValue).toHaveText(frontierBeforeReplay ?? "");
+  expect(frontierBeforeReplay).toBe("areas__atom_proof_conclusion");
 });
 
 test("keeps a declined semantic frontier unchanged and accepts the next request", async ({
