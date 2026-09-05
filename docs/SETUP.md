@@ -48,7 +48,7 @@ The authenticated verified visual lesson at `/canvas/generate` is deliberately d
 MURMUR_SCENE_ENABLED=true
 ```
 
-Scene authoring inherits `LLM_PROVIDER` and that provider's model and credentials by default. To select a separate supported provider or model, also set `MURMUR_SCENE_LLM_PROVIDER` and `MURMUR_SCENE_LLM_MODEL` with the matching server-side provider credentials. Keep the flag off when live scene-provider calls are not intended; unsupported lesson requests decline without changing the visible frontier.
+Scene authoring inherits `LLM_PROVIDER` and that provider's model and credentials by default. To select a separate supported provider or model, also set `MURMUR_SCENE_LLM_PROVIDER` and `MURMUR_SCENE_LLM_MODEL` with the matching server-side provider credentials. The current slice builds the Pythagorean area identity, then accepts a follow-up that extends the same board into a verified altitude-dissection proof. Keep the flag off when live scene-provider calls are not intended; unsupported lesson requests decline without changing the visible frontier.
 
 For voice, also set:
 

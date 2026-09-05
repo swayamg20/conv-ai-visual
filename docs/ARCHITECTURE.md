@@ -146,7 +146,9 @@ browser + Firebase bearer
   -> paired low-level + semantic frontier
 ```
 
-The browser advances the frontier only after an atom is presented, so interruption and replay retain the exact visible prefix. That frontier is ephemeral and held in memory by the mounted browser runtime; it is not server-persisted proof across refreshes, devices, or sessions. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
+The first bounded turn builds the right triangle and its three side squares through the area identity. A later supported “why are those areas equal?” turn continues the same component into a server-owned altitude-projection dissection: the altitude partitions the `c²` square into regions independently verified to have areas `a²` and `b²`. The model chooses only the terminal semantic stage; it never authors geometry, labels, equations, styles, or patch operations.
+
+The browser advances the frontier only after an atom is presented, so interruption and replay retain the exact visible prefix. Browser-observed presentation metrics begin at submit and settle only after the post-paint barrier; provider timing remains a separate server measurement. That frontier and those measurements are ephemeral and held in memory by the mounted browser runtime; they are not server-persisted proof across refreshes, devices, or sessions. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
 
 ## Extension rules
 

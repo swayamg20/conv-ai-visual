@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TypeAlias
 
 from murmur.live_scene.contracts import (
+    MAX_ACCEPTED_PATCHES,
     LatexSceneNode,
     PathSceneNode,
     PutSceneOperation,
@@ -39,6 +40,7 @@ from murmur.live_scene.semantic_verifier import verify_pythagorean_realization
 Point: TypeAlias = tuple[float, float]
 
 _IDENTITY = "a^2+b^2=c^2"
+_PROJECTION_IDENTITY = "AH = a²/c  ·  HB = b²/c"
 
 _RIGHT_ANGLE: Point = (320.0, 260.0)
 _SIDE_A_END: Point = (440.0, 260.0)
@@ -53,12 +55,22 @@ _ROLE_SUFFIX: dict[PythagoreanRole, str] = {
     PythagoreanRole.SQUARE_C: "square_c",
     PythagoreanRole.LABEL_C2: "label_c2",
     PythagoreanRole.IDENTITY: "identity",
+    PythagoreanRole.ALTITUDE: "altitude",
+    PythagoreanRole.PARTITION: "partition",
+    PythagoreanRole.REGION_A: "region_a",
+    PythagoreanRole.REGION_A_LABEL: "region_a_label",
+    PythagoreanRole.REGION_B: "region_b",
+    PythagoreanRole.REGION_B_LABEL: "region_b_label",
+    PythagoreanRole.PROJECTION_IDENTITY: "projection_identity",
+    PythagoreanRole.PROOF_CONCLUSION: "proof_conclusion",
 }
 
 _LABEL_TEXT: dict[PythagoreanRole, str] = {
     PythagoreanRole.LABEL_A2: "a²",
     PythagoreanRole.LABEL_B2: "b²",
     PythagoreanRole.LABEL_C2: "c²",
+    PythagoreanRole.REGION_A_LABEL: "a²",
+    PythagoreanRole.REGION_B_LABEL: "b²",
 }
 
 _DRAW_PRESENTATION = {"enter": "draw", "exit": "fade"}
@@ -69,6 +81,27 @@ _TRIANGLE_STYLE = {
     "fill": "transparent",
     "opacity": 1.0,
     "roughness": 0.45,
+}
+_ALTITUDE_STYLE = {
+    "stroke": "hsl(var(--chalk-soft))",
+    "strokeWidth": 2.5,
+    "opacity": 1.0,
+    "roughness": 0.25,
+    "fill": "transparent",
+}
+_PARTITION_STYLE = {
+    "stroke": "hsl(var(--chalk))",
+    "strokeWidth": 4.0,
+    "opacity": 1.0,
+    "roughness": 0.2,
+    "fill": "transparent",
+}
+_PROOF_CONCLUSION_STYLE = {
+    "stroke": "hsl(var(--amber))",
+    "strokeWidth": 5.0,
+    "opacity": 1.0,
+    "roughness": 0.2,
+    "fill": "transparent",
 }
 _SQUARE_STYLES: dict[PythagoreanRole, dict[str, object]] = {
     PythagoreanRole.SQUARE_A: {
@@ -91,6 +124,22 @@ _SQUARE_STYLES: dict[PythagoreanRole, dict[str, object]] = {
         "fill": "transparent",
         "opacity": 1.0,
         "roughness": 0.35,
+    },
+}
+_REGION_STYLES: dict[PythagoreanRole, dict[str, object]] = {
+    PythagoreanRole.REGION_A: {
+        "stroke": "hsl(var(--sage))",
+        "strokeWidth": 3.0,
+        "fill": "#173626",
+        "opacity": 1.0,
+        "roughness": 0.2,
+    },
+    PythagoreanRole.REGION_B: {
+        "stroke": "hsl(var(--lavender))",
+        "strokeWidth": 3.0,
+        "fill": "#2E2850",
+        "opacity": 1.0,
+        "roughness": 0.2,
     },
 }
 
@@ -120,6 +169,24 @@ def _path(
             "presentation": _DRAW_PRESENTATION,
             "points": points,
             "closed": True,
+            "style": style,
+        }
+    )
+
+
+def _line(
+    component_id: str,
+    role: PythagoreanRole,
+    points: tuple[Point, Point],
+    style: dict[str, object],
+) -> PathSceneNode:
+    return PathSceneNode.model_validate(
+        {
+            "id": _node_id(component_id, role),
+            "kind": "path",
+            "presentation": _DRAW_PRESENTATION,
+            "points": points,
+            "closed": False,
             "style": style,
         }
     )
@@ -169,6 +236,27 @@ def _build_pythagorean_nodes(component_id: str) -> tuple[SceneNode, ...]:
         (480.0, 540.0),
         (600.0, 380.0),
     )
+    hypotenuse_x = _SIDE_B_END[0] - _SIDE_A_END[0]
+    hypotenuse_y = _SIDE_B_END[1] - _SIDE_A_END[1]
+    from_a_x = _RIGHT_ANGLE[0] - _SIDE_A_END[0]
+    from_a_y = _RIGHT_ANGLE[1] - _SIDE_A_END[1]
+    projection = (from_a_x * hypotenuse_x + from_a_y * hypotenuse_y) / (
+        hypotenuse_x * hypotenuse_x + hypotenuse_y * hypotenuse_y
+    )
+    altitude_foot = (
+        _SIDE_A_END[0] + projection * hypotenuse_x,
+        _SIDE_A_END[1] + projection * hypotenuse_y,
+    )
+    square_offset = (
+        square_c[3][0] - square_c[0][0],
+        square_c[3][1] - square_c[0][1],
+    )
+    far_partition = (
+        altitude_foot[0] + square_offset[0],
+        altitude_foot[1] + square_offset[1],
+    )
+    region_a = (square_c[0], altitude_foot, far_partition, square_c[3])
+    region_b = (altitude_foot, square_c[1], square_c[2], far_partition)
 
     return (
         _path(
@@ -212,6 +300,54 @@ def _build_pythagorean_nodes(component_id: str) -> tuple[SceneNode, ...]:
                     "opacity": 1.0,
                 },
             }
+        ),
+        _line(
+            component_id,
+            PythagoreanRole.ALTITUDE,
+            (_RIGHT_ANGLE, altitude_foot),
+            _ALTITUDE_STYLE,
+        ),
+        _line(
+            component_id,
+            PythagoreanRole.PARTITION,
+            (altitude_foot, far_partition),
+            _PARTITION_STYLE,
+        ),
+        _path(
+            component_id,
+            PythagoreanRole.REGION_A,
+            region_a,
+            _REGION_STYLES[PythagoreanRole.REGION_A],
+        ),
+        _label(component_id, PythagoreanRole.REGION_A_LABEL, (498.4, 348.8)),
+        _path(
+            component_id,
+            PythagoreanRole.REGION_B,
+            region_b,
+            _REGION_STYLES[PythagoreanRole.REGION_B],
+        ),
+        _label(component_id, PythagoreanRole.REGION_B_LABEL, (438.4, 460.0)),
+        TextSceneNode.model_validate(
+            {
+                "id": _node_id(component_id, PythagoreanRole.PROJECTION_IDENTITY),
+                "kind": "text",
+                "presentation": _FADE_PRESENTATION,
+                "x": 270.0,
+                "y": 570.0,
+                "text": _PROJECTION_IDENTITY,
+                "style": {
+                    "color": "hsl(var(--chalk))",
+                    "fontSize": 20.0,
+                    "opacity": 1.0,
+                    "anchor": "middle",
+                },
+            }
+        ),
+        _line(
+            component_id,
+            PythagoreanRole.PROOF_CONCLUSION,
+            ((150.0, 112.0), (650.0, 112.0)),
+            _PROOF_CONCLUSION_STYLE,
         ),
     )
 
@@ -259,6 +395,11 @@ def compile_teaching_beat(
     current_roles = () if current is None else current.revealed_roles
     if current_roles != target_roles[: len(current_roles)]:
         raise SemanticCompilationError("a Pythagorean component cannot move backward")
+    missing_roles = target_roles[len(current_roles) :]
+    if len(missing_roles) > MAX_ACCEPTED_PATCHES:
+        raise SemanticCompilationError(
+            f"one teaching beat cannot compile more than {MAX_ACCEPTED_PATCHES} visual atoms"
+        )
 
     complete_nodes = _build_pythagorean_nodes(component_id)
     target_nodes = complete_nodes[: len(target_roles)]

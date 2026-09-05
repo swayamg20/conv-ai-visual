@@ -17,6 +17,7 @@ from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
+    MAX_ACCEPTED_PATCHES,
     MAX_SCENE_NODES,
     LiveSceneContract,
     NarrationText,
@@ -40,7 +41,7 @@ from murmur.live_scene.semantic_integrity import (
 
 MAX_SEMANTIC_ID_CHARS = 32
 MAX_SEMANTIC_COMPONENTS = MAX_SCENE_NODES
-SEMANTIC_COMPILER_VERSION = "murmur.pythagorean_area_identity.v1"
+SEMANTIC_COMPILER_VERSION = "murmur.pythagorean_area_identity.v2"
 
 SemanticId = Annotated[
     str,
@@ -80,6 +81,7 @@ class PythagoreanStage(StrEnum):
     TRIANGLE = "triangle"
     AREAS = "areas"
     IDENTITY = "identity"
+    PROOF = "proof"
 
 
 class VisualActAbstainReason(StrEnum):
@@ -134,6 +136,14 @@ class PythagoreanRole(StrEnum):
     SQUARE_C = "square_c"
     LABEL_C2 = "label_c2"
     IDENTITY = "identity"
+    ALTITUDE = "altitude"
+    PARTITION = "partition"
+    REGION_A = "region_a"
+    REGION_A_LABEL = "region_a_label"
+    REGION_B = "region_b"
+    REGION_B_LABEL = "region_b_label"
+    PROJECTION_IDENTITY = "projection_identity"
+    PROOF_CONCLUSION = "proof_conclusion"
 
 
 PYTHAGOREAN_ROLE_ORDER: tuple[PythagoreanRole, ...] = (
@@ -145,13 +155,22 @@ PYTHAGOREAN_ROLE_ORDER: tuple[PythagoreanRole, ...] = (
     PythagoreanRole.SQUARE_C,
     PythagoreanRole.LABEL_C2,
     PythagoreanRole.IDENTITY,
+    PythagoreanRole.ALTITUDE,
+    PythagoreanRole.PARTITION,
+    PythagoreanRole.REGION_A,
+    PythagoreanRole.REGION_A_LABEL,
+    PythagoreanRole.REGION_B,
+    PythagoreanRole.REGION_B_LABEL,
+    PythagoreanRole.PROJECTION_IDENTITY,
+    PythagoreanRole.PROOF_CONCLUSION,
 )
 
 PYTHAGOREAN_STAGE_ROLES: Mapping[PythagoreanStage, tuple[PythagoreanRole, ...]] = MappingProxyType(
     {
         PythagoreanStage.TRIANGLE: PYTHAGOREAN_ROLE_ORDER[:1],
         PythagoreanStage.AREAS: PYTHAGOREAN_ROLE_ORDER[:7],
-        PythagoreanStage.IDENTITY: PYTHAGOREAN_ROLE_ORDER,
+        PythagoreanStage.IDENTITY: PYTHAGOREAN_ROLE_ORDER[:8],
+        PythagoreanStage.PROOF: PYTHAGOREAN_ROLE_ORDER,
     }
 )
 
@@ -248,6 +267,10 @@ class VerificationObligation(StrEnum):
     LABEL_CONTAINMENT = "label_containment"
     LABEL_SEPARATION = "label_separation"
     COMPILER_IDENTITY = "compiler_identity"
+    ALTITUDE_PROJECTION = "altitude_projection"
+    SQUARE_PARTITION = "square_partition"
+    AREA_EQUIVALENCE = "area_equivalence"
+    PROOF_CONCLUSION = "proof_conclusion"
 
 
 class VerificationReceipt(LiveSceneContract):
@@ -451,7 +474,7 @@ class CompiledTeachingBeat(LiveSceneContract):
     result_scene: SemanticSceneState = Field(alias="resultScene")
     atoms: Annotated[
         tuple[CompiledVisualAtom, ...],
-        Field(max_length=len(PYTHAGOREAN_ROLE_ORDER)),
+        Field(max_length=MAX_ACCEPTED_PATCHES),
     ] = ()
 
     @model_validator(mode="after")

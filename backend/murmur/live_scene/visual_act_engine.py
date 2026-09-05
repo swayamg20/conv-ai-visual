@@ -44,6 +44,9 @@ _ROUTING_REPAIR_HINTS = {
     VisualActRoutingErrorCode.NON_FORWARD_TARGET: (
         "visual_act_state: choose a strictly later target or abstain"
     ),
+    VisualActRoutingErrorCode.PROOF_REQUIRES_IDENTITY: (
+        "visual_act_state: reveal the identity before continuing to proof"
+    ),
 }
 
 

@@ -26,6 +26,7 @@ class VisualActRoutingErrorCode(StrEnum):
     COMPONENT_NOT_FOUND = "component_not_found"
     MULTIPLE_COMPONENTS_UNSUPPORTED = "multiple_components_unsupported"
     NON_FORWARD_TARGET = "non_forward_target"
+    PROOF_REQUIRES_IDENTITY = "proof_requires_identity"
 
 
 class VisualActRoutingError(ValueError):
@@ -79,6 +80,10 @@ def resolve_visual_act(
         component_id = decision.component_id
 
     target_roles = roles_through(decision.target_stage)
+    if decision.target_stage is PythagoreanStage.PROOF:
+        identity_roles = roles_through(PythagoreanStage.IDENTITY)
+        if current_roles[: len(identity_roles)] != identity_roles:
+            raise VisualActRoutingError(VisualActRoutingErrorCode.PROOF_REQUIRES_IDENTITY)
     if current_roles != target_roles[: len(current_roles)] or len(current_roles) >= len(
         target_roles
     ):

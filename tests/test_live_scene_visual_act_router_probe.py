@@ -128,7 +128,7 @@ def _passing_record(case: object) -> dict[str, object]:
 def test_router_probe_dry_run_pins_full_corpus_and_twenty_attempt_cost() -> None:
     result = _run(
         "--max-cost-usd",
-        "0.041",
+        "0.043",
         "--case-limit",
         "10",
         "--max-tokens",
@@ -141,18 +141,18 @@ def test_router_probe_dry_run_pins_full_corpus_and_twenty_attempt_cost() -> None
         "caseCount": 10,
         "corpusSha256": "374aa407164cd9ca84ec8a311792c895ea39152dcdb2daa90dfec0a931e6e549",
         "evidenceScope": "provider_to_routed_semantic_sse",
-        "maxCostUsd": "0.041000000",
+        "maxCostUsd": "0.043000000",
         "mode": "dry-run",
         "pricingProfile": "azure-gpt-oss-120b-global-standard-2026-03-01",
-        "reservedMaxCostUsd": "0.040891800",
-        "reservedMaxInputTokens": 108_772,
+        "reservedMaxCostUsd": "0.042442800",
+        "reservedMaxInputTokens": 119_112,
         "reservedMaxOutputTokens": 40_960,
         "reservedMaxProviderAttempts": 20,
     }
 
 
 def test_router_probe_refuses_below_the_exact_full_corpus_bound() -> None:
-    result = _run("--max-cost-usd", "0.040", "--case-limit", "10", "--dry-run")
+    result = _run("--max-cost-usd", "0.042", "--case-limit", "10", "--dry-run")
 
     assert result.returncode == 2
     assert "provider cost ceiling reached" in result.stderr

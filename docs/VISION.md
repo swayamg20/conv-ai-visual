@@ -34,13 +34,14 @@ A few things we care about:
 
 - **Latency is everything.** Sentence-pipelined TTS, smart turn detection, and streaming at every stage. The goal is for the AI to feel present, not buffering.
 - **Tools are first-class.** The AI doesn't just generate text — it calls trusted tools, fetches live data, performs bounded computations, and renders results visually. Tool definitions live in the database; inline handlers are operator-controlled and intentionally not treated as strong process isolation.
-- **The canvas is not a gimmick.** It's the primary output surface. Rough.js gives it a hand-drawn aesthetic. GSAP animations make sequences feel intentional, not dumped. The LLM controls what appears, where, and when.
+- **The canvas is not a gimmick.** It's the primary output surface. Rough.js gives it a hand-drawn aesthetic. GSAP animations make sequences feel intentional, not dumped. For verified lessons, the model chooses a compact semantic intent and the deterministic compiler owns geometry, equations, stable IDs, and presentation order.
 - **Observation over declaration.** We're building toward a Decision Intelligence layer — instead of asking users what they want, we infer it from how they hesitate, choose, and react. The real preference data is behavioral, not stated.
 
 ## Where This Is Going
 
 The immediate roadmap is about making the teaching loop more grounded and measurably useful:
 
+- **Adaptive visual explanations** — preserve the board when a learner interrupts, then continue, highlight, or reframe the exact concept they questioned
 - **Rich widgets** on canvas — product cards, map embeds, charts, timelines, code blocks
 - **Interactive elements** — click a card to drill deeper, drag to reorder, hover for details
 - **Image placement** — the AI finds and places relevant images while explaining

@@ -27,6 +27,10 @@ _STAGE_BEAT_CONTENT = MappingProxyType(
             TeachingAct.CONNECT,
             "Connect the three square areas into the Pythagorean relationship.",
         ),
+        PythagoreanStage.PROOF: (
+            TeachingAct.DERIVE,
+            "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        ),
     }
 )
 

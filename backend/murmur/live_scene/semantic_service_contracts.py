@@ -12,6 +12,7 @@ from typing import Annotated, Literal, Self, TypeAlias
 from pydantic import Field, TypeAdapter, model_validator
 
 from murmur.live_scene.contracts import (
+    MAX_ACCEPTED_PATCHES,
     AttemptNumber,
     FriendlyMessage,
     LiveSceneContract,
@@ -27,7 +28,6 @@ from murmur.live_scene.contracts import (
     SceneStreamStartedEvent,
 )
 from murmur.live_scene.semantic_contracts import (
-    PYTHAGOREAN_ROLE_ORDER,
     AtomId,
     CompiledVisualAtom,
     CompilerCertificateV1,
@@ -43,7 +43,7 @@ from murmur.live_scene.semantic_contracts import (
 )
 from murmur.live_scene.semantic_integrity import digest_matches
 
-MAX_COMPILED_ATOMS = len(PYTHAGOREAN_ROLE_ORDER)
+MAX_COMPILED_ATOMS = MAX_ACCEPTED_PATCHES
 SemanticAtomSequence = Annotated[
     int,
     Field(strict=True, ge=1, le=MAX_COMPILED_ATOMS),

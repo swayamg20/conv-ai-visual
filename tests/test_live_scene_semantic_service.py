@@ -224,7 +224,7 @@ async def test_streams_all_eight_atoms_with_typed_certificate_metadata() -> None
     assert [(event.base_revision, event.result_revision) for event in patches] == [
         (index, index + 1) for index in range(8)
     ]
-    assert [event.semantic.role for event in patches] == list(PYTHAGOREAN_ROLE_ORDER)
+    assert [event.semantic.role for event in patches] == list(PYTHAGOREAN_ROLE_ORDER[:8])
     assert [event.semantic.atom_ordinal for event in patches] == list(range(1, 9))
 
     previous_certificate = None

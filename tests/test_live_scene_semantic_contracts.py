@@ -3,7 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from murmur.live_scene.contracts import LIVE_SCENE_SCHEMA_VERSION, MAX_SCENE_NARRATION_CHARS
+from murmur.live_scene.contracts import (
+    LIVE_SCENE_SCHEMA_VERSION,
+    MAX_ACCEPTED_PATCHES,
+    MAX_SCENE_NARRATION_CHARS,
+)
 from murmur.live_scene.semantic_contracts import (
     MAX_SEMANTIC_ID_CHARS,
     PYTHAGOREAN_ROLE_ORDER,
@@ -190,7 +194,7 @@ def test_directive_accepts_each_named_stage(stage: PythagoreanStage) -> None:
 
 
 def test_directive_rejects_unknown_stage_and_kind() -> None:
-    payload = _beat("proof")
+    payload = _beat("animation")
     with pytest.raises(ValidationError):
         TeachingBeatDraft.model_validate(payload)
 
@@ -233,10 +237,19 @@ def test_pythagorean_role_order_and_stage_boundaries_are_exact() -> None:
         "square_c",
         "label_c2",
         "identity",
+        "altitude",
+        "partition",
+        "region_a",
+        "region_a_label",
+        "region_b",
+        "region_b_label",
+        "projection_identity",
+        "proof_conclusion",
     )
     assert roles_through(PythagoreanStage.TRIANGLE) == PYTHAGOREAN_ROLE_ORDER[:1]
     assert roles_through(PythagoreanStage.AREAS) == PYTHAGOREAN_ROLE_ORDER[:7]
-    assert roles_through(PythagoreanStage.IDENTITY) == PYTHAGOREAN_ROLE_ORDER
+    assert roles_through(PythagoreanStage.IDENTITY) == PYTHAGOREAN_ROLE_ORDER[:8]
+    assert roles_through(PythagoreanStage.PROOF) == PYTHAGOREAN_ROLE_ORDER
     with pytest.raises(TypeError):
         PYTHAGOREAN_STAGE_ROLES[PythagoreanStage.TRIANGLE] = ()  # type: ignore[index]
 
@@ -381,8 +394,9 @@ def test_compiled_atom_rejects_unbound_metadata(mutate, message: str) -> None:
 @pytest.mark.parametrize("stage", list(PythagoreanStage))
 def test_compiled_beat_accepts_every_exact_missing_suffix(stage: PythagoreanStage) -> None:
     target_roles = roles_through(stage)
+    earliest_prefix = max(0, len(target_roles) - MAX_ACCEPTED_PATCHES)
 
-    for prefix_length in range(len(target_roles) + 1):
+    for prefix_length in range(earliest_prefix, len(target_roles) + 1):
         base_roles = target_roles[:prefix_length]
         base_components = () if prefix_length == 0 else (_component(base_roles),)
         atoms = tuple(_atom(role) for role in target_roles[prefix_length:])
@@ -401,6 +415,21 @@ def test_compiled_beat_accepts_every_exact_missing_suffix(stage: PythagoreanStag
 
         assert tuple(atom.role for atom in compiled.atoms) == target_roles[prefix_length:]
         assert compiled.result_scene.revision == compiled.base_scene.revision + len(atoms)
+
+
+def test_compiled_beat_rejects_more_than_one_generation_of_atoms() -> None:
+    target_roles = roles_through(PythagoreanStage.PROOF)
+
+    with pytest.raises(ValidationError, match="at most 8 items"):
+        CompiledTeachingBeat(
+            beat=TeachingBeatDraft.model_validate(_beat(PythagoreanStage.PROOF)),
+            base_scene=SemanticSceneState(revision=0),
+            result_scene=SemanticSceneState(
+                revision=len(target_roles),
+                components=(_component(target_roles),),
+            ),
+            atoms=tuple(_atom(role) for role in target_roles),
+        )
 
 
 def test_compiled_beat_allows_an_explicit_empty_component_as_its_base_prefix() -> None:

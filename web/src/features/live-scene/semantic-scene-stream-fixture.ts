@@ -1,6 +1,7 @@
 import goldenTranscriptValue from "./fixtures/pythagorean-area-identity.v1.json";
 
 import {
+  PYTHAGOREAN_IDENTITY_ROLE_COUNT,
   PYTHAGOREAN_ROLE_ORDER,
   applySemanticScenePatch,
   createSemanticSceneState,
@@ -172,16 +173,21 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
         `semantic fixture atom ${index + 1} is invalid: ${errorMessage(error)}`
       );
     }
+    const beatIndex = Math.floor(index / PYTHAGOREAN_IDENTITY_ROLE_COUNT);
+    const expectedSequence =
+      (index % PYTHAGOREAN_IDENTITY_ROLE_COUNT) + 1;
+    const expectedStage = beatIndex === 0 ? "identity" : "proof";
     if (
       decoded.type !== "semantic_scene_patch" ||
-      decoded.generation !== input.generation ||
+      decoded.generation !== input.generation + beatIndex ||
       decoded.attempt !== 1 ||
-      decoded.sequence !== index + 1 ||
+      decoded.sequence !== expectedSequence ||
       decoded.baseRevision !== input.baseRevision + index ||
       decoded.resultRevision !== input.baseRevision + index + 1 ||
       decoded.semantic.componentId !== input.componentId ||
       decoded.semantic.role !== PYTHAGOREAN_ROLE_ORDER[index] ||
-      decoded.semantic.atomOrdinal !== index + 1
+      decoded.semantic.atomOrdinal !== index + 1 ||
+      decoded.semantic.beat.directive.revealThrough !== expectedStage
     ) {
       fixtureFailure(
         "invalid_fixture",
@@ -288,7 +294,7 @@ function adaptedAtom(
 }
 
 /**
- * Emit a server-shaped lifecycle around exactly the missing golden suffix.
+ * Emit a server-shaped lifecycle around the missing suffix of one bounded beat.
  *
  * The fixture never rebases or recompiles certificates. A request must present
  * one exact paired prefix previously derived from this checked-in artifact.
@@ -303,7 +309,14 @@ export function createSemanticSceneFixtureEvents(
     attempt: 1,
     baseRevision: request.baseScene.revision,
   });
-  const sourceSuffix = GOLDEN_TRANSCRIPT.events.slice(nextAtomIndex);
+  const turnEndIndex =
+    nextAtomIndex < PYTHAGOREAN_IDENTITY_ROLE_COUNT
+      ? PYTHAGOREAN_IDENTITY_ROLE_COUNT
+      : GOLDEN_TRANSCRIPT.events.length;
+  const sourceSuffix = GOLDEN_TRANSCRIPT.events.slice(
+    nextAtomIndex,
+    turnEndIndex
+  );
 
   // The production lifecycle contract requires at least one patch before a
   // completion event. A fully complete golden prefix therefore gets an honest,

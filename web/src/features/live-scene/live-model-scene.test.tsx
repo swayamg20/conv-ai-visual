@@ -94,8 +94,8 @@ describe("LiveModelScene", () => {
     );
     expect(props.suggestions).toEqual([
       "Build a right triangle and reveal its side relationship",
-      "Continue the Pythagorean area identity one step at a time",
-      "Show the complete relationship between a², b², and c²",
+      "I do not understand why the areas are equal; dissect the large square",
+      "Continue the proof from the exact visible step",
     ]);
 
     await props.runStream(invocation);

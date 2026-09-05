@@ -30,7 +30,7 @@ _FIXTURE_PATH = (
 
 
 def _build_fixture() -> dict[str, object]:
-    beat = TeachingBeatDraft.model_validate(
+    identity_beat = TeachingBeatDraft.model_validate(
         {
             "v": 1,
             "beatId": "beat-identity",
@@ -43,32 +43,50 @@ def _build_fixture() -> dict[str, object]:
             },
         }
     )
-    compiled = compile_teaching_beat(beat, SemanticSceneState(revision=0))
+    identity = compile_teaching_beat(identity_beat, SemanticSceneState(revision=0))
+    proof_beat = TeachingBeatDraft.model_validate(
+        {
+            "v": 1,
+            "beatId": "beat-proof",
+            "narration": (
+                "Project the altitude through the hypotenuse square to prove its two regions "
+                "have areas a² and b²."
+            ),
+            "act": "derive",
+            "directive": {
+                "kind": "pythagorean_area_identity",
+                "id": "areas",
+                "revealThrough": "proof",
+            },
+        }
+    )
+    proof = compile_teaching_beat(proof_beat, identity.result_scene)
 
     events: list[dict[str, object]] = []
-    for sequence, atom in enumerate(compiled.atoms, start=1):
-        certificate = atom.certificate
-        assert certificate is not None
-        event = SemanticScenePatchEvent(
-            generation=1,
-            attempt=1,
-            sequence=sequence,
-            base_revision=sequence - 1,
-            result_revision=sequence,
-            patch=atom.patch,
-            semantic=SemanticAtomMetadata(
-                beat=compiled.beat,
-                atom_id=atom.atom_id,
-                component_id=atom.component_id,
-                role=atom.role,
-                atom_ordinal=certificate.body.atom_ordinal,
-                semantic_base_revision=certificate.body.base_semantic_revision,
-                semantic_result_revision=certificate.body.result_semantic_revision,
-                receipt=atom.receipt,
-                certificate=certificate,
-            ),
-        )
-        events.append(dump_semantic_scene_stream_event(event))
+    for generation, compiled in ((1, identity), (2, proof)):
+        for sequence, atom in enumerate(compiled.atoms, start=1):
+            certificate = atom.certificate
+            assert certificate is not None
+            event = SemanticScenePatchEvent(
+                generation=generation,
+                attempt=1,
+                sequence=sequence,
+                base_revision=certificate.body.base_semantic_revision,
+                result_revision=certificate.body.result_semantic_revision,
+                patch=atom.patch,
+                semantic=SemanticAtomMetadata(
+                    beat=compiled.beat,
+                    atom_id=atom.atom_id,
+                    component_id=atom.component_id,
+                    role=atom.role,
+                    atom_ordinal=certificate.body.atom_ordinal,
+                    semantic_base_revision=certificate.body.base_semantic_revision,
+                    semantic_result_revision=certificate.body.result_semantic_revision,
+                    receipt=atom.receipt,
+                    certificate=certificate,
+                ),
+            )
+            events.append(dump_semantic_scene_stream_event(event))
 
     return {
         "v": 1,
@@ -106,10 +124,11 @@ def test_fixture_is_exact_backend_generated_semantic_transcript() -> None:
     events = fixture["events"]
     assert isinstance(events, list)
     parsed = [SEMANTIC_SCENE_STREAM_EVENT_ADAPTER.validate_python(event) for event in events]
-    assert len(parsed) == 8
-    assert [event.type for event in parsed] == ["semantic_scene_patch"] * 8
-    assert [event.sequence for event in parsed] == list(range(1, 9))
+    assert len(parsed) == 16
+    assert [event.type for event in parsed] == ["semantic_scene_patch"] * 16
+    assert [event.generation for event in parsed] == [1] * 8 + [2] * 8
+    assert [event.sequence for event in parsed] == list(range(1, 9)) * 2
     assert [(event.base_revision, event.result_revision) for event in parsed] == [
-        (index, index + 1) for index in range(8)
+        (index, index + 1) for index in range(16)
     ]
     assert [event.semantic.role for event in parsed] == list(PYTHAGOREAN_ROLE_ORDER)

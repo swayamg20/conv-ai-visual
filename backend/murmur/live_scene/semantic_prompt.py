@@ -39,7 +39,7 @@ _SYSTEM_PROMPT = "\n".join(
         '- ACT is exactly one of "introduce", "derive", "connect", or "emphasize".',
         '- DIRECTIVE is exactly {"kind":"pythagorean_area_identity","id":"COMPONENT_ID",'
         '"revealThrough":"STAGE"}.',
-        '- STAGE is exactly one of "triangle", "areas", or "identity".',
+        '- STAGE is exactly one of "triangle", "areas", "identity", or "proof".',
         "- beatId and component id match [A-Za-z][A-Za-z0-9_-]{0,31}.",
         "- narration is non-empty, at most 512 characters, and describes only this beat.",
         "TRUST BOUNDARY:",
@@ -66,7 +66,7 @@ _VISUAL_ACT_ROUTER_SYSTEM_PROMPT = "\n".join(
         '- continue_visual fields are exactly v=1, decision="continue_visual", componentId copied '
         "from the accepted scene, and targetStage.",
         '- abstain fields are exactly v=1, decision="abstain", and reasonCode.',
-        '- targetStage is exactly "triangle", "areas", or "identity".',
+        '- targetStage is exactly "triangle", "areas", "identity", or "proof".',
         '- REASON is exactly "unsupported_intent" or "no_forward_progress".',
         "SUPPORTED COMPONENT:",
         "- pythagorean_area_identity: a right triangle whose three side squares culminate in "
@@ -77,6 +77,8 @@ _VISUAL_ACT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "- areas: reveal the triangle and all three side-area squares; stop before the final "
         "relationship.",
         "- identity: reveal the complete construction through the final area relationship.",
+        "- proof: after identity is accepted, extend the triangle altitude across the hypotenuse "
+        "square and verify that its two regions have areas a² and b².",
         "DECISION POLICY:",
         "- First decide whether the requested visual meaning is supported.",
         '- If unsupported or too ambiguous to map safely, abstain with "unsupported_intent".',
@@ -85,7 +87,11 @@ _VISUAL_ACT_ROUTER_SYSTEM_PROMPT = "\n".join(
         "- targetStage is the terminal boundary for this request, not merely the next small step.",
         "- Initial geometric setup alone maps to triangle; side-square areas without their final "
         "relationship map to areas; explaining, connecting, proving, or showing why the "
-        "relationship works maps to identity.",
+        "relationship works maps to identity when the accepted scene is empty.",
+        "- An empty board always starts at triangle, areas, or identity. Even explicit proof "
+        "language maps to identity first; never emit start_visual with targetStage proof.",
+        "- Emit continue_visual with targetStage proof only when the accepted component has "
+        "already reached identity. Resume an interrupted proof with the same target.",
         '- If the accepted scene contains multiple components, abstain with "unsupported_intent"; '
         "never emit start_visual or continue_visual, even when the request explicitly identifies "
         "one component.",

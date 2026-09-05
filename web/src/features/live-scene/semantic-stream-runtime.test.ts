@@ -12,6 +12,7 @@ import {
   type PythagoreanRole,
   type SemanticScenePatchEvent,
 } from "@/lib/live-scene";
+import { LIVE_SCENE_MAX_ACCEPTED_PATCHES } from "@/lib/live-scene/patch";
 
 import {
   decodeSceneStreamEvent,
@@ -227,7 +228,7 @@ function semanticPatch(options: {
         body: {
           v: 1,
           issuer: "semantic_compiler",
-          compilerVersion: "murmur.pythagorean_area_identity.v1",
+          compilerVersion: "murmur.pythagorean_area_identity.v2",
           canonicalization: "murmur-json-v1",
           hashAlgorithm: "sha256",
           atomId,
@@ -320,7 +321,7 @@ function semanticSnapshot(runtime: SceneStreamRuntime) {
   return semantic;
 }
 
-async function startedRuntime() {
+async function startedRuntime(options: { readonly now?: () => number } = {}) {
   const renderer = new ControlledRenderer();
   const harness = runnerHarness();
   const runtime = new SceneStreamRuntime({
@@ -328,6 +329,7 @@ async function startedRuntime() {
     renderer,
     runStream: harness.runStream,
     staggerMs: 0,
+    ...(options.now ? { now: options.now } : {}),
   });
   runtime.start("Explain the area identity");
   await flushMicrotasks();
@@ -562,6 +564,157 @@ describe("SceneStreamRuntime semantic protocol", () => {
     });
   });
 
+  it("measures browser request and replay settlement only across post-paint terminals", async () => {
+    let clock = 100;
+    const { renderer, harness, runtime, run } = await startedRuntime({
+      now: () => clock,
+    });
+
+    expect(runtime.getSnapshot().presentationMetrics).toEqual({});
+    expect(Object.isFrozen(runtime.getSnapshot().presentationMetrics)).toBe(true);
+
+    run.invocation.onEvent(semanticPatch({ ordinal: 1 }));
+    run.invocation.onEvent(semanticPatch({ ordinal: 2 }));
+    run.invocation.onEvent(completed({ finalRevision: 2, patchCount: 2 }));
+    expect(runtime.getSnapshot().phase).toBe("completing");
+    expect(runtime.getSnapshot().presentationMetrics).toEqual({});
+
+    clock = 140;
+    completePlayback(renderer.rendered[0].playback, 1);
+    await flushMicrotasks();
+    expect(runtime.getSnapshot().presentationMetrics).toEqual({
+      requestToFirstPresentedMs: 40,
+    });
+
+    clock = 175;
+    completePlayback(renderer.rendered[1].playback, 2);
+    await flushMicrotasks();
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "completed",
+      presentationMetrics: {
+        requestToFirstPresentedMs: 40,
+        requestToSettledMs: 75,
+      },
+    });
+
+    clock = 200;
+    const replayStart = renderer.rendered.length;
+    const replay = runtime.replayAccepted();
+    expect(runtime.getSnapshot().phase).toBe("replaying");
+    expect(harness.runs).toHaveLength(1);
+
+    clock = 225;
+    completePlayback(renderer.rendered[replayStart].playback, 1);
+    await flushMicrotasks();
+    expect(runtime.getSnapshot().presentationMetrics?.replayDurationMs).toBeUndefined();
+
+    clock = 270;
+    completePlayback(renderer.rendered[replayStart + 1].playback, 2);
+    await replay;
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "completed",
+      presentationMetrics: {
+        requestToFirstPresentedMs: 40,
+        requestToSettledMs: 75,
+        replayDurationMs: 70,
+      },
+    });
+  });
+
+  it("measures repeated interruption from its first call through the exact receipt", async () => {
+    let clock = 5;
+    const { renderer, runtime, run } = await startedRuntime({
+      now: () => clock,
+    });
+    run.invocation.onEvent(semanticPatch());
+    const playback = renderer.rendered[0].playback;
+    playback.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["areas__triangle"],
+    };
+
+    clock = 20;
+    expect(runtime.interrupt()).toBe(true);
+    clock = 25;
+    expect(runtime.interrupt()).toBe(true);
+    expect(runtime.getSnapshot().presentationMetrics).toEqual({});
+
+    clock = 35;
+    playback.settle(playback.cancelOutcome);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      presentationMetrics: {
+        requestToFirstPresentedMs: 30,
+        requestToSettledMs: 30,
+        interruptToSettledMs: 15,
+      },
+    });
+  });
+
+  it("does not let stale stream callbacks overwrite a newer request measurement", async () => {
+    let clock = 0;
+    const { harness, runtime, run } = await startedRuntime({
+      now: () => clock,
+    });
+    clock = 10;
+    run.invocation.onEvent(declined());
+    expect(runtime.getSnapshot().presentationMetrics).toEqual({
+      requestToSettledMs: 10,
+    });
+
+    clock = 100;
+    runtime.start("Begin a newer measured request");
+    await flushMicrotasks();
+    const freshMeasurement = runtime.getSnapshot().presentationMetrics;
+    expect(freshMeasurement).toEqual({});
+    expect(harness.runs).toHaveLength(2);
+
+    clock = 500;
+    run.invocation.onEvent(semanticPatch());
+    run.completion.reject(new Error("late old transport failure"));
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot().presentationMetrics).toBe(freshMeasurement);
+    expect(runtime.getSnapshot().phase).toBe("connecting");
+  });
+
+  it("keeps a post-reset request measurement authoritative when old playback settles late", async () => {
+    let clock = 0;
+    const { renderer, harness, runtime, run } = await startedRuntime({
+      now: () => clock,
+    });
+    run.invocation.onEvent(semanticPatch());
+    const stalePlayback = renderer.rendered[0].playback;
+    stalePlayback.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["areas__triangle"],
+    };
+
+    runtime.reset();
+    clock = 100;
+    runtime.start("Begin a measured request after reset");
+    await flushMicrotasks();
+
+    expect(harness.runs).toHaveLength(2);
+    const freshSnapshot = runtime.getSnapshot();
+    const freshMeasurement = freshSnapshot.presentationMetrics;
+    expect(freshSnapshot).toMatchObject({
+      phase: "connecting",
+      generation: 1,
+      presentationMetrics: {},
+    });
+
+    clock = 500;
+    stalePlayback.settle(stalePlayback.cancelOutcome);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toBe(freshSnapshot);
+    expect(runtime.getSnapshot().presentationMetrics).toBe(freshMeasurement);
+    expect(semanticSnapshot(runtime).accepted).toEqual([]);
+  });
+
   it("deep-freezes the paired ledger, original event, and browser presentation receipt", async () => {
     const { renderer, runtime, run } = await startedRuntime();
     run.invocation.onEvent(semanticPatch());
@@ -789,6 +942,7 @@ describe("SceneStreamRuntime semantic protocol", () => {
       provisionalScene: { revision: 0, components: [] },
       accepted: [],
     });
+    expect(resetSnapshot.presentationMetrics).toBeUndefined();
 
     playback.settle(playback.cancelOutcome);
     await flushMicrotasks();
@@ -1151,7 +1305,7 @@ describe("SceneStreamRuntime semantic protocol", () => {
       const run = harness.runs[generation - 1];
       run.invocation.onEvent(started(generation, acceptedAtomCount));
       const batchSize = Math.min(
-        PYTHAGOREAN_ROLE_ORDER.length,
+        LIVE_SCENE_MAX_ACCEPTED_PATCHES,
         targetAtomCount - acceptedAtomCount
       );
       const events: SemanticScenePatchEvent[] = [];

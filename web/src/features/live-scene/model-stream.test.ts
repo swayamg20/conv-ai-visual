@@ -135,7 +135,7 @@ function semanticPatchEvent(overrides: Record<string, unknown> = {}) {
         body: {
           v: 1,
           issuer: "semantic_compiler",
-          compilerVersion: "murmur.pythagorean_area_identity.v1",
+          compilerVersion: "murmur.pythagorean_area_identity.v2",
           canonicalization: "murmur-json-v1",
           hashAlgorithm: "sha256",
           atomId: "areas__atom_triangle",

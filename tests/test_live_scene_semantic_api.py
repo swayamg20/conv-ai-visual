@@ -365,7 +365,7 @@ def test_semantic_lab_streams_strict_metadata_and_releases_admission(
     assert semantic["semanticResultRevision"] == 1
     assert semantic["receipt"]["issuer"] == "semantic_verifier"
     assert semantic["certificate"]["body"]["compilerVersion"] == (
-        "murmur.pythagorean_area_identity.v1"
+        "murmur.pythagorean_area_identity.v2"
     )
     assert admission.user_ids == [
         _DEVELOPMENT_SCENE_LAB_IDENTITY,

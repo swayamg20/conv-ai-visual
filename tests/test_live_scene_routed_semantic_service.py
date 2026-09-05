@@ -137,6 +137,23 @@ def _materialized_triangle() -> tuple[SceneState, SemanticSceneState]:
     return scene, compiled.result_scene
 
 
+def _materialized_identity() -> tuple[SceneState, SemanticSceneState]:
+    beat = TeachingBeatDraft(
+        beat_id="prefix-identity",
+        narration="Connect the three square areas into the Pythagorean relationship.",
+        act=TeachingAct.CONNECT,
+        directive=PythagoreanAreaIdentityDirective(
+            id="areas",
+            reveal_through=PythagoreanStage.IDENTITY,
+        ),
+    )
+    compiled = compile_teaching_beat(beat, SemanticSceneState(revision=0))
+    scene = SceneState(revision=0)
+    for atom in compiled.atoms:
+        scene = service_module._apply_patch(scene, atom.patch)
+    return scene, compiled.result_scene
+
+
 async def _collect(
     service: service_module.SceneAuthoringService,
     request: SemanticLiveSceneRequest | None = None,
@@ -231,6 +248,34 @@ async def test_continuation_emits_only_missing_suffix_and_extends_certificate_he
     completed = events[-1]
     assert isinstance(completed, SceneStreamCompletedEvent)
     assert (completed.final_revision, completed.patch_count) == (7, 6)
+
+
+@pytest.mark.asyncio
+async def test_identity_followup_streams_only_the_eight_atom_proof_suffix() -> None:
+    scene, semantic_scene = _materialized_identity()
+    client = _Client([[_decision_line("continue_visual", stage="proof")]])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(scene=scene, semantic_scene=semantic_scene),
+    )
+
+    patches = _patches(events)
+    assert [event.semantic.role for event in patches] == list(PYTHAGOREAN_ROLE_ORDER[8:])
+    assert [event.semantic.atom_ordinal for event in patches] == list(range(9, 17))
+    assert [(event.base_revision, event.result_revision) for event in patches] == [
+        (revision, revision + 1) for revision in range(8, 16)
+    ]
+    assert (
+        patches[0].semantic.certificate.body.previous_certificate_sha256
+        == semantic_scene.certificate_head_sha256
+    )
+    assert all(
+        event.semantic.beat.directive.reveal_through is PythagoreanStage.PROOF for event in patches
+    )
+    completed = events[-1]
+    assert isinstance(completed, SceneStreamCompletedEvent)
+    assert (completed.final_revision, completed.patch_count) == (16, 8)
 
 
 @pytest.mark.asyncio

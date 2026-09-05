@@ -11,7 +11,7 @@ import { createSceneState } from "./state";
 import type { MotionPlan, SceneState } from "./types";
 
 export const SEMANTIC_COMPILER_VERSION =
-  "murmur.pythagorean_area_identity.v1" as const;
+  "murmur.pythagorean_area_identity.v2" as const;
 export const SEMANTIC_CANONICALIZATION = "murmur-json-v1" as const;
 export const SEMANTIC_HASH_ALGORITHM = "sha256" as const;
 
@@ -24,10 +24,20 @@ export const PYTHAGOREAN_ROLE_ORDER = [
   "square_c",
   "label_c2",
   "identity",
+  "altitude",
+  "partition",
+  "region_a",
+  "region_a_label",
+  "region_b",
+  "region_b_label",
+  "projection_identity",
+  "proof_conclusion",
 ] as const;
 
+export const PYTHAGOREAN_IDENTITY_ROLE_COUNT = 8;
+
 export type TeachingAct = "introduce" | "derive" | "connect" | "emphasize";
-export type PythagoreanStage = "triangle" | "areas" | "identity";
+export type PythagoreanStage = "triangle" | "areas" | "identity" | "proof";
 export type PythagoreanRole = (typeof PYTHAGOREAN_ROLE_ORDER)[number];
 
 export type VerificationObligation =
@@ -40,7 +50,11 @@ export type VerificationObligation =
   | "hypotenuse_ratio"
   | "label_containment"
   | "label_separation"
-  | "compiler_identity";
+  | "compiler_identity"
+  | "altitude_projection"
+  | "square_partition"
+  | "area_equivalence"
+  | "proof_conclusion";
 
 export interface PythagoreanAreaIdentityDirective {
   readonly kind: "pythagorean_area_identity";
@@ -156,6 +170,7 @@ const PYTHAGOREAN_STAGES = new Set<PythagoreanStage>([
   "triangle",
   "areas",
   "identity",
+  "proof",
 ]);
 const PYTHAGOREAN_ROLES = new Set<PythagoreanRole>(PYTHAGOREAN_ROLE_ORDER);
 const VERIFICATION_OBLIGATIONS = new Set<VerificationObligation>([
@@ -169,6 +184,10 @@ const VERIFICATION_OBLIGATIONS = new Set<VerificationObligation>([
   "label_containment",
   "label_separation",
   "compiler_identity",
+  "altitude_projection",
+  "square_partition",
+  "area_equivalence",
+  "proof_conclusion",
 ]);
 
 function fail(
@@ -259,6 +278,9 @@ function oneOf<T extends string>(value: unknown, allowed: ReadonlySet<T>, field:
 function rolesThrough(stage: PythagoreanStage): readonly PythagoreanRole[] {
   if (stage === "triangle") return PYTHAGOREAN_ROLE_ORDER.slice(0, 1);
   if (stage === "areas") return PYTHAGOREAN_ROLE_ORDER.slice(0, 7);
+  if (stage === "identity") {
+    return PYTHAGOREAN_ROLE_ORDER.slice(0, PYTHAGOREAN_IDENTITY_ROLE_COUNT);
+  }
   return PYTHAGOREAN_ROLE_ORDER;
 }
 

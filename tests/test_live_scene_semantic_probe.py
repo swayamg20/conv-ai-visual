@@ -109,8 +109,8 @@ def test_semantic_probe_dry_run_pins_and_bounds_the_full_corpus() -> None:
         "maxCostUsd": "0.080000000",
         "mode": "dry-run",
         "pricingProfile": "azure-gpt-oss-120b-global-standard-2026-03-01",
-        "reservedMaxCostUsd": "0.075716400",
-        "reservedMaxInputTokens": 177_096,
+        "reservedMaxCostUsd": "0.075770400",
+        "reservedMaxInputTokens": 177_456,
         "reservedMaxOutputTokens": 81_920,
         "reservedMaxProviderAttempts": 40,
     }

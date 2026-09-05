@@ -140,6 +140,10 @@ function shortCertificate(value: string): string {
   return `${value.slice(0, 10)}…${value.slice(-4)}`;
 }
 
+function milliseconds(value: number | undefined): string {
+  return value === undefined ? "—" : `${Math.round(value)} ms`;
+}
+
 export function ModelSceneDemo(props: ModelSceneDemoProps) {
   const {
     sourceLabel = "Live model",
@@ -626,7 +630,12 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
             </div>
           </div>
 
-          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          <div
+            className={cn(
+              "mt-4 grid gap-3",
+              isSemantic ? "sm:grid-cols-2 xl:grid-cols-4" : "sm:grid-cols-3"
+            )}
+          >
             {isSemantic ? (
               <>
                 <div className="border-l-2 border-sage/45 px-3 py-1">
@@ -657,6 +666,36 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                     Server-owned teaching text is not independently fact-checked.
                   </p>
                 </div>
+                <div
+                  className="border-l-2 border-sage/45 px-3 py-1"
+                  aria-label="Browser presentation timing"
+                >
+                  <div className="flex items-center gap-1.5 text-xs font-medium">
+                    <Clock3 className="h-3.5 w-3.5 text-sage" />
+                    Browser presentation timing
+                  </div>
+                  {snapshot.presentationMetrics ? (
+                    <div className="mt-1 space-y-0.5 text-[11px] leading-4 text-muted-foreground">
+                      <p>
+                        First presented {milliseconds(snapshot.presentationMetrics.requestToFirstPresentedMs)} · request settled {milliseconds(snapshot.presentationMetrics.requestToSettledMs)}.
+                      </p>
+                      {snapshot.presentationMetrics.interruptToSettledMs !== undefined && (
+                        <p>
+                          Stop settled {milliseconds(snapshot.presentationMetrics.interruptToSettledMs)}.
+                        </p>
+                      )}
+                      {snapshot.presentationMetrics.replayDurationMs !== undefined && (
+                        <p>
+                          Replay settled {milliseconds(snapshot.presentationMetrics.replayDurationMs)}.
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+                      Measured in this browser through post-paint settlement.
+                    </p>
+                  )}
+                </div>
               </>
             ) : (
               <>
@@ -682,12 +721,12 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 <div className="border-l-2 border-amber/45 px-3 py-1">
                   <div className="flex items-center gap-1.5 text-xs font-medium">
                     <Clock3 className="h-3.5 w-3.5 text-amber" />
-                    Stream timing
+                    Server stream timing
                   </div>
                   <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
                     {snapshot.completion
                       ? `First patch ${Math.round(snapshot.completion.firstPatchMs)} ms · total ${Math.round(snapshot.completion.totalMs)} ms.`
-                      : "Measured from request to accepted model patch."}
+                      : "Reported by the server through its terminal event."}
                   </p>
                 </div>
               </>
@@ -708,6 +747,14 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                   <div><dt className="text-muted-foreground">semantic</dt><dd className="mt-0.5 text-foreground">s{semanticSnapshot.committedScene.revision}</dd></div>
                   <div><dt className="text-muted-foreground">presented acts</dt><dd className="mt-0.5 text-foreground">{semanticSnapshot.accepted.length}</dd></div>
                   <div><dt className="text-muted-foreground">frontier</dt><dd className="mt-0.5 truncate text-foreground">{semanticSnapshot.commitFrontier?.atomId ?? "none"}</dd></div>
+                  <div className="col-span-2">
+                    <dt className="text-muted-foreground">server stream timing</dt>
+                    <dd className="mt-0.5 text-foreground">
+                      {snapshot.completion
+                        ? `first atom ${Math.round(snapshot.completion.firstPatchMs)} ms · terminal ${Math.round(snapshot.completion.totalMs)} ms`
+                        : "no server completion metrics for this state"}
+                    </dd>
+                  </div>
                 </>
               )}
             </dl>

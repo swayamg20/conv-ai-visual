@@ -7,9 +7,9 @@ after independently parsing and checking the complete supplied role prefix.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from math import hypot, isclose, isfinite
-from typing import TypeAlias
+from typing import ParamSpec, TypeAlias, TypeVar
 
 from pydantic import ValidationError
 
@@ -22,6 +22,17 @@ from murmur.live_scene.contracts import (
     SceneNode,
     TextSceneNode,
 )
+from murmur.live_scene.pythagorean_proof import (
+    PythagoreanProofError,
+    polygon_area,
+    verify_altitude,
+    verify_partition,
+    verify_projection_area_equivalence,
+    verify_projection_identity,
+    verify_proof_conclusion,
+    verify_region,
+    verify_region_coverage,
+)
 from murmur.live_scene.semantic_contracts import (
     PYTHAGOREAN_ROLE_ORDER,
     PythagoreanRole,
@@ -32,6 +43,8 @@ from murmur.live_scene.semantic_contracts import (
 SerializedSceneNode: TypeAlias = Mapping[str, object]
 Point: TypeAlias = tuple[float, float]
 Box: TypeAlias = tuple[float, float, float, float]
+_ProofParams = ParamSpec("_ProofParams")
+_ProofResult = TypeVar("_ProofResult")
 
 _VERIFICATION_EPSILON = 1e-6
 _RENDERER_LATEX_WIDTH = 500.0
@@ -47,12 +60,22 @@ _EXPECTED_ROLE_SUFFIX: dict[PythagoreanRole, str] = {
     PythagoreanRole.SQUARE_C: "square_c",
     PythagoreanRole.LABEL_C2: "label_c2",
     PythagoreanRole.IDENTITY: "identity",
+    PythagoreanRole.ALTITUDE: "altitude",
+    PythagoreanRole.PARTITION: "partition",
+    PythagoreanRole.REGION_A: "region_a",
+    PythagoreanRole.REGION_A_LABEL: "region_a_label",
+    PythagoreanRole.REGION_B: "region_b",
+    PythagoreanRole.REGION_B_LABEL: "region_b_label",
+    PythagoreanRole.PROJECTION_IDENTITY: "projection_identity",
+    PythagoreanRole.PROOF_CONCLUSION: "proof_conclusion",
 }
 
 _EXPECTED_LABEL_TEXT: dict[PythagoreanRole, str] = {
     PythagoreanRole.LABEL_A2: "a²",
     PythagoreanRole.LABEL_B2: "b²",
     PythagoreanRole.LABEL_C2: "c²",
+    PythagoreanRole.REGION_A_LABEL: "a²",
+    PythagoreanRole.REGION_B_LABEL: "b²",
 }
 
 
@@ -201,6 +224,23 @@ def _verify_square(
     return points
 
 
+def _verify_latex(
+    node: SceneNode,
+    *,
+    role: PythagoreanRole,
+    required_latex: str,
+) -> None:
+    if not isinstance(node, LatexSceneNode) or node.latex != required_latex:
+        _fail(f"{role.value} must be the exact required equation")
+    viewport = (
+        node.x,
+        node.y,
+        node.x + _RENDERER_LATEX_WIDTH,
+        node.y + _RENDERER_LATEX_HEIGHT,
+    )
+    _require_box_on_board(viewport, role=role)
+
+
 def _label_box(node: TextSceneNode) -> Box:
     font_size = node.style.font_size
     width = max(48.0, len(node.text) * font_size * 0.75)
@@ -268,6 +308,17 @@ def _receipt(
     )
 
 
+def _proof_check(
+    function: Callable[_ProofParams, _ProofResult],
+    *args: _ProofParams.args,
+    **kwargs: _ProofParams.kwargs,
+) -> _ProofResult:
+    try:
+        return function(*args, **kwargs)
+    except PythagoreanProofError as exc:
+        raise SemanticVerificationError(str(exc)) from exc
+
+
 def verify_pythagorean_realization(
     component_id: str,
     serialized_nodes: Sequence[SerializedSceneNode],
@@ -307,12 +358,15 @@ def verify_pythagorean_realization(
         PythagoreanRole.SQUARE_B: ((right, side_b_end), side_a_end),
         PythagoreanRole.SQUARE_C: ((side_a_end, side_b_end), right),
     }
-    label_square = {
+    label_container = {
         PythagoreanRole.LABEL_A2: PythagoreanRole.SQUARE_A,
         PythagoreanRole.LABEL_B2: PythagoreanRole.SQUARE_B,
         PythagoreanRole.LABEL_C2: PythagoreanRole.SQUARE_C,
     }
+    region_by_role: dict[PythagoreanRole, tuple[Point, Point, Point, Point]] = {}
     label_boxes: list[tuple[PythagoreanRole, Box]] = []
+    altitude_foot: Point | None = None
+    far_partition: Point | None = None
 
     for index, role in enumerate(roles[1:], start=1):
         node = nodes[index]
@@ -337,8 +391,8 @@ def verify_pythagorean_realization(
             )
             continue
 
-        if role in label_square:
-            square_role = label_square[role]
+        if role in label_container:
+            square_role = label_container[role]
             square = square_by_role.get(square_role)
             if square is None:
                 _fail(f"{role.value} is missing its prerequisite square")
@@ -346,15 +400,7 @@ def verify_pythagorean_realization(
             continue
 
         if role is PythagoreanRole.IDENTITY:
-            if not isinstance(node, LatexSceneNode) or node.latex != _REQUIRED_IDENTITY:
-                _fail("identity must be the exact required equation")
-            viewport = (
-                node.x,
-                node.y,
-                node.x + _RENDERER_LATEX_WIDTH,
-                node.y + _RENDERER_LATEX_HEIGHT,
-            )
-            _require_box_on_board(viewport, role=role)
+            _verify_latex(node, role=role, required_latex=_REQUIRED_IDENTITY)
             receipt_by_role[role] = _receipt(
                 component_id,
                 role,
@@ -367,21 +413,189 @@ def verify_pythagorean_realization(
             )
             continue
 
+        if role is PythagoreanRole.ALTITUDE:
+            altitude_foot = _proof_check(
+                verify_altitude,
+                node,
+                right=right,
+                side_a_end=side_a_end,
+                side_b_end=side_b_end,
+            )
+            receipt_by_role[role] = _receipt(
+                component_id,
+                role,
+                (
+                    VerificationObligation.STABLE_ID,
+                    VerificationObligation.UNIQUE_IDS,
+                    VerificationObligation.BOARD_BOUNDS,
+                    VerificationObligation.ALTITUDE_PROJECTION,
+                ),
+            )
+            continue
+
+        if role is PythagoreanRole.PARTITION:
+            square_c = square_by_role.get(PythagoreanRole.SQUARE_C)
+            if altitude_foot is None or square_c is None:
+                _fail("partition is missing its verified altitude or hypotenuse square")
+            far_partition = _proof_check(
+                verify_partition,
+                node,
+                altitude_foot=altitude_foot,
+                square_c=square_c,
+            )
+            receipt_by_role[role] = _receipt(
+                component_id,
+                role,
+                (
+                    VerificationObligation.STABLE_ID,
+                    VerificationObligation.UNIQUE_IDS,
+                    VerificationObligation.BOARD_BOUNDS,
+                    VerificationObligation.SQUARE_PARTITION,
+                ),
+            )
+            continue
+
+        if role in (PythagoreanRole.REGION_A, PythagoreanRole.REGION_B):
+            square_c = square_by_role.get(PythagoreanRole.SQUARE_C)
+            square_a = square_by_role.get(PythagoreanRole.SQUARE_A)
+            square_b = square_by_role.get(PythagoreanRole.SQUARE_B)
+            if (
+                altitude_foot is None
+                or far_partition is None
+                or square_c is None
+                or square_a is None
+                or square_b is None
+            ):
+                _fail(f"{role.value} is missing its verified partition prerequisites")
+            if role is PythagoreanRole.REGION_A:
+                expected_points = (
+                    square_c[0],
+                    altitude_foot,
+                    far_partition,
+                    square_c[3],
+                )
+                expected_area = polygon_area(square_a)
+            else:
+                expected_points = (
+                    altitude_foot,
+                    square_c[1],
+                    square_c[2],
+                    far_partition,
+                )
+                expected_area = polygon_area(square_b)
+            region_by_role[role] = _proof_check(
+                verify_region,
+                node,
+                name=role.value,
+                expected_points=expected_points,
+                expected_area=expected_area,
+            )
+            receipt_by_role[role] = _receipt(
+                component_id,
+                role,
+                (
+                    VerificationObligation.STABLE_ID,
+                    VerificationObligation.UNIQUE_IDS,
+                    VerificationObligation.BOARD_BOUNDS,
+                    VerificationObligation.SQUARE_PARTITION,
+                    VerificationObligation.AREA_EQUIVALENCE,
+                ),
+            )
+            if role is PythagoreanRole.REGION_B:
+                region_a = region_by_role.get(PythagoreanRole.REGION_A)
+                if region_a is None:
+                    _fail("region_b is missing region_a")
+                _proof_check(
+                    verify_region_coverage,
+                    region_a=region_a,
+                    region_b=region_by_role[role],
+                    square_c=square_c,
+                    altitude_foot=altitude_foot,
+                    far_partition=far_partition,
+                )
+            continue
+
+        if role in (PythagoreanRole.REGION_A_LABEL, PythagoreanRole.REGION_B_LABEL):
+            region_role = (
+                PythagoreanRole.REGION_A
+                if role is PythagoreanRole.REGION_A_LABEL
+                else PythagoreanRole.REGION_B
+            )
+            region = region_by_role.get(region_role)
+            if region is None:
+                _fail(f"{role.value} is missing its prerequisite proof region")
+            label_boxes.append((role, _verify_label(node, role=role, square=region)))
+            continue
+
+        if role is PythagoreanRole.PROJECTION_IDENTITY:
+            square_a = square_by_role.get(PythagoreanRole.SQUARE_A)
+            square_b = square_by_role.get(PythagoreanRole.SQUARE_B)
+            if (
+                altitude_foot is None
+                or square_a is None
+                or square_b is None
+                or PythagoreanRole.REGION_A not in region_by_role
+                or PythagoreanRole.REGION_B not in region_by_role
+            ):
+                _fail("projection identity is missing its verified proof regions")
+            _proof_check(
+                verify_projection_area_equivalence,
+                side_a_end=side_a_end,
+                side_b_end=side_b_end,
+                altitude_foot=altitude_foot,
+                square_a=square_a,
+                square_b=square_b,
+            )
+            _proof_check(verify_projection_identity, node)
+            receipt_by_role[role] = _receipt(
+                component_id,
+                role,
+                (
+                    VerificationObligation.STABLE_ID,
+                    VerificationObligation.UNIQUE_IDS,
+                    VerificationObligation.BOARD_BOUNDS,
+                    VerificationObligation.AREA_EQUIVALENCE,
+                ),
+            )
+            continue
+
+        if role is PythagoreanRole.PROOF_CONCLUSION:
+            if (
+                PythagoreanRole.IDENTITY not in receipt_by_role
+                or PythagoreanRole.PROJECTION_IDENTITY not in receipt_by_role
+            ):
+                _fail("proof conclusion is missing its verified identities")
+            _proof_check(verify_proof_conclusion, node, identity=nodes[7])
+            receipt_by_role[role] = _receipt(
+                component_id,
+                role,
+                (
+                    VerificationObligation.STABLE_ID,
+                    VerificationObligation.UNIQUE_IDS,
+                    VerificationObligation.BOARD_BOUNDS,
+                    VerificationObligation.PROOF_CONCLUSION,
+                ),
+            )
+            continue
+
         _fail(f"unsupported Pythagorean role: {role.value}")
 
     for index, (role, box) in enumerate(label_boxes):
-        if any(_boxes_intersect(box, other) for _, other in label_boxes[index + 1 :]):
+        if any(_boxes_intersect(box, other) for _other_role, other in label_boxes[index + 1 :]):
             _fail("conservative label boxes intersect")
+        label_obligations = (
+            VerificationObligation.STABLE_ID,
+            VerificationObligation.UNIQUE_IDS,
+            VerificationObligation.BOARD_BOUNDS,
+            VerificationObligation.LABEL_CONTAINMENT,
+            VerificationObligation.LABEL_SEPARATION,
+        )
+        if role in (PythagoreanRole.REGION_A_LABEL, PythagoreanRole.REGION_B_LABEL):
+            label_obligations = (*label_obligations, VerificationObligation.AREA_EQUIVALENCE)
         receipt_by_role[role] = _receipt(
             component_id,
             role,
-            (
-                VerificationObligation.STABLE_ID,
-                VerificationObligation.UNIQUE_IDS,
-                VerificationObligation.BOARD_BOUNDS,
-                VerificationObligation.LABEL_CONTAINMENT,
-                VerificationObligation.LABEL_SEPARATION,
-            ),
+            label_obligations,
         )
 
     if set(receipt_by_role) != set(roles):

@@ -29,6 +29,17 @@ import type {
   SemanticSceneStreamRequest,
   SemanticSceneStreamRunner,
 } from "./model-stream";
+import {
+  beginPresentationInterrupt,
+  beginPresentationReplay,
+  beginPresentationRequest,
+  createRuntimePresentationMetricsState,
+  markFirstPresented,
+  resetPresentationMetrics,
+  settlePresentationMetrics,
+  type RuntimePresentationMetricsSnapshot,
+  type RuntimePresentationMetricsState,
+} from "./runtime-presentation-metrics";
 
 const EMPTY_SCENE = createSceneState({ revision: 0, nodes: [] });
 const EMPTY_SEMANTIC_SCENE = createSemanticSceneState({
@@ -122,6 +133,7 @@ export interface SceneStreamRuntimeSnapshot {
   readonly narration: string;
   readonly error?: SceneStreamRuntimeFailure;
   readonly completion?: SceneStreamCompletionMetrics;
+  readonly presentationMetrics?: RuntimePresentationMetricsSnapshot;
   readonly decline?: SemanticSceneStreamDecline;
   readonly semantic?: SemanticSceneStreamRuntimeSnapshot;
 }
@@ -145,6 +157,7 @@ interface CommonSceneStreamRuntimeOptions {
   readonly renderer: SceneStreamRenderer;
   readonly queueLimit?: number;
   readonly staggerMs?: number;
+  readonly now?: () => number;
 }
 
 export type SceneStreamRuntimeOptions =
@@ -323,6 +336,7 @@ export class SceneStreamRuntime {
   private readonly runSemanticStream: SemanticSceneStreamRunner | undefined;
   private readonly queueLimit: number;
   private readonly staggerMs: number;
+  private readonly now: () => number;
   private readonly listeners = new Set<() => void>();
 
   private tokenSequence = 0;
@@ -346,6 +360,8 @@ export class SceneStreamRuntime {
   private narration = "Ready for a visual explanation.";
   private failure: SceneStreamRuntimeFailure | undefined;
   private completion: SceneStreamCompletionMetrics | undefined;
+  private presentationTiming: RuntimePresentationMetricsState =
+    createRuntimePresentationMetricsState();
   private decline: SemanticSceneStreamDecline | undefined;
   private snapshot: SceneStreamRuntimeSnapshot;
   private disposed = false;
@@ -362,6 +378,7 @@ export class SceneStreamRuntime {
     }
     this.queueLimit = options.queueLimit ?? LIVE_SCENE_MAX_PATCH_QUEUE;
     this.staggerMs = options.staggerMs ?? 70;
+    this.now = options.now ?? (() => globalThis.performance.now());
     if (
       !Number.isSafeInteger(this.queueLimit) ||
       this.queueLimit < 1 ||
@@ -415,6 +432,9 @@ export class SceneStreamRuntime {
       );
     }
 
+    if (this.protocol === "semantic") {
+      this.presentationTiming = beginPresentationRequest(this.now());
+    }
     this.invalidateCurrentToken(true);
     const generation = this.generation + 1;
     const token = this.createToken("stream", generation);
@@ -568,6 +588,7 @@ export class SceneStreamRuntime {
     this.narration = "Ready for a visual explanation.";
     this.failure = undefined;
     this.completion = undefined;
+    this.presentationTiming = resetPresentationMetrics();
     this.decline = undefined;
     this.publish();
   }
@@ -697,6 +718,10 @@ export class SceneStreamRuntime {
       );
     }
 
+    this.presentationTiming = beginPresentationReplay(
+      this.presentationTiming,
+      this.now()
+    );
     this.invalidateCurrentToken(true);
     const records = [...this.acceptedSemantic];
     const token = this.createToken("replay", this.generation);
@@ -1419,6 +1444,11 @@ export class SceneStreamRuntime {
   private interruptSemantic(): boolean {
     if (this.pendingInterruptToken) return true;
 
+    this.presentationTiming = beginPresentationInterrupt(
+      this.presentationTiming,
+      this.now()
+    );
+
     const active = this.active;
     const control = this.streamControl;
     this.streamControl = null;
@@ -1561,6 +1591,10 @@ export class SceneStreamRuntime {
     });
     this.accepted = [...this.accepted, rawRecord];
     this.acceptedSemantic = [...this.acceptedSemantic, semanticRecord];
+    this.presentationTiming = markFirstPresented(
+      this.presentationTiming,
+      this.now()
+    );
   }
 
   private replaceSemanticAccepted(
@@ -1847,6 +1881,18 @@ export class SceneStreamRuntime {
   }
 
   private publish(): void {
+    if (
+      this.protocol === "semantic" &&
+      (this.phase === "completed" ||
+        this.phase === "declined" ||
+        this.phase === "failed" ||
+        this.phase === "interrupted")
+    ) {
+      this.presentationTiming = settlePresentationMetrics(
+        this.presentationTiming,
+        this.now()
+      );
+    }
     this.snapshot = this.buildSnapshot();
     for (const listener of [...this.listeners]) {
       try {
@@ -1894,6 +1940,9 @@ export class SceneStreamRuntime {
       narration: this.narration,
       ...(this.failure ? { error: this.failure } : {}),
       ...(this.completion ? { completion: this.completion } : {}),
+      ...(this.protocol === "semantic" && this.presentationTiming.snapshot
+        ? { presentationMetrics: this.presentationTiming.snapshot }
+        : {}),
       ...(this.decline ? { decline: this.decline } : {}),
       ...(semantic ? { semantic } : {}),
     });
