@@ -16,6 +16,7 @@ This is an authenticated, ephemeral product slice. It does not claim that the se
 - [x] 2026-09-06 01:47 IST: Added the authenticated semantic product endpoint in `a93b71d`; admission uses the trusted database user ID, the raw route remains unchanged, and 154 focused backend tests plus Ruff passed.
 - [x] 2026-09-06 02:01 IST: Proved progressive presentation, interruption, exact in-memory continuation, replay, decline/recovery, semantic late-frame rejection, and both narrow viewports in `a219d5e` and reviewer repair `9cc37c4`; all 14 Playwright scenarios passed.
 - [x] 2026-09-06 02:02 IST: Ran the full local gates: 1,659 backend tests, 458 frontend tests, Ruff, lint, type-check, production build with all 11 static pages, and the scene browser suite passed. Added the browser proof to pull-request CI in `96d0e5a` and restored production Next route references in `71183e7`.
+- [x] 2026-09-06 02:15 IST: Synchronized the public feature, architecture, setup, development, and manual-provider documentation in `2d962a3`, including the default-off flag and the provider-free versus genuine signed-in qualification boundary.
 - [ ] After separate cost approval, run one small signed-in Azure browser qualification and record only sanitized latency/outcome evidence.
 
 ## Surprises & Discoveries
