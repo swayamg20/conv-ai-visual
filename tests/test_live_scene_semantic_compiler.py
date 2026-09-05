@@ -3,10 +3,17 @@ from __future__ import annotations
 import ast
 import inspect
 from collections.abc import Callable
+from itertools import combinations
 
 import pytest
 from murmur.live_scene import semantic_compiler, semantic_verifier
-from murmur.live_scene.contracts import LatexSceneNode, PathSceneNode, SceneNode, TextSceneNode
+from murmur.live_scene.contracts import (
+    MAX_ACCEPTED_PATCHES,
+    LatexSceneNode,
+    PathSceneNode,
+    SceneNode,
+    TextSceneNode,
+)
 from murmur.live_scene.pythagorean_proof import PythagoreanProofError, verify_region_coverage
 from murmur.live_scene.semantic_compiler import (
     SemanticCompilationError,
@@ -78,6 +85,67 @@ def _replace_node(
     return (*nodes[:index], replacement, *nodes[index + 1 :])
 
 
+def _compile_full_proof(
+    base_scene: SemanticSceneState | None = None,
+) -> tuple[CompiledTeachingBeat, CompiledTeachingBeat]:
+    identity = compile_teaching_beat(
+        _beat(PythagoreanStage.IDENTITY, beat_id="beat-identity"),
+        base_scene or SemanticSceneState(revision=0),
+    )
+    proof = compile_teaching_beat(
+        _beat(PythagoreanStage.PROOF, beat_id="beat-proof"),
+        identity.result_scene,
+    )
+    return identity, proof
+
+
+def _full_proof_nodes() -> tuple[SceneNode, ...]:
+    identity, proof = _compile_full_proof()
+    return (*_nodes(identity), *_nodes(proof))
+
+
+def _proof_prefix_scene(
+    identity: CompiledTeachingBeat,
+    proof: CompiledTeachingBeat,
+    prefix_length: int,
+) -> SemanticSceneState:
+    if prefix_length == MAX_ACCEPTED_PATCHES:
+        return identity.result_scene
+    certificate = proof.atoms[prefix_length - MAX_ACCEPTED_PATCHES - 1].certificate
+    assert certificate is not None
+    return SemanticSceneState(
+        revision=identity.base_scene.revision + prefix_length,
+        components=(
+            PythagoreanAreaIdentityState(
+                id="areas",
+                revealed_roles=PYTHAGOREAN_ROLE_ORDER[:prefix_length],
+            ),
+        ),
+        certificate_head_sha256=certificate.certificate_sha256,
+    )
+
+
+def _conservative_label_box(node: TextSceneNode) -> tuple[float, float, float, float]:
+    width = max(48.0, len(node.text) * node.style.font_size * 0.75)
+    height = max(36.0, node.style.font_size * 1.25)
+    if node.style.anchor == "middle":
+        left = node.x - width / 2.0
+    elif node.style.anchor == "end":
+        left = node.x - width
+    else:
+        left = node.x
+    return (left, node.y - height / 2.0, left + width, node.y + height / 2.0)
+
+
+def _boxes_intersect(
+    left: tuple[float, float, float, float],
+    right: tuple[float, float, float, float],
+) -> bool:
+    return not (
+        left[2] < right[0] or right[2] < left[0] or left[3] < right[1] or right[3] < left[1]
+    )
+
+
 def test_compilation_is_byte_for_byte_deterministic_and_uses_no_entropy_sources() -> None:
     beat = _beat()
     base = SemanticSceneState(revision=0)
@@ -117,7 +185,6 @@ def test_verifier_is_a_separate_serialized_contract_boundary() -> None:
         (PythagoreanStage.TRIANGLE, 1),
         (PythagoreanStage.AREAS, 7),
         (PythagoreanStage.IDENTITY, 8),
-        (PythagoreanStage.PROOF, 16),
     ],
 )
 def test_each_stage_lowers_to_the_exact_ordered_one_put_prefix(
@@ -142,40 +209,74 @@ def test_each_stage_lowers_to_the_exact_ordered_one_put_prefix(
 def test_child_and_atom_ids_remain_stable_across_target_stages() -> None:
     compiled_by_stage = {
         stage: compile_teaching_beat(_beat(stage), SemanticSceneState(revision=0))
-        for stage in PythagoreanStage
+        for stage in (
+            PythagoreanStage.TRIANGLE,
+            PythagoreanStage.AREAS,
+            PythagoreanStage.IDENTITY,
+        )
     }
-    final = compiled_by_stage[PythagoreanStage.PROOF]
+    identity = compiled_by_stage[PythagoreanStage.IDENTITY]
+    proof = compile_teaching_beat(
+        _beat(PythagoreanStage.PROOF, beat_id="beat-proof"),
+        identity.result_scene,
+    )
+    final_atoms = (*identity.atoms, *proof.atoms)
+    final_nodes = (*_nodes(identity), *_nodes(proof))
 
     for stage, expected_count in (
         (PythagoreanStage.TRIANGLE, 1),
         (PythagoreanStage.AREAS, 7),
         (PythagoreanStage.IDENTITY, 8),
-        (PythagoreanStage.PROOF, 16),
     ):
         compiled = compiled_by_stage[stage]
         assert tuple(atom.atom_id for atom in compiled.atoms) == tuple(
-            atom.atom_id for atom in final.atoms[:expected_count]
+            atom.atom_id for atom in final_atoms[:expected_count]
         )
         assert tuple(node.id for node in _nodes(compiled)) == tuple(
-            node.id for node in _nodes(final)[:expected_count]
+            node.id for node in final_nodes[:expected_count]
         )
+    assert tuple(atom.atom_id for atom in proof.atoms) == tuple(
+        atom.atom_id for atom in final_atoms[MAX_ACCEPTED_PATCHES:]
+    )
+    assert tuple(node.id for node in _nodes(proof)) == tuple(
+        node.id for node in final_nodes[MAX_ACCEPTED_PATCHES:]
+    )
 
 
 def test_resume_from_every_committed_role_emits_only_the_exact_missing_suffix() -> None:
-    complete = compile_teaching_beat(_beat(PythagoreanStage.PROOF), _base_with_prefix(0))
+    identity, proof = _compile_full_proof(SemanticSceneState(revision=11))
 
-    for prefix_length in range(len(PYTHAGOREAN_ROLE_ORDER) + 1):
+    for prefix_length in range(MAX_ACCEPTED_PATCHES, len(PYTHAGOREAN_ROLE_ORDER) + 1):
+        base_scene = _proof_prefix_scene(identity, proof, prefix_length)
         resumed = compile_teaching_beat(
-            _beat(PythagoreanStage.PROOF),
-            _base_with_prefix(prefix_length),
+            proof.beat,
+            base_scene,
         )
 
         assert tuple(atom.role for atom in resumed.atoms) == PYTHAGOREAN_ROLE_ORDER[prefix_length:]
-        assert tuple(atom.atom_id for atom in resumed.atoms) == tuple(
-            atom.atom_id for atom in complete.atoms[prefix_length:]
-        )
+        assert resumed.atoms == proof.atoms[prefix_length - MAX_ACCEPTED_PATCHES :]
         assert resumed.result_scene.components[0].revealed_roles == PYTHAGOREAN_ROLE_ORDER
-        assert resumed.result_scene.revision == 11 + len(resumed.atoms)
+        assert resumed.result_scene == proof.result_scene
+
+
+def test_empty_to_proof_is_rejected_before_geometry_or_atoms_are_built(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builder_called = False
+
+    def forbidden_builder(_component_id: str) -> tuple[SceneNode, ...]:
+        nonlocal builder_called
+        builder_called = True
+        return ()
+
+    monkeypatch.setattr(semantic_compiler, "_build_pythagorean_nodes", forbidden_builder)
+
+    with pytest.raises(SemanticCompilationError, match="cannot compile more than 8"):
+        compile_teaching_beat(
+            _beat(PythagoreanStage.PROOF),
+            SemanticSceneState(revision=0),
+        )
+    assert builder_called is False
 
 
 def test_noop_is_empty_and_a_backward_target_is_rejected() -> None:
@@ -212,14 +313,12 @@ def test_compiler_owns_the_geometry_labels_and_exact_identity() -> None:
 
 
 def test_proof_suffix_is_exactly_eight_deterministic_replay_safe_atoms() -> None:
-    compiled = compile_teaching_beat(
-        _beat(PythagoreanStage.PROOF, beat_id="beat-proof"),
-        _base_with_prefix(8),
-    )
+    identity, compiled = _compile_full_proof()
     nodes = _nodes(compiled)
 
+    assert len(identity.atoms) == MAX_ACCEPTED_PATCHES
     assert tuple(atom.role for atom in compiled.atoms) == PYTHAGOREAN_ROLE_ORDER[8:]
-    assert len(nodes) == 8
+    assert len(nodes) == MAX_ACCEPTED_PATCHES
     for index in (0, 1, 7):
         stroke = nodes[index]
         assert isinstance(stroke, PathSceneNode)
@@ -261,7 +360,7 @@ def test_proof_suffix_is_exactly_eight_deterministic_replay_safe_atoms() -> None
     assert isinstance(region_b_label, TextSceneNode)
     assert isinstance(projection, TextSceneNode)
     assert (region_a_label.text, region_a_label.x, region_a_label.y) == ("a²", 498.4, 348.8)
-    assert (region_b_label.text, region_b_label.x, region_b_label.y) == ("b²", 438.4, 428.8)
+    assert (region_b_label.text, region_b_label.x, region_b_label.y) == ("b²", 438.4, 460.0)
     assert projection.text == "AH = a²/c  ·  HB = b²/c"
     assert nodes[7].points == ((150.0, 112.0), (650.0, 112.0))
 
@@ -271,6 +370,29 @@ def test_proof_suffix_is_exactly_eight_deterministic_replay_safe_atoms() -> None
     assert VerificationObligation.AREA_EQUIVALENCE in obligations[PYTHAGOREAN_ROLE_ORDER[10]]
     assert VerificationObligation.PROOF_CONCLUSION in obligations[PYTHAGOREAN_ROLE_ORDER[15]]
     assert compiled.result_scene.components[0].revealed_roles == PYTHAGOREAN_ROLE_ORDER
+
+
+def test_full_proof_label_boxes_are_pairwise_separated_and_cross_group_overlap_fails() -> None:
+    valid = _full_proof_nodes()
+    label_indexes = (2, 4, 6, 11, 13)
+    labels = tuple(valid[index] for index in label_indexes)
+    assert all(isinstance(label, TextSceneNode) for label in labels)
+    boxes = tuple(
+        _conservative_label_box(label) for label in labels if isinstance(label, TextSceneNode)
+    )
+
+    assert len(boxes) == len(label_indexes)
+    assert all(not _boxes_intersect(left, right) for left, right in combinations(boxes, 2))
+
+    region_b_label = valid[13]
+    assert isinstance(region_b_label, TextSceneNode)
+    overlapping = _replace_node(
+        valid,
+        13,
+        region_b_label.model_copy(update={"y": 428.8}),
+    )
+    with pytest.raises(SemanticVerificationError, match="label boxes intersect"):
+        verify_pythagorean_realization("areas", _serialized(overlapping))
 
 
 def test_semantic_beat_is_at_least_eighty_percent_smaller_than_raw_patches() -> None:
@@ -427,12 +549,7 @@ def test_independent_verifier_fails_closed_for_every_obligation_class() -> None:
 
 
 def test_independent_verifier_rejects_each_proof_relationship_and_exact_text() -> None:
-    valid = _nodes(
-        compile_teaching_beat(
-            _beat(PythagoreanStage.PROOF),
-            SemanticSceneState(revision=0),
-        )
-    )
+    valid = _full_proof_nodes()
     altitude = valid[8]
     partition = valid[9]
     region_a = valid[10]

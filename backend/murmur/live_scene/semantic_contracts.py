@@ -17,6 +17,7 @@ from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
+    MAX_ACCEPTED_PATCHES,
     MAX_SCENE_NODES,
     LiveSceneContract,
     NarrationText,
@@ -473,7 +474,7 @@ class CompiledTeachingBeat(LiveSceneContract):
     result_scene: SemanticSceneState = Field(alias="resultScene")
     atoms: Annotated[
         tuple[CompiledVisualAtom, ...],
-        Field(max_length=len(PYTHAGOREAN_ROLE_ORDER)),
+        Field(max_length=MAX_ACCEPTED_PATCHES),
     ] = ()
 
     @model_validator(mode="after")

@@ -581,16 +581,7 @@ def verify_pythagorean_realization(
         _fail(f"unsupported Pythagorean role: {role.value}")
 
     for index, (role, box) in enumerate(label_boxes):
-        is_region_label = role in (
-            PythagoreanRole.REGION_A_LABEL,
-            PythagoreanRole.REGION_B_LABEL,
-        )
-        if any(
-            _boxes_intersect(box, other)
-            for other_role, other in label_boxes[index + 1 :]
-            if (other_role in (PythagoreanRole.REGION_A_LABEL, PythagoreanRole.REGION_B_LABEL))
-            is is_region_label
-        ):
+        if any(_boxes_intersect(box, other) for _other_role, other in label_boxes[index + 1 :]):
             _fail("conservative label boxes intersect")
         label_obligations = (
             VerificationObligation.STABLE_ID,

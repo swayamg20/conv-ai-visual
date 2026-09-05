@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import TypeAlias
 
 from murmur.live_scene.contracts import (
+    MAX_ACCEPTED_PATCHES,
     LatexSceneNode,
     PathSceneNode,
     PutSceneOperation,
@@ -325,7 +326,7 @@ def _build_pythagorean_nodes(component_id: str) -> tuple[SceneNode, ...]:
             region_b,
             _REGION_STYLES[PythagoreanRole.REGION_B],
         ),
-        _label(component_id, PythagoreanRole.REGION_B_LABEL, (438.4, 428.8)),
+        _label(component_id, PythagoreanRole.REGION_B_LABEL, (438.4, 460.0)),
         TextSceneNode.model_validate(
             {
                 "id": _node_id(component_id, PythagoreanRole.PROJECTION_IDENTITY),
@@ -394,6 +395,11 @@ def compile_teaching_beat(
     current_roles = () if current is None else current.revealed_roles
     if current_roles != target_roles[: len(current_roles)]:
         raise SemanticCompilationError("a Pythagorean component cannot move backward")
+    missing_roles = target_roles[len(current_roles) :]
+    if len(missing_roles) > MAX_ACCEPTED_PATCHES:
+        raise SemanticCompilationError(
+            f"one teaching beat cannot compile more than {MAX_ACCEPTED_PATCHES} visual atoms"
+        )
 
     complete_nodes = _build_pythagorean_nodes(component_id)
     target_nodes = complete_nodes[: len(target_roles)]

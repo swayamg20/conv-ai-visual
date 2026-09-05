@@ -3,7 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from murmur.live_scene.contracts import LIVE_SCENE_SCHEMA_VERSION, MAX_SCENE_NARRATION_CHARS
+from murmur.live_scene.contracts import (
+    LIVE_SCENE_SCHEMA_VERSION,
+    MAX_ACCEPTED_PATCHES,
+    MAX_SCENE_NARRATION_CHARS,
+)
 from murmur.live_scene.semantic_contracts import (
     MAX_SEMANTIC_ID_CHARS,
     PYTHAGOREAN_ROLE_ORDER,
@@ -390,8 +394,9 @@ def test_compiled_atom_rejects_unbound_metadata(mutate, message: str) -> None:
 @pytest.mark.parametrize("stage", list(PythagoreanStage))
 def test_compiled_beat_accepts_every_exact_missing_suffix(stage: PythagoreanStage) -> None:
     target_roles = roles_through(stage)
+    earliest_prefix = max(0, len(target_roles) - MAX_ACCEPTED_PATCHES)
 
-    for prefix_length in range(len(target_roles) + 1):
+    for prefix_length in range(earliest_prefix, len(target_roles) + 1):
         base_roles = target_roles[:prefix_length]
         base_components = () if prefix_length == 0 else (_component(base_roles),)
         atoms = tuple(_atom(role) for role in target_roles[prefix_length:])
@@ -410,6 +415,21 @@ def test_compiled_beat_accepts_every_exact_missing_suffix(stage: PythagoreanStag
 
         assert tuple(atom.role for atom in compiled.atoms) == target_roles[prefix_length:]
         assert compiled.result_scene.revision == compiled.base_scene.revision + len(atoms)
+
+
+def test_compiled_beat_rejects_more_than_one_generation_of_atoms() -> None:
+    target_roles = roles_through(PythagoreanStage.PROOF)
+
+    with pytest.raises(ValidationError, match="at most 8 items"):
+        CompiledTeachingBeat(
+            beat=TeachingBeatDraft.model_validate(_beat(PythagoreanStage.PROOF)),
+            base_scene=SemanticSceneState(revision=0),
+            result_scene=SemanticSceneState(
+                revision=len(target_roles),
+                components=(_component(target_roles),),
+            ),
+            atoms=tuple(_atom(role) for role in target_roles),
+        )
 
 
 def test_compiled_beat_allows_an_explicit_empty_component_as_its_base_prefix() -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
-from murmur.live_scene.contracts import ScenePatchDraft
+from murmur.live_scene.contracts import MAX_ACCEPTED_PATCHES, ScenePatchDraft
 from murmur.live_scene.semantic_compiler import compile_teaching_beat
 from murmur.live_scene.semantic_contracts import (
     PYTHAGOREAN_ROLE_ORDER,
@@ -34,12 +34,13 @@ from pydantic import ValidationError
 def _beat(
     stage: PythagoreanStage = PythagoreanStage.IDENTITY,
     *,
+    beat_id: str = "beat-integrity",
     narration: str = "See a² and 雪 meet at 320.0 units.",
 ) -> TeachingBeatDraft:
     return TeachingBeatDraft.model_validate(
         {
             "v": 1,
-            "beatId": "beat-integrity",
+            "beatId": beat_id,
             "narration": narration,
             "act": "derive",
             "directive": {
@@ -56,12 +57,22 @@ def _prefix_scene(compiled: CompiledTeachingBeat, prefix_length: int) -> Semanti
         return compiled.base_scene
     certificate = compiled.atoms[prefix_length - 1].certificate
     assert certificate is not None
+    base_component = next(
+        (
+            component
+            for component in compiled.base_scene.components
+            if component.id == compiled.beat.directive.id
+        ),
+        None,
+    )
+    base_role_count = 0 if base_component is None else len(base_component.revealed_roles)
+    revealed_role_count = base_role_count + prefix_length
     return SemanticSceneState(
         revision=compiled.base_scene.revision + prefix_length,
         components=(
             PythagoreanAreaIdentityState(
-                id="areas",
-                revealed_roles=PYTHAGOREAN_ROLE_ORDER[:prefix_length],
+                id=compiled.beat.directive.id,
+                revealed_roles=PYTHAGOREAN_ROLE_ORDER[:revealed_role_count],
             ),
         ),
         certificate_head_sha256=certificate.certificate_sha256,
@@ -183,20 +194,28 @@ def test_compiler_emits_one_contiguous_certificate_chain() -> None:
     )
 
 
-def test_resume_from_every_prefix_reproduces_the_exact_certificate_suffix() -> None:
-    beat = _beat(PythagoreanStage.PROOF)
-    complete = compile_teaching_beat(beat, SemanticSceneState(revision=0))
+def test_proof_beat_resumes_the_exact_two_beat_certificate_suffix() -> None:
+    identity_beat = _beat(PythagoreanStage.IDENTITY, beat_id="beat-identity")
+    proof_beat = _beat(PythagoreanStage.PROOF, beat_id="beat-proof")
+    identity = compile_teaching_beat(identity_beat, SemanticSceneState(revision=0))
+    proof = compile_teaching_beat(proof_beat, identity.result_scene)
+    identity_head = identity.result_scene.certificate_head_sha256
+    first_proof_certificate = proof.atoms[0].certificate
+    assert first_proof_certificate is not None
+    assert first_proof_certificate.body.previous_certificate_sha256 == identity_head
+    assert first_proof_certificate.body.beat_sha256 == teaching_beat_sha256(proof_beat)
+    assert first_proof_certificate.body.beat_sha256 != teaching_beat_sha256(identity_beat)
 
-    for prefix_length in range(len(PYTHAGOREAN_ROLE_ORDER) + 1):
-        base = _prefix_scene(complete, prefix_length)
-        resumed = compile_teaching_beat(beat, base)
+    for prefix_length in range(MAX_ACCEPTED_PATCHES + 1):
+        base = _prefix_scene(proof, prefix_length)
+        resumed = compile_teaching_beat(proof_beat, base)
 
-        assert resumed.atoms == complete.atoms[prefix_length:]
-        assert resumed.result_scene == complete.result_scene
+        assert resumed.atoms == proof.atoms[prefix_length:]
+        assert resumed.result_scene == proof.result_scene
         if resumed.atoms:
             certificate = resumed.atoms[0].certificate
             assert certificate is not None
-            assert certificate.body.atom_ordinal == prefix_length + 1
+            assert certificate.body.atom_ordinal == MAX_ACCEPTED_PATCHES + prefix_length + 1
             assert certificate.body.previous_certificate_sha256 == (base.certificate_head_sha256)
         else:
             assert resumed.result_scene is base

@@ -1336,7 +1336,7 @@
                 "exit": "fade"
               },
               "x": 438.4,
-              "y": 428.8,
+              "y": 460.0,
               "text": "b²",
               "style": {
                 "color": "hsl(var(--chalk))",
@@ -1399,11 +1399,11 @@
             "resultSemanticRevision": 14,
             "baseSceneSha256": "89ca0166587eac27ecec64a5fff6be8182efc669e85dd7724e8fa2bb0747ef63",
             "resultSceneSha256": "78c4d2cfb4573b26406743f3c220ac06603bfe6f889f7c877fe135847412ef60",
-            "patchSha256": "78ff5cb42f73a8b8c93519f8db65431abc85ddc70b265f252bb8ac2b038e5c89",
+            "patchSha256": "41a7fc5ffd66d707966a798993de894c90f1812af2c0383a56f6ad8b6e62a1eb",
             "receiptSha256": "1c1a26adb8fda8d3471e91682a3a262bcea9da9c955e1346349cddf658eb318b",
             "previousCertificateSha256": "fa3d7474b393b80196c3b24b1d5d15bad32db63a215a53aa9966abc6f97fb951"
           },
-          "certificateSha256": "a06fafcf74882678e887db0b38443fab41e721044e54bd3325866fd3b134c857"
+          "certificateSha256": "92a3b472051ff56c5b544e0bfb3f0f00ad515fba85a406ba21d2fd9b2dd72655"
         }
       }
     },
@@ -1492,9 +1492,9 @@
             "resultSceneSha256": "258f4f358b197f53f9554189cc7de2cabf88a49927e828016f8c49661ee318b2",
             "patchSha256": "2af4c8e140487eec3aa810d3f225abff4cc602f81206c56e0a844749d030bfd3",
             "receiptSha256": "472e9dcfa1f17e4c51ab4f3bc63c35bf2e7b41259feb2ca2ef2996707c9d1f0f",
-            "previousCertificateSha256": "a06fafcf74882678e887db0b38443fab41e721044e54bd3325866fd3b134c857"
+            "previousCertificateSha256": "92a3b472051ff56c5b544e0bfb3f0f00ad515fba85a406ba21d2fd9b2dd72655"
           },
-          "certificateSha256": "5438f2591dde139f1d3360202589745edf4b8315fd5e3b7cc411b6e217bf3e0f"
+          "certificateSha256": "3c4a1b9a4936054c1268b374e76175a5ba2a979bdc0351f0f73e5b49d82cca2a"
         }
       }
     },
@@ -1592,9 +1592,9 @@
             "resultSceneSha256": "9b0dfcfd8187daf35e3079898ef4dab232038d58f3a30c3ac575421bb5bad1b7",
             "patchSha256": "bb3490df8f9d916609d3a09078b37a4032ec8b74c530b3654965344cbd3b52b0",
             "receiptSha256": "2444607fc2ac9ca487b0e81ca1ab7559c9dec6ded57355662c96fd6230c53f1c",
-            "previousCertificateSha256": "5438f2591dde139f1d3360202589745edf4b8315fd5e3b7cc411b6e217bf3e0f"
+            "previousCertificateSha256": "3c4a1b9a4936054c1268b374e76175a5ba2a979bdc0351f0f73e5b49d82cca2a"
           },
-          "certificateSha256": "2f9e2e95ec677a03eb3eb84e9973bb2853763cf09c96732da4f9baaa020f6df4"
+          "certificateSha256": "7b870c035f2045f9504a5793fc6421411645546c6c00b37b750b2d2074d3fdb4"
         }
       }
     }
