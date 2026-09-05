@@ -515,7 +515,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             touchAction: "none",
           }}
         />
-        <div className="absolute top-3 right-3 flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+        <div className="mt-2 flex items-center justify-end gap-1 opacity-100 transition-opacity sm:absolute sm:top-3 sm:right-3 sm:mt-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
           <button
             onClick={zoomIn}
             className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all text-xs font-mono"

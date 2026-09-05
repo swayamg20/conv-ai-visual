@@ -294,6 +294,19 @@ async function expectSemanticBoard(
   ).toHaveCount(0);
 }
 
+async function expectMobileCanvasControlsBelowBoard(board: Locator): Promise<void> {
+  const layout = await board.evaluate((root) => {
+    const svg = root.querySelector('svg[viewBox="0 0 800 600"]');
+    const reset = root.querySelector<HTMLButtonElement>('button[title="Reset zoom"]');
+    if (!svg || !reset) return null;
+    const svgBounds = svg.getBoundingClientRect();
+    const resetBounds = reset.getBoundingClientRect();
+    return { svgBottom: svgBounds.bottom, resetTop: resetBounds.top };
+  });
+  expect(layout).not.toBeNull();
+  expect(layout!.resetTop).toBeGreaterThanOrEqual(layout!.svgBottom);
+}
+
 test("stops the zero-network fixture at identity, then appends the proof", async ({
   page,
 }) => {
@@ -337,6 +350,10 @@ test("stops the zero-network fixture at identity, then appends the proof", async
   await expect(page.locator("#areas__projection_identity")).toContainText(
     "AH = a²/c · HB = b²/c"
   );
+  await page.screenshot({
+    path: "../var/scene-e2e/gate14-adaptive-proof.png",
+    fullPage: true,
+  });
   expect(liveSceneRequests).toEqual([]);
 });
 
@@ -906,11 +923,18 @@ test("keeps the prompt, controls, and board reachable at 320px", async ({ page }
   await expect(page.getByRole("button", { name: "Begin verified lesson" })).toBeVisible();
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
   await expect(page.getByRole("button", { name: "Stop drawing" })).toBeEnabled();
-  await page.getByRole("button", { name: "Stop drawing" }).click();
+  await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
+  await page
+    .getByLabel("What should the board teach?")
+    .fill("I do not understand why the areas are equal; dissect the large square");
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible();
 
   const board = page.getByRole("region", { name: "Live visual board" });
   await board.scrollIntoViewIfNeeded();
   await expect(board).toBeVisible();
+  await expectSemanticBoard(page);
+  await expectMobileCanvasControlsBelowBoard(board);
   const hasHorizontalOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth > window.innerWidth
   );
@@ -925,11 +949,21 @@ test("keeps the prompt, controls, and board reachable at 375x812", async ({ page
   await expect(page.getByRole("button", { name: "Begin verified lesson" })).toBeVisible();
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
   await expect(page.getByRole("button", { name: "Stop drawing" })).toBeEnabled();
-  await page.getByRole("button", { name: "Stop drawing" }).click();
+  await expect(page.getByText("8 presented", { exact: true })).toBeVisible();
+  await page
+    .getByLabel("What should the board teach?")
+    .fill("I do not understand why the areas are equal; dissect the large square");
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByText("16 presented", { exact: true })).toBeVisible();
 
   const board = page.getByRole("region", { name: "Live visual board" });
   await board.scrollIntoViewIfNeeded();
   await expect(board).toBeVisible();
+  await expectSemanticBoard(page);
+  await expectMobileCanvasControlsBelowBoard(board);
+  await board.screenshot({
+    path: "../var/scene-e2e/gate14-adaptive-proof-375.png",
+  });
   const hasHorizontalOverflow = await page.evaluate(
     () => document.documentElement.scrollWidth > window.innerWidth
   );
