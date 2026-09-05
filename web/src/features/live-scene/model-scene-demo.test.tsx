@@ -187,6 +187,16 @@ describe("ModelSceneDemo", () => {
     expect(demo.container.textContent).toContain("server stream timing");
     expect(demo.container.textContent).toContain("first atom");
 
+    await act(async () => {
+      button(demo.container, "Replay presented").click();
+      await flushWork();
+    });
+    expect(demo.container.textContent).toContain("Replay settled");
+    expect(demo.container.textContent).toContain(
+      "no server completion metrics for this state"
+    );
+    expect(demo.container.textContent).not.toContain("awaiting server terminal");
+
     await act(async () => demo.root.unmount());
   });
 

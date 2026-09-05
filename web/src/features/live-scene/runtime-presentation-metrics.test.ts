@@ -59,6 +59,32 @@ describe("runtime presentation metrics", () => {
       requestToSettledMs: 80,
       replayDurationMs: 55,
     });
+
+    const replayingAgain = beginPresentationReplay(replaySettled, 200);
+    expect(replayingAgain.snapshot).toEqual({
+      requestToFirstPresentedMs: 20,
+      requestToSettledMs: 80,
+    });
+    expect(settlePresentationMetrics(replayingAgain, 235).snapshot).toEqual({
+      requestToFirstPresentedMs: 20,
+      requestToSettledMs: 80,
+      replayDurationMs: 35,
+    });
+  });
+
+  it("hides a previous stop duration while a later interruption is unsettled", () => {
+    const firstStop = settlePresentationMetrics(
+      beginPresentationInterrupt(beginPresentationRequest(0), 20),
+      45
+    );
+    expect(firstStop.snapshot?.interruptToSettledMs).toBe(25);
+
+    const stoppingAgain = beginPresentationInterrupt(firstStop, 100);
+    expect(stoppingAgain.snapshot).toEqual({ requestToSettledMs: 45 });
+    expect(settlePresentationMetrics(stoppingAgain, 115).snapshot).toEqual({
+      requestToSettledMs: 45,
+      interruptToSettledMs: 15,
+    });
   });
 
   it("clamps a regressing clock and resets all timing state", () => {

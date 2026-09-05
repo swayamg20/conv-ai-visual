@@ -31,6 +31,15 @@ function freezeSnapshot(
   return Object.freeze({ ...snapshot });
 }
 
+function clearMetric(
+  snapshot: RuntimePresentationMetricsSnapshot | undefined,
+  metric: keyof RuntimePresentationMetricsSnapshot
+): RuntimePresentationMetricsSnapshot {
+  const next = { ...snapshot };
+  Reflect.deleteProperty(next, metric);
+  return freezeSnapshot(next);
+}
+
 function freezeState(
   state: RuntimePresentationMetricsState
 ): RuntimePresentationMetricsState {
@@ -78,7 +87,7 @@ export function beginPresentationInterrupt(
   assertTimestamp(at);
   return freezeState({
     ...state,
-    snapshot: state.snapshot ?? freezeSnapshot({}),
+    snapshot: clearMetric(state.snapshot, "interruptToSettledMs"),
     interruptStartedAt: at,
   });
 }
@@ -90,7 +99,7 @@ export function beginPresentationReplay(
   assertTimestamp(at);
   return freezeState({
     ...state,
-    snapshot: state.snapshot ?? freezeSnapshot({}),
+    snapshot: clearMetric(state.snapshot, "replayDurationMs"),
     replayStartedAt: at,
   });
 }

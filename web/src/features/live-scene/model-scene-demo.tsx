@@ -752,7 +752,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                     <dd className="mt-0.5 text-foreground">
                       {snapshot.completion
                         ? `first atom ${Math.round(snapshot.completion.firstPatchMs)} ms · terminal ${Math.round(snapshot.completion.totalMs)} ms`
-                        : "awaiting server terminal"}
+                        : "no server completion metrics for this state"}
                     </dd>
                   </div>
                 </>
