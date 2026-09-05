@@ -1,7 +1,14 @@
 import { expect, test, type Page } from "@playwright/test";
 
+import semanticTranscript from "../src/features/live-scene/fixtures/pythagorean-area-identity.v1.json";
+
 interface SceneVisibilityProbe {
   readonly completedPatchFrameAt: Record<string, number>;
+}
+
+interface SemanticLateTrace {
+  emitted: number;
+  requests: number;
 }
 
 const SEMANTIC_NODE_IDS = [
@@ -14,6 +21,83 @@ const SEMANTIC_NODE_IDS = [
   "areas__label_c2",
   "areas__identity",
 ] as const;
+
+function semanticSse(events: readonly object[]): string {
+  return events
+    .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+    .join("");
+}
+
+function semanticStarted(generation: number, baseRevision: number): object {
+  return {
+    type: "scene_stream_started",
+    generation,
+    attempt: 1,
+    baseRevision,
+  };
+}
+
+function semanticFixtureAtom(
+  atomIndex: number,
+  generation: number,
+  sequence: number
+): object {
+  return {
+    ...semanticTranscript.events[atomIndex],
+    generation,
+    attempt: 1,
+    sequence,
+  };
+}
+
+async function installLateSemanticFetch(
+  page: Page,
+  events: readonly object[]
+): Promise<void> {
+  await page.addInitScript((streamEvents) => {
+    const originalFetch = window.fetch;
+    const trace: SemanticLateTrace = { emitted: 0, requests: 0 };
+    Object.defineProperty(window, "__semanticLateTrace", {
+      configurable: false,
+      value: trace,
+    });
+    window.fetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (!url.endsWith("/api/live-scenes/lab/semantic/stream")) {
+        return originalFetch(input, init);
+      }
+
+      trace.requests += 1;
+      const encoder = new TextEncoder();
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          void (async () => {
+            for (const [index, event] of streamEvents.entries()) {
+              const delayMs = index === 0 ? 10 : index === 1 ? 30 : index === 2 ? 1_800 : 20;
+              await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+              if (cancelled) return;
+              controller.enqueue(
+                encoder.encode(`data: ${JSON.stringify(event)}\n\n`)
+              );
+              trace.emitted += 1;
+            }
+            if (!cancelled) controller.close();
+          })();
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      // Deliberately ignore init.signal. This simulates a provider/transport
+      // that races cancellation and proves the runtime rejects its stale token.
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    };
+  }, events);
+}
 
 async function installSceneVisibilityProbe(page: Page): Promise<void> {
   await page.addInitScript(() => {
@@ -103,7 +187,7 @@ function percentile(samples: readonly number[], percentileValue: number): number
 async function openLab(page: Page): Promise<void> {
   await page.goto("/labs/live-scene");
   await expect(page.getByRole("heading", { name: "Verified-act board" })).toBeVisible();
-  await expect(page.getByText("Gate 1.2", { exact: true }).locator("..")).toBeVisible();
+  await expect(page.getByText("Verified", { exact: true }).locator("..")).toBeVisible();
   await expect(page.getByRole("radio", { name: "Verified acts" })).toBeChecked();
   await expect(page.getByRole("radio", { name: "Fixture · $0" })).toBeChecked();
   await expect(page.getByText("Verified fixture · $0", { exact: true })).toBeVisible();
@@ -220,6 +304,61 @@ test("interrupts at one presented semantic act, resumes the exact suffix, and re
   expect(liveSceneRequests).toEqual([]);
 });
 
+test("retains the semantic frontier and rejects deliberately late atoms", async ({ page }) => {
+  const generation = 1;
+  const atoms = semanticTranscript.events.map((_event, index) =>
+    semanticFixtureAtom(index, generation, index + 1)
+  );
+  const events = [
+    semanticStarted(generation, 0),
+    ...atoms,
+    {
+      type: "scene_stream_completed",
+      generation,
+      finalRevision: atoms.length,
+      patchCount: atoms.length,
+      firstPatchMs: 20,
+      totalMs: 200,
+      repaired: false,
+    },
+  ];
+  await installLateSemanticFetch(page, events);
+
+  await openLab(page);
+  await chooseSource(page, "Azure · paid");
+  await page.getByRole("button", { name: "Run paid Azure lesson" }).click();
+  await expect(page.locator("#areas__triangle")).toBeVisible();
+  expect(await page.locator("#areas__square_a").count()).toBe(0);
+
+  await page.getByRole("button", { name: "Stop after this act" }).click();
+  await expect(page.getByText("Stopped at presented frontier", { exact: true })).toBeVisible();
+  const canvas = page
+    .getByRole("region", { name: "Live visual board" })
+    .locator('svg[viewBox="0 0 800 600"]');
+  const interruptedMarkup = await canvas.evaluate((svg) => svg.innerHTML);
+
+  await page.waitForFunction((eventCount) => {
+    const trace = (
+      window as typeof window & { __semanticLateTrace?: SemanticLateTrace }
+    ).__semanticLateTrace;
+    return trace?.emitted === eventCount;
+  }, events.length);
+
+  await expect(page.getByText("Stopped at presented frontier", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 presented", { exact: true })).toBeVisible();
+  await expect(page.locator("#areas__square_a")).not.toBeVisible();
+  await expect(page.locator("#areas__identity")).not.toBeVisible();
+  expect(await canvas.evaluate((svg) => svg.innerHTML)).toBe(interruptedMarkup);
+  expect(
+    await page.evaluate(() => {
+      const trace = (
+        window as typeof window & { __semanticLateTrace: SemanticLateTrace }
+      ).__semanticLateTrace;
+      return trace.requests;
+    })
+  ).toBe(1);
+});
+
 test("posts paired semantic bases only to the intercepted paid Azure route", async ({ page }) => {
   const prompt = "Teach the Pythagorean area identity through verified areas";
   let postedBody: unknown;
@@ -275,6 +414,81 @@ test("posts paired semantic bases only to the intercepted paid Azure route", asy
   expect(postedBody).toMatchObject({
     prompt,
     generation: 1,
+    baseScene: { revision: 0, nodes: [] },
+    baseSemanticScene: { revision: 0, components: [] },
+  });
+});
+
+test("keeps a declined semantic frontier unchanged and accepts the next request", async ({
+  page,
+}) => {
+  const postedBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/live-scenes/lab/semantic/stream", async (route) => {
+    const request = route.request().postDataJSON() as Record<string, unknown>;
+    postedBodies.push(request);
+    const generation = request.generation as number;
+    const baseScene = request.baseScene as { revision: number };
+    const events =
+      postedBodies.length === 1
+        ? [
+            semanticStarted(generation, baseScene.revision),
+            {
+              type: "semantic_scene_stream_declined",
+              generation,
+              attempt: 1,
+              finalRevision: baseScene.revision,
+              reasonCode: "unsupported_intent",
+              message: "This request does not have a supported visual yet.",
+            },
+          ]
+        : [
+            semanticStarted(generation, 0),
+            semanticFixtureAtom(0, generation, 1),
+            {
+              type: "scene_stream_completed",
+              generation,
+              finalRevision: 1,
+              patchCount: 1,
+              firstPatchMs: 20,
+              totalMs: 40,
+              repaired: false,
+            },
+          ];
+    await route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      headers: { "Access-Control-Allow-Origin": "*" },
+      body: semanticSse(events),
+    });
+  });
+
+  await openLab(page);
+  await chooseSource(page, "Azure · paid");
+  const board = page.getByRole("region", { name: "Live visual board" });
+  const canvas = board.locator('svg[viewBox="0 0 800 600"]');
+  const before = await canvas.evaluate((svg) => svg.innerHTML);
+
+  await page.getByLabel("What should the board teach?").fill("Draw a weather map");
+  await page.getByRole("button", { name: "Run paid Azure lesson" }).click();
+
+  await expect(page.getByText("No visual change", { exact: true })).toBeVisible();
+  await expect(page.getByText("0 presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("scene 0", { exact: true })).toBeVisible();
+  await expect(page.getByText("semantic 0", { exact: true })).toBeVisible();
+  expect(await canvas.evaluate((svg) => svg.innerHTML)).toBe(before);
+  await expect(page.getByRole("button", { name: "Run paid Azure lesson" })).toBeEnabled();
+
+  await page
+    .getByLabel("What should the board teach?")
+    .fill("Start with the right triangle");
+  await page.getByRole("button", { name: "Run paid Azure lesson" }).click();
+
+  await expect(page.getByText("Verified acts presented", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 presented", { exact: true })).toBeVisible();
+  await expect(page.locator("#areas__triangle")).toBeVisible();
+  expect(postedBodies).toHaveLength(2);
+  expect(postedBodies[1]).toMatchObject({
+    generation: 2,
     baseScene: { revision: 0, nodes: [] },
     baseSemanticScene: { revision: 0, components: [] },
   });
@@ -524,13 +738,12 @@ test("keeps the prompt, controls, and board reachable at 320px", async ({ page }
 test("keeps the prompt, controls, and board reachable at 375x812", async ({ page }) => {
   await page.setViewportSize({ width: 375, height: 812 });
   await openLab(page);
-  await chooseRawBaseline(page);
 
   await expect(page.getByLabel("What should the board teach?")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Run raw fixture" })).toBeVisible();
-  await page.getByRole("button", { name: "Run raw fixture" }).click();
-  await expect(page.getByRole("button", { name: "Interrupt" })).toBeEnabled();
-  await page.getByRole("button", { name: "Interrupt" }).click();
+  await expect(page.getByRole("button", { name: "Begin verified lesson" })).toBeVisible();
+  await page.getByRole("button", { name: "Begin verified lesson" }).click();
+  await expect(page.getByRole("button", { name: "Stop after this act" })).toBeEnabled();
+  await page.getByRole("button", { name: "Stop after this act" }).click();
 
   const board = page.getByRole("region", { name: "Live visual board" });
   await board.scrollIntoViewIfNeeded();
