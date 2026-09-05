@@ -166,7 +166,7 @@ describe("ModelSceneDemo", () => {
     expect(demo.container.textContent).toContain("atom areas__atom_triangle");
     expect(demo.container.textContent).toContain("stable_id · unique_ids · board_bounds");
     expect(demo.container.textContent).toContain(
-      "compiler certificate 28ab5dd89f…485d"
+      "compiler certificate 47002ee295…4736"
     );
     expect(demo.container.textContent).toContain(
       "Browser post-paint acknowledgement · completed"
@@ -181,6 +181,11 @@ describe("ModelSceneDemo", () => {
     expect(demo.container.textContent).toContain(
       "Narration remains explanatory copy and is not fact-checked by this gate."
     );
+    expect(demo.container.textContent).toContain("Browser presentation timing");
+    expect(demo.container.textContent).toContain("First presented");
+    expect(demo.container.textContent).toContain("request settled");
+    expect(demo.container.textContent).toContain("server stream timing");
+    expect(demo.container.textContent).toContain("first atom");
 
     await act(async () => demo.root.unmount());
   });
