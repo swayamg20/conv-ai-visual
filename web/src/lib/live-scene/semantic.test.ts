@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import { decodeScenePatchEvent, LiveSceneProtocolError } from "./patch";
 import {
+  PYTHAGOREAN_IDENTITY_ROLE_COUNT,
+  PYTHAGOREAN_ROLE_ORDER,
+  SEMANTIC_COMPILER_VERSION,
   applySemanticScenePatch,
   createSemanticSceneState,
   decodeSemanticScenePatchEvent,
@@ -90,7 +93,7 @@ function rawSemanticEvent(): Record<string, unknown> {
         body: {
           v: 1,
           issuer: "semantic_compiler",
-          compilerVersion: "murmur.pythagorean_area_identity.v1",
+          compilerVersion: "murmur.pythagorean_area_identity.v2",
           canonicalization: "murmur-json-v1",
           hashAlgorithm: "sha256",
           atomId: "areas__atom_triangle",
@@ -169,6 +172,74 @@ function secondSemanticEvent(
   return event;
 }
 
+function proofSemanticEvent(): Record<string, unknown> {
+  const event = rawSemanticEvent();
+  event.baseRevision = 8;
+  event.resultRevision = 9;
+
+  const patch = event.patch as Record<string, unknown>;
+  patch.patchId = "areas__atom_altitude";
+  patch.narration = "Project the right-angle altitude through the large square.";
+  patch.operations = [
+    {
+      op: "put",
+      node: {
+        id: "areas__altitude",
+        kind: "path",
+        presentation: { enter: "draw", exit: "fade" },
+        points: [
+          [320, 420],
+          [396.8, 317.6],
+        ],
+        closed: false,
+        style: {
+          stroke: "hsl(var(--amber))",
+          strokeWidth: 3,
+          opacity: 1,
+          roughness: 0.45,
+          fill: "transparent",
+        },
+      },
+    },
+  ];
+
+  const semantic = event.semantic as Record<string, unknown>;
+  const beat = semantic.beat as Record<string, unknown>;
+  beat.beatId = "beat-proof";
+  beat.narration = patch.narration;
+  (beat.directive as Record<string, unknown>).revealThrough = "proof";
+  semantic.atomId = "areas__atom_altitude";
+  semantic.role = "altitude";
+  semantic.atomOrdinal = 9;
+  semantic.semanticBaseRevision = 8;
+  semantic.semanticResultRevision = 9;
+
+  const receipt = semantic.receipt as Record<string, unknown>;
+  receipt.role = "altitude";
+  receipt.nodeId = "areas__altitude";
+  receipt.obligationCodes = [
+    "stable_id",
+    "unique_ids",
+    "board_bounds",
+    "altitude_projection",
+    "square_partition",
+    "area_equivalence",
+    "proof_conclusion",
+  ];
+
+  const certificate = semantic.certificate as Record<string, unknown>;
+  const body = certificate.body as Record<string, unknown>;
+  body.atomId = "areas__atom_altitude";
+  body.beatId = "beat-proof";
+  body.role = "altitude";
+  body.nodeId = "areas__altitude";
+  body.atomOrdinal = 9;
+  body.baseSemanticRevision = 8;
+  body.resultSemanticRevision = 9;
+  body.previousCertificateSha256 = DIGESTS.certificate;
+  return event;
+}
+
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
@@ -183,6 +254,54 @@ function protocolCode(callback: () => unknown): string | undefined {
 }
 
 describe("semantic live scene contract", () => {
+  it("mirrors the compiler v2 proof vocabulary without changing the identity prefix", () => {
+    expect(SEMANTIC_COMPILER_VERSION).toBe(
+      "murmur.pythagorean_area_identity.v2"
+    );
+    expect(PYTHAGOREAN_IDENTITY_ROLE_COUNT).toBe(8);
+    expect(PYTHAGOREAN_ROLE_ORDER).toEqual([
+      "triangle",
+      "square_a",
+      "label_a2",
+      "square_b",
+      "label_b2",
+      "square_c",
+      "label_c2",
+      "identity",
+      "altitude",
+      "partition",
+      "region_a",
+      "region_a_label",
+      "region_b",
+      "region_b_label",
+      "projection_identity",
+      "proof_conclusion",
+    ]);
+
+    const proof = decodeSemanticScenePatchEvent(proofSemanticEvent());
+    expect(proof.semantic).toMatchObject({
+      role: "altitude",
+      atomOrdinal: 9,
+      beat: { directive: { revealThrough: "proof" } },
+      receipt: {
+        obligationCodes: expect.arrayContaining([
+          "altitude_projection",
+          "square_partition",
+          "area_equivalence",
+          "proof_conclusion",
+        ]),
+      },
+    });
+
+    const proofRoleUnderIdentity = proofSemanticEvent();
+    (((proofRoleUnderIdentity.semantic as Record<string, unknown>)
+      .beat as Record<string, unknown>).directive as Record<string, unknown>)
+      .revealThrough = "identity";
+    expect(() => decodeSemanticScenePatchEvent(proofRoleUnderIdentity)).toThrow(
+      /role and ordinal/
+    );
+  });
+
   it("decodes an exact server event and deep-freezes every accepted layer", () => {
     const event = decodeSemanticScenePatchEvent(rawSemanticEvent());
 
@@ -259,7 +378,7 @@ describe("semantic live scene contract", () => {
 
     const wrongStage = rawSemanticEvent();
     (((wrongStage.semantic as Record<string, unknown>).beat as Record<string, unknown>)
-      .directive as Record<string, unknown>).revealThrough = "proof";
+      .directive as Record<string, unknown>).revealThrough = "diagram";
     expect(() => decodeSemanticScenePatchEvent(wrongStage)).toThrow(/revealThrough/);
 
     const wrongNarration = rawSemanticEvent();
@@ -286,6 +405,13 @@ describe("semantic live scene contract", () => {
     ((duplicateObligation.semantic as Record<string, unknown>).receipt as Record<string, unknown>)
       .obligationCodes = ["stable_id", "stable_id"];
     expect(() => decodeSemanticScenePatchEvent(duplicateObligation)).toThrow(/must be unique/);
+
+    const unknownObligation = rawSemanticEvent();
+    ((unknownObligation.semantic as Record<string, unknown>).receipt as Record<string, unknown>)
+      .obligationCodes = ["stable_id", "proof_magic"];
+    expect(() => decodeSemanticScenePatchEvent(unknownObligation)).toThrow(
+      /unsupported value/
+    );
 
     const remove = rawSemanticEvent();
     (remove.patch as Record<string, unknown>).operations = [

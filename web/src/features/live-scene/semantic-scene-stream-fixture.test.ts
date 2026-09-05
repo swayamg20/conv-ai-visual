@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  PYTHAGOREAN_IDENTITY_ROLE_COUNT,
   PYTHAGOREAN_ROLE_ORDER,
   applySemanticScenePatch,
   createSemanticSceneState,
@@ -50,19 +51,30 @@ function goldenPrefix(atomCount: number): {
   readonly semanticScene: SemanticSceneState;
   readonly sourceEvents: readonly SemanticScenePatchEvent[];
 } {
-  const sourceEvents = patches(createSemanticSceneFixtureEvents(request()));
+  const sourceEvents: SemanticScenePatchEvent[] = [];
   let scene = createSceneState({ revision: 0, nodes: [] });
   let semanticScene = createSemanticSceneState({ revision: 0, components: [] });
-  for (const event of sourceEvents.slice(0, atomCount)) {
-    const applied = applySemanticScenePatch(scene, semanticScene, event);
-    scene = applied.scene;
-    semanticScene = applied.semanticScene;
+  let generation = 1;
+  while (scene.revision < atomCount) {
+    const batch = patches(
+      createSemanticSceneFixtureEvents(
+        request(generation, scene, semanticScene)
+      )
+    );
+    const exactPrefixBatch = batch.slice(0, atomCount - scene.revision);
+    sourceEvents.push(...exactPrefixBatch);
+    for (const event of exactPrefixBatch) {
+      const applied = applySemanticScenePatch(scene, semanticScene, event);
+      scene = applied.scene;
+      semanticScene = applied.semanticScene;
+    }
+    generation += 1;
   }
   return { scene, semanticScene, sourceEvents };
 }
 
 describe("semantic scene stream fixture", () => {
-  it("strictly emits and applies all eight compiler-certified golden atoms", () => {
+  it("stops the first request at the eight-atom identity boundary", () => {
     const events = createSemanticSceneFixtureEvents(request(7));
     const atoms = patches(events);
     let scene = createSceneState({ revision: 0, nodes: [] });
@@ -80,9 +92,9 @@ describe("semantic scene stream fixture", () => {
       attempt: 1,
       baseRevision: 0,
     });
-    expect(atoms).toHaveLength(8);
+    expect(atoms).toHaveLength(PYTHAGOREAN_IDENTITY_ROLE_COUNT);
     expect(atoms.map((event) => event.semantic.role)).toEqual(
-      PYTHAGOREAN_ROLE_ORDER
+      PYTHAGOREAN_ROLE_ORDER.slice(0, PYTHAGOREAN_IDENTITY_ROLE_COUNT)
     );
     expect(atoms.map((event) => event.generation)).toEqual(Array(8).fill(7));
     expect(atoms.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -93,11 +105,14 @@ describe("semantic scene stream fixture", () => {
         {
           kind: "pythagorean_area_identity",
           id: "areas",
-          revealedRoles: PYTHAGOREAN_ROLE_ORDER,
+          revealedRoles: PYTHAGOREAN_ROLE_ORDER.slice(
+            0,
+            PYTHAGOREAN_IDENTITY_ROLE_COUNT
+          ),
         },
       ],
       certificateHeadSha256:
-        "df4f7cec75afb919a3c54017f816c43ec54b7f23a66ffa5f3ff252e54c36f279",
+        atoms.at(-1)?.semantic.certificate.certificateSha256,
     });
     expect(events.at(-1)).toEqual(
       expect.objectContaining({
@@ -139,7 +154,7 @@ describe("semantic scene stream fixture", () => {
       })
     );
     expect(suffix.map((event) => event.semantic.role)).toEqual(
-      PYTHAGOREAN_ROLE_ORDER.slice(3)
+      PYTHAGOREAN_ROLE_ORDER.slice(3, PYTHAGOREAN_IDENTITY_ROLE_COUNT)
     );
     expect(events.at(-1)).toEqual(
       expect.objectContaining({
@@ -150,22 +165,98 @@ describe("semantic scene stream fixture", () => {
     );
     expect(resumedScene.revision).toBe(8);
     expect(resumedSemanticScene.components[0]?.revealedRoles).toEqual(
+      PYTHAGOREAN_ROLE_ORDER.slice(0, PYTHAGOREAN_IDENTITY_ROLE_COUNT)
+    );
+  });
+
+  it("emits one certificate-chained eight-atom proof beat after identity", () => {
+    const identity = goldenPrefix(PYTHAGOREAN_IDENTITY_ROLE_COUNT);
+    const events = createSemanticSceneFixtureEvents(
+      request(9, identity.scene, identity.semanticScene)
+    );
+    const proof = patches(events);
+    let scene = identity.scene;
+    let semanticScene = identity.semanticScene;
+
+    for (const event of proof) {
+      const applied = applySemanticScenePatch(scene, semanticScene, event);
+      scene = applied.scene;
+      semanticScene = applied.semanticScene;
+    }
+
+    expect(proof).toHaveLength(8);
+    expect(proof.map((event) => event.semantic.role)).toEqual(
+      PYTHAGOREAN_ROLE_ORDER.slice(PYTHAGOREAN_IDENTITY_ROLE_COUNT)
+    );
+    expect(proof.map((event) => event.semantic.atomOrdinal)).toEqual([
+      9, 10, 11, 12, 13, 14, 15, 16,
+    ]);
+    expect(proof.map((event) => event.sequence)).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8,
+    ]);
+    expect(
+      proof[0]?.semantic.certificate.body.previousCertificateSha256
+    ).toBe(identity.semanticScene.certificateHeadSha256);
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        type: "scene_stream_completed",
+        generation: 9,
+        finalRevision: 16,
+        patchCount: 8,
+      })
+    );
+    expect(scene.revision).toBe(16);
+    expect(semanticScene.components[0]?.revealedRoles).toEqual(
       PYTHAGOREAN_ROLE_ORDER
+    );
+  });
+
+  it("resumes only the missing suffix of an interrupted proof beat", () => {
+    const prefix = goldenPrefix(11);
+    const events = createSemanticSceneFixtureEvents(
+      request(12, prefix.scene, prefix.semanticScene)
+    );
+    const suffix = patches(events);
+
+    expect(prefix.sourceEvents).toHaveLength(11);
+    expect(suffix).toHaveLength(5);
+    expect(suffix.map((event) => event.semantic.role)).toEqual(
+      PYTHAGOREAN_ROLE_ORDER.slice(11)
+    );
+    expect(suffix.map((event) => event.sequence)).toEqual([1, 2, 3, 4, 5]);
+    expect(suffix[0]).toEqual(
+      expect.objectContaining({
+        generation: 12,
+        baseRevision: 11,
+        resultRevision: 12,
+      })
+    );
+    expect(events.at(-1)).toEqual(
+      expect.objectContaining({
+        type: "scene_stream_completed",
+        finalRevision: 16,
+        patchCount: 5,
+      })
     );
   });
 
   it("re-stamps only unbound envelope fields and preserves certificate-bound values", () => {
     const prefix = goldenPrefix(3);
+    const [source] = patches(
+      createSemanticSceneFixtureEvents(
+        request(4, prefix.scene, prefix.semanticScene)
+      )
+    );
     const [resumed] = patches(
       createSemanticSceneFixtureEvents(
         request(11, prefix.scene, prefix.semanticScene)
       )
     );
-    const source = prefix.sourceEvents[3];
 
     expect(resumed.generation).toBe(11);
     expect(resumed.sequence).toBe(1);
-    expect(source.sequence).toBe(4);
+    expect(source.generation).toBe(4);
+    expect(source.sequence).toBe(1);
     expect(resumed.attempt).toBe(source.attempt);
     expect(resumed.baseRevision).toBe(source.baseRevision);
     expect(resumed.resultRevision).toBe(source.resultRevision);
@@ -208,7 +299,7 @@ describe("semantic scene stream fixture", () => {
     expect(events.at(-1)).toEqual(
       expect.objectContaining({
         code: "semantic_fixture_complete",
-        lastAcceptedRevision: 8,
+        lastAcceptedRevision: 16,
         retryable: false,
       })
     );
@@ -216,6 +307,8 @@ describe("semantic scene stream fixture", () => {
 
   it("uses the production byte-stream decoder without calling fetch", async () => {
     const received: SemanticSceneStreamEvent[] = [];
+    const proofReceived: SemanticSceneStreamEvent[] = [];
+    const identity = goldenPrefix(PYTHAGOREAN_IDENTITY_ROLE_COUNT);
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockRejectedValue(new Error("fixture must not use fetch"));
@@ -229,12 +322,21 @@ describe("semantic scene stream fixture", () => {
         signal: new AbortController().signal,
         onEvent: (event) => received.push(event),
       });
+      await runner({
+        request: request(2, identity.scene, identity.semanticScene),
+        signal: new AbortController().signal,
+        onEvent: (event) => proofReceived.push(event),
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
     }
 
     expect(received).toEqual(createSemanticSceneFixtureEvents(request()));
     expect(patches(received)).toHaveLength(8);
+    expect(patches(proofReceived).map((event) => event.semantic.role)).toEqual(
+      PYTHAGOREAN_ROLE_ORDER.slice(PYTHAGOREAN_IDENTITY_ROLE_COUNT)
+    );
   });
 
   it("honors cancellation while stale mode can deliberately deliver late events", async () => {

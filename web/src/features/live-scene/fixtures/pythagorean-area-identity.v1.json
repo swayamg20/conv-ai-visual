@@ -88,7 +88,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_triangle",
@@ -106,7 +106,7 @@
             "receiptSha256": "518b80fd923323c07939edb97a9dad39aebd3ec475518be0074c85b890fbee47",
             "previousCertificateSha256": null
           },
-          "certificateSha256": "28ab5dd89fb5a900354b63a1279c2c5566eebc99f8f9142500a082d1436f485d"
+          "certificateSha256": "47002ee295b9ff3bc801ff4085a835885cbfff153a001772bfc050ac15414736"
         }
       }
     },
@@ -197,7 +197,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_square_a",
@@ -213,9 +213,9 @@
             "resultSceneSha256": "68838dd25b57251d844521384ecca40e59fd541476ddb75efa05b8c951a27629",
             "patchSha256": "f0814a4204dd0e42bb5db5e68e421aa2e683d393ad7c0e44b6736f456ca44ce1",
             "receiptSha256": "7047c5b65ff82a14fac4162a1e1bd9505d93aeab347103da5c31f0c71503c57e",
-            "previousCertificateSha256": "28ab5dd89fb5a900354b63a1279c2c5566eebc99f8f9142500a082d1436f485d"
+            "previousCertificateSha256": "47002ee295b9ff3bc801ff4085a835885cbfff153a001772bfc050ac15414736"
           },
-          "certificateSha256": "a1668c61cdb87b268804eb8caa6f9342db632ddf5752ab218f7ab831539cfb01"
+          "certificateSha256": "3826abb45d7b9b95ff3e2ec22f4d8f0aa2dedd45f65f2fe26e4ecee8932777e9"
         }
       }
     },
@@ -289,7 +289,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_label_a2",
@@ -305,9 +305,9 @@
             "resultSceneSha256": "42d172e85dbb25b559859d83773ff574119c3590dab751069944ec47de67403f",
             "patchSha256": "62c50435d1af24a14e9712ff328e50e482081d83685093cab40dc05a6074db09",
             "receiptSha256": "201b675adca2436b2fb7f9faf5c0066b2325e0d5ee2450b099d4c0b28066b677",
-            "previousCertificateSha256": "a1668c61cdb87b268804eb8caa6f9342db632ddf5752ab218f7ab831539cfb01"
+            "previousCertificateSha256": "3826abb45d7b9b95ff3e2ec22f4d8f0aa2dedd45f65f2fe26e4ecee8932777e9"
           },
-          "certificateSha256": "2732395b986d0e6681b000c4c4cf181450e3da708427e8906a35fb63070e2795"
+          "certificateSha256": "a8c04d16828586082edfeb5bacb1d9a9548ceb715a49acd19d576d807fa9b100"
         }
       }
     },
@@ -398,7 +398,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_square_b",
@@ -414,9 +414,9 @@
             "resultSceneSha256": "200d50f46f84edcbe7c8ce17d15e4b3b4a4fe4b444782eac31443de81eb8d4a7",
             "patchSha256": "7d2372364718ddd8557e25b7b44aeb862023ad868f5f7ea4703f3dd6b6d72ab5",
             "receiptSha256": "be64153af29bcf328a95feed88c70a51f58acb4ba9985474051b4267b2a8827a",
-            "previousCertificateSha256": "2732395b986d0e6681b000c4c4cf181450e3da708427e8906a35fb63070e2795"
+            "previousCertificateSha256": "a8c04d16828586082edfeb5bacb1d9a9548ceb715a49acd19d576d807fa9b100"
           },
-          "certificateSha256": "09c64e6c676b67f4ec6cd68e7588ef2bff447ba90c347aa97f7c24c0ad6c5448"
+          "certificateSha256": "e1ea1b159ab400fcb7a197d82780caeeb1c035141c1f077169012409b2dd2e0f"
         }
       }
     },
@@ -490,7 +490,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_label_b2",
@@ -506,9 +506,9 @@
             "resultSceneSha256": "8cb2a14fdb6441e7104f4dc9ad176a1d4650cd403d0a1d31ba626c441c7a4700",
             "patchSha256": "f2575c39be214771f4cf8856c139db23d31e413a787fa28b278d230be97256da",
             "receiptSha256": "f9f64364598f48277424392877e55f96765d9c617d2c43dc11ca2159576c7d89",
-            "previousCertificateSha256": "09c64e6c676b67f4ec6cd68e7588ef2bff447ba90c347aa97f7c24c0ad6c5448"
+            "previousCertificateSha256": "e1ea1b159ab400fcb7a197d82780caeeb1c035141c1f077169012409b2dd2e0f"
           },
-          "certificateSha256": "f66af0059b0247161252eeb85959af9953e833bc417be194dfad1b1238f2659d"
+          "certificateSha256": "caaffa30a8e6078044e6851574ded88e5f58e0a713d3f2b07af6f646e6dfa3d1"
         }
       }
     },
@@ -599,7 +599,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_square_c",
@@ -615,9 +615,9 @@
             "resultSceneSha256": "86aaa610deab581fbc9b33fb2e74c59e747241455924edff1335e081d7f5f8b3",
             "patchSha256": "ce3a790cb030bc47b85a10960c5f6fd4f69325b66486566a32b8bd8fe946e95b",
             "receiptSha256": "77780efb83b5ef353370a827bd6d9d9eab60797b05f1b80a2197d163d4af054d",
-            "previousCertificateSha256": "f66af0059b0247161252eeb85959af9953e833bc417be194dfad1b1238f2659d"
+            "previousCertificateSha256": "caaffa30a8e6078044e6851574ded88e5f58e0a713d3f2b07af6f646e6dfa3d1"
           },
-          "certificateSha256": "a890662f38b307d98952b44f8695f0432540a2e92abd4a63f01aaf295fe6153f"
+          "certificateSha256": "0a6e0fc244c9d844cd40dad8e1939f9fe2256ff529e3063f744b5db95d378eb1"
         }
       }
     },
@@ -691,7 +691,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_label_c2",
@@ -707,9 +707,9 @@
             "resultSceneSha256": "9667612830109358ff5a52c48e1b0bbabbe6dc37ee4ef39864660db5ac3aba7f",
             "patchSha256": "83b0a093a757d0146bb61307e75c2c18171f02ba5c4f8afc19f55a1851c98ba6",
             "receiptSha256": "d54b6b04b83f6d9e5641bbc2403f463f68766c3fb4637bf41ef77c4fb60abaf6",
-            "previousCertificateSha256": "a890662f38b307d98952b44f8695f0432540a2e92abd4a63f01aaf295fe6153f"
+            "previousCertificateSha256": "0a6e0fc244c9d844cd40dad8e1939f9fe2256ff529e3063f744b5db95d378eb1"
           },
-          "certificateSha256": "8d14d632b10ac809e6b775291d6dc358e431a2f9351e1d5807def8907ddda2fd"
+          "certificateSha256": "d53826f5fa5d9c1c374741f9f73744390976032fccd1f6cbbbc9135831b0da7d"
         }
       }
     },
@@ -781,7 +781,7 @@
           "body": {
             "v": 1,
             "issuer": "semantic_compiler",
-            "compilerVersion": "murmur.pythagorean_area_identity.v1",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
             "canonicalization": "murmur-json-v1",
             "hashAlgorithm": "sha256",
             "atomId": "areas__atom_identity",
@@ -797,9 +797,804 @@
             "resultSceneSha256": "0150eb86270b260c5303ab0e74a9428966c738cd519e0f0c3311756824a547ac",
             "patchSha256": "04a2735c46ee3ba22226870b3de9eb7b5a600f1ab14095c29b5c736e657542e2",
             "receiptSha256": "8fdfde60d9096048ca52f8fc0cee33e661df4e9eec7cfed0d6ef19bd9daeffc0",
-            "previousCertificateSha256": "8d14d632b10ac809e6b775291d6dc358e431a2f9351e1d5807def8907ddda2fd"
+            "previousCertificateSha256": "d53826f5fa5d9c1c374741f9f73744390976032fccd1f6cbbbc9135831b0da7d"
           },
-          "certificateSha256": "df4f7cec75afb919a3c54017f816c43ec54b7f23a66ffa5f3ff252e54c36f279"
+          "certificateSha256": "239bc5bed36f4279edbb1eb1f03fe7b8e3f1473d81c7b5c455c1094fedfe3e15"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 1,
+      "baseRevision": 8,
+      "resultRevision": 9,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_altitude",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__altitude",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  320.0,
+                  260.0
+                ],
+                [
+                  396.8,
+                  317.6
+                ]
+              ],
+              "closed": false,
+              "style": {
+                "stroke": "hsl(var(--chalk-soft))",
+                "strokeWidth": 2.5,
+                "opacity": 1.0,
+                "roughness": 0.25,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_altitude",
+        "componentId": "areas",
+        "role": "altitude",
+        "atomOrdinal": 9,
+        "semanticBaseRevision": 8,
+        "semanticResultRevision": 9,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "altitude",
+          "nodeId": "areas__altitude",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "altitude_projection"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_altitude",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "altitude",
+            "nodeId": "areas__altitude",
+            "atomOrdinal": 9,
+            "baseSemanticRevision": 8,
+            "resultSemanticRevision": 9,
+            "baseSceneSha256": "0150eb86270b260c5303ab0e74a9428966c738cd519e0f0c3311756824a547ac",
+            "resultSceneSha256": "1179006f7ae40a70cd2f94203cd92d02ad80b0e33450026decd54d31d70f944f",
+            "patchSha256": "3d5cfce65d02421317394255644fa9eb3fd713754739ba54cf805af600dd21e4",
+            "receiptSha256": "6c6d5581ba41661ed8fe6dc2e4915153a42193e6a64822f7b346901f8d96e87f",
+            "previousCertificateSha256": "239bc5bed36f4279edbb1eb1f03fe7b8e3f1473d81c7b5c455c1094fedfe3e15"
+          },
+          "certificateSha256": "b1f263bdc100a2a5ca9948a35883586d07ebb0c00c0b3b95d35d7b0d294459a7"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 2,
+      "baseRevision": 9,
+      "resultRevision": 10,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_partition",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__partition",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  396.8,
+                  317.6
+                ],
+                [
+                  556.8,
+                  437.6
+                ]
+              ],
+              "closed": false,
+              "style": {
+                "stroke": "hsl(var(--chalk))",
+                "strokeWidth": 4.0,
+                "opacity": 1.0,
+                "roughness": 0.2,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_partition",
+        "componentId": "areas",
+        "role": "partition",
+        "atomOrdinal": 10,
+        "semanticBaseRevision": 9,
+        "semanticResultRevision": 10,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "partition",
+          "nodeId": "areas__partition",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "square_partition"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_partition",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "partition",
+            "nodeId": "areas__partition",
+            "atomOrdinal": 10,
+            "baseSemanticRevision": 9,
+            "resultSemanticRevision": 10,
+            "baseSceneSha256": "1179006f7ae40a70cd2f94203cd92d02ad80b0e33450026decd54d31d70f944f",
+            "resultSceneSha256": "6e7b8fd44aa7ab1d8f2e0cc525c179f9f28f6a38ac0db8d4cb7e1b2f9677c1c8",
+            "patchSha256": "1208bd91f7d979e9053c59502f75df154b807c31676d1d2954e0086328265a13",
+            "receiptSha256": "26cb056fc3eeef9bcdafd6cf46ed94dfe9be1aeb96b14392c3d35e85c078313a",
+            "previousCertificateSha256": "b1f263bdc100a2a5ca9948a35883586d07ebb0c00c0b3b95d35d7b0d294459a7"
+          },
+          "certificateSha256": "8ec04313cdacdeff120338b6943fe0cdb8bdc5569fa8afd80c30c762d169479f"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 3,
+      "baseRevision": 10,
+      "resultRevision": 11,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_region_a",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__region_a",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  440.0,
+                  260.0
+                ],
+                [
+                  396.8,
+                  317.6
+                ],
+                [
+                  556.8,
+                  437.6
+                ],
+                [
+                  600.0,
+                  380.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--sage))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.2,
+                "fill": "#173626"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_region_a",
+        "componentId": "areas",
+        "role": "region_a",
+        "atomOrdinal": 11,
+        "semanticBaseRevision": 10,
+        "semanticResultRevision": 11,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "region_a",
+          "nodeId": "areas__region_a",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "square_partition",
+            "area_equivalence"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_region_a",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "region_a",
+            "nodeId": "areas__region_a",
+            "atomOrdinal": 11,
+            "baseSemanticRevision": 10,
+            "resultSemanticRevision": 11,
+            "baseSceneSha256": "6e7b8fd44aa7ab1d8f2e0cc525c179f9f28f6a38ac0db8d4cb7e1b2f9677c1c8",
+            "resultSceneSha256": "89e838c88e585a1564f309f16cc69c02c076aa998ca859e42f651691878adfd9",
+            "patchSha256": "06c1fe0b59aa2bb16342a296e611d5811d5ca1854eb1487f0f5f1abcbcffd0b0",
+            "receiptSha256": "fb31b0476fb72e5959b644e8093d0873362c55f53d22f64d2976fed51c3ec8f1",
+            "previousCertificateSha256": "8ec04313cdacdeff120338b6943fe0cdb8bdc5569fa8afd80c30c762d169479f"
+          },
+          "certificateSha256": "7407b1a7408fb01b683ba3379506f2f060cbf9d7ba6c3f3bcda173e8d2ccd3b0"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 4,
+      "baseRevision": 11,
+      "resultRevision": 12,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_region_a_label",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__region_a_label",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 498.4,
+              "y": 348.8,
+              "text": "a²",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 30.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_region_a_label",
+        "componentId": "areas",
+        "role": "region_a_label",
+        "atomOrdinal": 12,
+        "semanticBaseRevision": 11,
+        "semanticResultRevision": 12,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "region_a_label",
+          "nodeId": "areas__region_a_label",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "label_containment",
+            "label_separation",
+            "area_equivalence"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_region_a_label",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "region_a_label",
+            "nodeId": "areas__region_a_label",
+            "atomOrdinal": 12,
+            "baseSemanticRevision": 11,
+            "resultSemanticRevision": 12,
+            "baseSceneSha256": "89e838c88e585a1564f309f16cc69c02c076aa998ca859e42f651691878adfd9",
+            "resultSceneSha256": "4a93c71d2b6dcfa97fad96dcfdfba551c0cc9078f5941279db8be078e931e054",
+            "patchSha256": "4927d2dde888fcaf4d1de4905c9e9146648670c1f8e3e9e1d0dd6831471ef374",
+            "receiptSha256": "24bf0b02543562d0d919165079b785dbf4062feb05f3641b9858149362fcdfe1",
+            "previousCertificateSha256": "7407b1a7408fb01b683ba3379506f2f060cbf9d7ba6c3f3bcda173e8d2ccd3b0"
+          },
+          "certificateSha256": "293df5153f6518a434fb1081d5a5385e55995e7938b1b2ef93eed626b9577a01"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 5,
+      "baseRevision": 12,
+      "resultRevision": 13,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_region_b",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__region_b",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  396.8,
+                  317.6
+                ],
+                [
+                  320.0,
+                  420.0
+                ],
+                [
+                  480.0,
+                  540.0
+                ],
+                [
+                  556.8,
+                  437.6
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--lavender))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.2,
+                "fill": "#2E2850"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_region_b",
+        "componentId": "areas",
+        "role": "region_b",
+        "atomOrdinal": 13,
+        "semanticBaseRevision": 12,
+        "semanticResultRevision": 13,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "region_b",
+          "nodeId": "areas__region_b",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "square_partition",
+            "area_equivalence"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_region_b",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "region_b",
+            "nodeId": "areas__region_b",
+            "atomOrdinal": 13,
+            "baseSemanticRevision": 12,
+            "resultSemanticRevision": 13,
+            "baseSceneSha256": "4a93c71d2b6dcfa97fad96dcfdfba551c0cc9078f5941279db8be078e931e054",
+            "resultSceneSha256": "89ca0166587eac27ecec64a5fff6be8182efc669e85dd7724e8fa2bb0747ef63",
+            "patchSha256": "da9ffd6fb4a280548adb368fd5d89e2568ddff082ffb1fe0dede6c95a061b63f",
+            "receiptSha256": "7a1eb7f82403c82bdd9b47f6bec40d5694f26d26bf2c3b8470d5e045350b3f2a",
+            "previousCertificateSha256": "293df5153f6518a434fb1081d5a5385e55995e7938b1b2ef93eed626b9577a01"
+          },
+          "certificateSha256": "fa3d7474b393b80196c3b24b1d5d15bad32db63a215a53aa9966abc6f97fb951"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 6,
+      "baseRevision": 13,
+      "resultRevision": 14,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_region_b_label",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__region_b_label",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 438.4,
+              "y": 428.8,
+              "text": "b²",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 30.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_region_b_label",
+        "componentId": "areas",
+        "role": "region_b_label",
+        "atomOrdinal": 14,
+        "semanticBaseRevision": 13,
+        "semanticResultRevision": 14,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "region_b_label",
+          "nodeId": "areas__region_b_label",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "label_containment",
+            "label_separation",
+            "area_equivalence"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_region_b_label",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "region_b_label",
+            "nodeId": "areas__region_b_label",
+            "atomOrdinal": 14,
+            "baseSemanticRevision": 13,
+            "resultSemanticRevision": 14,
+            "baseSceneSha256": "89ca0166587eac27ecec64a5fff6be8182efc669e85dd7724e8fa2bb0747ef63",
+            "resultSceneSha256": "78c4d2cfb4573b26406743f3c220ac06603bfe6f889f7c877fe135847412ef60",
+            "patchSha256": "78ff5cb42f73a8b8c93519f8db65431abc85ddc70b265f252bb8ac2b038e5c89",
+            "receiptSha256": "1c1a26adb8fda8d3471e91682a3a262bcea9da9c955e1346349cddf658eb318b",
+            "previousCertificateSha256": "fa3d7474b393b80196c3b24b1d5d15bad32db63a215a53aa9966abc6f97fb951"
+          },
+          "certificateSha256": "a06fafcf74882678e887db0b38443fab41e721044e54bd3325866fd3b134c857"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 7,
+      "baseRevision": 14,
+      "resultRevision": 15,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_projection_identity",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__projection_identity",
+              "kind": "text",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 270.0,
+              "y": 570.0,
+              "text": "AH = a²/c  ·  HB = b²/c",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 20.0,
+                "opacity": 1.0,
+                "anchor": "middle"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_projection_identity",
+        "componentId": "areas",
+        "role": "projection_identity",
+        "atomOrdinal": 15,
+        "semanticBaseRevision": 14,
+        "semanticResultRevision": 15,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "projection_identity",
+          "nodeId": "areas__projection_identity",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "area_equivalence"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_projection_identity",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "projection_identity",
+            "nodeId": "areas__projection_identity",
+            "atomOrdinal": 15,
+            "baseSemanticRevision": 14,
+            "resultSemanticRevision": 15,
+            "baseSceneSha256": "78c4d2cfb4573b26406743f3c220ac06603bfe6f889f7c877fe135847412ef60",
+            "resultSceneSha256": "258f4f358b197f53f9554189cc7de2cabf88a49927e828016f8c49661ee318b2",
+            "patchSha256": "2af4c8e140487eec3aa810d3f225abff4cc602f81206c56e0a844749d030bfd3",
+            "receiptSha256": "472e9dcfa1f17e4c51ab4f3bc63c35bf2e7b41259feb2ca2ef2996707c9d1f0f",
+            "previousCertificateSha256": "a06fafcf74882678e887db0b38443fab41e721044e54bd3325866fd3b134c857"
+          },
+          "certificateSha256": "5438f2591dde139f1d3360202589745edf4b8315fd5e3b7cc411b6e217bf3e0f"
+        }
+      }
+    },
+    {
+      "type": "semantic_scene_patch",
+      "generation": 2,
+      "attempt": 1,
+      "sequence": 8,
+      "baseRevision": 15,
+      "resultRevision": 16,
+      "patch": {
+        "v": 1,
+        "patchId": "areas__atom_proof_conclusion",
+        "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "areas__proof_conclusion",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  150.0,
+                  112.0
+                ],
+                [
+                  650.0,
+                  112.0
+                ]
+              ],
+              "closed": false,
+              "style": {
+                "stroke": "hsl(var(--amber))",
+                "strokeWidth": 5.0,
+                "opacity": 1.0,
+                "roughness": 0.2,
+                "fill": "transparent"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 1,
+          "beatId": "beat-proof",
+          "narration": "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+          "act": "derive",
+          "directive": {
+            "kind": "pythagorean_area_identity",
+            "id": "areas",
+            "revealThrough": "proof"
+          }
+        },
+        "atomId": "areas__atom_proof_conclusion",
+        "componentId": "areas",
+        "role": "proof_conclusion",
+        "atomOrdinal": 16,
+        "semanticBaseRevision": 15,
+        "semanticResultRevision": 16,
+        "receipt": {
+          "issuer": "semantic_verifier",
+          "componentId": "areas",
+          "role": "proof_conclusion",
+          "nodeId": "areas__proof_conclusion",
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "proof_conclusion"
+          ],
+          "verified": true
+        },
+        "certificate": {
+          "body": {
+            "v": 1,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.pythagorean_area_identity.v2",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "atomId": "areas__atom_proof_conclusion",
+            "beatId": "beat-proof",
+            "beatSha256": "62a605a48b8f2aa480d6784fae74fe95a2c9fe6c9c1d28382e0fc5991ccfc1e8",
+            "componentId": "areas",
+            "role": "proof_conclusion",
+            "nodeId": "areas__proof_conclusion",
+            "atomOrdinal": 16,
+            "baseSemanticRevision": 15,
+            "resultSemanticRevision": 16,
+            "baseSceneSha256": "258f4f358b197f53f9554189cc7de2cabf88a49927e828016f8c49661ee318b2",
+            "resultSceneSha256": "9b0dfcfd8187daf35e3079898ef4dab232038d58f3a30c3ac575421bb5bad1b7",
+            "patchSha256": "bb3490df8f9d916609d3a09078b37a4032ec8b74c530b3654965344cbd3b52b0",
+            "receiptSha256": "2444607fc2ac9ca487b0e81ca1ab7559c9dec6ded57355662c96fd6230c53f1c",
+            "previousCertificateSha256": "5438f2591dde139f1d3360202589745edf4b8315fd5e3b7cc411b6e217bf3e0f"
+          },
+          "certificateSha256": "2f9e2e95ec677a03eb3eb84e9973bb2853763cf09c96732da4f9baaa020f6df4"
         }
       }
     }
