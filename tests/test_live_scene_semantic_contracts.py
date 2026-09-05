@@ -190,7 +190,7 @@ def test_directive_accepts_each_named_stage(stage: PythagoreanStage) -> None:
 
 
 def test_directive_rejects_unknown_stage_and_kind() -> None:
-    payload = _beat("proof")
+    payload = _beat("animation")
     with pytest.raises(ValidationError):
         TeachingBeatDraft.model_validate(payload)
 
@@ -233,10 +233,19 @@ def test_pythagorean_role_order_and_stage_boundaries_are_exact() -> None:
         "square_c",
         "label_c2",
         "identity",
+        "altitude",
+        "partition",
+        "region_a",
+        "region_a_label",
+        "region_b",
+        "region_b_label",
+        "projection_identity",
+        "proof_conclusion",
     )
     assert roles_through(PythagoreanStage.TRIANGLE) == PYTHAGOREAN_ROLE_ORDER[:1]
     assert roles_through(PythagoreanStage.AREAS) == PYTHAGOREAN_ROLE_ORDER[:7]
-    assert roles_through(PythagoreanStage.IDENTITY) == PYTHAGOREAN_ROLE_ORDER
+    assert roles_through(PythagoreanStage.IDENTITY) == PYTHAGOREAN_ROLE_ORDER[:8]
+    assert roles_through(PythagoreanStage.PROOF) == PYTHAGOREAN_ROLE_ORDER
     with pytest.raises(TypeError):
         PYTHAGOREAN_STAGE_ROLES[PythagoreanStage.TRIANGLE] = ()  # type: ignore[index]
 

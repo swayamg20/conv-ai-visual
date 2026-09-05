@@ -52,13 +52,16 @@ def test_stage_guidance_is_symmetric_and_selects_a_terminal_boundary() -> None:
         build_visual_act_decision_messages("Continue visually", EMPTY_SEMANTIC_SCENE)
     )
 
-    for stage in ("triangle", "areas", "identity"):
+    for stage in ("triangle", "areas", "identity", "proof"):
         assert system.count(f"\n- {stage}:") == 1
     assert "deepest stage explicitly or semantically requested" in system
     assert "terminal boundary for this request" in system
     assert '"only", "stop before", and "leave for later"' in system
     assert "Start only when the accepted scene contains no component" in system
     assert "A separate or second construction is not supported yet" in system
+    assert "explicit proof language maps to identity first" in system
+    assert "never emit start_visual with targetStage proof" in system
+    assert "continue_visual with targetStage proof" in system
     assert "Start with the right triangle" not in system
 
 

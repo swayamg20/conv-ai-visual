@@ -7,6 +7,7 @@ from collections.abc import Callable
 import pytest
 from murmur.live_scene import semantic_compiler, semantic_verifier
 from murmur.live_scene.contracts import LatexSceneNode, PathSceneNode, SceneNode, TextSceneNode
+from murmur.live_scene.pythagorean_proof import PythagoreanProofError, verify_region_coverage
 from murmur.live_scene.semantic_compiler import (
     SemanticCompilationError,
     compile_teaching_beat,
@@ -18,6 +19,7 @@ from murmur.live_scene.semantic_contracts import (
     PythagoreanStage,
     SemanticSceneState,
     TeachingBeatDraft,
+    VerificationObligation,
 )
 from murmur.live_scene.semantic_verifier import (
     SemanticVerificationError,
@@ -115,6 +117,7 @@ def test_verifier_is_a_separate_serialized_contract_boundary() -> None:
         (PythagoreanStage.TRIANGLE, 1),
         (PythagoreanStage.AREAS, 7),
         (PythagoreanStage.IDENTITY, 8),
+        (PythagoreanStage.PROOF, 16),
     ],
 )
 def test_each_stage_lowers_to_the_exact_ordered_one_put_prefix(
@@ -141,12 +144,13 @@ def test_child_and_atom_ids_remain_stable_across_target_stages() -> None:
         stage: compile_teaching_beat(_beat(stage), SemanticSceneState(revision=0))
         for stage in PythagoreanStage
     }
-    final = compiled_by_stage[PythagoreanStage.IDENTITY]
+    final = compiled_by_stage[PythagoreanStage.PROOF]
 
     for stage, expected_count in (
         (PythagoreanStage.TRIANGLE, 1),
         (PythagoreanStage.AREAS, 7),
         (PythagoreanStage.IDENTITY, 8),
+        (PythagoreanStage.PROOF, 16),
     ):
         compiled = compiled_by_stage[stage]
         assert tuple(atom.atom_id for atom in compiled.atoms) == tuple(
@@ -158,10 +162,13 @@ def test_child_and_atom_ids_remain_stable_across_target_stages() -> None:
 
 
 def test_resume_from_every_committed_role_emits_only_the_exact_missing_suffix() -> None:
-    complete = compile_teaching_beat(_beat(), _base_with_prefix(0))
+    complete = compile_teaching_beat(_beat(PythagoreanStage.PROOF), _base_with_prefix(0))
 
     for prefix_length in range(len(PYTHAGOREAN_ROLE_ORDER) + 1):
-        resumed = compile_teaching_beat(_beat(), _base_with_prefix(prefix_length))
+        resumed = compile_teaching_beat(
+            _beat(PythagoreanStage.PROOF),
+            _base_with_prefix(prefix_length),
+        )
 
         assert tuple(atom.role for atom in resumed.atoms) == PYTHAGOREAN_ROLE_ORDER[prefix_length:]
         assert tuple(atom.atom_id for atom in resumed.atoms) == tuple(
@@ -173,7 +180,7 @@ def test_resume_from_every_committed_role_emits_only_the_exact_missing_suffix() 
 
 def test_noop_is_empty_and_a_backward_target_is_rejected() -> None:
     complete = _base_with_prefix(len(PYTHAGOREAN_ROLE_ORDER))
-    noop = compile_teaching_beat(_beat(), complete)
+    noop = compile_teaching_beat(_beat(PythagoreanStage.PROOF), complete)
     assert noop.atoms == ()
     assert noop.result_scene == complete
 
@@ -201,7 +208,69 @@ def test_compiler_owns_the_geometry_labels_and_exact_identity() -> None:
     assert identity.y + 120.0 <= 600.0
 
     receipts = verify_pythagorean_realization("areas", _serialized(nodes))
-    assert tuple(receipt.role for receipt in receipts) == PYTHAGOREAN_ROLE_ORDER
+    assert tuple(receipt.role for receipt in receipts) == PYTHAGOREAN_ROLE_ORDER[:8]
+
+
+def test_proof_suffix_is_exactly_eight_deterministic_replay_safe_atoms() -> None:
+    compiled = compile_teaching_beat(
+        _beat(PythagoreanStage.PROOF, beat_id="beat-proof"),
+        _base_with_prefix(8),
+    )
+    nodes = _nodes(compiled)
+
+    assert tuple(atom.role for atom in compiled.atoms) == PYTHAGOREAN_ROLE_ORDER[8:]
+    assert len(nodes) == 8
+    for index in (0, 1, 7):
+        stroke = nodes[index]
+        assert isinstance(stroke, PathSceneNode)
+        assert stroke.closed is False
+        assert len(stroke.points) == 2
+
+    assert nodes[0].points == ((320.0, 260.0), (396.8, 317.6))
+    assert nodes[1].points == ((396.8, 317.6), (556.8, 437.6))
+
+    region_a = nodes[2]
+    region_b = nodes[4]
+    assert isinstance(region_a, PathSceneNode)
+    assert isinstance(region_b, PathSceneNode)
+    assert region_a.points == (
+        (440.0, 260.0),
+        (396.8, 317.6),
+        (556.8, 437.6),
+        (600.0, 380.0),
+    )
+    assert region_b.points == (
+        (396.8, 317.6),
+        (320.0, 420.0),
+        (480.0, 540.0),
+        (556.8, 437.6),
+    )
+    partition = nodes[1]
+    assert isinstance(partition, PathSceneNode)
+    assert region_a.points[1:3] == partition.points
+    assert (region_b.points[-1], region_b.points[0]) == partition.points[::-1]
+    assert region_a.style.fill != "transparent"
+    assert region_b.style.fill != "transparent"
+    assert region_a.style.stroke_width > 0
+    assert region_b.style.stroke_width > 0
+
+    region_a_label = nodes[3]
+    region_b_label = nodes[5]
+    projection = nodes[6]
+    assert isinstance(region_a_label, TextSceneNode)
+    assert isinstance(region_b_label, TextSceneNode)
+    assert isinstance(projection, TextSceneNode)
+    assert (region_a_label.text, region_a_label.x, region_a_label.y) == ("a²", 498.4, 348.8)
+    assert (region_b_label.text, region_b_label.x, region_b_label.y) == ("b²", 438.4, 428.8)
+    assert projection.text == "AH = a²/c  ·  HB = b²/c"
+    assert nodes[7].points == ((150.0, 112.0), (650.0, 112.0))
+
+    obligations = {atom.role: set(atom.receipt.obligation_codes) for atom in compiled.atoms}
+    assert VerificationObligation.ALTITUDE_PROJECTION in obligations[PYTHAGOREAN_ROLE_ORDER[8]]
+    assert VerificationObligation.SQUARE_PARTITION in obligations[PYTHAGOREAN_ROLE_ORDER[9]]
+    assert VerificationObligation.AREA_EQUIVALENCE in obligations[PYTHAGOREAN_ROLE_ORDER[10]]
+    assert VerificationObligation.PROOF_CONCLUSION in obligations[PYTHAGOREAN_ROLE_ORDER[15]]
+    assert compiled.result_scene.components[0].revealed_roles == PYTHAGOREAN_ROLE_ORDER
 
 
 def test_semantic_beat_is_at_least_eighty_percent_smaller_than_raw_patches() -> None:
@@ -357,6 +426,84 @@ def test_independent_verifier_fails_closed_for_every_obligation_class() -> None:
             verify_pythagorean_realization("areas", _serialized(corrupt(valid)))
 
 
+def test_independent_verifier_rejects_each_proof_relationship_and_exact_text() -> None:
+    valid = _nodes(
+        compile_teaching_beat(
+            _beat(PythagoreanStage.PROOF),
+            SemanticSceneState(revision=0),
+        )
+    )
+    altitude = valid[8]
+    partition = valid[9]
+    region_a = valid[10]
+    projection = valid[14]
+    conclusion = valid[15]
+    assert isinstance(altitude, PathSceneNode)
+    assert isinstance(partition, PathSceneNode)
+    assert isinstance(region_a, PathSceneNode)
+    assert isinstance(projection, TextSceneNode)
+    assert isinstance(conclusion, PathSceneNode)
+
+    corruptions: tuple[tuple[SceneNode, int, str], ...] = (
+        (
+            altitude.model_copy(update={"points": ((320.0, 260.0), (397.8, 317.6))}),
+            8,
+            "hypotenuse projection",
+        ),
+        (
+            partition.model_copy(update={"points": ((396.8, 317.6), (555.8, 437.6))}),
+            9,
+            "extend the altitude",
+        ),
+        (
+            region_a.model_copy(
+                update={
+                    "points": (
+                        (440.0, 260.0),
+                        (396.8, 317.6),
+                        (555.8, 437.6),
+                        (600.0, 380.0),
+                    )
+                }
+            ),
+            10,
+            "verified square partition",
+        ),
+        (
+            projection.model_copy(update={"text": "AH = a²/c"}),
+            14,
+            "exact required text",
+        ),
+        (
+            conclusion.model_copy(update={"points": ((150.0, 113.0), (650.0, 113.0))}),
+            15,
+            "emphasize the verified identity",
+        ),
+    )
+
+    for replacement, index, message in corruptions:
+        with pytest.raises(SemanticVerificationError, match=message):
+            verify_pythagorean_realization(
+                "areas",
+                _serialized(_replace_node(valid, index, replacement)),
+            )
+
+
+def test_proof_coverage_check_rejects_overlap_even_when_total_area_matches() -> None:
+    square = ((0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0))
+    region_a = ((0.0, 0.0), (2.0, 0.0), (2.0, 4.0), (0.0, 4.0))
+    overlapping_region_b = ((0.0, 0.0), (2.0, 0.0), (2.0, 4.0), (0.0, 4.0))
+
+    with pytest.raises(PythagoreanProofError, match="opposite half-planes"):
+        verify_region_coverage(
+            region_a=region_a,
+            region_b=overlapping_region_b,
+            square_c=square,
+            altitude_foot=(2.0, 0.0),
+            far_partition=(2.0, 4.0),
+        )
+
+
 def test_compilation_preflights_the_whole_realization_before_creating_any_atom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -366,11 +513,11 @@ def test_compilation_preflights_the_whole_realization_before_creating_any_atom(
 
     def corrupted_builder(component_id: str) -> tuple[SceneNode, ...]:
         nodes = original_builder(component_id)
-        identity = nodes[-1]
+        identity = nodes[7]
         assert isinstance(identity, LatexSceneNode)
         return _replace_node(
             nodes,
-            len(nodes) - 1,
+            7,
             identity.model_copy(update={"latex": "unverified"}),
         )
 

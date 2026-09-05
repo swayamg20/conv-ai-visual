@@ -145,7 +145,7 @@ def test_compiler_certificate_contract_is_explicit_and_self_checking() -> None:
     assert body.patch_sha256 == "4892da2c64b0bf08030e6aa3e9f6b826ba2004cfaa61452caf8a94d86bee6c39"
     assert body.beat_sha256 == "7529114153c906f55bd632aad6f25e9693dc5587d03b459f46ca42f0b18254ae"
     assert certificate.certificate_sha256 == (
-        "9093c6dc150b2611c89974cd64e6c807d142ac4effbcbb1203dff515d0bdcdb7"
+        "2c40ec91523e34d82e2d310ff67fdd43571dac12652e66fb996f9cb81690488a"
     )
 
 
@@ -184,7 +184,7 @@ def test_compiler_emits_one_contiguous_certificate_chain() -> None:
 
 
 def test_resume_from_every_prefix_reproduces_the_exact_certificate_suffix() -> None:
-    beat = _beat()
+    beat = _beat(PythagoreanStage.PROOF)
     complete = compile_teaching_beat(beat, SemanticSceneState(revision=0))
 
     for prefix_length in range(len(PYTHAGOREAN_ROLE_ORDER) + 1):
@@ -280,7 +280,7 @@ def test_patch_geometry_mutation_invalidates_the_certificate() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("compilerVersion", "murmur.pythagorean_area_identity.v2"),
+        ("compilerVersion", "murmur.pythagorean_area_identity.v1"),
         ("atomId", "areas__atom_square_a"),
         ("beatId", "beat-other"),
         ("beatSha256", "0" * 64),

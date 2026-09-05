@@ -39,7 +39,7 @@ def test_encodes_exactly_one_semantic_beat_without_low_level_authoring_fields() 
     assert "exactly one complete JSON object on one line, then stop" in system
     assert "exactly v, beatId, narration, act, and directive" in system
     assert '"introduce", "derive", "connect", or "emphasize"' in system
-    assert '"triangle", "areas", or "identity"' in system
+    assert '"triangle", "areas", "identity", or "proof"' in system
     assert "Never author coordinates" in system
     assert "equations" in system
     assert "child node IDs" in system

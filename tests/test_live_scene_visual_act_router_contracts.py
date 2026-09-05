@@ -160,7 +160,7 @@ def test_decision_rejects_fields_from_another_variant(payload: dict[str, object]
         {**_start(), "v": 2},
         {**_start(), "decision": "draw_visual"},
         {**_start(), "componentKind": "freeform_svg"},
-        {**_start(), "targetStage": "proof"},
+        {**_start(), "targetStage": "animation"},
         {**_continue(), "componentId": "1 invalid"},
         {**_abstain(), "reasonCode": "model_unsure"},
     ],
@@ -172,7 +172,10 @@ def test_decision_rejects_values_outside_the_closed_vocabulary(
         VISUAL_ACT_DECISION_ADAPTER.validate_python(payload)
 
 
-@pytest.mark.parametrize("stage", list(PythagoreanStage))
+@pytest.mark.parametrize(
+    "stage",
+    (PythagoreanStage.TRIANGLE, PythagoreanStage.AREAS, PythagoreanStage.IDENTITY),
+)
 def test_start_resolves_each_supported_stage_to_its_exact_prefix(stage: PythagoreanStage) -> None:
     decision = VISUAL_ACT_DECISION_ADAPTER.validate_python(_start(stage.value))
     scene = SemanticSceneState(revision=0)
@@ -195,6 +198,8 @@ def test_start_resolves_each_supported_stage_to_its_exact_prefix(stage: Pythagor
         (1, "areas", PYTHAGOREAN_ROLE_ORDER[1:7]),
         (3, "areas", PYTHAGOREAN_ROLE_ORDER[3:7]),
         (7, "identity", PYTHAGOREAN_ROLE_ORDER[7:8]),
+        (8, "proof", PYTHAGOREAN_ROLE_ORDER[8:]),
+        (12, "proof", PYTHAGOREAN_ROLE_ORDER[12:]),
     ],
 )
 def test_continue_reuses_component_and_resolves_only_the_missing_suffix(
@@ -217,7 +222,7 @@ def test_continue_reuses_component_and_resolves_only_the_missing_suffix(
 
 @pytest.mark.parametrize(
     ("prefix_length", "stage"),
-    [(1, "triangle"), (3, "triangle"), (7, "areas"), (8, "identity")],
+    [(1, "triangle"), (3, "triangle"), (7, "areas"), (8, "identity"), (16, "proof")],
 )
 def test_continue_rejects_every_non_forward_target(prefix_length: int, stage: str) -> None:
     decision = VISUAL_ACT_DECISION_ADAPTER.validate_python(_continue(stage))
@@ -236,6 +241,19 @@ def test_abstain_is_a_valid_no_mutation_resolution(reason: VisualActAbstainReaso
 
     assert resolve_visual_act(decision, scene) is None
     assert scene == before
+
+
+@pytest.mark.parametrize("prefix_length", [0, 1, 7])
+def test_proof_requires_the_complete_accepted_identity(prefix_length: int) -> None:
+    decision = VISUAL_ACT_DECISION_ADAPTER.validate_python(_start("proof"))
+    scene = SemanticSceneState(revision=0) if prefix_length == 0 else _scene(prefix_length)
+    if prefix_length:
+        decision = VISUAL_ACT_DECISION_ADAPTER.validate_python(_continue("proof"))
+
+    with pytest.raises(VisualActRoutingError) as captured:
+        resolve_visual_act(decision, scene)
+
+    assert captured.value.code is VisualActRoutingErrorCode.PROOF_REQUIRES_IDENTITY
 
 
 def test_continue_with_an_unknown_component_fails_closed() -> None:

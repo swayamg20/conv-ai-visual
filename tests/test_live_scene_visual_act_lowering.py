@@ -34,10 +34,17 @@ _EXPECTED_CONTENT = {
         TeachingAct.CONNECT,
         "Connect the three square areas into the Pythagorean relationship.",
     ),
+    PythagoreanStage.PROOF: (
+        TeachingAct.DERIVE,
+        "Project the altitude through the hypotenuse square to prove its two regions have areas a² and b².",
+    ),
 }
 
 
-@pytest.mark.parametrize("stage", list(PythagoreanStage))
+@pytest.mark.parametrize(
+    "stage",
+    (PythagoreanStage.TRIANGLE, PythagoreanStage.AREAS, PythagoreanStage.IDENTITY),
+)
 def test_lowers_each_start_target_to_fixed_server_authored_beat(
     stage: PythagoreanStage,
 ) -> None:
@@ -81,7 +88,31 @@ def test_continue_reuses_resolved_component_and_compiles_only_its_missing_suffix
 
     assert beat.directive.id == "areas-2"
     assert beat.directive.reveal_through is PythagoreanStage.IDENTITY
-    assert tuple(atom.role for atom in compiled.atoms) == PYTHAGOREAN_ROLE_ORDER[7:]
+    assert tuple(atom.role for atom in compiled.atoms) == PYTHAGOREAN_ROLE_ORDER[7:8]
+
+
+def test_identity_continuation_lowers_proof_to_the_exact_eight_atom_suffix() -> None:
+    scene = SemanticSceneState(
+        revision=8,
+        components=(
+            PythagoreanAreaIdentityState(
+                id="areas",
+                revealed_roles=PYTHAGOREAN_ROLE_ORDER[:8],
+            ),
+        ),
+    )
+    resolved = resolve_visual_act(
+        ContinueVisualDecision(component_id="areas", target_stage=PythagoreanStage.PROOF),
+        scene,
+    )
+    assert resolved is not None
+
+    beat = lower_resolved_visual_act(resolved, generation=9)
+    compiled = compile_teaching_beat(beat, scene)
+
+    assert (beat.act, beat.narration) == _EXPECTED_CONTENT[PythagoreanStage.PROOF]
+    assert beat.directive.reveal_through is PythagoreanStage.PROOF
+    assert tuple(atom.role for atom in compiled.atoms) == PYTHAGOREAN_ROLE_ORDER[8:]
 
 
 def test_server_beat_id_is_deterministic_unique_by_generation_and_bounded() -> None:
