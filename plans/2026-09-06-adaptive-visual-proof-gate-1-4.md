@@ -14,10 +14,10 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 
 - [x] 2026-09-06 04:05 IST: Merged Gate 1.3 qualification record through PR #28 at `303b7c0` and created clean branch `codex/gate14-adaptive-visual-proof` without touching the dirty voice worktree.
 - [x] 2026-09-06 04:09 IST: Audited the compiler, verifier, router, browser runtime, SVG executor, fixture, and browser suite; selected an eight-atom altitude dissection that preserves the one-put/one-presentation invariant and existing per-generation limit.
-- [ ] Extend the server-owned semantic vocabulary, deterministic geometry, independent mathematical verifier, routing prompt, and narration through the proof boundary.
-- [ ] Mirror the semantic contract in the browser, regenerate the compiler-certified fixture as two bounded teaching turns, and prove exact prefix continuation.
-- [ ] Instrument browser-observed presentation, interruption, and replay latency with deterministic clock tests and truthful UI labels.
-- [ ] Add browser evidence for identity-to-proof adaptation, mid-proof interruption and continuation, action-correlated zero-network Replay, exact final frontier, and narrow viewports.
+- [x] 2026-09-06 04:19 IST: Extended the server-owned contract, compiler, verifier, router, and narration through an independently checked eight-atom altitude-projection proof in `47e725a`; 328 focused backend tests and both Ruff checks passed.
+- [x] 2026-09-06 04:25 IST: Mirrored the versioned sixteen-role contract in the browser and split the compiler-certified fixture into two bounded eight-atom turns in `dd6048a`; 32 focused semantic, fixture, and live-model tests passed.
+- [x] 2026-09-06 04:35 IST: Added immutable browser presentation metrics and truthful server/browser diagnostic boundaries in `2e8819d` and `95c0d38`; 43 focused tests, lint, and type-check passed after independent race review.
+- [x] 2026-09-06 04:49 IST: Added zero-cost browser evidence for adaptation, interruption, suffix continuation, stale-output rejection, exact canonical Replay, and full-proof 320/375px layouts in `5ae73ee`, `abc0fb8`, and `aea0ca3`; the provider-free suite passed 15/15 and the targeted narrow suite passed 2/2.
 - [ ] Run focused and full repository gates, complete independent review, push every coherent milestone, merge the pull request, and verify the merged `main` checks.
 
 ## Surprises & Discoveries
@@ -27,6 +27,9 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - `SceneStreamCompletedEvent.firstPatchMs` and `totalMs` are server-side production timings. They do not include browser motion or post-paint settlement, so displaying them as user-perceived semantic latency would be incorrect.
 - The full semantic role history will grow from eight to sixteen, but the new proof is deliberately reachable only after the eight-role identity boundary. Each request therefore continues to emit at most eight atoms and stays inside the existing completion-event and queue budgets.
 - Generic `LineSceneNode` marks are rendered through RoughJS without a stable seed, so replaying them can produce different SVG path data even when the canonical scene is unchanged. Proof-critical strokes therefore use deterministic open semantic paths; exact replay remains a browser-observable invariant instead of a state-only claim.
+- Raw SVG `innerHTML` can differ after Replay solely because the browser changes attribute insertion order while preserving the same elements, attributes, values, and child order. The browser test therefore canonicalizes only attribute ordering before demanding exact SVG DOM equality; it does not normalize coordinates, paths, styles, or structure.
+- At 375px, the canvas zoom/download toolbar originally floated over the proof equation. Rendering those controls in normal flow below the board on touch-sized viewports removes the collision while retaining the desktop hover/focus overlay.
+- The fixture's raw animation-frame-to-first-visible p95 was 35.4 ms in the full browser run. This is renderer scheduling evidence, not end-to-end request latency; the visible browser metric correctly reported the much longer request-to-first-presented and request-to-settled durations.
 
 ## Decision Log
 
@@ -37,6 +40,8 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - 2026-09-06, Codex: Keep browser presentation metrics separate from server completion metrics. Measure only at synchronous submit, verified post-paint acceptance, settled interruption, and replay completion boundaries.
 - 2026-09-06, Codex: No paid Azure request is authorized by this plan. Provider-free contract, service, component, and browser evidence must fully qualify the implementation; a later live model smoke requires a new explicit dollar cap.
 - 2026-09-06, Codex: Encode the altitude, partition, and concluding emphasis as two-point open `PathSceneNode` marks. This keeps the change local to the verified proof vocabulary and avoids changing the visual character of every existing rough-drawn canvas line merely to make this proof replay deterministic.
+- 2026-09-06, Codex: Define exact Replay as equality of the canonical SVG DOM and semantic frontier, with attribute order treated as non-semantic browser serialization detail. All attribute values, node order, paths, styles, and semantic receipts remain strict.
+- 2026-09-06, Codex: Keep canvas controls below the SVG on mobile and as a hover/focus overlay on desktop. This preserves the drawing area without hiding controls from touch users or covering mathematical content.
 
 ## Outcomes & Retrospective
 
@@ -106,6 +111,6 @@ The mathematical verifier passes when it independently proves the altitude is pe
 
 The browser runtime passes when request-to-first-presented begins at submit and ends only after a verified atom's post-paint settlement; request-to-settled ends only after the terminal event and all queued motion settle; interruption latency spans click through the presentation barrier; Replay duration is measured independently; stale generations and reset cannot overwrite newer metrics; and server/provider timings remain separately labeled.
 
-The interaction passes when a zero-cost browser run reaches the eight-act identity frontier, the follow-up “I do not understand why the areas are equal; dissect the large square” preserves those nodes and progressively reaches sixteen acts, stopping mid-proof retains only settled atoms, continuation emits the exact remaining suffix, and Replay restores byte-equivalent SVG plus the same semantic frontier without increasing the action-bracketed semantic request count. The final board must remain usable at desktop, 375 by 812, and 320 by 568.
+The interaction passes when a zero-cost browser run reaches the eight-act identity frontier, the follow-up “I do not understand why the areas are equal; dissect the large square” preserves those nodes and progressively reaches sixteen acts, stopping mid-proof retains only settled atoms, continuation emits the exact remaining suffix, and Replay restores an attribute-order-independent canonical SVG DOM plus the same semantic frontier without increasing the action-bracketed semantic request count. The final board must remain usable at desktop, 375 by 812, and 320 by 568.
 
 Gate 1.4 is done only after focused and full backend tests, frontend tests, Ruff, formatting, lint, type-check, production build, the scene Playwright suite, and independent review pass at the pushed head; its pull request is merged; and the merged `main` checks are green. Live Azure model quality and dollar-backed latency remain a separate, explicitly authorized qualification rather than an implicit part of this merge.
