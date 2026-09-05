@@ -17,7 +17,8 @@ This is an authenticated, ephemeral product slice. It does not claim that the se
 - [x] 2026-09-06 02:01 IST: Proved progressive presentation, interruption, exact in-memory continuation, replay, decline/recovery, semantic late-frame rejection, and both narrow viewports in `a219d5e` and reviewer repair `9cc37c4`; all 14 Playwright scenarios passed.
 - [x] 2026-09-06 02:02 IST: Ran the full local gates: 1,659 backend tests, 458 frontend tests, Ruff, lint, type-check, production build with all 11 static pages, and the scene browser suite passed. Added the browser proof to pull-request CI in `96d0e5a` and restored production Next route references in `71183e7`.
 - [x] 2026-09-06 02:15 IST: Synchronized the public feature, architecture, setup, development, and manual-provider documentation in `2d962a3`, including the default-off flag and the provider-free versus genuine signed-in qualification boundary.
-- [ ] After separate cost approval, run one small signed-in Azure browser qualification and record only sanitized latency/outcome evidence.
+- [x] 2026-09-06 03:50 IST: Ran a small user-operated signed-in Azure browser qualification on `/canvas/generate`. A captured first attempt reached matching scene and semantic revision 8 with eight verified acts, four authenticated semantic stream requests returned HTTP 200 without a scene error, and the user reported progressive presentation, replay, immediate interruption with no late work, and exact-board continuation all worked. The server limited each provider dispatch to 2,048 output tokens; exact billing was not available.
+- [ ] Capture instrumented prompt-to-first-visible and terminal latency plus an action-correlated browser network trace before claiming live-provider performance or independently verified network-free Replay.
 
 ## Surprises & Discoveries
 
@@ -28,6 +29,7 @@ This is an authenticated, ephemeral product slice. It does not claim that the se
 - The first browser test used a fixed delay to force late semantic frames. Independent review correctly identified that as timing-sensitive on slow CI workers, so `9cc37c4` replaced it with a deterministic post-interruption release barrier.
 - Next development and production commands generate different `next-env.d.ts` references. The branch accidentally committed development references in `a219d5e`; `71183e7` restores the production-generated form validated by a clean build.
 - `LiveModelScene` correctly blocks transport when Firebase cannot produce a bearer, but the shared async runtime currently presents its generic stream-unavailable error instead of the wrapper's more specific sign-in-again text. The authenticated app shell normally prevents this state; improving that error taxonomy is useful polish, not evidence for this gate.
+- The first live launch used `uv run --env-file` against the developer `.env`; that parser stopped at an unquoted prose value before the later Firebase settings, so authenticated API calls returned HTTP 503 even though the browser retained a valid Firebase user. Launching through the installed `python-dotenv` command loaded the same file completely; the unauthenticated control then returned the expected HTTP 401 and the signed-in requests returned HTTP 200.
 
 ## Decision Log
 
@@ -39,6 +41,7 @@ This is an authenticated, ephemeral product slice. It does not claim that the se
 - 2026-09-06, Codex: No paid provider request is authorized by this plan. Provider-free fakes qualify implementation first; any Azure call needs a newly stated case count, attempt ceiling, token ceiling, and dollar cap.
 - 2026-09-06, Codex: Use “Stop drawing” and visible-frontier language. Semantic interruption cancels current playback immediately and commits an atom only when its exact target has reached the browser's presentation barrier; “stop after this act” incorrectly promised completion of the active act.
 - 2026-09-06, Codex: Run the complete scene Playwright suite as a dedicated pull-request CI job and upload its report artifacts. Local browser evidence alone is insufficient for a durable merge gate.
+- 2026-09-06, Codex: Record the signed-in Azure interaction as a user-observed behavior pass, but keep measured latency and an independently correlated Replay network trace open. Server access logs prove successful authenticated streams, not which browser control initiated each one.
 
 ## Outcomes & Retrospective
 
@@ -48,7 +51,7 @@ Local evidence is green: 1,659 backend tests passed with five upstream deprecati
 
 Independent review found no P0 auth, admission, cleanup, or schema issue. It found misleading mobile badge and interruption wording, timing-sensitive late-frame release, stale plan evidence, missing CI ownership, and generated Next path churn; commits `9cc37c4`, `96d0e5a`, `71183e7`, and this plan checkpoint address those findings.
 
-This is not yet live-provider product qualification. No Playwright test enters the authenticated page through a genuine Firebase session, no new Azure call was authorized, the feature remains default-off, the compiler supports one Pythagorean component family, the frontier is in-memory rather than persisted, and admission remains process-local. The next evidence step is one genuine signed-in Azure browser smoke under a separately approved spend ceiling; voice, cross-session persistence, and more visual families remain out of scope.
+A genuine Firebase session has now exercised the Azure-backed product route. The captured first attempt completed the Pythagorean construction at matching scene and semantic revision 8 with eight verified acts, the access log recorded four successful authenticated semantic streams and no scene error, and the user reported progressive drawing, Replay, interruption with no late work, and exact-board continuation all worked. This closes Gate 1.3 interaction correctness, but it is not an instrumented performance qualification: prompt-to-first-visible and terminal latency were not captured, and Replay was not isolated in an action-correlated browser network trace. The feature remains default-off, the compiler supports one Pythagorean component family, the frontier is in-memory rather than persisted, and admission remains process-local; voice, cross-session persistence, and more visual families remain out of scope.
 
 ## Context and Orientation
 
