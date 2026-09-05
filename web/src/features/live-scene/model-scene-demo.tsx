@@ -278,10 +278,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                   {isSemantic ? "Verified-act board" : "Model-authored board"}
                 </h1>
                 <span className="rounded-full border border-amber/25 bg-amber/10 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.16em] text-amber">
-                  <span className="sm:hidden">{isSemantic ? "Safe" : "G1"}</span>
-                  <span className="hidden sm:inline">
-                    {isSemantic ? "Verified" : "Gate 1"}
-                  </span>
+                  {isSemantic ? "Verified" : "Gate 1"}
                 </span>
               </div>
               <p className="hidden text-xs text-muted-foreground sm:block">
@@ -303,7 +300,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 {isSemantic ? "Board controls" : "Teacher's desk"}
               </p>
               <h2 className="text-2xl font-semibold tracking-[-0.025em]">
-                {isSemantic ? "Direct the visual proof" : "Shape the explanation"}
+                {isSemantic ? "Direct the visual lesson" : "Shape the explanation"}
               </h2>
             </div>
             <Sparkles className="mt-1 h-5 w-5 shrink-0 text-amber" />
@@ -349,7 +346,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
               <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
                 <span>
                   {isSemantic
-                    ? "Stop after the current act; anything queued stays off the board."
+                    ? "Stop now; only work already visible stays on the board."
                     : "Interrupt whenever the explanation changes direction."}
                 </span>
                 <span className="shrink-0 font-mono">{prompt.length}/2000</span>
@@ -400,7 +397,7 @@ export function ModelSceneDemo(props: ModelSceneDemoProps) {
                 className="min-h-11 gap-1.5 border-amber/35 px-2 text-xs hover:bg-amber/10 sm:gap-2 sm:px-5 sm:text-sm"
               >
                 <StopCircle className="hidden h-4 w-4 text-amber sm:block" />
-                {isSemantic ? "Stop after this act" : "Interrupt"}
+                {isSemantic ? "Stop drawing" : "Interrupt"}
               </Button>
               <Button
                 type="button"

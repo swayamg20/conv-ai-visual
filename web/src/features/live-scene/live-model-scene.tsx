@@ -32,6 +32,7 @@ export function LiveModelScene() {
       runStream={runAuthenticatedSemanticSceneStream}
       sourceLabel="Verified live model"
       startLabel="Begin verified lesson"
+      defaultPrompt="Show the Pythagorean area identity one verified step at a time."
       suggestions={[
         "Build a right triangle and reveal its side relationship",
         "Continue the Pythagorean area identity one step at a time",

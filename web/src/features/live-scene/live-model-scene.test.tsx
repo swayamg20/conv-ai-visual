@@ -89,6 +89,9 @@ describe("LiveModelScene", () => {
 
     expect(props.sourceLabel).toBe("Verified live model");
     expect(props.startLabel).toBe("Begin verified lesson");
+    expect(props.defaultPrompt).toBe(
+      "Show the Pythagorean area identity one verified step at a time."
+    );
     expect(props.suggestions).toEqual([
       "Build a right triangle and reveal its side relationship",
       "Continue the Pythagorean area identity one step at a time",

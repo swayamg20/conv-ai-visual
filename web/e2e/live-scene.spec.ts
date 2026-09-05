@@ -11,6 +11,11 @@ interface SemanticLateTrace {
   requests: number;
 }
 
+interface SemanticLateWindow extends Window {
+  readonly __semanticLateTrace?: SemanticLateTrace;
+  readonly __releaseLateSemanticFrames?: () => void;
+}
+
 const SEMANTIC_NODE_IDS = [
   "areas__triangle",
   "areas__square_a",
@@ -57,9 +62,17 @@ async function installLateSemanticFetch(
   await page.addInitScript((streamEvents) => {
     const originalFetch = window.fetch;
     const trace: SemanticLateTrace = { emitted: 0, requests: 0 };
+    let releaseLateFrames = (): void => {};
+    const lateFramesReleased = new Promise<void>((resolve) => {
+      releaseLateFrames = resolve;
+    });
     Object.defineProperty(window, "__semanticLateTrace", {
       configurable: false,
       value: trace,
+    });
+    Object.defineProperty(window, "__releaseLateSemanticFrames", {
+      configurable: false,
+      value: releaseLateFrames,
     });
     window.fetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -74,7 +87,8 @@ async function installLateSemanticFetch(
         start(controller) {
           void (async () => {
             for (const [index, event] of streamEvents.entries()) {
-              const delayMs = index === 0 ? 10 : index === 1 ? 30 : index === 2 ? 1_800 : 20;
+              if (index === 2) await lateFramesReleased;
+              const delayMs = index < 2 ? 20 : 5;
               await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
               if (cancelled) return;
               controller.enqueue(
@@ -187,7 +201,7 @@ function percentile(samples: readonly number[], percentileValue: number): number
 async function openLab(page: Page): Promise<void> {
   await page.goto("/labs/live-scene");
   await expect(page.getByRole("heading", { name: "Verified-act board" })).toBeVisible();
-  await expect(page.getByText("Verified", { exact: true }).locator("..")).toBeVisible();
+  await expect(page.getByText("Verified", { exact: true })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Verified acts" })).toBeChecked();
   await expect(page.getByRole("radio", { name: "Fixture · $0" })).toBeChecked();
   await expect(page.getByText("Verified fixture · $0", { exact: true })).toBeVisible();
@@ -273,7 +287,7 @@ test("interrupts at one presented semantic act, resumes the exact suffix, and re
   await openLab(page);
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
   await expect(page.locator("#areas__triangle")).toBeVisible();
-  await page.getByRole("button", { name: "Stop after this act" }).click();
+  await page.getByRole("button", { name: "Stop drawing" }).click();
 
   await expect(page.getByText("Stopped at presented frontier", { exact: true })).toBeVisible();
   await expect(page.getByText("1 presented", { exact: true })).toBeVisible();
@@ -330,17 +344,19 @@ test("retains the semantic frontier and rejects deliberately late atoms", async 
   await expect(page.locator("#areas__triangle")).toBeVisible();
   expect(await page.locator("#areas__square_a").count()).toBe(0);
 
-  await page.getByRole("button", { name: "Stop after this act" }).click();
+  await page.getByRole("button", { name: "Stop drawing" }).click();
   await expect(page.getByText("Stopped at presented frontier", { exact: true })).toBeVisible();
   const canvas = page
     .getByRole("region", { name: "Live visual board" })
     .locator('svg[viewBox="0 0 800 600"]');
   const interruptedMarkup = await canvas.evaluate((svg) => svg.innerHTML);
 
+  await page.evaluate(() => {
+    (window as SemanticLateWindow).__releaseLateSemanticFrames?.();
+  });
+
   await page.waitForFunction((eventCount) => {
-    const trace = (
-      window as typeof window & { __semanticLateTrace?: SemanticLateTrace }
-    ).__semanticLateTrace;
+    const trace = (window as SemanticLateWindow).__semanticLateTrace;
     return trace?.emitted === eventCount;
   }, events.length);
 
@@ -351,10 +367,7 @@ test("retains the semantic frontier and rejects deliberately late atoms", async 
   expect(await canvas.evaluate((svg) => svg.innerHTML)).toBe(interruptedMarkup);
   expect(
     await page.evaluate(() => {
-      const trace = (
-        window as typeof window & { __semanticLateTrace: SemanticLateTrace }
-      ).__semanticLateTrace;
-      return trace.requests;
+      return (window as SemanticLateWindow).__semanticLateTrace?.requests;
     })
   ).toBe(1);
 });
@@ -723,8 +736,8 @@ test("keeps the prompt, controls, and board reachable at 320px", async ({ page }
   await expect(page.getByLabel("What should the board teach?")).toBeVisible();
   await expect(page.getByRole("button", { name: "Begin verified lesson" })).toBeVisible();
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
-  await expect(page.getByRole("button", { name: "Stop after this act" })).toBeEnabled();
-  await page.getByRole("button", { name: "Stop after this act" }).click();
+  await expect(page.getByRole("button", { name: "Stop drawing" })).toBeEnabled();
+  await page.getByRole("button", { name: "Stop drawing" }).click();
 
   const board = page.getByRole("region", { name: "Live visual board" });
   await board.scrollIntoViewIfNeeded();
@@ -742,8 +755,8 @@ test("keeps the prompt, controls, and board reachable at 375x812", async ({ page
   await expect(page.getByLabel("What should the board teach?")).toBeVisible();
   await expect(page.getByRole("button", { name: "Begin verified lesson" })).toBeVisible();
   await page.getByRole("button", { name: "Begin verified lesson" }).click();
-  await expect(page.getByRole("button", { name: "Stop after this act" })).toBeEnabled();
-  await page.getByRole("button", { name: "Stop after this act" }).click();
+  await expect(page.getByRole("button", { name: "Stop drawing" })).toBeEnabled();
+  await page.getByRole("button", { name: "Stop drawing" }).click();
 
   const board = page.getByRole("region", { name: "Live visual board" });
   await board.scrollIntoViewIfNeeded();
