@@ -35,6 +35,7 @@ const runDevelopmentLabSemanticSceneStream: SemanticSceneStreamRunner = async (
 ) => {
   await runSemanticSceneModelStream({
     apiUrl: API_BASE,
+    endpoint: "developmentLab",
     ...invocation,
   });
 };

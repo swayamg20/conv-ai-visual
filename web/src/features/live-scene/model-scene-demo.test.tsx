@@ -151,7 +151,7 @@ describe("ModelSceneDemo", () => {
       createSemanticSceneFixtureRunner({ eventDelayMs: 0, chunkDelayMs: 0 })
     );
 
-    expect(demo.container.textContent).toContain("Gate 1.2");
+    expect(demo.container.textContent).toContain("Verified");
     expect(demo.container.textContent).toContain("Presented act ledger");
     expect(demo.container.textContent).toContain("0 presented");
 
