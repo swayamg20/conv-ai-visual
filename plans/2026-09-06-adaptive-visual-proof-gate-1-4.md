@@ -19,7 +19,7 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - [x] 2026-09-06 04:35 IST: Added immutable browser presentation metrics and truthful server/browser diagnostic boundaries in `2e8819d` and `95c0d38`; 43 focused tests, lint, and type-check passed after independent race review.
 - [x] 2026-09-06 04:49 IST: Added zero-cost browser evidence for adaptation, interruption, suffix continuation, stale-output rejection, exact canonical Replay, and full-proof 320/375px layouts in `5ae73ee`, `abc0fb8`, and `aea0ca3`; the provider-free suite passed 15/15 and the targeted narrow suite passed 2/2.
 - [x] 2026-09-06 05:12 IST: Qualified pushed head `eaf54c1`: 1,683 backend tests, 470 frontend tests, Ruff, formatting, lint, type-check, production build, and 15 Playwright scenarios passed; independent re-review confirmed both discovered blockers closed with no remaining material findings.
-- [ ] Open and merge the Gate 1.4 pull request, then verify every required check on merged `main`.
+- [x] 2026-09-06 05:23 IST: Merged PR #29 as `0e1c106`; all five required jobs on merged `main` passed in CI run `33999674729` (backend, frontend, verified scene, offline RTC, and Pipecat RTC).
 
 ## Surprises & Discoveries
 
@@ -50,9 +50,9 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 
 ## Outcomes & Retrospective
 
-Implementation and local qualification are complete on pushed head `eaf54c1`. The final suite passed 1,683 backend tests, 470 frontend tests, and 15 provider-free Playwright scenarios; Ruff, formatting, lint, type-check, the CI-equivalent production build, and diff checks also passed. The final browser run measured complete-patch-frame to first-visible p95 at 33.6 ms. Fresh desktop and 375px evidence show the five labels separated, the proof regions contained, and mobile controls below the board. Independent review initially found two material verifier/compiler boundary issues; `eaf54c1` fixed both and the re-review returned PASS with no material findings. No paid Azure request was made.
+Gate 1.4 is complete. PR #29 merged as `0e1c106`, and all five required jobs on the resulting `main` passed in CI run `33999674729`. Before merge, the final local suite passed 1,683 backend tests, 470 frontend tests, and 15 provider-free Playwright scenarios; Ruff, formatting, lint, type-check, the CI-equivalent production build, and diff checks also passed. The final browser run measured complete-patch-frame to first-visible p95 at 33.6 ms. Fresh desktop and 375px evidence show the five labels separated, the proof regions contained, and mobile controls below the board. Independent review initially found two material verifier/compiler boundary issues; `eaf54c1` fixed both and the re-review returned PASS with no material findings. No paid Azure request was made.
 
-The gate is not yet complete because the pull request has not been merged and required checks on merged `main` have not been verified. This section will receive the PR and merged commit once those external gates finish.
+The shipped boundary remains deliberate: this is one text-directed, ephemeral Pythagorean proof with a closed server-owned vocabulary. Arbitrary subjects, persistent scenes, voice synchronization, and paid live-model quality qualification belong to later gates.
 
 ## Context and Orientation
 
