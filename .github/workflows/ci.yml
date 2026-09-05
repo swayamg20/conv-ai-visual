@@ -83,6 +83,42 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+  scene:
+    name: Verified scene browser proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run verified scene browser proof
+        run: npm run e2e:scene
+
+      - name: Upload scene proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: verified-scene-${{ github.run_id }}-${{ github.run_attempt }}
+          path: var/scene-e2e/
+          if-no-files-found: error
+          retention-days: 7
+
   rtc:
     name: Offline RTC browser proof
     runs-on: ubuntu-latest
