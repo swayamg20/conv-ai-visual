@@ -69,7 +69,7 @@ npx playwright install chromium
 npm run e2e:scene
 ```
 
-The suite uses the guarded development lab with provider-free fixtures and intercepted streams to prove progressive rendering, interruption, exact in-memory continuation, replay, decline recovery, and narrow viewport behavior. It does not authenticate through a genuine Firebase session or qualify a live provider. GitHub Actions owns the same command in the `Verified scene browser proof` job and uploads its report and failure artifacts from `var/scene-e2e/`.
+The suite uses the guarded development lab with provider-free fixtures and intercepted streams to prove progressive rendering, identity-to-proof adaptation, browser-observed settlement timing, interruption, exact in-memory continuation, action-correlated network-free replay, decline recovery, and narrow viewport behavior. It does not authenticate through a genuine Firebase session or qualify a live provider. GitHub Actions owns the same command in the `Verified scene browser proof` job and uploads its report and failure artifacts from `var/scene-e2e/`.
 
 ## Adding behavior
 

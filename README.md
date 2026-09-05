@@ -14,7 +14,7 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 - Database-backed tools, including web search and canvas updates
 - Four-layer memory: short-term context, episodic summaries, Mem0 semantic memory, and an explicit user profile
 - A deterministic Scene Description Language (SDL) compiler and a Rough.js/GSAP SVG renderer
-- An authenticated `/canvas/generate` lesson that streams compiler-verified Pythagorean visual atoms and resumes from its in-memory presented frontier
+- An authenticated `/canvas/generate` lesson that streams compiler-verified Pythagorean visual atoms, adapts a follow-up into an altitude-dissection proof, and resumes from its in-memory presented frontier
 - User-scoped logs, latency metrics, session history, and mastery data
 
 ## Runtime flow
@@ -117,7 +117,7 @@ npm run build
 
 Automated tests use local fakes and an in-memory database. Live provider checks live under `scripts/manual/` and are never collected by default.
 
-The provider-free scene browser gate runs the guarded development lab with checked-in or intercepted fixtures. It proves progressive rendering, interruption, exact in-memory continuation, replay, decline recovery, and narrow viewport behavior without claiming genuine Firebase or live-provider qualification. GitHub Actions runs the same command in its `Verified scene browser proof` job and uploads ignored evidence from `var/scene-e2e/`:
+The provider-free scene browser gate runs the guarded development lab with checked-in or intercepted fixtures. It proves progressive rendering, an identity-to-dissection follow-up, browser-observed settlement timing, interruption, exact in-memory continuation, action-correlated network-free replay, decline recovery, and narrow viewport behavior without claiming genuine Firebase or live-provider qualification. GitHub Actions runs the same command in its `Verified scene browser proof` job and uploads ignored evidence from `var/scene-e2e/`:
 
 ```bash
 cd web

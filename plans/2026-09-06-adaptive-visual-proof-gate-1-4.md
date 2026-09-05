@@ -13,7 +13,7 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 ## Progress
 
 - [x] 2026-09-06 04:05 IST: Merged Gate 1.3 qualification record through PR #28 at `303b7c0` and created clean branch `codex/gate14-adaptive-visual-proof` without touching the dirty voice worktree.
-- [x] 2026-09-06 04:25 IST: Audited the compiler, verifier, router, browser runtime, SVG executor, fixture, and browser suite; selected an eight-atom altitude dissection that preserves the one-put/one-presentation invariant and existing per-generation limit.
+- [x] 2026-09-06 04:09 IST: Audited the compiler, verifier, router, browser runtime, SVG executor, fixture, and browser suite; selected an eight-atom altitude dissection that preserves the one-put/one-presentation invariant and existing per-generation limit.
 - [ ] Extend the server-owned semantic vocabulary, deterministic geometry, independent mathematical verifier, routing prompt, and narration through the proof boundary.
 - [ ] Mirror the semantic contract in the browser, regenerate the compiler-certified fixture as two bounded teaching turns, and prove exact prefix continuation.
 - [ ] Instrument browser-observed presentation, interruption, and replay latency with deterministic clock tests and truthful UI labels.
@@ -26,6 +26,7 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - The low-level motion executor already provides draw, fade, and scale entrances. A proof can feel progressive and responsive without weakening canonical replay by introducing transient, unrecorded highlighting.
 - `SceneStreamCompletedEvent.firstPatchMs` and `totalMs` are server-side production timings. They do not include browser motion or post-paint settlement, so displaying them as user-perceived semantic latency would be incorrect.
 - The full semantic role history will grow from eight to sixteen, but the new proof is deliberately reachable only after the eight-role identity boundary. Each request therefore continues to emit at most eight atoms and stays inside the existing completion-event and queue budgets.
+- Generic `LineSceneNode` marks are rendered through RoughJS without a stable seed, so replaying them can produce different SVG path data even when the canonical scene is unchanged. Proof-critical strokes therefore use deterministic open semantic paths; exact replay remains a browser-observable invariant instead of a state-only claim.
 
 ## Decision Log
 
@@ -35,6 +36,7 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - 2026-09-06, Codex: Require an accepted identity before the proof stage. A direct empty-board proof request is routed through the identity boundary first, ensuring no generation exceeds eight atoms.
 - 2026-09-06, Codex: Keep browser presentation metrics separate from server completion metrics. Measure only at synchronous submit, verified post-paint acceptance, settled interruption, and replay completion boundaries.
 - 2026-09-06, Codex: No paid Azure request is authorized by this plan. Provider-free contract, service, component, and browser evidence must fully qualify the implementation; a later live model smoke requires a new explicit dollar cap.
+- 2026-09-06, Codex: Encode the altitude, partition, and concluding emphasis as two-point open `PathSceneNode` marks. This keeps the change local to the verified proof vocabulary and avoids changing the visual character of every existing rough-drawn canvas line merely to make this proof replay deterministic.
 
 ## Outcomes & Retrospective
 
