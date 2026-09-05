@@ -134,6 +134,16 @@ class ApiSecurityTest(unittest.TestCase):
             ("get", "/api/logs/stats", None),
             ("get", "/api/voice-logs", None),
             ("get", "/api/voice-logs/stats", None),
+            (
+                "post",
+                "/api/live-scenes/semantic/stream",
+                {
+                    "prompt": "Teach the Pythagorean area identity.",
+                    "generation": 1,
+                    "baseScene": {"revision": 0, "nodes": []},
+                    "baseSemanticScene": {"revision": 0, "components": []},
+                },
+            ),
             ("delete", f"/chat/{self.owner_session.id}", None),
             (
                 "post",

@@ -19,6 +19,8 @@ from murmur.live_scene import (
     LiveSceneRequest,
     SceneAdmissionError,
     SceneAdmissionLease,
+    SceneAuthoringAdmission,
+    SceneAuthoringService,
     SceneStreamEvent,
     encode_scene_stream_event,
 )
@@ -93,6 +95,31 @@ async def _encode_semantic_scene_events(
         await close_async_resource(events)
 
 
+async def _stream_semantic_scene(
+    body: SemanticLiveSceneRequest,
+    *,
+    admission_identity: str,
+    admission: SceneAuthoringAdmission,
+    scene_service: SceneAuthoringService,
+) -> StreamingResponse:
+    """Acquire paid capacity and stream the routed, compiler-verified protocol."""
+
+    try:
+        lease = await admission.acquire(admission_identity)
+    except SceneAdmissionError as exc:
+        raise ApiError(429, str(exc)) from None
+    events = scene_service.stream_routed_semantic_events(body)
+    return _OwnedStreamingResponse(
+        _encode_semantic_scene_events(events),
+        admission_lease=lease,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @router.post("/stream")
 async def stream_live_scene(
     body: LiveSceneRequest,
@@ -114,6 +141,23 @@ async def stream_live_scene(
             "Cache-Control": "no-store",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.post("/semantic/stream")
+async def stream_semantic_live_scene(
+    body: SemanticLiveSceneRequest,
+    user: CurrentUserDependency,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream compiler-verified semantic atoms for an authenticated caller."""
+
+    return await _stream_semantic_scene(
+        body,
+        admission_identity=user["id"],
+        admission=admission,
+        scene_service=scene_service,
     )
 
 
@@ -155,19 +199,11 @@ async def stream_development_semantic_live_scene(
     scene_service: SceneAuthoringServiceDependency,
 ) -> StreamingResponse:
     """Stream compiler-verified semantic atoms in the guarded development lab."""
-    try:
-        lease = await admission.acquire(_DEVELOPMENT_SCENE_LAB_IDENTITY)
-    except SceneAdmissionError as exc:
-        raise ApiError(429, str(exc)) from None
-    events = scene_service.stream_routed_semantic_events(body)
-    return _OwnedStreamingResponse(
-        _encode_semantic_scene_events(events),
-        admission_lease=lease,
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-store",
-            "X-Accel-Buffering": "no",
-        },
+    return await _stream_semantic_scene(
+        body,
+        admission_identity=_DEVELOPMENT_SCENE_LAB_IDENTITY,
+        admission=admission,
+        scene_service=scene_service,
     )
 
 
@@ -176,4 +212,5 @@ __all__ = [
     "stream_development_live_scene",
     "stream_development_semantic_live_scene",
     "stream_live_scene",
+    "stream_semantic_live_scene",
 ]

@@ -582,7 +582,7 @@ describe("semantic scene model stream transport", () => {
     expect(cancelSpy).toHaveBeenCalledWith(originalError);
   });
 
-  it("posts paired snapshots to the fixed auth-free semantic lab endpoint", async () => {
+  it("posts paired snapshots to the explicit auth-free semantic lab endpoint", async () => {
     const controller = new AbortController();
     const request = {
       prompt: "Explain the Pythagorean area identity",
@@ -613,6 +613,7 @@ describe("semantic scene model stream transport", () => {
     const runner: SemanticSceneStreamRunner = async (streamInvocation) => {
       await runSemanticSceneModelStream({
         apiUrl: "http://127.0.0.1:8000/",
+        endpoint: "developmentLab",
         headers: { "X-Test": "semantic-gate" },
         fetchImpl,
         ...streamInvocation,
@@ -639,5 +640,46 @@ describe("semantic scene model stream transport", () => {
       "scene_stream_started",
       "scene_stream_failed",
     ]);
+  });
+
+  it("posts paired snapshots and authorization to the semantic product endpoint", async () => {
+    const controller = new AbortController();
+    const request = {
+      prompt: "Continue the Pythagorean area identity",
+      generation: 2,
+      baseScene: createSceneState({ revision: 0, nodes: [] }),
+      baseSemanticScene: createSemanticSceneState({ revision: 0, components: [] }),
+    };
+    const fetchImpl = vi.fn<typeof fetch>(async () =>
+      streamedResponse([
+        encoder.encode(
+          sseFrame(startedEvent({ generation: 2 })) +
+            sseFrame(failedEvent({ generation: 2 }), "scene_stream_failed")
+        ),
+      ])
+    );
+
+    await runSemanticSceneModelStream({
+      apiUrl: "https://murmur.example/",
+      endpoint: "product",
+      headers: { Authorization: "Bearer verified-user-token" },
+      request,
+      signal: controller.signal,
+      onEvent: vi.fn(),
+      fetchImpl,
+    });
+
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    const [url, init] = fetchImpl.mock.calls[0];
+    expect(url).toBe("https://murmur.example/api/live-scenes/semantic/stream");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer verified-user-token",
+      },
+      signal: controller.signal,
+    });
+    expect(JSON.parse(String(init?.body))).toEqual(request);
   });
 });

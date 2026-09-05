@@ -14,6 +14,7 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 - Database-backed tools, including web search and canvas updates
 - Four-layer memory: short-term context, episodic summaries, Mem0 semantic memory, and an explicit user profile
 - A deterministic Scene Description Language (SDL) compiler and a Rough.js/GSAP SVG renderer
+- An authenticated `/canvas/generate` lesson that streams compiler-verified Pythagorean visual atoms and resumes from its in-memory presented frontier
 - User-scoped logs, latency metrics, session history, and mastery data
 
 ## Runtime flow
@@ -41,6 +42,7 @@ backend/murmur/
   chat/           transport-neutral chat service
   core/           configuration and domain errors
   llm/            provider adapters, pipeline, routing, and tool policy
+  live_scene/     bounded scene routing, compilation, verification, and admission
   memory/         context budgeting, durable layers, and orchestration
   persistence/    SQLModel tables, engine lifecycle, and repositories
   resources/      PDF/URL ingestion and retrieval
@@ -50,6 +52,7 @@ backend/murmur/
 web/src/
   app/            Next.js routes and layouts
   features/canvas typed canvas contracts, normalization, rendering, and timing
+  features/live-scene/ semantic/raw transports and interruption-safe scene runtime
   lib/scene-kit/  semantic scene compiler and layout engine
   hooks/          chat and WebRTC client transports
 tests/            provider-free backend unit and integration tests
@@ -113,6 +116,14 @@ npm run build
 ```
 
 Automated tests use local fakes and an in-memory database. Live provider checks live under `scripts/manual/` and are never collected by default.
+
+The provider-free scene browser gate runs the guarded development lab with checked-in or intercepted fixtures. It proves progressive rendering, interruption, exact in-memory continuation, replay, decline recovery, and narrow viewport behavior without claiming genuine Firebase or live-provider qualification. GitHub Actions runs the same command in its `Verified scene browser proof` job and uploads ignored evidence from `var/scene-e2e/`:
+
+```bash
+cd web
+npx playwright install chromium
+npm run e2e:scene
+```
 
 The provider-free RTC browser gate uses a digest-pinned local LiveKit server, a guarded deterministic worker profile, an isolated production Next.js build, and Chromium. It requires Docker and a locally installed Playwright Chromium binary, owns only dedicated loopback ports, strips ambient provider credentials from child processes, and writes ignored evidence under `var/`:
 

@@ -151,7 +151,7 @@ describe("ModelSceneDemo", () => {
       createSemanticSceneFixtureRunner({ eventDelayMs: 0, chunkDelayMs: 0 })
     );
 
-    expect(demo.container.textContent).toContain("Gate 1.2");
+    expect(demo.container.textContent).toContain("Verified");
     expect(demo.container.textContent).toContain("Presented act ledger");
     expect(demo.container.textContent).toContain("0 presented");
 
@@ -192,7 +192,7 @@ describe("ModelSceneDemo", () => {
     );
 
     expect(button(demo.container, "Compose the proof").disabled).toBe(false);
-    expect(button(demo.container, "Stop after this act").disabled).toBe(true);
+    expect(button(demo.container, "Stop drawing").disabled).toBe(true);
     expect(button(demo.container, "Replay presented").disabled).toBe(true);
     expect(button(demo.container, "Wipe board").disabled).toBe(true);
 
@@ -236,7 +236,7 @@ describe("ModelSceneDemo", () => {
     expect(demo.container.textContent).toContain("scene 0");
     expect(demo.container.querySelector('[role="alert"]')).toBeNull();
     expect(button(demo.container, "Present verified acts").disabled).toBe(false);
-    expect(button(demo.container, "Stop after this act").disabled).toBe(true);
+    expect(button(demo.container, "Stop drawing").disabled).toBe(true);
 
     await act(async () => demo.root.unmount());
   });

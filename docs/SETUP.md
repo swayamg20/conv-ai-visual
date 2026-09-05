@@ -42,6 +42,14 @@ FIREBASE_PROJECT_ID=your-firebase-project-id
 
 Use `OPENAI_API_KEY` with `LLM_PROVIDER=openai`, or `GEMINI_API_KEY` with `LLM_PROVIDER=gemini`.
 
+The authenticated verified visual lesson at `/canvas/generate` is deliberately default-off. To enable its current Pythagorean slice, set:
+
+```dotenv
+MURMUR_SCENE_ENABLED=true
+```
+
+Scene authoring inherits `LLM_PROVIDER` and that provider's model and credentials by default. To select a separate supported provider or model, also set `MURMUR_SCENE_LLM_PROVIDER` and `MURMUR_SCENE_LLM_MODEL` with the matching server-side provider credentials. Keep the flag off when live scene-provider calls are not intended; unsupported lesson requests decline without changing the visible frontier.
+
 For voice, also set:
 
 ```dotenv

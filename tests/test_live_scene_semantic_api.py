@@ -1,4 +1,4 @@
-"""Guard, wire, and ownership tests for the development semantic scene lab."""
+"""Guard, wire, and ownership tests for semantic scene HTTP routes."""
 
 from __future__ import annotations
 
@@ -37,6 +37,12 @@ from murmur.live_scene.semantic_service_contracts import (
 )
 from pydantic import ValidationError
 from starlette.requests import ClientDisconnect
+
+AUTHENTICATED_USER = {
+    "id": "semantic-scene-user",
+    "email": "semantic-scene-user@example.com",
+    "name": "Semantic Scene User",
+}
 
 
 def _request_body() -> dict[str, object]:
@@ -146,8 +152,10 @@ class RecordingSceneAuthoringAdmission(SceneAuthoringAdmission):
 class RejectingSceneAuthoringAdmission(SceneAuthoringAdmission):
     def __init__(self) -> None:
         super().__init__(global_limit=1, per_user_limit=1, requests_per_minute=10)
+        self.user_ids: list[str] = []
 
     async def acquire(self, user_id: str):
+        self.user_ids.append(user_id)
         raise SceneAdmissionError("capacity_reached", "Visual generation is busy.")
 
 
@@ -175,6 +183,8 @@ def _sse_payloads(response_text: str) -> list[dict[str, Any]]:
 def _test_client(
     service: FakeSemanticSceneAuthoringService,
     *,
+    authenticated: bool = False,
+    authentication_unavailable: bool = False,
     admission: SceneAuthoringAdmission | None = None,
     scene_authoring_enabled: bool = True,
     client_host: str = "127.0.0.1",
@@ -185,10 +195,14 @@ def _test_client(
         scene_authoring_enabled=scene_authoring_enabled,
     )
 
-    def reject_product_authentication() -> dict[str, str | None]:
-        raise ApiError(401, "Not authenticated")
+    def authenticate_product_user() -> dict[str, str | None]:
+        if authentication_unavailable:
+            raise ApiError(503, "Authentication is unavailable")
+        if not authenticated:
+            raise ApiError(401, "Not authenticated")
+        return AUTHENTICATED_USER
 
-    app.dependency_overrides[get_authenticated_user] = reject_product_authentication
+    app.dependency_overrides[get_authenticated_user] = authenticate_product_user
     return TestClient(app, client=(client_host, 50_000))
 
 
@@ -459,11 +473,10 @@ def test_semantic_lab_rejects_before_provider_stream_when_admission_is_full(
     assert service.requests == []
 
 
-def test_no_production_semantic_route_is_registered(monkeypatch) -> None:
-    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
-    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+def test_semantic_product_stream_requires_authentication() -> None:
     service = FakeSemanticSceneAuthoringService(_semantic_events())
-    client = _test_client(service)
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(service, admission=admission)
     try:
         response = client.post(
             "/api/live-scenes/semantic/stream",
@@ -472,5 +485,199 @@ def test_no_production_semantic_route_is_registered(monkeypatch) -> None:
     finally:
         client.close()
 
-    assert response.status_code == 404
+    assert response.status_code == 401
+    assert response.json() == {"error": "Not authenticated"}
+    assert admission.user_ids == []
+    assert service.requests == []
+
+
+def test_semantic_product_stream_contains_authentication_outages() -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authentication_unavailable=True,
+        admission=admission,
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "Authentication is unavailable"}
+    assert admission.user_ids == []
+    assert service.requests == []
+
+
+def test_semantic_product_streams_canonical_events_for_trusted_user() -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=True,
+        admission=admission,
+    )
+    try:
+        first = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+        second = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers["content-type"].startswith("text/event-stream")
+    assert first.headers["cache-control"] == "no-store"
+    assert first.headers["x-accel-buffering"] == "no"
+    assert [payload["type"] for payload in _sse_payloads(first.text)] == [
+        "scene_stream_started",
+        "semantic_scene_patch",
+        "scene_stream_completed",
+    ]
+    assert admission.user_ids == [
+        AUTHENTICATED_USER["id"],
+        AUTHENTICATED_USER["id"],
+    ]
+    assert len(service.requests) == 2
+    assert service.requests[0].model_dump(mode="json", by_alias=True) == _request_body()
+    assert not hasattr(service.requests[0], "user_id")
+
+
+def test_semantic_product_declines_without_mutating_revision() -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_declined_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=True,
+        admission=admission,
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert _sse_payloads(response.text)[-1] == {
+        "type": "semantic_scene_stream_declined",
+        "generation": 7,
+        "attempt": 1,
+        "finalRevision": 0,
+        "reasonCode": "unsupported_intent",
+        "message": "No supported visual change is available.",
+    }
+    assert admission.user_ids == [AUTHENTICATED_USER["id"]]
+    assert len(service.requests) == 1
+
+
+@pytest.mark.parametrize(
+    "body_mutation",
+    [
+        pytest.param(
+            {"userId": "attacker"},
+            id="client-authored-identity",
+        ),
+        pytest.param(
+            {"baseSemanticScene": {"revision": 1, "components": []}},
+            id="mismatched-frontier",
+        ),
+    ],
+)
+def test_semantic_product_rejects_untrusted_request_fields_before_admission(
+    body_mutation: dict[str, object],
+) -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RecordingSceneAuthoringAdmission()
+    body = {**_request_body(), **body_mutation}
+    client = _test_client(
+        service,
+        authenticated=True,
+        admission=admission,
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=body,
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 422
+    assert admission.user_ids == []
+    assert service.requests == []
+
+
+def test_semantic_product_stream_is_default_off_for_authenticated_users() -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=True,
+        admission=admission,
+        scene_authoring_enabled=False,
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 503
+    assert response.json() == {"error": "Live scene generation is not enabled"}
+    assert admission.user_ids == []
+    assert service.requests == []
+
+
+def test_semantic_product_rejects_before_provider_stream_when_admission_is_full() -> None:
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RejectingSceneAuthoringAdmission()
+    client = _test_client(
+        service,
+        authenticated=True,
+        admission=admission,
+    )
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 429
+    assert response.json() == {"error": "Visual generation is busy."}
+    assert admission.user_ids == [AUTHENTICATED_USER["id"]]
+    assert service.requests == []
+
+
+def test_lab_flag_does_not_bypass_semantic_product_authentication(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeSemanticSceneAuthoringService(_semantic_events())
+    admission = RecordingSceneAuthoringAdmission()
+    client = _test_client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/semantic/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert response.json() == {"error": "Not authenticated"}
+    assert admission.user_ids == []
     assert service.requests == []

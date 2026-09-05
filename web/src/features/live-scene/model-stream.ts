@@ -117,6 +117,7 @@ export type SemanticSceneStreamRunner = (
 export interface RunSemanticSceneStreamOptions
   extends SemanticSceneStreamRunInvocation {
   readonly apiUrl: string;
+  readonly endpoint: SceneStreamEndpoint;
   readonly headers?: Readonly<Record<string, string>>;
   readonly fetchImpl?: typeof fetch;
 }
@@ -127,7 +128,10 @@ const SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
   product: "/api/live-scenes/stream",
   developmentLab: "/api/live-scenes/lab/stream",
 };
-const SEMANTIC_SCENE_STREAM_PATH = "/api/live-scenes/lab/semantic/stream";
+const SEMANTIC_SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
+  product: "/api/live-scenes/semantic/stream",
+  developmentLab: "/api/live-scenes/lab/semantic/stream",
+};
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -553,13 +557,14 @@ export async function runSceneModelStream(
   await consumeSceneStreamResponse(response, options.onEvent);
 }
 
-/** Start one compiler-certified semantic stream against the development lab. */
+/** Start one compiler-certified semantic stream against an explicit trust boundary. */
 export async function runSemanticSceneModelStream(
   options: RunSemanticSceneStreamOptions
 ): Promise<void> {
   const requestFetch = options.fetchImpl ?? fetch;
+  const endpointPath = SEMANTIC_SCENE_STREAM_PATHS[options.endpoint];
   const response = await requestFetch(
-    `${options.apiUrl.replace(/\/$/, "")}${SEMANTIC_SCENE_STREAM_PATH}`,
+    `${options.apiUrl.replace(/\/$/, "")}${endpointPath}`,
     {
       method: "POST",
       headers: {
