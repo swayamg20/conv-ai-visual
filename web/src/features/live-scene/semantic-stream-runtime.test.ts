@@ -680,6 +680,41 @@ describe("SceneStreamRuntime semantic protocol", () => {
     expect(runtime.getSnapshot().phase).toBe("connecting");
   });
 
+  it("keeps a post-reset request measurement authoritative when old playback settles late", async () => {
+    let clock = 0;
+    const { renderer, harness, runtime, run } = await startedRuntime({
+      now: () => clock,
+    });
+    run.invocation.onEvent(semanticPatch());
+    const stalePlayback = renderer.rendered[0].playback;
+    stalePlayback.cancelOutcome = {
+      status: "cancelled",
+      appliedStepIds: ["areas__triangle"],
+    };
+
+    runtime.reset();
+    clock = 100;
+    runtime.start("Begin a measured request after reset");
+    await flushMicrotasks();
+
+    expect(harness.runs).toHaveLength(2);
+    const freshSnapshot = runtime.getSnapshot();
+    const freshMeasurement = freshSnapshot.presentationMetrics;
+    expect(freshSnapshot).toMatchObject({
+      phase: "connecting",
+      generation: 1,
+      presentationMetrics: {},
+    });
+
+    clock = 500;
+    stalePlayback.settle(stalePlayback.cancelOutcome);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toBe(freshSnapshot);
+    expect(runtime.getSnapshot().presentationMetrics).toBe(freshMeasurement);
+    expect(semanticSnapshot(runtime).accepted).toEqual([]);
+  });
+
   it("deep-freezes the paired ledger, original event, and browser presentation receipt", async () => {
     const { renderer, runtime, run } = await startedRuntime();
     run.invocation.onEvent(semanticPatch());
