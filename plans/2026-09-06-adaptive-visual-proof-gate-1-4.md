@@ -18,7 +18,8 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - [x] 2026-09-06 04:25 IST: Mirrored the versioned sixteen-role contract in the browser and split the compiler-certified fixture into two bounded eight-atom turns in `dd6048a`; 32 focused semantic, fixture, and live-model tests passed.
 - [x] 2026-09-06 04:35 IST: Added immutable browser presentation metrics and truthful server/browser diagnostic boundaries in `2e8819d` and `95c0d38`; 43 focused tests, lint, and type-check passed after independent race review.
 - [x] 2026-09-06 04:49 IST: Added zero-cost browser evidence for adaptation, interruption, suffix continuation, stale-output rejection, exact canonical Replay, and full-proof 320/375px layouts in `5ae73ee`, `abc0fb8`, and `aea0ca3`; the provider-free suite passed 15/15 and the targeted narrow suite passed 2/2.
-- [ ] Run focused and full repository gates, complete independent review, push every coherent milestone, merge the pull request, and verify the merged `main` checks.
+- [x] 2026-09-06 05:12 IST: Qualified pushed head `eaf54c1`: 1,683 backend tests, 470 frontend tests, Ruff, formatting, lint, type-check, production build, and 15 Playwright scenarios passed; independent re-review confirmed both discovered blockers closed with no remaining material findings.
+- [ ] Open and merge the Gate 1.4 pull request, then verify every required check on merged `main`.
 
 ## Surprises & Discoveries
 
@@ -30,6 +31,8 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - Raw SVG `innerHTML` can differ after Replay solely because the browser changes attribute insertion order while preserving the same elements, attributes, values, and child order. The browser test therefore canonicalizes only attribute ordering before demanding exact SVG DOM equality; it does not normalize coordinates, paths, styles, or structure.
 - At 375px, the canvas zoom/download toolbar originally floated over the proof equation. Rendering those controls in normal flow below the board on touch-sized viewports removes the collision while retaining the desktop hover/focus overlay.
 - The fixture's raw animation-frame-to-first-visible p95 was 35.4 ms in the full browser run. This is renderer scheduling evidence, not end-to-end request latency; the visible browser metric correctly reported the much longer request-to-first-presented and request-to-settled durations.
+- Extending the closed semantic/router vocabularies grew the conservative dry-run prompts without changing either evaluation corpus. Exact reserved input moved to 177,456 tokens / $0.075770400 for the semantic probe and 119,112 / $0.042442800 for the router probe; the pinned dry-run tests and human router ceiling now reflect those deterministic bounds, with no provider request made.
+- Independent pre-merge review found that the first proof draft skipped cross-group label-collision checks while issuing an unscoped `LABEL_SEPARATION` receipt, and that direct compiler callers could construct a non-wireable sixteen-atom beat. Moving the Region B label and enforcing the shared eight-atom cap in both compiler and contract closed those trust-boundary gaps before PR creation.
 
 ## Decision Log
 
@@ -42,10 +45,14 @@ This gate remains one Pythagorean component, text-directed, ephemeral to the mou
 - 2026-09-06, Codex: Encode the altitude, partition, and concluding emphasis as two-point open `PathSceneNode` marks. This keeps the change local to the verified proof vocabulary and avoids changing the visual character of every existing rough-drawn canvas line merely to make this proof replay deterministic.
 - 2026-09-06, Codex: Define exact Replay as equality of the canonical SVG DOM and semantic frontier, with attribute order treated as non-semantic browser serialization detail. All attribute values, node order, paths, styles, and semantic receipts remain strict.
 - 2026-09-06, Codex: Keep canvas controls below the SVG on mobile and as a hover/focus overlay on desktop. This preserves the drawing area without hiding controls from touch users or covering mathematical content.
+- 2026-09-06, Codex: A `LABEL_SEPARATION` receipt means separation from every other verified area label, including labels introduced in an earlier beat. The verifier therefore checks all unordered pairs rather than treating identity and proof labels as separate groups.
+- 2026-09-06, Codex: Make the eight-atom generation limit a compiler and data-contract invariant, not merely a routed-service preflight. Full proof construction is always represented and tested as an eight-atom identity beat followed by an eight-atom proof beat with one contiguous certificate chain.
 
 ## Outcomes & Retrospective
 
-Not yet complete. This section will be updated with the merged commit, exact test counts, browser evidence, review findings, and remaining product boundaries.
+Implementation and local qualification are complete on pushed head `eaf54c1`. The final suite passed 1,683 backend tests, 470 frontend tests, and 15 provider-free Playwright scenarios; Ruff, formatting, lint, type-check, the CI-equivalent production build, and diff checks also passed. The final browser run measured complete-patch-frame to first-visible p95 at 33.6 ms. Fresh desktop and 375px evidence show the five labels separated, the proof regions contained, and mobile controls below the board. Independent review initially found two material verifier/compiler boundary issues; `eaf54c1` fixed both and the re-review returned PASS with no material findings. No paid Azure request was made.
+
+The gate is not yet complete because the pull request has not been merged and required checks on merged `main` have not been verified. This section will receive the PR and merged commit once those external gates finish.
 
 ## Context and Orientation
 
