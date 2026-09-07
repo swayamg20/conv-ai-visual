@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from types import MappingProxyType
 
+from murmur.live_scene.choreography_contracts import RoutedChoreographyBeatV2
 from murmur.live_scene.contracts import MAX_SAFE_SEQUENCE
 from murmur.live_scene.semantic_contracts import (
     PythagoreanAreaIdentityDirective,
@@ -11,7 +12,7 @@ from murmur.live_scene.semantic_contracts import (
     TeachingAct,
     TeachingBeatDraft,
 )
-from murmur.live_scene.visual_act_router import ResolvedVisualAct
+from murmur.live_scene.visual_act_router import ResolvedChoreographyAct, ResolvedVisualAct
 
 _STAGE_BEAT_CONTENT = MappingProxyType(
     {
@@ -66,4 +67,21 @@ def lower_resolved_visual_act(
     )
 
 
-__all__ = ["lower_resolved_visual_act"]
+def lower_resolved_choreography_act(
+    resolved: ResolvedChoreographyAct,
+    *,
+    generation: int,
+) -> RoutedChoreographyBeatV2:
+    """Create the presentation-free V2 input expected by the choreography compiler."""
+
+    if not isinstance(resolved, ResolvedChoreographyAct):
+        raise TypeError("resolved must be a ResolvedChoreographyAct")
+    return RoutedChoreographyBeatV2(
+        beat_id=_server_beat_id(generation),
+        component_kind=resolved.component_kind,
+        component_id=resolved.component_id,
+        route=resolved.route,
+    )
+
+
+__all__ = ["lower_resolved_choreography_act", "lower_resolved_visual_act"]

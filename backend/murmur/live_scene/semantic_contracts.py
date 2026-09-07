@@ -15,6 +15,7 @@ from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
+from murmur.live_scene.choreography_contracts import CompletingSquareStage
 from murmur.live_scene.completing_square_contracts import CompletingSquareState
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
@@ -112,6 +113,32 @@ class ContinueVisualDecision(LiveSceneContract):
     target_stage: PythagoreanStage = Field(alias="targetStage")
 
 
+class StartChoreographyDecision(LiveSceneContract):
+    """Model request to start the one supported choreographed lesson."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["start_choreography"] = "start_choreography"
+    component_kind: Literal["completing_square"] = Field(alias="componentKind")
+    target_stage: CompletingSquareStage = Field(alias="targetStage")
+
+
+class ContinueChoreographyDecision(LiveSceneContract):
+    """Model request to advance one accepted choreographed lesson."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["continue_choreography"] = "continue_choreography"
+    component_id: SemanticComponentId = Field(alias="componentId")
+    target_stage: CompletingSquareStage = Field(alias="targetStage")
+
+
+class ClarifyCornerDecision(LiveSceneContract):
+    """Model request for the sole supported adaptive choreography detour."""
+
+    v: Literal[LIVE_SCENE_SCHEMA_VERSION] = LIVE_SCENE_SCHEMA_VERSION
+    decision: Literal["clarify_corner"] = "clarify_corner"
+    component_id: SemanticComponentId = Field(alias="componentId")
+
+
 class AbstainVisualDecision(LiveSceneContract):
     """Model decision to leave the accepted visual state unchanged."""
 
@@ -121,7 +148,12 @@ class AbstainVisualDecision(LiveSceneContract):
 
 
 VisualActDecision: TypeAlias = Annotated[
-    StartVisualDecision | ContinueVisualDecision | AbstainVisualDecision,
+    StartVisualDecision
+    | ContinueVisualDecision
+    | StartChoreographyDecision
+    | ContinueChoreographyDecision
+    | ClarifyCornerDecision
+    | AbstainVisualDecision,
     Field(discriminator="decision"),
 ]
 
