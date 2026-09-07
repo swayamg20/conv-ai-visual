@@ -1,12 +1,9 @@
 import { gsap } from "gsap";
 
-import type { SVGPrimitiveRenderer } from "@/features/canvas/primitives";
 import type {
-  CanvasOperation,
   MotionPlayback,
   MotionPlaybackOutcome,
   MotionPlaybackOptions,
-  SVGElementData,
 } from "@/features/canvas/types";
 import {
   animateColorPulse,
@@ -16,7 +13,13 @@ import {
   resolveCssColor,
   settleDrawOn,
 } from "@/lib/gsap-setup";
-import type { MotionPlan, MotionStep, SceneNode } from "@/lib/live-scene";
+import type { MotionPlan, MotionStep } from "@/lib/live-scene";
+
+import {
+  createSvgNodeReconciler,
+  type SvgNodeReconciler,
+  type SvgNodeReconcilerContext,
+} from "./svg-node-reconciler";
 
 interface ManagedMotionPlayback {
   pause(): void;
@@ -39,12 +42,8 @@ export interface SvgMotionExecutorOptions {
   readonly presentationBarrier?: SvgPresentationBarrier;
 }
 
-export interface SvgMotionExecutorContext {
-  readonly elements: Map<string, SVGElementData>;
-  getSvg(): SVGSVGElement | null;
-  getRenderer(): SVGPrimitiveRenderer | null;
+export interface SvgMotionExecutorContext extends SvgNodeReconcilerContext {
   getHighlightColor(): string;
-  invalidate(): void;
 }
 
 export interface SvgMotionExecutor {
@@ -52,195 +51,6 @@ export interface SvgMotionExecutor {
   emphasize(id: string, color?: string): void;
   cancel(): void;
   dispose(): void;
-}
-
-function sceneNodeOperation(
-  node: Exclude<SceneNode, { kind: "latex" | "latex_token" }>
-): CanvasOperation {
-  switch (node.kind) {
-    case "line":
-      return {
-        action: "line",
-        id: node.id,
-        points: node.points.map(([x, y]) => [x, y]) as [number, number][],
-        color: node.style.stroke,
-        stroke_width: node.style.strokeWidth,
-        roughness: node.style.roughness,
-      };
-    case "path":
-      return {
-        action: "path",
-        id: node.id,
-        points: node.points.map(([x, y]) => [x, y]) as [number, number][],
-        color: node.style.stroke,
-        fill: node.style.fill,
-        stroke_width: node.style.strokeWidth,
-        roughness: node.style.roughness,
-      };
-    case "rect":
-      return {
-        action: "rect",
-        id: node.id,
-        x: node.x,
-        y: node.y,
-        width: node.width,
-        height: node.height,
-        color: node.style.stroke,
-        fill: node.style.fill === "none" ? undefined : node.style.fill,
-        stroke_width: node.style.strokeWidth,
-        roughness: node.style.roughness,
-      };
-    case "text":
-      return {
-        action: "text",
-        id: node.id,
-        x: node.x,
-        y: node.y,
-        text: node.text,
-        color: node.style.color,
-        font_size: node.style.fontSize,
-        font_family: node.style.fontFamily,
-      };
-  }
-}
-
-function sceneNodePosition(node: SceneNode): { x: number; y: number } {
-  return "x" in node ? { x: node.x, y: node.y } : { x: 0, y: 0 };
-}
-
-function createPathElement(
-  node: Extract<SceneNode, { kind: "path" }>,
-  domId: string
-): SVGElement {
-  const namespace = "http://www.w3.org/2000/svg";
-  const group = document.createElementNS(namespace, "g");
-  group.setAttribute("id", domId);
-  group.setAttribute("data-element-id", domId);
-
-  const path = document.createElementNS(namespace, "path");
-  path.setAttribute(
-    "d",
-    `${node.points
-      .map(([x, y], index) => `${index === 0 ? "M" : "L"}${x},${y}`)
-      .join(" ")}${node.closed ? " Z" : ""}`
-  );
-  path.setAttribute("fill", node.style.fill);
-  path.setAttribute("stroke", node.style.stroke);
-  path.setAttribute("stroke-width", String(node.style.strokeWidth));
-  path.setAttribute("stroke-linecap", "round");
-  path.setAttribute("stroke-linejoin", "round");
-  group.appendChild(path);
-  return group;
-}
-
-function createSceneElement(
-  context: SvgMotionExecutorContext,
-  node: SceneNode,
-  domId = node.id
-): SVGElement | null {
-  const renderer = context.getRenderer();
-  if (!renderer) return null;
-
-  if (node.kind === "latex") {
-    return renderer.drawLatex({
-      type: "latex",
-      id: domId,
-      latex: node.latex,
-      x: node.x,
-      y: node.y,
-      font_size: node.style.fontSize,
-      color: node.style.color,
-    });
-  }
-
-  if (node.kind === "latex_token") {
-    return renderer.drawLatexToken({
-      type: "latex_token",
-      id: domId,
-      latex: node.latex,
-      x: node.x,
-      y: node.y,
-      width: node.width,
-      height: node.height,
-      anchor: node.anchor,
-      font_size: node.style.fontSize,
-      color: node.style.color,
-    });
-  }
-
-  if (node.kind === "path") return createPathElement(node, domId);
-
-  const element = renderer.draw({ ...sceneNodeOperation(node), id: domId });
-  if (element && node.kind === "text") {
-    element.querySelector("text")?.setAttribute("text-anchor", node.style.anchor);
-  }
-  return element;
-}
-
-function rememberElement(
-  context: SvgMotionExecutorContext,
-  node: SceneNode,
-  element: SVGElement
-): void {
-  context.elements.set(node.id, {
-    element,
-    id: node.id,
-    type: node.kind,
-    ...sceneNodePosition(node),
-    data: node,
-  });
-  context.invalidate();
-}
-
-function restoreElementSnapshot(element: SVGElement, snapshot: SVGElement): void {
-  gsap.killTweensOf(element);
-  gsap.set(element, { clearProps: "all" });
-  for (const attribute of Array.from(element.attributes)) {
-    element.removeAttribute(attribute.name);
-  }
-  for (const attribute of Array.from(snapshot.attributes)) {
-    element.setAttribute(attribute.name, attribute.value);
-  }
-  element.replaceChildren(
-    ...Array.from(snapshot.childNodes, (child) => child.cloneNode(true))
-  );
-}
-
-function restoreElementPosition(
-  element: SVGElement,
-  parent: Node | null,
-  nextSibling: Node | null
-): void {
-  if (!parent || element.parentNode === parent) return;
-  parent.insertBefore(
-    element,
-    nextSibling?.parentNode === parent ? nextSibling : null
-  );
-}
-
-function settleElementPresentation(element: SVGElement, node: SceneNode): void {
-  element.removeAttribute("clip-path");
-  element.style.removeProperty("clip-path");
-  element
-    .querySelectorAll<SVGElement>("*")
-    .forEach((child) => {
-      child.removeAttribute("clip-path");
-      child.style.removeProperty("clip-path");
-    });
-  element.removeAttribute("transform");
-  gsap.set(element, { opacity: node.style.opacity });
-  gsap.set(element, { clearProps: "transform,transformOrigin" });
-  element.style.removeProperty("transform");
-  element.style.removeProperty("transform-origin");
-}
-
-function clearDrawResidue(element: SVGElement): void {
-  element.querySelectorAll<SVGElement>("path").forEach((path) => {
-    path.removeAttribute("stroke-dasharray");
-    path.removeAttribute("stroke-dashoffset");
-    path.style.removeProperty("stroke-dasharray");
-    path.style.removeProperty("stroke-dashoffset");
-  });
 }
 
 function browserPresentationBarrier(): Promise<void> {
@@ -257,6 +67,7 @@ function browserPresentationBarrier(): Promise<void> {
 
 function executeMotionStep(
   context: SvgMotionExecutorContext,
+  reconciler: SvgNodeReconciler,
   step: MotionStep
 ): StartedMotion {
   const svg = context.getSvg();
@@ -265,9 +76,7 @@ function executeMotionStep(
   if (step.type === "remove") {
     const target = context.elements.get(step.id);
     if (!target) throw new Error(`Missing remove target: ${step.id}`);
-    const snapshot = target.element.cloneNode(true) as SVGElement;
-    const parent = target.element.parentNode;
-    const nextSibling = target.element.nextSibling;
+    const snapshot = reconciler.capture(target.element);
     let state: "pending" | "committed" | "rolledback" = "pending";
     const commit = () => {
       if (state === "committed") return;
@@ -275,18 +84,13 @@ function executeMotionStep(
         throw new Error(`Cannot recommit rolled-back remove target: ${step.id}`);
       }
       target.element.remove();
-      if (context.elements.get(step.id)?.element === target.element) {
-        context.elements.delete(step.id);
-      }
-      context.invalidate();
+      reconciler.forget(step.id, target.element);
       state = "committed";
     };
     const rollback = () => {
       if (state === "rolledback") return;
-      restoreElementSnapshot(target.element, snapshot);
-      restoreElementPosition(target.element, parent, nextSibling);
-      context.elements.set(step.id, target);
-      context.invalidate();
+      reconciler.restore(snapshot);
+      reconciler.remember(step.node, target.element);
       state = "rolledback";
     };
     if (step.effect === "none") {
@@ -312,30 +116,30 @@ function executeMotionStep(
     const outgoing = outgoingData.element;
 
     if (step.transition === "transform") {
-      const replacement = createSceneElement(context, node, node.id);
+      const replacement = reconciler.create(node, node.id);
       if (!replacement) throw new Error(`Could not render update target: ${node.id}`);
-      const snapshot = outgoing.cloneNode(true) as SVGElement;
+      const snapshot = reconciler.capture(outgoing);
       let state: "pending" | "committed" | "rolledback" = "pending";
       const commit = () => {
         if (state === "committed") return;
         if (state === "rolledback") {
           throw new Error(`Cannot recommit rolled-back update target: ${step.id}`);
         }
-        settleElementPresentation(outgoing, node);
-        rememberElement(context, node, outgoing);
+        reconciler.settle(outgoing, node);
+        reconciler.remember(node, outgoing);
         state = "committed";
       };
       const rollback = () => {
         if (state === "rolledback") return;
-        restoreElementSnapshot(outgoing, snapshot);
-        rememberElement(context, step.previous, outgoing);
+        reconciler.restore(snapshot);
+        reconciler.remember(step.previous, outgoing);
         state = "rolledback";
       };
       try {
         outgoing.replaceChildren(...Array.from(replacement.childNodes));
         outgoing.removeAttribute("clip-path");
         gsap.set(outgoing, { opacity: node.style.opacity, scale: 0.98 });
-        rememberElement(context, node, outgoing);
+        reconciler.remember(node, outgoing);
         const animation = gsap.to(outgoing, {
           opacity: node.style.opacity,
           scale: 1,
@@ -349,11 +153,9 @@ function executeMotionStep(
       }
     }
 
-    const incoming = createSceneElement(context, node, `${node.id}--incoming`);
+    const incoming = reconciler.create(node, `${node.id}--incoming`);
     if (!incoming) throw new Error(`Could not render update target: ${node.id}`);
-    const outgoingSnapshot = outgoing.cloneNode(true) as SVGElement;
-    const outgoingParent = outgoing.parentNode;
-    const outgoingNextSibling = outgoing.nextSibling;
+    const outgoingSnapshot = reconciler.capture(outgoing);
     let state: "pending" | "committed" | "rolledback" = "pending";
     const commit = () => {
       if (state === "committed") return;
@@ -363,16 +165,15 @@ function executeMotionStep(
       outgoing.remove();
       incoming.setAttribute("id", node.id);
       incoming.setAttribute("data-element-id", node.id);
-      settleElementPresentation(incoming, node);
-      rememberElement(context, node, incoming);
+      reconciler.settle(incoming, node);
+      reconciler.remember(node, incoming);
       state = "committed";
     };
     const rollback = () => {
       if (state === "rolledback") return;
       incoming.remove();
-      restoreElementSnapshot(outgoing, outgoingSnapshot);
-      restoreElementPosition(outgoing, outgoingParent, outgoingNextSibling);
-      rememberElement(context, step.previous, outgoing);
+      reconciler.restore(outgoingSnapshot);
+      reconciler.remember(step.previous, outgoing);
       state = "rolledback";
     };
     try {
@@ -381,12 +182,12 @@ function executeMotionStep(
       incoming.setAttribute("id", node.id);
       incoming.setAttribute("data-element-id", node.id);
       gsap.set(incoming, { opacity: 0 });
-      if (outgoingParent) {
-        outgoingParent.insertBefore(incoming, outgoing.nextSibling);
+      if (outgoingSnapshot.parent) {
+        outgoingSnapshot.parent.insertBefore(incoming, outgoing.nextSibling);
       } else {
         svg.appendChild(incoming);
       }
-      rememberElement(context, node, incoming);
+      reconciler.remember(node, incoming);
 
       const timeline = gsap.timeline();
       timeline.to(outgoing, {
@@ -413,7 +214,7 @@ function executeMotionStep(
   if (context.elements.has(node.id)) {
     throw new Error(`Duplicate enter target: ${node.id}`);
   }
-  const element = createSceneElement(context, node);
+  const element = reconciler.create(node);
   if (!element) throw new Error(`Could not render enter target: ${node.id}`);
   let animation: gsap.core.Animation | null = null;
   let drawAnimation: gsap.core.Timeline | null = null;
@@ -425,25 +226,21 @@ function executeMotionStep(
     }
     if (drawAnimation) {
       settleDrawOn(drawAnimation);
-      clearDrawResidue(element);
     }
-    settleElementPresentation(element, node);
-    rememberElement(context, node, element);
+    reconciler.settle(element, node, Boolean(drawAnimation));
+    reconciler.remember(node, element);
     state = "committed";
   };
   const rollback = () => {
     if (state === "rolledback") return;
     element.remove();
-    if (context.elements.get(node.id)?.element === element) {
-      context.elements.delete(node.id);
-    }
-    context.invalidate();
+    reconciler.forget(node.id, element);
     state = "rolledback";
   };
 
   try {
     svg.appendChild(element);
-    rememberElement(context, node, element);
+    reconciler.remember(node, element);
 
     if (step.effect === "none") {
       animation = null;
@@ -489,6 +286,7 @@ export function createSvgMotionExecutor(
   context: SvgMotionExecutorContext,
   options: SvgMotionExecutorOptions = {}
 ): SvgMotionExecutor {
+  const reconciler = createSvgNodeReconciler(context);
   const playbacks = new Set<ManagedMotionPlayback>();
   const emphasisAnimations = new Map<gsap.core.Animation, () => void>();
   let mutationEpoch = 0;
@@ -623,7 +421,7 @@ export function createSvgMotionExecutor(
     const startStep = (step: MotionStep) => {
       if (settlementStarted) return;
       try {
-        const started = executeMotionStep(context, step);
+        const started = executeMotionStep(context, reconciler, step);
         activeMotions.set(step.id, started);
         transactions.push({ step, motion: started });
 
