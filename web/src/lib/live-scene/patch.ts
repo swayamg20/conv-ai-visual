@@ -528,6 +528,11 @@ function decodePatch(value: unknown): ScenePatchDraft {
   });
 }
 
+/** Strictly decode one lifecycle-free scene patch draft. */
+export function decodeScenePatchDraft(inputValue: unknown): ScenePatchDraft {
+  return decodePatch(inputValue);
+}
+
 /** Strictly decode one server-authoritative `scene_patch` event. */
 export function decodeScenePatchEvent(inputValue: unknown): ScenePatchEvent {
   const input = record(inputValue, "scene_patch event", "invalid_event");
