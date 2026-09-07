@@ -15,6 +15,7 @@ from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
+from murmur.live_scene.completing_square_contracts import CompletingSquareState
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
     MAX_ACCEPTED_PATCHES,
@@ -229,7 +230,10 @@ class PythagoreanAreaIdentityState(LiveSceneContract):
         return self
 
 
-SemanticComponentState: TypeAlias = PythagoreanAreaIdentityState
+SemanticComponentState: TypeAlias = Annotated[
+    PythagoreanAreaIdentityState | CompletingSquareState,
+    Field(discriminator="kind"),
+]
 
 
 class SemanticSceneState(LiveSceneContract):
@@ -493,6 +497,23 @@ class CompiledTeachingBeat(LiveSceneContract):
             ),
             None,
         )
+
+        if base_component is not None and not isinstance(
+            base_component,
+            PythagoreanAreaIdentityState,
+        ):
+            raise ValueError(
+                "legacy compiled teaching beat cannot target a non-Pythagorean "
+                "component in baseScene"
+            )
+        if result_component is not None and not isinstance(
+            result_component,
+            PythagoreanAreaIdentityState,
+        ):
+            raise ValueError(
+                "legacy compiled teaching beat cannot target a non-Pythagorean "
+                "component in resultScene"
+            )
 
         base_roles = () if base_component is None else base_component.revealed_roles
         if base_roles != target_roles[: len(base_roles)]:
