@@ -1,6 +1,7 @@
 export { materializeSceneTransition, planSceneTransition } from "./planner";
 export * from "./choreography";
 export * from "./checkpoint";
+export * from "./choreography-planner";
 export * from "./semantic";
 export { createSceneState } from "./state";
 export type {
