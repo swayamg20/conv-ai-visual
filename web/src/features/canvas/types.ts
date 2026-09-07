@@ -72,6 +72,21 @@ export interface LatexOperation {
   color: string;
 }
 
+export interface LatexTokenOperation {
+  type: "latex_token";
+  id: string;
+  latex: string;
+  /** Horizontal anchor coordinate in the logical canvas. */
+  x: number;
+  /** Top edge of the measured token box. */
+  y: number;
+  width: number;
+  height: number;
+  anchor: "start" | "middle" | "end";
+  font_size: number;
+  color: string;
+}
+
 export interface TeachingStep {
   action: string;
   element?: CanvasOperation;

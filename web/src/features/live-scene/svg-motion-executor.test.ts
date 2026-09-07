@@ -4,10 +4,15 @@ import { gsap } from "gsap";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { SVGPrimitiveRenderer } from "@/features/canvas/primitives";
-import type { CanvasOperation, SVGElementData } from "@/features/canvas/types";
+import type {
+  CanvasOperation,
+  LatexTokenOperation,
+  SVGElementData,
+} from "@/features/canvas/types";
 import {
   createSceneState,
   planSceneTransition,
+  type LatexTokenSceneNode,
   type PathSceneNode,
   type SceneNode,
   type TextSceneNode,
@@ -61,6 +66,25 @@ function pathNode(id: string): PathSceneNode {
   };
 }
 
+function latexTokenNode(
+  x: number,
+  overrides: Partial<LatexTokenSceneNode> = {}
+): LatexTokenSceneNode {
+  return {
+    id: "equation-x-squared",
+    kind: "latex_token",
+    x,
+    y: 120,
+    width: 80,
+    height: 44,
+    anchor: "middle",
+    latex: "x^2",
+    presentation: { enter: "fade", exit: "fade" },
+    style: { color: "#f59e0b", fontSize: 28, opacity: 0.9 },
+    ...overrides,
+  };
+}
+
 function renderText(operation: CanvasOperation): SVGGElement {
   const group = document.createElementNS(SVG_NAMESPACE, "g");
   group.setAttribute("id", operation.id as string);
@@ -92,6 +116,25 @@ function createRenderer(
       const group = document.createElementNS(SVG_NAMESPACE, "g");
       group.setAttribute("id", operation.id);
       group.setAttribute("data-element-id", operation.id);
+      created.set(operation.id, group);
+      return group;
+    },
+    drawLatexToken(operation: LatexTokenOperation) {
+      const group = document.createElementNS(SVG_NAMESPACE, "g");
+      group.setAttribute("id", operation.id);
+      group.setAttribute("data-element-id", operation.id);
+      const foreignObject = document.createElementNS(SVG_NAMESPACE, "foreignObject");
+      const left =
+        operation.anchor === "middle"
+          ? operation.x - operation.width / 2
+          : operation.anchor === "end"
+            ? operation.x - operation.width
+            : operation.x;
+      foreignObject.setAttribute("x", String(left));
+      foreignObject.setAttribute("y", String(operation.y));
+      foreignObject.setAttribute("width", String(operation.width));
+      foreignObject.setAttribute("height", String(operation.height));
+      group.appendChild(foreignObject);
       created.set(operation.id, group);
       return group;
     },
@@ -178,6 +221,62 @@ afterEach(() => {
 });
 
 describe("createSvgMotionExecutor", () => {
+  it("renders and updates a measured LaTeX token through its dedicated primitive", async () => {
+    const { elements, executor, svg } = createHarness({
+      barrier: () => Promise.resolve(),
+    });
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const entered = createSceneState({
+      revision: 1,
+      nodes: [latexTokenNode(200)],
+    });
+
+    const enterPlayback = executor.play(planSceneTransition(empty, entered), {
+      staggerMs: 0,
+    });
+    const enterOutcome = enterPlayback.cancel();
+    await expect(enterPlayback.finished).resolves.toBe(enterOutcome);
+
+    const retained = svg.querySelector<SVGGElement>(
+      "[data-element-id='equation-x-squared']"
+    );
+    expect(retained?.querySelector("foreignObject")?.getAttribute("x")).toBe("160");
+    expect(retained?.querySelector("foreignObject")?.getAttribute("y")).toBe("120");
+    expect(retained?.querySelector("foreignObject")?.getAttribute("width")).toBe("80");
+    expect(retained?.querySelector("foreignObject")?.getAttribute("height")).toBe("44");
+    expect(elements.get("equation-x-squared")?.type).toBe("latex_token");
+
+    const moved = createSceneState({
+      revision: 2,
+      nodes: [
+        latexTokenNode(700, {
+          y: 180,
+          width: 100,
+          height: 52,
+          anchor: "end",
+        }),
+      ],
+    });
+    const movePlan = planSceneTransition(entered, moved);
+    expect(movePlan.steps[0]).toMatchObject({ transition: "transform" });
+
+    const movePlayback = executor.play(movePlan, { staggerMs: 0 });
+    const moveOutcome = movePlayback.cancel();
+    await expect(movePlayback.finished).resolves.toBe(moveOutcome);
+
+    const settled = svg.querySelector<SVGGElement>(
+      "[data-element-id='equation-x-squared']"
+    );
+    expect(settled).toBe(retained);
+    expect(settled?.querySelector("foreignObject")?.getAttribute("x")).toBe("600");
+    expect(settled?.querySelector("foreignObject")?.getAttribute("y")).toBe("180");
+    expect(settled?.querySelector("foreignObject")?.getAttribute("width")).toBe("100");
+    expect(settled?.querySelector("foreignObject")?.getAttribute("height")).toBe("52");
+    expect(settled?.style.opacity).toBe("0.9");
+    expect(settled?.style.transform).toBe("");
+    expect(elements.get("equation-x-squared")?.data).toEqual(moved.nodes[0]);
+  });
+
   it("commits every started motion to canonical DOM and acknowledges only after the barrier", async () => {
     const paint = deferred();
     const presentationBarrier = vi.fn(() => paint.promise);

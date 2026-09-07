@@ -250,8 +250,42 @@ class LatexSceneNode(LiveSceneContract):
     style: LatexStyle
 
 
+class LatexTokenSceneNode(LiveSceneContract):
+    """One measured equation token with an explicit horizontal anchor."""
+
+    id: SceneNodeId
+    kind: Literal["latex_token"]
+    presentation: ScenePresentation
+    x: XCoordinate
+    y: YCoordinate
+    width: Width
+    height: Height
+    anchor: Literal["start", "middle", "end"]
+    latex: SceneText
+    style: LatexStyle
+
+    @model_validator(mode="after")
+    def validate_inside_board(self) -> Self:
+        left = self.x
+        if self.anchor == "middle":
+            left -= self.width / 2
+        elif self.anchor == "end":
+            left -= self.width
+
+        if left < 0 or left + self.width > LIVE_SCENE_BOARD_WIDTH:
+            raise ValueError("LaTeX token must stay inside the board width")
+        if self.y + self.height > LIVE_SCENE_BOARD_HEIGHT:
+            raise ValueError("LaTeX token must stay inside the board height")
+        return self
+
+
 SceneNode: TypeAlias = Annotated[
-    LineSceneNode | PathSceneNode | RectSceneNode | TextSceneNode | LatexSceneNode,
+    LineSceneNode
+    | PathSceneNode
+    | RectSceneNode
+    | TextSceneNode
+    | LatexSceneNode
+    | LatexTokenSceneNode,
     Field(discriminator="kind"),
 ]
 

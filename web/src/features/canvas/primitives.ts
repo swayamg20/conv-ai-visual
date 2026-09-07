@@ -8,6 +8,7 @@ import type {
   CanvasPalette,
   FunctionPlotData,
   LatexOperation,
+  LatexTokenOperation,
 } from "./types";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -30,6 +31,7 @@ export interface FunctionPlotElements {
 export interface SVGPrimitiveRenderer {
   draw(operation: CanvasOperation): SVGElement | null;
   drawLatex(operation: LatexOperation): SVGElement;
+  drawLatexToken(operation: LatexTokenOperation): SVGElement;
   drawFunctionPlot(
     plot: FunctionPlotData,
     dimensions: { width: number; height: number }
@@ -309,6 +311,43 @@ export function createSvgPrimitiveRenderer(
     return group;
   };
 
+  const drawLatexToken = (operation: LatexTokenOperation): SVGElement => {
+    const group = createGroup(operation.id);
+    const foreignObject = createSvgElement("foreignObject");
+    const left =
+      operation.anchor === "middle"
+        ? operation.x - operation.width / 2
+        : operation.anchor === "end"
+          ? operation.x - operation.width
+          : operation.x;
+    foreignObject.setAttribute("x", String(left));
+    foreignObject.setAttribute("y", String(operation.y));
+    foreignObject.setAttribute("width", String(operation.width));
+    foreignObject.setAttribute("height", String(operation.height));
+
+    const container = document.createElement("div");
+    container.innerHTML = katex.renderToString(operation.latex, {
+      throwOnError: false,
+      displayMode: false,
+    });
+    container.style.color = operation.color;
+    container.style.fontSize = `${operation.font_size}px`;
+    container.style.width = "100%";
+    container.style.height = "100%";
+    container.style.display = "flex";
+    container.style.alignItems = "center";
+    container.style.justifyContent =
+      operation.anchor === "start"
+        ? "flex-start"
+        : operation.anchor === "end"
+          ? "flex-end"
+          : "center";
+    container.style.whiteSpace = "nowrap";
+    foreignObject.appendChild(container);
+    group.appendChild(foreignObject);
+    return group;
+  };
+
   const drawFunctionPlot = (
     plot: FunctionPlotData,
     dimensions: { width: number; height: number }
@@ -427,5 +466,5 @@ export function createSvgPrimitiveRenderer(
     };
   };
 
-  return { draw, drawLatex, drawFunctionPlot };
+  return { draw, drawLatex, drawLatexToken, drawFunctionPlot };
 }

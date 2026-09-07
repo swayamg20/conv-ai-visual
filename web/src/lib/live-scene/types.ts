@@ -1,4 +1,10 @@
-export type SceneNodeKind = "line" | "path" | "rect" | "text" | "latex";
+export type SceneNodeKind =
+  | "line"
+  | "path"
+  | "rect"
+  | "text"
+  | "latex"
+  | "latex_token";
 
 export type ScenePoint = readonly [x: number, y: number];
 
@@ -74,12 +80,25 @@ export interface LatexSceneNode extends SceneNodeBase<"latex"> {
   readonly style: LatexStyle;
 }
 
+export interface LatexTokenSceneNode extends SceneNodeBase<"latex_token"> {
+  /** Horizontal anchor coordinate in the logical 800 by 600 board. */
+  readonly x: number;
+  /** Top edge of the measured token box. */
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly anchor: "start" | "middle" | "end";
+  readonly latex: string;
+  readonly style: LatexStyle;
+}
+
 export type SceneNode =
   | LineSceneNode
   | PathSceneNode
   | RectSceneNode
   | TextSceneNode
-  | LatexSceneNode;
+  | LatexSceneNode
+  | LatexTokenSceneNode;
 
 export interface SceneState {
   readonly revision: number;

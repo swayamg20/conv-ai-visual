@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { materializeSceneTransition, planSceneTransition } from "./planner";
 import { createSceneState } from "./state";
-import type { LatexSceneNode, LineSceneNode, SceneNode, TextSceneNode } from "./types";
+import type {
+  LatexSceneNode,
+  LatexTokenSceneNode,
+  LineSceneNode,
+  SceneNode,
+  TextSceneNode,
+} from "./types";
 
 const presentation = { enter: "draw", exit: "fade" } as const;
 const strokeStyle = {
@@ -50,6 +56,21 @@ function latex(value: string): LatexSceneNode {
     x: 300,
     y: 120,
     latex: value,
+    style: { color: "#e2e8f0", fontSize: 28, opacity: 1 },
+  };
+}
+
+function latexToken(latexValue: string, x = 300): LatexTokenSceneNode {
+  return {
+    id: "equation-x-squared",
+    kind: "latex_token",
+    presentation: { enter: "fade", exit: "fade" },
+    x,
+    y: 120,
+    width: 80,
+    height: 48,
+    anchor: "middle",
+    latex: latexValue,
     style: { color: "#e2e8f0", fontSize: 28, opacity: 1 },
   };
 }
@@ -199,6 +220,28 @@ describe("planSceneTransition", () => {
       type: "update",
       id: "lesson-title",
       transition: "transform",
+    });
+  });
+
+  it("transforms a stable LaTeX token move without changing its referent", () => {
+    const previous = createSceneState({ revision: 2, nodes: [latexToken("x^2", 300)] });
+    const next = createSceneState({ revision: 3, nodes: [latexToken("x^2", 420)] });
+
+    expect(planSceneTransition(previous, next).steps[0]).toMatchObject({
+      type: "update",
+      id: "equation-x-squared",
+      transition: "transform",
+    });
+  });
+
+  it("crossfades a stable LaTeX token whose mathematical content changes", () => {
+    const previous = createSceneState({ revision: 2, nodes: [latexToken("x^2")] });
+    const next = createSceneState({ revision: 3, nodes: [latexToken("x^3")] });
+
+    expect(planSceneTransition(previous, next).steps[0]).toMatchObject({
+      type: "update",
+      id: "equation-x-squared",
+      transition: "crossfade",
     });
   });
 

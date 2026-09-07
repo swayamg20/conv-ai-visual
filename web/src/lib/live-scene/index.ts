@@ -5,6 +5,7 @@ export type {
   EnterMotion,
   LatexSceneNode,
   LatexStyle,
+  LatexTokenSceneNode,
   LineSceneNode,
   MotionPlan,
   MotionStep,

@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { createSceneState } from "./state";
-import type { SceneNode, SceneState, TextSceneNode } from "./types";
+import type {
+  LatexSceneNode,
+  LatexTokenSceneNode,
+  SceneNode,
+  SceneState,
+  TextSceneNode,
+} from "./types";
 import {
   applyLiveScenePatch,
   applyScenePatch,
@@ -31,6 +37,36 @@ function textNode(id = "lesson-title", text = "Build a triangle"): TextSceneNode
       opacity: 1,
       anchor: "middle",
     },
+  };
+}
+
+function latexNode(id = "equation-pythagoras"): LatexSceneNode {
+  return {
+    id,
+    kind: "latex",
+    presentation,
+    x: 400,
+    y: 500,
+    latex: "a^2+b^2=c^2",
+    style: { color: "hsl(var(--sage))", fontSize: 32, opacity: 1 },
+  };
+}
+
+function latexTokenNode(
+  overrides: Partial<LatexTokenSceneNode> = {}
+): LatexTokenSceneNode {
+  return {
+    id: "equation-x-squared",
+    kind: "latex_token",
+    presentation,
+    x: 400,
+    y: 500,
+    width: 80,
+    height: 48,
+    anchor: "middle",
+    latex: "x^2",
+    style: { color: "hsl(var(--amber))", fontSize: 32, opacity: 1 },
+    ...overrides,
   };
 }
 
@@ -110,7 +146,7 @@ describe("live scene patch protocol", () => {
     ).toBe("Build a triangle");
   });
 
-  it("accepts every Gate 0 node kind and safe paint grammar", () => {
+  it("accepts every supported node kind and safe paint grammar", () => {
     const nodes: SceneNode[] = [
       {
         id: "triangle-base",
@@ -157,15 +193,8 @@ describe("live scene patch protocol", () => {
         },
       },
       textNode(),
-      {
-        id: "equation-pythagoras",
-        kind: "latex",
-        presentation,
-        x: 400,
-        y: 500,
-        latex: "a^2+b^2=c^2",
-        style: { color: "hsl(var(--sage))", fontSize: 32, opacity: 1 },
-      },
+      latexNode(),
+      latexTokenNode(),
     ];
     const event = decodeLiveScenePatchEvent(
       rawEvent(nodes.map((node) => ({ op: "put", node })))
@@ -178,6 +207,7 @@ describe("live scene patch protocol", () => {
       "rect",
       "text",
       "latex",
+      "latex_token",
     ]);
     expect(applied.plan.steps.map((step) => step.id)).toEqual(
       nodes.map((node) => node.id)
@@ -185,6 +215,66 @@ describe("live scene patch protocol", () => {
     expect(
       applyScenePatch(createSceneState({ revision: 0, nodes: [] }), event)
     ).toEqual(applied.scene);
+  });
+
+  it("preserves the legacy latex wire shape while decoding measured tokens additively", () => {
+    const legacy = latexNode();
+    const token = latexTokenNode();
+    const event = decodeLiveScenePatchEvent(
+      rawEvent([
+        { op: "put", node: legacy },
+        { op: "put", node: token },
+      ])
+    );
+
+    expect((event.patch.operations[0] as { node: SceneNode }).node).toEqual(legacy);
+    expect((event.patch.operations[1] as { node: SceneNode }).node).toEqual(token);
+  });
+
+  it.each([
+    [0, 80, "start"],
+    [400, 800, "middle"],
+    [800, 80, "end"],
+  ] as const)(
+    "accepts an anchored LaTeX token at the board edge (%s, %s, %s)",
+    (x, width, anchor) => {
+      expect(() =>
+        decodeLiveScenePatchEvent(
+          rawEvent([{ op: "put", node: latexTokenNode({ x, width, anchor }) }])
+        )
+      ).not.toThrow();
+    }
+  );
+
+  it.each([
+    [{ x: 721, width: 80, anchor: "start" as const }],
+    [{ x: 39, width: 80, anchor: "middle" as const }],
+    [{ x: 79, width: 80, anchor: "end" as const }],
+    [{ y: 553, height: 48 }],
+    [{ width: 0 }],
+  ])("rejects an out-of-board or unmeasured LaTeX token %j", (overrides) => {
+    expect(
+      errorCode(() =>
+        decodeLiveScenePatchEvent(
+          rawEvent([{ op: "put", node: latexTokenNode(overrides) }])
+        )
+      )
+    ).toBe("invalid_node");
+  });
+
+  it("rejects invalid token anchors and unknown token fields", () => {
+    const invalidAnchor = latexTokenNode() as unknown as Record<string, unknown>;
+    invalidAnchor.anchor = "center";
+    expect(
+      errorCode(() =>
+        decodeLiveScenePatchEvent(rawEvent([{ op: "put", node: invalidAnchor }]))
+      )
+    ).toBe("invalid_node");
+
+    const unknownField = { ...latexTokenNode(), baseline: "middle" };
+    expect(() =>
+      decodeLiveScenePatchEvent(rawEvent([{ op: "put", node: unknownField }]))
+    ).toThrow("unknown field baseline");
   });
 
   it("atomically puts, replaces, and removes nodes while retaining stable identity", () => {

@@ -54,7 +54,9 @@ export interface SvgMotionExecutor {
   dispose(): void;
 }
 
-function sceneNodeOperation(node: Exclude<SceneNode, { kind: "latex" }>): CanvasOperation {
+function sceneNodeOperation(
+  node: Exclude<SceneNode, { kind: "latex" | "latex_token" }>
+): CanvasOperation {
   switch (node.kind) {
     case "line":
       return {
@@ -146,6 +148,21 @@ function createSceneElement(
       latex: node.latex,
       x: node.x,
       y: node.y,
+      font_size: node.style.fontSize,
+      color: node.style.color,
+    });
+  }
+
+  if (node.kind === "latex_token") {
+    return renderer.drawLatexToken({
+      type: "latex_token",
+      id: domId,
+      latex: node.latex,
+      x: node.x,
+      y: node.y,
+      width: node.width,
+      height: node.height,
+      anchor: node.anchor,
       font_size: node.style.fontSize,
       color: node.style.color,
     });
@@ -444,7 +461,8 @@ function executeMotionStep(
     } else if (
       step.effect === "draw" &&
       node.kind !== "text" &&
-      node.kind !== "latex"
+      node.kind !== "latex" &&
+      node.kind !== "latex_token"
     ) {
       drawAnimation = animateDrawOn(element, DURATION.drawSlow, EASING.draw);
       animation = drawAnimation;

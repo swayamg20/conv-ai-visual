@@ -32,6 +32,7 @@ The gate is intentionally narrow. It does not build a general Manim replacement,
 - [x] 2026-09-06 23:11 IST: Audited the merged Gate 1.4 compiler, verifier, semantic service, browser runtime, motion executor, viewport, metrics, and Playwright proof; selected completing the square as the flagship and checkpoint-level presentation as the core abstraction.
 - [x] 2026-09-06 23:22 IST: Wrote the self-contained Gate 1.5 execution plan and passed independent backend, frontend/runtime, and visual-quality review after resolving interruption, trust-boundary, responsive-camera, evidence-provenance, and CI-artifact findings.
 - [x] 2026-09-08 03:43 IST: Implemented the standalone, fail-closed choreography vocabulary: routed-only V2 beats, one bounded parallel cue phase, non-overshooting easing tokens, exact cinematic/compact viewport joins, presentation checkpoints, and domain-separated hashes. The new contract and legacy low-level contract suites pass together (84 tests), with Ruff and formatting clean.
+- [x] 2026-09-08 03:46 IST: Added measured, anchored `latex_token` nodes across the Python and TypeScript low-level contracts, immutable scene state, decoder, planner, SVG primitive renderer, and motion executor. Stable-content moves plan as transforms, changed syntax crossfades, and the legacy `latex` wire and display behavior remain unchanged. Focused frontend coverage passes (70 tests), together with TypeScript and ESLint.
 - [ ] Define and test the versioned backend checkpoint, choreography, certificate, router, and independent verification contracts while preserving the complete Gate 1.4 path.
 - [ ] Compile all eight completing-square checkpoints and the bounded missing-corner clarification with stable object identities, exact mathematics, server-owned layout, and deterministic choreography.
 - [ ] Implement true compatible geometry/token transforms, camera focus, deterministic emphasis, authored phase timing, atomic settlement, reduced motion, and exact Replay in the browser.
@@ -71,7 +72,7 @@ The gate is intentionally narrow. It does not build a general Manim replacement,
 
 ## Outcomes & Retrospective
 
-No implementation has shipped yet. This section will be updated after every milestone with the pushed commit, measured evidence, independent findings, and any scope or architectural changes. At completion it must state the merged commit, CI run, real-speed artifact hashes, rubric result, and remaining product boundary.
+The first implementation milestone is pushed as `96d7c07` (`feat: define live choreography contracts`). It establishes the routed-only compiler boundary and deterministic presentation vocabulary; 84 combined new-and-legacy contract tests, Ruff, formatting, and the repository diff check passed before push. The gate is not yet testable end to end: compiler, verifier, browser checkpoint playback, and evidence artifacts remain in progress. At completion this section must state the merged commit, CI run, real-speed artifact hashes, rubric result, and remaining product boundary.
 
 ## Context and Orientation
 
