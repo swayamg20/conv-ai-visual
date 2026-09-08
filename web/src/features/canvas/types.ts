@@ -213,6 +213,9 @@ export interface SVGCanvasHandle {
   panTo(x: number, y: number, zoom?: number): void;
 }
 
+/** Closed playback rates supported by the certified choreography renderer. */
+export type ChoreographyPlaybackRate = 1 | 16;
+
 export interface SVGCanvasProps {
   width?: number;
   height?: number;
@@ -222,6 +225,8 @@ export interface SVGCanvasProps {
   viewportInteractionLocked?: boolean;
   /** Preserve every checkpoint while eliminating spatial travel and tweening. */
   reducedMotion?: boolean;
+  /** Scale only certified choreography timing; legacy canvas motion is unchanged. */
+  choreographyPlaybackRate?: ChoreographyPlaybackRate;
 }
 
 export interface CanvasPalette {

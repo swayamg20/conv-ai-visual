@@ -3,7 +3,10 @@
 import type { RefObject } from "react";
 
 import { SVGCanvas } from "@/components/svg-canvas";
-import type { SVGCanvasHandle } from "@/features/canvas/types";
+import type {
+  ChoreographyPlaybackRate,
+  SVGCanvasHandle,
+} from "@/features/canvas/types";
 import {
   COMPLETING_SQUARE_CHECKPOINT_IDS,
   type ChoreographyLayout,
@@ -32,6 +35,7 @@ interface LiveChoreographyStageProps {
   readonly caption: string;
   readonly rendererTrusted: boolean;
   readonly reducedMotion?: boolean;
+  readonly playbackRate?: ChoreographyPlaybackRate;
   readonly className?: string;
 }
 
@@ -57,6 +61,7 @@ export function LiveChoreographyStage({
   caption,
   rendererTrusted,
   reducedMotion = false,
+  playbackRate = 1,
   className,
 }: LiveChoreographyStageProps) {
   const boundedMainCount = Math.min(
@@ -140,6 +145,7 @@ export function LiveChoreographyStage({
           showGrid={false}
           viewportInteractionLocked
           reducedMotion={reducedMotion}
+          choreographyPlaybackRate={playbackRate}
           className="h-full w-full"
         />
       </div>

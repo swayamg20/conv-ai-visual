@@ -23,7 +23,10 @@ import {
 import { MurmurLogoMark } from "@/components/murmur-doodles";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import type { SVGCanvasHandle } from "@/features/canvas/types";
+import type {
+  ChoreographyPlaybackRate,
+  SVGCanvasHandle,
+} from "@/features/canvas/types";
 import {
   COMPLETING_SQUARE_CHECKPOINT_IDS,
   type ChoreographyLayout,
@@ -101,6 +104,7 @@ export interface LiveChoreographyDemoProps {
   readonly pathLocked?: boolean;
   readonly layout?: ChoreographyLayout;
   readonly reducedMotion?: boolean;
+  readonly playbackRate?: ChoreographyPlaybackRate;
   readonly stageOnly?: boolean;
   readonly autoStart?: boolean;
   readonly runnerFactory?: ChoreographyRunnerFactory;
@@ -184,6 +188,7 @@ function ChoreographySession({
   scenarioControl,
   pathLocked = false,
   reducedMotion = false,
+  playbackRate = 1,
   stageOnly = false,
   autoStart = false,
 }: ChoreographySessionProps) {
@@ -310,6 +315,7 @@ function ChoreographySession({
       caption={caption}
       rendererTrusted={choreography.rendererTrusted}
       reducedMotion={reducedMotion}
+      playbackRate={playbackRate}
       className={stageOnly ? "h-full w-full rounded-none border-0" : "w-full"}
     />
   );

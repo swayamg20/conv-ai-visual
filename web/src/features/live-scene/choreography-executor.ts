@@ -1,6 +1,9 @@
 import { gsap } from "gsap";
 
-import type { SVGElementData } from "@/features/canvas/types";
+import type {
+  ChoreographyPlaybackRate,
+  SVGElementData,
+} from "@/features/canvas/types";
 import {
   createSceneState,
   type ChoreographyCueKind,
@@ -57,6 +60,7 @@ export type ChoreographyPresentationBarrier = () => Promise<void>;
 export interface ChoreographyExecutorOptions {
   readonly presentationBarrier?: ChoreographyPresentationBarrier;
   readonly reducedMotion?: boolean;
+  readonly playbackRate?: ChoreographyPlaybackRate;
 }
 
 export interface ChoreographyExecutorContext extends SvgNodeReconcilerContext {
@@ -206,6 +210,14 @@ function combinedError(primary: unknown, cleanup?: unknown): Error {
     : new Error(`${primaryMessage}; rollback failed: ${errorMessage(cleanup)}`);
 }
 
+function validatedPlaybackRate(value: unknown): ChoreographyPlaybackRate {
+  const rate = value === undefined ? 1 : value;
+  if (rate !== 1 && rate !== 16) {
+    throw new RangeError("playbackRate must be exactly 1 or 16");
+  }
+  return rate;
+}
+
 /** Execute one already-verified checkpoint as one owned, interruption-safe timeline. */
 export function createChoreographyExecutor(
   context: ChoreographyExecutorContext,
@@ -214,6 +226,7 @@ export function createChoreographyExecutor(
   const reconciler = createSvgNodeReconciler(context);
   const presentationBarrier =
     options.presentationBarrier ?? browserPresentationBarrier;
+  const playbackRate = validatedPlaybackRate(options.playbackRate);
   let active: ChoreographyPlayback | null = null;
   let disposed = false;
 
@@ -398,7 +411,10 @@ export function createChoreographyExecutor(
     try {
       baseScene = validateAndReadBaseScene(context, plan);
       const phase = plan.choreographyPlan.phase;
-      const duration = options.reducedMotion ? 0 : phase.durationMs / 1_000;
+      const duration = options.reducedMotion
+        ? 0
+        : phase.durationMs / 1_000 / playbackRate;
+      const holdDuration = phase.holdAfterMs / 1_000 / playbackRate;
       const emitCueStarts = () => {
         for (const cue of phase.cues) {
           observer?.({ type: "cueStarted", cue: cue.cue });
@@ -439,14 +455,14 @@ export function createChoreographyExecutor(
         );
       }
 
-      if (phase.holdAfterMs > 0) {
-        timeline.to({}, { duration: phase.holdAfterMs / 1_000 });
+      if (holdDuration > 0) {
+        timeline.to({}, { duration: holdDuration });
       }
       timeline.eventCallback("onComplete", () => {
         phaseFinished = true;
         completeIfReady();
       });
-      if (options.reducedMotion && phase.holdAfterMs === 0) {
+      if (options.reducedMotion && holdDuration === 0) {
         phaseFinished = true;
         completeIfReady();
       } else {

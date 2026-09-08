@@ -18,6 +18,7 @@ const canvas = vi.hoisted(() => ({
   materializeScene: vi.fn(),
   materializeViewport: vi.fn(),
   playCheckpointChoreography: vi.fn(),
+  renderProps: vi.fn(),
 }));
 
 vi.mock("next/link", () => ({
@@ -46,7 +47,8 @@ vi.mock("@/components/theme-toggle", () => ({
 vi.mock("@/components/svg-canvas", async () => {
   const React = await import("react");
   return {
-    SVGCanvas: React.forwardRef(function MockCanvas(_props, ref) {
+    SVGCanvas: React.forwardRef(function MockCanvas(props, ref) {
+      canvas.renderProps(props);
       React.useImperativeHandle(ref, () => ({
         cancelMotion: canvas.cancelMotion,
         clear: canvas.clear,
@@ -160,6 +162,7 @@ describe("LiveChoreographyDemo", () => {
     canvas.playCheckpointChoreography
       .mockReset()
       .mockImplementation(immediatePlayback);
+    canvas.renderProps.mockReset();
   });
 
   afterEach(() => {
@@ -257,6 +260,17 @@ describe("LiveChoreographyDemo", () => {
     expect(demo.container.querySelector("textarea")).toBeNull();
     expect(demo.container.textContent).not.toContain("Post-paint commits");
     expect(invocations).toEqual(["full"]);
+
+    await act(async () => demo.root.unmount());
+  });
+
+  it("threads the closed accelerated playback rate into the choreography canvas", async () => {
+    const demo = await mount({ playbackRate: 16, stageOnly: true });
+
+    expect(canvas.renderProps).toHaveBeenCalled();
+    expect(canvas.renderProps.mock.calls.at(-1)?.[0]).toMatchObject({
+      choreographyPlaybackRate: 16,
+    });
 
     await act(async () => demo.root.unmount());
   });

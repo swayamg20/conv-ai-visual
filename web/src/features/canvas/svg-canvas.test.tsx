@@ -980,6 +980,7 @@ describe("SVGCanvas", () => {
           showGrid={false}
           viewportInteractionLocked
           reducedMotion
+          choreographyPlaybackRate={16}
         />,
       );
     });
@@ -1037,7 +1038,7 @@ describe("SVGCanvas", () => {
           ]),
           durationMs: 800,
           easing: "ease_out_quart",
-          holdAfterMs: 0,
+          holdAfterMs: 1_600,
         }),
       }),
     });
@@ -1045,11 +1046,15 @@ describe("SVGCanvas", () => {
     let playback: ReturnType<
       SVGCanvasHandle["playCheckpointChoreography"]
     > | null = null;
+    const timelineSpy = vi.spyOn(gsap, "timeline");
 
     await act(async () => {
       playback = canvas.current!.playCheckpointChoreography(plan, (signal) => {
         signals.push(signal);
       });
+      const timeline = timelineSpy.mock.results.at(-1)?.value as
+        gsap.core.Timeline | undefined;
+      expect(timeline?.duration()).toBeCloseTo(0.1);
       await playback.finished;
     });
 

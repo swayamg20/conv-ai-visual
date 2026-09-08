@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SVGPrimitiveRenderer } from "@/features/canvas/primitives";
 import type {
   CanvasOperation,
+  ChoreographyPlaybackRate,
   LatexOperation,
   LatexTokenOperation,
   SVGElementData,
@@ -294,6 +295,7 @@ function harness(
   options: {
     readonly barrier?: () => Promise<void>;
     readonly reducedMotion?: boolean;
+    readonly playbackRate?: ChoreographyPlaybackRate;
     readonly failOnId?: string;
     readonly viewport?: ViewportPoseV1;
   } = {},
@@ -328,6 +330,7 @@ function harness(
   const executor = createChoreographyExecutor(context, {
     ...(options.barrier ? { presentationBarrier: options.barrier } : {}),
     reducedMotion: options.reducedMotion,
+    playbackRate: options.playbackRate,
   });
   return {
     context,
@@ -375,6 +378,31 @@ afterEach(() => {
 });
 
 describe("checkpoint choreography executor", () => {
+  it.each([0, 2, 15, 17, Number.NaN, null, "16"])(
+    "rejects unsupported playback rate %p",
+    (playbackRate) => {
+      expect(() =>
+        harness({
+          playbackRate: playbackRate as unknown as ChoreographyPlaybackRate,
+        }),
+      ).toThrow("playbackRate must be exactly 1 or 16");
+    },
+  );
+
+  it("scales both authored motion and reading hold at the closed accelerated rate", () => {
+    const base = scene(0, [pathNode("shape", 0)]);
+    const target = scene(1, [pathNode("shape", 100)]);
+    const setup = harness({ playbackRate: 16 });
+    setup.seed(base);
+    const timelineSpy = vi.spyOn(gsap, "timeline");
+
+    setup.executor.play(
+      planned(base, target, { durationMs: 1_200, holdAfterMs: 800 }),
+    );
+
+    expect(capturedTimeline(timelineSpy).duration()).toBeCloseTo(0.125);
+  });
+
   it.each([0.25, 0.5, 0.75])(
     "numerically interpolates equal-topology paths, tokens, and camera at %s",
     (sample) => {
@@ -745,6 +773,7 @@ describe("checkpoint choreography executor", () => {
     const paints: VoidDeferred[] = [];
     const setup = harness({
       reducedMotion: true,
+      playbackRate: 16,
       barrier: () => {
         const paint = deferred();
         paints.push(paint);
@@ -760,7 +789,7 @@ describe("checkpoint choreography executor", () => {
     );
     const timeline = capturedTimeline(timelineSpy);
 
-    expect(timeline.duration()).toBeCloseTo(0.7);
+    expect(timeline.duration()).toBeCloseTo(0.04375);
     expect(setup.elements.get("shape")?.data).toEqual(target.nodes[0]);
     expect(setup.elements.get("label")?.data).toEqual(target.nodes[1]);
     expect(setup.readViewport()).toEqual(RESULT_VIEWPORT);

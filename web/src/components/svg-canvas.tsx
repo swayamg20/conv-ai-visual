@@ -68,6 +68,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       showGrid = true,
       viewportInteractionLocked = false,
       reducedMotion = false,
+      choreographyPlaybackRate = 1,
     },
     ref,
   ) => {
@@ -179,10 +180,11 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             renderViewportFrame,
             materializeViewport,
           },
-          { reducedMotion },
+          { reducedMotion, playbackRate: choreographyPlaybackRate },
         ),
       [
         materializeViewport,
+        choreographyPlaybackRate,
         readViewport,
         reducedMotion,
         renderViewportFrame,
