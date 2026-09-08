@@ -31,6 +31,7 @@ _preflight_ports = voice_e2e_stack._preflight_ports
 _query_livekit_state = voice_e2e_stack._query_livekit_state
 _read_browser_result = voice_e2e_stack._read_browser_result
 _evidence_summary = voice_e2e_stack._evidence_summary
+_worker_registration_observed = voice_e2e_stack._worker_registration_observed
 build_commands = voice_e2e_stack.build_commands
 build_environment = voice_e2e_stack.build_environment
 make_paths = voice_e2e_stack.make_paths
@@ -186,6 +187,63 @@ def test_container_claim_requires_private_nonce_before_teardown_ownership(
     stack._teardown()
 
     assert removed == [("docker", "rm", "--force", "owned-id")]
+
+
+def test_worker_waits_for_registration_ack_after_idle_health(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log_path = tmp_path / "worker.log"
+    log_path.write_text(
+        json.dumps({"message": "HTTP server listening on :8081"}) + "\n",
+        encoding="utf-8",
+    )
+    worker = SimpleNamespace(tail=lambda **_: log_path.read_text(encoding="utf-8"))
+    livekit = SimpleNamespace()
+    stack = VoiceE2EStack(StackOptions(run_id="unit-worker-registration", dry_run=True))
+
+    monkeypatch.setattr(
+        voice_e2e_stack,
+        "_worker_state",
+        lambda: {
+            "agent_name": "murmur-voice-v2-e2e",
+            "sdk_version": "1.6.9",
+            "active_jobs": 0,
+        },
+    )
+
+    def wait_for_registration(_description: str, probe: object, **_kwargs: object) -> bool:
+        assert callable(probe)
+        assert probe() is False
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "message": "registered worker",
+                        "agent_name": "another-worker",
+                        "id": "AW_wrong",
+                    }
+                )
+                + "\n"
+            )
+        assert probe() is False
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "message": "registered worker",
+                        "agent_name": "murmur-voice-v2-e2e",
+                        "id": "AW_registered",
+                    }
+                )
+                + "\n"
+            )
+        assert probe() is True
+        return True
+
+    monkeypatch.setattr(voice_e2e_stack, "_wait_for", wait_for_registration)
+
+    stack._wait_worker(worker, livekit)  # type: ignore[arg-type]
+    assert _worker_registration_observed(worker) is True  # type: ignore[arg-type]
 
 
 def test_browser_result_requires_cleanup_identifiers(tmp_path: Path) -> None:
