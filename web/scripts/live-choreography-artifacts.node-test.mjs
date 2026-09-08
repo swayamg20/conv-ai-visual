@@ -29,6 +29,7 @@ import {
   resolveArtifactRoot,
   sha256,
   validateGithubShaForTests,
+  validateExpectedShaForTests,
   validateManifest,
   validateProviderFreeRequestsForTests,
   validateRuntimeEvidenceForTests,
@@ -436,5 +437,24 @@ test("optional GITHUB_SHA must be a full object ID equal to HEAD", () => {
   assert.throws(
     () => validateGithubShaForTests(GIT_COMMIT, "3".repeat(40)),
     /GITHUB_SHA/,
+  );
+});
+
+test("an explicit choreography SHA uses its own fail-closed provenance label", () => {
+  assert.doesNotThrow(() =>
+    validateExpectedShaForTests(
+      GIT_COMMIT,
+      GIT_COMMIT,
+      "CHOREOGRAPHY_EXPECTED_SHA",
+    ),
+  );
+  assert.throws(
+    () =>
+      validateExpectedShaForTests(
+        GIT_COMMIT,
+        "3".repeat(40),
+        "CHOREOGRAPHY_EXPECTED_SHA",
+      ),
+    /CHOREOGRAPHY_EXPECTED_SHA/,
   );
 });

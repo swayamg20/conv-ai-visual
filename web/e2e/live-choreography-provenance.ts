@@ -141,12 +141,16 @@ export function createChoreographyExecutionMetadata(): ChoreographyExecutionObse
   assertRelevantSourcesCommitted();
   const gitCommit = gitObject("HEAD^{commit}");
   const gitTree = gitObject("HEAD^{tree}");
-  const githubSha = process.env.GITHUB_SHA;
-  if (githubSha !== undefined) {
-    fullSha(githubSha, "GITHUB_SHA");
-    if (githubSha !== gitCommit) {
+  const expectedSha =
+    process.env.CHOREOGRAPHY_EXPECTED_SHA ?? process.env.GITHUB_SHA;
+  const expectedShaLabel = process.env.CHOREOGRAPHY_EXPECTED_SHA !== undefined
+    ? "CHOREOGRAPHY_EXPECTED_SHA"
+    : "GITHUB_SHA";
+  if (expectedSha !== undefined) {
+    fullSha(expectedSha, expectedShaLabel);
+    if (expectedSha !== gitCommit) {
       throw new Error(
-        `GITHUB_SHA ${githubSha} does not match checked-out HEAD ${gitCommit}`,
+        `${expectedShaLabel} ${expectedSha} does not match checked-out HEAD ${gitCommit}`,
       );
     }
   }

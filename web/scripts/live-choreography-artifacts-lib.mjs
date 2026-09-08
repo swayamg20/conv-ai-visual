@@ -385,14 +385,18 @@ export function inspectRelevantGitStatusForTests(
   return relevantDirtyStatus(status, trackedNextEnv, workingNextEnv);
 }
 
-function validateGithubSha(commitSha, githubSha) {
-  if (githubSha === undefined) return;
-  gitObjectId(githubSha, "GITHUB_SHA");
-  literal(githubSha, commitSha, "GITHUB_SHA");
+function validateExpectedSha(commitSha, expectedSha, label) {
+  if (expectedSha === undefined) return;
+  gitObjectId(expectedSha, label);
+  literal(expectedSha, commitSha, label);
 }
 
 export function validateGithubShaForTests(commitSha, githubSha) {
-  validateGithubSha(commitSha, githubSha);
+  validateExpectedSha(commitSha, githubSha, "GITHUB_SHA");
+}
+
+export function validateExpectedShaForTests(commitSha, expectedSha, label) {
+  validateExpectedSha(commitSha, expectedSha, label);
 }
 
 function gitProvenance() {
@@ -423,7 +427,15 @@ function gitProvenance() {
   const treeSha = runGit(["rev-parse", "HEAD^{tree}"]);
   gitObjectId(commitSha, "git HEAD");
   gitObjectId(treeSha, "git tree");
-  validateGithubSha(commitSha, process.env.GITHUB_SHA);
+  const expectedSha =
+    process.env.CHOREOGRAPHY_EXPECTED_SHA ?? process.env.GITHUB_SHA;
+  validateExpectedSha(
+    commitSha,
+    expectedSha,
+    process.env.CHOREOGRAPHY_EXPECTED_SHA !== undefined
+      ? "CHOREOGRAPHY_EXPECTED_SHA"
+      : "GITHUB_SHA",
+  );
   return { commitSha, treeSha };
 }
 

@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - "codex/gate15-*"
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -123,12 +126,17 @@ jobs:
     name: Provider-free live choreography proof
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CHOREOGRAPHY_EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     defaults:
       run:
         working-directory: web
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
 
       - name: Install Node.js
         uses: actions/setup-node@v7
@@ -142,6 +150,9 @@ jobs:
 
       - name: Test live choreography artifact validation
         run: npm run test:choreography-artifacts
+
+      - name: Test live choreography human-review validation
+        run: npm run test:choreography-review
 
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
@@ -160,6 +171,9 @@ jobs:
 
       - name: Validate live choreography artifacts
         run: npm run validate:choreography-artifacts
+
+      - name: Validate recorded live choreography review
+        run: npm run validate:choreography-review
 
       - name: Upload live choreography proof artifacts
         if: always()
