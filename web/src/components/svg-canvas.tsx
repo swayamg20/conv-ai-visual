@@ -14,7 +14,10 @@ import rough from "roughjs";
 import type { RoughSVG } from "roughjs/bin/svg";
 
 import { saveCanvasImage } from "@/features/canvas/export-image";
-import { normalizeOperation, normalizeTeachingSteps } from "@/features/canvas/normalization";
+import {
+  normalizeOperation,
+  normalizeTeachingSteps,
+} from "@/features/canvas/normalization";
 import { createSvgPrimitiveRenderer } from "@/features/canvas/primitives";
 import { createTeachingTimeline } from "@/features/canvas/timeline";
 import type {
@@ -46,7 +49,7 @@ import "katex/dist/katex.min.css";
 
 function sequenceFocus(steps: TeachingStep[]): { x: number; y: number } | null {
   const firstPositionedStep = steps.find(
-    (step) => step.y !== undefined || step.element?.y !== undefined
+    (step) => step.y !== undefined || step.element?.y !== undefined,
   );
   if (!firstPositionedStep) return null;
   return {
@@ -88,6 +91,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       readViewport,
       resetViewport,
       resetZoom,
+      renderViewportFrame,
       zoomIn,
       zoomLevel,
       zoomOut,
@@ -101,7 +105,8 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     useEffect(() => {
       const refreshPalette = () => {
         paletteRef.current = getCanvasPalette();
-        if (svgRef.current && showGrid) renderGrid(svgRef.current, width, height);
+        if (svgRef.current && showGrid)
+          renderGrid(svgRef.current, width, height);
       };
       const observer = new MutationObserver((mutations) => {
         if (mutations.some((mutation) => mutation.attributeName === "class")) {
@@ -132,7 +137,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
     const generateId = useCallback(
       () => `elem_${Math.random().toString(36).substring(2, 10)}`,
-      []
+      [],
     );
 
     const primitiveRenderer = useCallback(() => {
@@ -153,7 +158,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         getHighlightColor: () => paletteRef.current.error,
         invalidate: () => forceRender((revision) => revision + 1),
       }),
-      [primitiveRenderer]
+      [primitiveRenderer],
     );
     const sceneReconciler = useMemo(
       () => createSvgNodeReconciler(sceneRendererContext),
@@ -168,7 +173,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       () => () => {
         sceneMotionExecutor.dispose();
       },
-      [sceneMotionExecutor]
+      [sceneMotionExecutor],
     );
 
     const renderFunctionPlot = useCallback(
@@ -185,7 +190,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           gsap.fromTo(
             result.axes,
             { opacity: 0 },
-            { opacity: 1, duration: DURATION.fast, stagger: 0.02 }
+            { opacity: 1, duration: DURATION.fast, stagger: 0.02 },
           );
           animateProgressivePath(result.curve, DURATION.verySlow, EASING.draw);
         }
@@ -200,7 +205,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         });
         forceRender((revision) => revision + 1);
       },
-      [height, primitiveRenderer, width]
+      [height, primitiveRenderer, width],
     );
 
     const render = useCallback(
@@ -210,16 +215,22 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         if (!svg || !renderer) return;
 
         for (const rawOperation of operations) {
-          const operation = ["clear", "delete", "highlight", "crossout"].includes(
-            rawOperation.action
-          )
+          const operation = [
+            "clear",
+            "delete",
+            "highlight",
+            "crossout",
+          ].includes(rawOperation.action)
             ? rawOperation
             : normalizeOperation(rawOperation);
 
           if (operation.action === "clear") {
             animateSceneFadeOut(svg).then(() => {
               Array.from(svg.children)
-                .filter((element) => element.id !== "canvas-grid" && element.tagName !== "defs")
+                .filter(
+                  (element) =>
+                    element.id !== "canvas-grid" && element.tagName !== "defs",
+                )
                 .forEach((element) => element.remove());
             });
             elementsRef.current.clear();
@@ -228,7 +239,9 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
           if (operation.action === "delete") {
             const targetId = operation.id || operation.target_id;
-            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            const target = targetId
+              ? elementsRef.current.get(targetId)
+              : undefined;
             if (target && targetId) {
               gsap.to(target.element, {
                 opacity: 0,
@@ -243,13 +256,15 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
           if (operation.action === "crossout") {
             const targetId = operation.id || operation.target_id;
-            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            const target = targetId
+              ? elementsRef.current.get(targetId)
+              : undefined;
             if (target) {
               animateCrossOut(
                 svg,
                 target.element,
                 operation.color ?? paletteRef.current.error,
-                DURATION.fast
+                DURATION.fast,
               );
             }
             continue;
@@ -257,10 +272,17 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
           if (operation.action === "highlight") {
             const targetId = operation.id || operation.target_id;
-            const target = targetId ? elementsRef.current.get(targetId) : undefined;
+            const target = targetId
+              ? elementsRef.current.get(targetId)
+              : undefined;
             if (!target) continue;
             if (operation.highlight_color) {
-              animateColorPulse(target.element, operation.highlight_color, 0.4, 2);
+              animateColorPulse(
+                target.element,
+                operation.highlight_color,
+                0.4,
+                2,
+              );
             } else {
               gsap.set(target.element, { transformOrigin: "center center" });
               gsap.to(target.element, {
@@ -282,14 +304,17 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           gsap.set(element, { opacity: 0 });
           svg.appendChild(element);
           const hasStrokePaths =
-            element.querySelectorAll("path[stroke]:not([stroke='none'])").length > 0;
+            element.querySelectorAll("path[stroke]:not([stroke='none'])")
+              .length > 0;
           const isInkElement =
-            (operation.action === "arrow" || operation.action === "path") && !hasStrokePaths;
+            (operation.action === "arrow" || operation.action === "path") &&
+            !hasStrokePaths;
 
           if (operation.action === "curve") {
             gsap.set(element, { opacity: 1 });
             const curve = element.querySelector("path");
-            if (curve) animateProgressivePath(curve, DURATION.verySlow, EASING.draw);
+            if (curve)
+              animateProgressivePath(curve, DURATION.verySlow, EASING.draw);
           } else if (animateStyle === "draw" && isInkElement) {
             animateInkReveal(element, DURATION.draw, EASING.draw);
           } else if (
@@ -302,7 +327,12 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             gsap.fromTo(
               element,
               { opacity: 0, scale: 0, transformOrigin: "center center" },
-              { opacity: 1, scale: 1, duration: DURATION.normal, ease: EASING.back }
+              {
+                opacity: 1,
+                scale: 1,
+                duration: DURATION.normal,
+                ease: EASING.back,
+              },
             );
           } else {
             gsap.to(element, {
@@ -324,22 +354,25 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
 
         forceRender((revision) => revision + 1);
       },
-      [generateId, primitiveRenderer]
+      [generateId, primitiveRenderer],
     );
 
-    const animate = useCallback((animation: AnimationOperation): gsap.core.Tween | null => {
-      const target = elementsRef.current.get(animation.target_id);
-      if (!target) {
-        console.warn(`Animation target not found: ${animation.target_id}`);
-        return null;
-      }
-      return gsap.to(target.element, {
-        ...animation.properties,
-        duration: animation.duration,
-        ease: animation.ease,
-        delay: animation.delay || 0,
-      });
-    }, []);
+    const animate = useCallback(
+      (animation: AnimationOperation): gsap.core.Tween | null => {
+        const target = elementsRef.current.get(animation.target_id);
+        if (!target) {
+          console.warn(`Animation target not found: ${animation.target_id}`);
+          return null;
+        }
+        return gsap.to(target.element, {
+          ...animation.properties,
+          duration: animation.duration,
+          ease: animation.ease,
+          delay: animation.delay || 0,
+        });
+      },
+      [],
+    );
 
     const renderLatex = useCallback(
       (operation: LatexOperation) => {
@@ -363,7 +396,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           data: operation,
         });
       },
-      [primitiveRenderer]
+      [primitiveRenderer],
     );
 
     const clearTimelineScene = useCallback(() => {
@@ -373,7 +406,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         return;
       }
       const children = Array.from(svg.children).filter(
-        (element) => element.id !== "canvas-grid" && element.tagName !== "defs"
+        (element) => element.id !== "canvas-grid" && element.tagName !== "defs",
       );
       gsap.to(children, {
         opacity: 0,
@@ -396,7 +429,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           generateId,
           palette: paletteRef.current,
         }),
-      [clearTimelineScene, generateId, render, renderLatex]
+      [clearTimelineScene, generateId, render, renderLatex],
     );
 
     const playNextSequence = useCallback(() => {
@@ -432,7 +465,15 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         if (!isPlayingRef.current) playNextSequence();
         return timeline;
       },
-      [buildTimeline, height, panRef, panTo, playNextSequence, width, zoomLevel]
+      [
+        buildTimeline,
+        height,
+        panRef,
+        panTo,
+        playNextSequence,
+        width,
+        zoomLevel,
+      ],
     );
 
     const createPausedSequence = useCallback(
@@ -442,7 +483,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         timelinesRef.current.set(timelineId, timeline);
         return timeline;
       },
-      [buildTimeline]
+      [buildTimeline],
     );
 
     const playMotionPlan = sceneMotionExecutor.play;
@@ -506,6 +547,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         playMotionPlan,
         readViewport,
         animateViewport,
+        renderViewportFrame,
         materializeViewport,
         resetViewport,
         cancelViewportAnimation,
@@ -538,14 +580,18 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         renderLatex,
         resetViewport,
         resetZoom,
+        renderViewportFrame,
         saveAsImage,
         zoomIn,
         zoomOut,
-      ]
+      ],
     );
 
     return (
-      <div className={`relative group ${className ?? ""}`}>
+      <div
+        className={`relative group ${className ?? ""}`}
+        style={{ touchAction: viewportInteractionLocked ? "pan-y" : "none" }}
+      >
         <svg
           ref={svgRef}
           width={width}
@@ -564,7 +610,6 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
               : isPanning
                 ? "grabbing"
                 : "grab",
-            touchAction: "none",
           }}
         />
         <div
@@ -618,7 +663,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         </div>
       </div>
     );
-  }
+  },
 );
 
 SVGCanvas.displayName = "SVGCanvas";

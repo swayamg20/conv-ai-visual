@@ -39,29 +39,22 @@ function viewportError(error: unknown): string {
     : "Viewport animation failed";
 }
 
-function freezePose(
+function freezeRenderedPose(
   pose: Omit<ViewportPoseV1, "v"> & { readonly v?: number },
-  width: number,
-  height: number,
 ): ViewportPoseV1 {
   if (pose.v !== undefined && pose.v !== 1) {
     throw new RangeError("Viewport pose version must equal 1");
   }
   const values = [pose.x, pose.y, pose.width, pose.height];
   if (
-    values.some(
-      (value) => typeof value !== "number" || !Number.isFinite(value),
-    )
+    values.some((value) => typeof value !== "number" || !Number.isFinite(value))
   ) {
-    throw new TypeError("Viewport coordinates and extents must be finite numbers");
-  }
-  if (pose.x < 0 || pose.y < 0 || pose.width <= 0 || pose.height <= 0) {
-    throw new RangeError(
-      "Viewport pose must have a nonnegative origin and positive extent",
+    throw new TypeError(
+      "Viewport coordinates and extents must be finite numbers",
     );
   }
-  if (pose.x + pose.width > width || pose.y + pose.height > height) {
-    throw new RangeError("Viewport pose must remain inside the logical canvas");
+  if (pose.width <= 0 || pose.height <= 0) {
+    throw new RangeError("Viewport pose must have positive extents");
   }
   return Object.freeze({
     v: 1,
@@ -70,6 +63,41 @@ function freezePose(
     width: pose.width,
     height: pose.height,
   });
+}
+
+function freezeCertifiedPose(
+  pose: Omit<ViewportPoseV1, "v"> & { readonly v?: number },
+  width: number,
+  height: number,
+): ViewportPoseV1 {
+  const frozen = freezeRenderedPose(pose);
+  if (frozen.x < 0 || frozen.y < 0) {
+    throw new RangeError(
+      "Certified viewport pose must have a nonnegative origin",
+    );
+  }
+  if (frozen.x + frozen.width > width || frozen.y + frozen.height > height) {
+    throw new RangeError("Viewport pose must remain inside the logical canvas");
+  }
+  return frozen;
+}
+
+function validatePlaybackOptions(options: ViewportPlaybackOptions): void {
+  if (
+    typeof options.durationMs !== "number" ||
+    !Number.isFinite(options.durationMs) ||
+    options.durationMs < 0 ||
+    options.durationMs > MAX_CHOREOGRAPHY_PLAN_MS
+  ) {
+    throw new RangeError(
+      `Viewport durationMs must be between 0 and ${MAX_CHOREOGRAPHY_PLAN_MS}`,
+    );
+  }
+  if (!Object.hasOwn(VIEWPORT_EASING, options.easing)) {
+    throw new RangeError(
+      "Viewport easing is not in the closed choreography vocabulary",
+    );
+  }
 }
 
 function viewBoxValue(pose: ViewportPoseV1): string {
@@ -83,7 +111,7 @@ export function useCanvasViewport({
   interactionLocked = false,
 }: CanvasViewportOptions) {
   const defaultPose = useMemo(
-    () => freezePose({ x: 0, y: 0, width, height }, width, height),
+    () => freezeCertifiedPose({ x: 0, y: 0, width, height }, width, height),
     [height, width],
   );
   const [zoomLevel, setZoomLevel] = useState(1);
@@ -96,8 +124,14 @@ export function useCanvasViewport({
   const panStartRef = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
 
   const writePose = useCallback(
-    (poseValue: ViewportPoseV1): ViewportPoseV1 => {
-      const pose = freezePose(poseValue, width, height);
+    (
+      poseValue: ViewportPoseV1,
+      policy: "certified" | "manual",
+    ): ViewportPoseV1 => {
+      const pose =
+        policy === "certified"
+          ? freezeCertifiedPose(poseValue, width, height)
+          : freezeRenderedPose(poseValue);
       const svg = svgRef.current;
       if (!svg) throw new Error("The SVG canvas is unavailable");
       svg.setAttribute("viewBox", viewBoxValue(pose));
@@ -105,6 +139,20 @@ export function useCanvasViewport({
       return pose;
     },
     [height, svgRef, width],
+  );
+
+  const renderViewportFrame = useCallback(
+    (poseValue: ViewportPoseV1): void => {
+      writePose(poseValue, "certified");
+    },
+    [writePose],
+  );
+
+  const writeManualViewportFrame = useCallback(
+    (poseValue: ViewportPoseV1): void => {
+      writePose(poseValue, "manual");
+    },
+    [writePose],
   );
 
   const readViewport = useCallback((): ViewportPoseV1 => {
@@ -116,14 +164,15 @@ export function useCanvasViewport({
       throw new Error("The SVG canvas has an invalid viewBox");
     }
     const [x, y, poseWidth, poseHeight] = values;
-    const pose = freezePose(
-      { x, y, width: poseWidth, height: poseHeight },
-      width,
-      height,
-    );
+    const pose = freezeRenderedPose({
+      x,
+      y,
+      width: poseWidth,
+      height: poseHeight,
+    });
     viewportPoseRef.current = pose;
     return pose;
-  }, [height, svgRef, width]);
+  }, [svgRef]);
 
   const syncLegacyState = useCallback(
     (pose: ViewportPoseV1) => {
@@ -133,51 +182,49 @@ export function useCanvasViewport({
     [width],
   );
 
-  const cancelViewportAnimation = useCallback(
-    (): ViewportPlaybackOutcome | null => {
+  const cancelViewportAnimation =
+    useCallback((): ViewportPlaybackOutcome | null => {
       const active = activePlaybackRef.current;
       return active ? active.cancel() : null;
-    },
-    [],
-  );
+    }, []);
 
   const materializeViewport = useCallback(
     (poseValue: ViewportPoseV1): void => {
+      const pose = freezeCertifiedPose(poseValue, width, height);
       cancelViewportAnimation();
-      const pose = writePose(freezePose(poseValue, width, height));
+      renderViewportFrame(pose);
       syncLegacyState(pose);
     },
-    [cancelViewportAnimation, height, syncLegacyState, width, writePose],
+    [
+      cancelViewportAnimation,
+      height,
+      syncLegacyState,
+      width,
+      renderViewportFrame,
+    ],
   );
 
-  const animateViewport = useCallback(
+  const startViewportAnimation = useCallback(
     (
-      poseValue: ViewportPoseV1,
+      target: ViewportPoseV1,
       options: ViewportPlaybackOptions,
+      policy: "certified" | "manual",
     ): ViewportPlayback => {
-      if (
-        typeof options.durationMs !== "number" ||
-        !Number.isFinite(options.durationMs) ||
-        options.durationMs < 0 ||
-        options.durationMs > MAX_CHOREOGRAPHY_PLAN_MS
-      ) {
-        throw new RangeError(
-          `Viewport durationMs must be between 0 and ${MAX_CHOREOGRAPHY_PLAN_MS}`,
-        );
-      }
-      if (!Object.hasOwn(VIEWPORT_EASING, options.easing)) {
-        throw new RangeError("Viewport easing is not in the closed choreography vocabulary");
-      }
-
-      const target = freezePose(poseValue, width, height);
+      validatePlaybackOptions(options);
+      const start =
+        policy === "certified"
+          ? freezeCertifiedPose(readViewport(), width, height)
+          : freezeRenderedPose(readViewport());
       cancelViewportAnimation();
-      const start = readViewport();
+      const writeFrame =
+        policy === "certified" ? renderViewportFrame : writeManualViewportFrame;
       let settled: ViewportPlaybackOutcome | null = null;
       let resolveFinished!: (outcome: ViewportPlaybackOutcome) => void;
       const finished = new Promise<ViewportPlaybackOutcome>((resolve) => {
         resolveFinished = resolve;
       });
       let tween: gsap.core.Tween | null = null;
+      let playback!: ManagedViewportPlayback;
 
       const settle = (
         status: ViewportPlaybackOutcome["status"],
@@ -190,29 +237,51 @@ export function useCanvasViewport({
           pose,
           ...(error === undefined ? {} : { error: viewportError(error) }),
         });
-        if (activePlaybackRef.current === playback) activePlaybackRef.current = null;
+        if (activePlaybackRef.current === playback) {
+          activePlaybackRef.current = null;
+        }
         syncLegacyState(pose);
         resolveFinished(settled);
         return settled;
       };
 
-      const playback: ManagedViewportPlayback = Object.freeze({
+      const fail = (error: unknown): ViewportPlaybackOutcome => {
+        if (settled) return settled;
+        tween?.kill();
+        let pose = viewportPoseRef.current;
+        let failure = error;
+        try {
+          writeFrame(start);
+          pose = start;
+        } catch (rollbackError) {
+          failure = new Error(
+            `${viewportError(error)}; rollback failed: ${viewportError(rollbackError)}`,
+          );
+        }
+        return settle("failed", pose, failure);
+      };
+
+      playback = Object.freeze({
         finished,
         cancel: () => {
           if (settled) return settled;
-          tween?.kill();
-          const current = readViewport();
-          return settle("cancelled", current);
+          try {
+            tween?.kill();
+            const current = readViewport();
+            return settle("cancelled", current);
+          } catch (error) {
+            return fail(error);
+          }
         },
       });
       activePlaybackRef.current = playback;
 
       if (options.durationMs === 0) {
         try {
-          const pose = writePose(target);
-          settle("completed", pose);
+          writeFrame(target);
+          settle("completed", target);
         } catch (error) {
-          settle("failed", viewportPoseRef.current, error);
+          fail(error);
         }
         return playback;
       }
@@ -232,20 +301,23 @@ export function useCanvasViewport({
           duration: options.durationMs / 1_000,
           ease: VIEWPORT_EASING[options.easing],
           onUpdate: () => {
-            writePose(freezePose(animated, width, height));
+            try {
+              writeFrame(freezeRenderedPose(animated));
+            } catch (error) {
+              fail(error);
+            }
           },
           onComplete: () => {
-            const pose = writePose(target);
-            settle("completed", pose);
+            try {
+              writeFrame(target);
+              settle("completed", target);
+            } catch (error) {
+              fail(error);
+            }
           },
         });
       } catch (error) {
-        try {
-          writePose(start);
-        } catch {
-          // Keep the original animation failure as the public error.
-        }
-        settle("failed", viewportPoseRef.current, error);
+        fail(error);
       }
       return playback;
     },
@@ -255,43 +327,74 @@ export function useCanvasViewport({
       readViewport,
       syncLegacyState,
       width,
-      writePose,
+      writeManualViewportFrame,
+      renderViewportFrame,
     ],
+  );
+
+  const animateViewport = useCallback(
+    (
+      poseValue: ViewportPoseV1,
+      options: ViewportPlaybackOptions,
+    ): ViewportPlayback => {
+      const target = freezeCertifiedPose(poseValue, width, height);
+      return startViewportAnimation(target, options, "certified");
+    },
+    [height, startViewportAnimation, width],
+  );
+
+  const animateManualViewport = useCallback(
+    (
+      poseValue: ViewportPoseV1,
+      options: ViewportPlaybackOptions,
+    ): ViewportPlayback => {
+      const target = freezeRenderedPose(poseValue);
+      return startViewportAnimation(target, options, "manual");
+    },
+    [startViewportAnimation],
   );
 
   const applyViewBox = useCallback(
     (zoom: number, pan: { x: number; y: number }, animate = false) => {
-      const pose = freezePose(
-        {
-          x: pan.x,
-          y: pan.y,
-          width: width / zoom,
-          height: height / zoom,
-        },
-        width,
-        height,
-      );
+      if (!Number.isFinite(zoom) || zoom <= 0) {
+        throw new RangeError(
+          "Manual viewport zoom must be a positive finite number",
+        );
+      }
+      const pose = freezeRenderedPose({
+        x: pan.x,
+        y: pan.y,
+        width: width / zoom,
+        height: height / zoom,
+      });
       if (animate) {
-        animateViewport(pose, {
+        animateManualViewport(pose, {
           durationMs: DURATION.fast * 1_000,
           easing: "ease_in_out",
         });
         return;
       }
-      materializeViewport(pose);
+      cancelViewportAnimation();
+      writeManualViewportFrame(pose);
+      syncLegacyState(pose);
     },
-    [animateViewport, height, materializeViewport, width],
+    [
+      animateManualViewport,
+      cancelViewportAnimation,
+      height,
+      syncLegacyState,
+      width,
+      writeManualViewportFrame,
+    ],
   );
 
   const panTo = useCallback(
     (x: number, y: number, zoom?: number) => {
       if (interactionLocked) return;
       const nextZoom = zoom ?? zoomLevel;
-      const poseWidth = width / nextZoom;
-      const poseHeight = height / nextZoom;
       const nextPan = {
-        x: Math.min(Math.max(0, x - poseWidth / 2), width - poseWidth),
-        y: Math.min(Math.max(0, y - poseHeight / 2), height - poseHeight),
+        x: x - width / nextZoom / 2,
+        y: y - height / nextZoom / 2,
       };
       panRef.current = nextPan;
       applyViewBox(nextZoom, nextPan, true);
@@ -324,23 +427,19 @@ export function useCanvasViewport({
       if (bounds.width <= 0 || bounds.height <= 0) return;
       const current = readViewport();
       const deltaX =
-        (event.clientX - panStartRef.current.x) * (current.width / bounds.width);
+        (event.clientX - panStartRef.current.x) *
+        (current.width / bounds.width);
       const deltaY =
-        (event.clientY - panStartRef.current.y) * (current.height / bounds.height);
+        (event.clientY - panStartRef.current.y) *
+        (current.height / bounds.height);
       const nextPan = {
-        x: Math.min(
-          Math.max(0, panStartRef.current.panX - deltaX),
-          width - current.width,
-        ),
-        y: Math.min(
-          Math.max(0, panStartRef.current.panY - deltaY),
-          height - current.height,
-        ),
+        x: panStartRef.current.panX - deltaX,
+        y: panStartRef.current.panY - deltaY,
       };
       panRef.current = nextPan;
-      writePose({ ...current, x: nextPan.x, y: nextPan.y });
+      writeManualViewportFrame({ ...current, x: nextPan.x, y: nextPan.y });
     },
-    [height, interactionLocked, readViewport, svgRef, width, writePose],
+    [interactionLocked, readViewport, svgRef, writeManualViewportFrame],
   );
 
   const handlePointerUp = useCallback(() => {
@@ -355,11 +454,8 @@ export function useCanvasViewport({
       const centerX = panRef.current.x + width / currentZoom / 2;
       const centerY = panRef.current.y + height / currentZoom / 2;
       const nextPan = {
-        x: Math.min(Math.max(0, centerX - width / nextZoom / 2), width - width / nextZoom),
-        y: Math.min(
-          Math.max(0, centerY - height / nextZoom / 2),
-          height - height / nextZoom,
-        ),
+        x: centerX - width / nextZoom / 2,
+        y: centerY - height / nextZoom / 2,
       };
       panRef.current = nextPan;
       applyViewBox(nextZoom, nextPan, true);
@@ -370,15 +466,14 @@ export function useCanvasViewport({
   const zoomOut = useCallback(() => {
     if (interactionLocked) return;
     setZoomLevel((currentZoom) => {
-      const nextZoom = Math.max(currentZoom - 0.25, 1);
+      const nextZoom = Math.max(currentZoom - 0.25, 0.5);
       const poseWidth = width / nextZoom;
       const poseHeight = height / nextZoom;
-      if (poseWidth > width || poseHeight > height) return currentZoom;
       const centerX = panRef.current.x + width / currentZoom / 2;
       const centerY = panRef.current.y + height / currentZoom / 2;
       const nextPan = {
-        x: Math.min(Math.max(0, centerX - poseWidth / 2), width - poseWidth),
-        y: Math.min(Math.max(0, centerY - poseHeight / 2), height - poseHeight),
+        x: centerX - poseWidth / 2,
+        y: centerY - poseHeight / 2,
       };
       panRef.current = nextPan;
       applyViewBox(nextZoom, nextPan, true);
@@ -434,6 +529,7 @@ export function useCanvasViewport({
     readViewport,
     resetViewport,
     resetZoom,
+    renderViewportFrame,
     zoomIn,
     zoomLevel,
     zoomOut,

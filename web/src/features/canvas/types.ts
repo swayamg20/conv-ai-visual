@@ -168,7 +168,10 @@ export interface SVGCanvasHandle {
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
-  playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
+  playMotionPlan(
+    plan: MotionPlan,
+    options?: MotionPlaybackOptions,
+  ): MotionPlayback;
   /** Return the exact viewBox currently rendered, including during a tween. */
   readViewport(): ViewportPoseV1;
   /** Animate only through the closed choreography camera vocabulary. */
@@ -176,6 +179,8 @@ export interface SVGCanvasHandle {
     pose: ViewportPoseV1,
     options: ViewportPlaybackOptions,
   ): ViewportPlayback;
+  /** Write one certified frame without cancelling playback or updating React state. */
+  renderViewportFrame(pose: ViewportPoseV1): void;
   /** Kill camera motion and atomically apply an exact certified pose. */
   materializeViewport(pose: ViewportPoseV1): void;
   /** Reset to a supplied certified pose or the complete logical board. */
@@ -192,7 +197,7 @@ export interface SVGCanvasHandle {
   zoomIn(): void;
   zoomOut(): void;
   resetZoom(): void;
-  panTo(x: number, y: number): void;
+  panTo(x: number, y: number, zoom?: number): void;
 }
 
 export interface SVGCanvasProps {
