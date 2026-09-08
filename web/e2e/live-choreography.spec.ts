@@ -1,0 +1,442 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+
+import { expect, test, type Page } from "@playwright/test";
+
+import {
+  CINEMATIC_CHECKPOINTS,
+  COMPACT_CHECKPOINTS,
+  acknowledgeCheckpoint,
+  assertRetainedDomIdentity,
+  choreographyStage,
+  observeSettledCheckpoint,
+  readCaptureBridgeState,
+  type ExpectedChoreographyCheckpoint,
+  type SettledCheckpointObservation,
+} from "./live-choreography-helpers";
+
+const CAPTURE_BRIDGE_KEY = "__MURMUR_CHOREOGRAPHY_CAPTURE__";
+const CORNER_DETAIL_CAPTION =
+  "Both exposed edges measure three, so the missing corner is three by three and its area is nine.";
+const CORNER_DETAIL_NODE_IDS = [
+  "square-lesson__corner_calc",
+  "square-lesson__corner_dim_h",
+  "square-lesson__corner_dim_v",
+] as const;
+
+interface StageSnapshot {
+  readonly caption: string;
+  readonly viewBox: string;
+  readonly nodeIds: readonly string[];
+  readonly domIdentity: Readonly<Record<string, number>>;
+  readonly canonicalSvg: string;
+}
+
+interface ResponsiveObservation {
+  readonly viewport: { readonly width: number; readonly height: number };
+  readonly documentWidth: number;
+  readonly bodyWidth: number;
+  readonly stage: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly finalViewBox: string;
+}
+
+interface AcceleratedObservations {
+  cinematic?: {
+    readonly checkpoints: readonly SettledCheckpointObservation[];
+    readonly liveSceneRequests: readonly string[];
+  };
+  reducedMotion?: {
+    readonly final: SettledCheckpointObservation;
+    readonly equivalentToCinematic: boolean;
+    readonly liveSceneRequests: readonly string[];
+  };
+  responsive: ResponsiveObservation[];
+  adaptive?: {
+    readonly interruptionSettleMs: number;
+    readonly cornerDetailNodeIds: readonly string[];
+    readonly replayEquivalent: boolean;
+    readonly liveSceneRequests: readonly string[];
+  };
+}
+
+const observations: AcceleratedObservations = { responsive: [] };
+
+function captureUrl(
+  layout: "cinematic" | "compact",
+  motion: "real" | "reduced",
+): string {
+  return `/e2e/choreography?pace=step&timing=accelerated&layout=${layout}&motion=${motion}`;
+}
+
+function liveSceneRequests(page: Page): string[] {
+  const requests: string[] = [];
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/live-scenes"))
+      requests.push(url.pathname);
+  });
+  return requests;
+}
+
+async function waitForCheckpointGate(
+  page: Page,
+  expected: ExpectedChoreographyCheckpoint,
+): Promise<void> {
+  await page.waitForFunction(
+    ({ key, ordinal, checkpointId }) => {
+      const bridge = (window as typeof window & Record<string, unknown>)[
+        key
+      ] as
+        | {
+            readonly version: number;
+            readonly pace: string;
+            getState(): {
+              readonly waitingFor: {
+                readonly generation: number;
+                readonly sequence: number;
+                readonly checkpointId: string;
+              } | null;
+              readonly acknowledgedThrough: number;
+            };
+          }
+        | undefined;
+      const state = bridge?.getState();
+      return (
+        bridge?.version === 1 &&
+        bridge.pace === "step" &&
+        state?.acknowledgedThrough === ordinal - 1 &&
+        state.waitingFor?.generation === 1 &&
+        state.waitingFor.sequence === ordinal &&
+        state.waitingFor.checkpointId === checkpointId
+      );
+    },
+    {
+      key: CAPTURE_BRIDGE_KEY,
+      ordinal: expected.ordinal,
+      checkpointId: expected.checkpointId,
+    },
+  );
+
+  const state = await readCaptureBridgeState(page);
+  expect(state.acknowledgedThrough).toBe(expected.ordinal - 1);
+  expect(state.waitingFor).toMatchObject({
+    generation: 1,
+    sequence: expected.ordinal,
+    checkpointId: expected.checkpointId,
+  });
+  expect(state.waitingFor?.openedAtMs).toBeGreaterThanOrEqual(0);
+}
+
+async function runStepLesson(
+  page: Page,
+  checkpoints: readonly ExpectedChoreographyCheckpoint[],
+): Promise<readonly SettledCheckpointObservation[]> {
+  const results: SettledCheckpointObservation[] = [];
+  let previous: SettledCheckpointObservation | undefined;
+
+  for (const checkpoint of checkpoints) {
+    await waitForCheckpointGate(page, checkpoint);
+    const current = await observeSettledCheckpoint(page, checkpoint);
+    await expect(choreographyStage(page)).toHaveAttribute(
+      "data-phase",
+      "streaming",
+    );
+    if (previous) assertRetainedDomIdentity(previous, current);
+    results.push(current);
+    previous = current;
+    await acknowledgeCheckpoint(page, checkpoint);
+  }
+
+  await expect(choreographyStage(page)).toHaveAttribute(
+    "data-phase",
+    "completed",
+  );
+  return results;
+}
+
+async function waitForStableStage(page: Page): Promise<void> {
+  await choreographyStage(page).evaluate(async (element) => {
+    await document.fonts.ready;
+    await Promise.all(
+      element
+        .getAnimations({ subtree: true })
+        .map((animation) => animation.finished.catch(() => undefined)),
+    );
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+    );
+  });
+}
+
+async function stageSnapshot(page: Page): Promise<StageSnapshot> {
+  await waitForStableStage(page);
+  return choreographyStage(page).evaluate((element) => {
+    interface IdentityRegistry {
+      next: number;
+      readonly tokens: WeakMap<Element, number>;
+    }
+    const owner = window as typeof window & {
+      __MURMUR_CHOREOGRAPHY_DOM_IDENTITY__?: IdentityRegistry;
+    };
+    const registry = owner.__MURMUR_CHOREOGRAPHY_DOM_IDENTITY__ ?? {
+      next: 1,
+      tokens: new WeakMap<Element, number>(),
+    };
+    owner.__MURMUR_CHOREOGRAPHY_DOM_IDENTITY__ = registry;
+
+    const svg = element.querySelector("svg");
+    if (!svg) throw new Error("The choreography stage has no SVG canvas");
+    const nodes = Array.from(
+      svg.querySelectorAll<SVGElement>(":scope > [data-element-id]"),
+    );
+    const domIdentity = Object.fromEntries(
+      nodes.map((node) => {
+        let token = registry.tokens.get(node);
+        if (token === undefined) {
+          token = registry.next;
+          registry.next += 1;
+          registry.tokens.set(node, token);
+        }
+        return [node.dataset.elementId ?? "", token];
+      }),
+    );
+    const serialize = (node: Node): string => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        return JSON.stringify(node.nodeValue ?? "");
+      }
+      if (!(node instanceof Element)) return "";
+      const attributes = Array.from(node.attributes)
+        .map(({ name, value }) => [name, value] as const)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => `${name}=${JSON.stringify(value)}`)
+        .join(" ");
+      const opening = attributes
+        ? `<${node.namespaceURI}:${node.localName} ${attributes}>`
+        : `<${node.namespaceURI}:${node.localName}>`;
+      return `${opening}${Array.from(node.childNodes).map(serialize).join("")}</${node.namespaceURI}:${node.localName}>`;
+    };
+
+    return {
+      caption: element.querySelector("figcaption")?.textContent?.trim() ?? "",
+      viewBox: svg.getAttribute("viewBox") ?? "",
+      nodeIds: nodes.map((node) => node.dataset.elementId ?? ""),
+      domIdentity,
+      canonicalSvg: serialize(svg),
+    };
+  });
+}
+
+function expectSharedDomIdentity(
+  before: StageSnapshot,
+  after: StageSnapshot,
+): void {
+  for (const id of before.nodeIds) {
+    if (after.domIdentity[id] !== undefined) {
+      expect(after.domIdentity[id], `DOM identity changed for ${id}`).toBe(
+        before.domIdentity[id],
+      );
+    }
+  }
+}
+
+async function responsiveObservation(
+  page: Page,
+  viewport: { readonly width: number; readonly height: number },
+): Promise<ResponsiveObservation> {
+  const measured = await page.evaluate(() => {
+    const stage = document.querySelector<HTMLElement>(
+      '[data-testid="live-choreography-stage"]',
+    );
+    if (!stage) throw new Error("The choreography stage is unavailable");
+    const bounds = stage.getBoundingClientRect();
+    return {
+      documentWidth: document.documentElement.scrollWidth,
+      bodyWidth: document.body.scrollWidth,
+      stage: {
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+      },
+      finalViewBox: stage.querySelector("svg")?.getAttribute("viewBox") ?? "",
+    };
+  });
+
+  expect(measured.documentWidth).toBeLessThanOrEqual(viewport.width);
+  expect(measured.bodyWidth).toBeLessThanOrEqual(viewport.width);
+  expect(measured.stage.x).toBeGreaterThanOrEqual(-0.5);
+  expect(measured.stage.y).toBeGreaterThanOrEqual(-0.5);
+  expect(measured.stage.x + measured.stage.width).toBeLessThanOrEqual(
+    viewport.width + 0.5,
+  );
+  expect(measured.stage.y + measured.stage.height).toBeLessThanOrEqual(
+    viewport.height + 0.5,
+  );
+  return { viewport, ...measured };
+}
+
+test.describe("Gate 1.5 live visual choreography", () => {
+  test("settles the exact eight-checkpoint lesson without replacing retained ink or calling a model", async ({
+    page,
+  }) => {
+    const requests = liveSceneRequests(page);
+    await page.goto(captureUrl("cinematic", "real"));
+    const checkpoints = await runStepLesson(page, CINEMATIC_CHECKPOINTS);
+
+    expect(checkpoints).toHaveLength(8);
+    expect(requests).toEqual([]);
+    observations.cinematic = {
+      checkpoints,
+      liveSceneRequests: [...requests],
+    };
+  });
+
+  test("reduced motion reaches the same certified final state", async ({
+    page,
+  }) => {
+    const requests = liveSceneRequests(page);
+    await page.goto(captureUrl("cinematic", "reduced"));
+    const checkpoints = await runStepLesson(page, CINEMATIC_CHECKPOINTS);
+    const final = checkpoints.at(-1)!;
+    const expectedFinal = CINEMATIC_CHECKPOINTS.at(-1)!;
+
+    expect({
+      checkpointId: final.checkpointId,
+      caption: final.caption,
+      viewBox: final.viewBox,
+      nodeIds: final.nodeIds,
+    }).toEqual({
+      checkpointId: expectedFinal.checkpointId,
+      caption: expectedFinal.caption,
+      viewBox: `${expectedFinal.resultViewport.x} ${expectedFinal.resultViewport.y} ${expectedFinal.resultViewport.width} ${expectedFinal.resultViewport.height}`,
+      nodeIds: expectedFinal.nodeIds,
+    });
+    expect(requests).toEqual([]);
+    observations.reducedMotion = {
+      final,
+      equivalentToCinematic: true,
+      liveSceneRequests: [...requests],
+    };
+  });
+
+  for (const viewport of [
+    { width: 375, height: 812 },
+    { width: 320, height: 568 },
+  ] as const) {
+    test(`keeps the compact ${viewport.width}x${viewport.height} stage inside the viewport`, async ({
+      page,
+    }) => {
+      const requests = liveSceneRequests(page);
+      await page.setViewportSize(viewport);
+      await page.goto(captureUrl("compact", "reduced"));
+      await runStepLesson(page, COMPACT_CHECKPOINTS);
+      const measured = await responsiveObservation(page, viewport);
+
+      expect(requests).toEqual([]);
+      observations.responsive.push(measured);
+    });
+  }
+
+  test("pauses at the visible corner, answers it, continues, and replays the exact visual state", async ({
+    page,
+  }) => {
+    const requests = liveSceneRequests(page);
+    await page.goto("/labs/live-scene");
+    await page
+      .getByTestId("authoring-mode-picker")
+      .getByText("Live choreography", { exact: true })
+      .click();
+    await expect(
+      page.getByRole("radio", { name: "Live choreography" }),
+    ).toBeChecked();
+    await expect(
+      page.getByRole("radio", { name: "Ask at the corner" }),
+    ).toBeChecked();
+
+    await page.getByRole("button", { name: "Begin the lesson" }).click();
+    const stage = choreographyStage(page);
+    await expect(stage).toHaveAttribute("data-checkpoint-id", "missing_corner");
+    await expect(stage).toHaveAttribute("data-settled-main-count", "5");
+    await expect(stage).toHaveAttribute("data-phase", "streaming");
+    const beforeInterrupt = await stageSnapshot(page);
+
+    const interruptedAt = await page.evaluate(() => performance.now());
+    await page.getByRole("button", { name: "Stop here and ask" }).click();
+    await expect(stage).toHaveAttribute("data-phase", "interrupted");
+    const interruptionSettleMs = await page.evaluate(
+      (startedAt) => performance.now() - startedAt,
+      interruptedAt,
+    );
+    const interrupted = await stageSnapshot(page);
+    expect(interrupted).toEqual(beforeInterrupt);
+
+    await page.getByRole("button", { name: "Why is the corner 9?" }).click();
+    await expect(stage).toHaveAttribute("data-checkpoint-id", "corner_detail");
+    await expect(stage).toHaveAttribute("data-settled-main-count", "5");
+    await expect(stage).toHaveAttribute("data-corner-clarified", "true");
+    await expect(stage).toHaveAttribute("data-phase", "completed");
+    const cornerDetail = await stageSnapshot(page);
+    expect(cornerDetail.caption).toBe(CORNER_DETAIL_CAPTION);
+    expect(cornerDetail.viewBox).toBe("380 380 260 160");
+    expect(cornerDetail.nodeIds).toEqual([
+      ...CINEMATIC_CHECKPOINTS[4].nodeIds,
+      ...CORNER_DETAIL_NODE_IDS,
+    ]);
+    expectSharedDomIdentity(interrupted, cornerDetail);
+
+    await page.getByRole("button", { name: "Continue the solution" }).click();
+    await expect(stage).toHaveAttribute("data-checkpoint-id", "solve_roots");
+    await expect(stage).toHaveAttribute("data-settled-main-count", "8");
+    await expect(stage).toHaveAttribute("data-phase", "completed");
+    const completed = await stageSnapshot(page);
+    const expectedFinal = CINEMATIC_CHECKPOINTS.at(-1)!;
+    expect(completed.caption).toBe(expectedFinal.caption);
+    expect(completed.viewBox).toBe(
+      `${expectedFinal.resultViewport.x} ${expectedFinal.resultViewport.y} ${expectedFinal.resultViewport.width} ${expectedFinal.resultViewport.height}`,
+    );
+    expect(completed.nodeIds).toEqual(expectedFinal.nodeIds);
+
+    const requestsBeforeReplay = requests.length;
+    await page.getByRole("button", { name: "Replay" }).click();
+    await expect(stage).toHaveAttribute("data-phase", "replaying");
+    await expect(stage).toHaveAttribute("data-phase", "completed");
+    const replayed = await stageSnapshot(page);
+    expect(replayed.caption).toBe(completed.caption);
+    expect(replayed.viewBox).toBe(completed.viewBox);
+    expect(replayed.nodeIds).toEqual(completed.nodeIds);
+    expect(replayed.canonicalSvg).toBe(completed.canonicalSvg);
+    expect(requests).toHaveLength(requestsBeforeReplay);
+    expect(requests).toEqual([]);
+
+    observations.adaptive = {
+      interruptionSettleMs,
+      cornerDetailNodeIds: [...CORNER_DETAIL_NODE_IDS],
+      replayEquivalent: true,
+      liveSceneRequests: [...requests],
+    };
+  });
+
+  test.afterAll(async () => {
+    const artifactRoot = path.resolve(
+      process.env.CHOREOGRAPHY_E2E_ARTIFACT_DIR ?? "../var/live-choreography",
+    );
+    const outputPath = path.join(
+      artifactRoot,
+      "accelerated",
+      "observations.json",
+    );
+    const temporaryPath = `${outputPath}.${process.pid}.tmp`;
+    await fs.mkdir(path.dirname(outputPath), { recursive: true });
+    await fs.writeFile(
+      temporaryPath,
+      `${JSON.stringify({ v: 1, ...observations }, null, 2)}\n`,
+      "utf8",
+    );
+    await fs.rename(temporaryPath, outputPath);
+  });
+});
