@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 
-import { act, createRef } from "react";
+import { act, createRef, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { gsap } from "gsap";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -958,7 +958,7 @@ describe("SVGCanvas", () => {
     await act(async () => root.unmount());
   });
 
-  it("owns verified checkpoint choreography through one narrow canvas handle", async () => {
+  it("owns verified checkpoint choreography through one narrow canvas handle in Strict Mode", async () => {
     vi.stubGlobal(
       "requestAnimationFrame",
       (callback: FrameRequestCallback): number => {
@@ -973,15 +973,17 @@ describe("SVGCanvas", () => {
 
     await act(async () => {
       root.render(
-        <SVGCanvas
-          ref={canvas}
-          width={320}
-          height={220}
-          showGrid={false}
-          viewportInteractionLocked
-          reducedMotion
-          choreographyPlaybackRate={16}
-        />,
+        <StrictMode>
+          <SVGCanvas
+            ref={canvas}
+            width={320}
+            height={220}
+            showGrid={false}
+            viewportInteractionLocked
+            reducedMotion
+            choreographyPlaybackRate={16}
+          />
+        </StrictMode>,
       );
     });
 

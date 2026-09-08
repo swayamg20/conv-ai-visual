@@ -192,13 +192,34 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       ],
     );
 
-    useEffect(
-      () => () => {
-        sceneMotionExecutor.dispose();
-        choreographyExecutor.dispose();
-      },
-      [choreographyExecutor, sceneMotionExecutor],
-    );
+    const executorLifecycleRef = useRef<{
+      readonly sceneMotion: typeof sceneMotionExecutor;
+      readonly choreography: typeof choreographyExecutor;
+    } | null>(null);
+
+    useEffect(() => {
+      const current = {
+        sceneMotion: sceneMotionExecutor,
+        choreography: choreographyExecutor,
+      };
+      const previous = executorLifecycleRef.current;
+      if (previous?.sceneMotion !== current.sceneMotion) {
+        previous?.sceneMotion.dispose();
+      }
+      if (previous?.choreography !== current.choreography) {
+        previous?.choreography.dispose();
+      }
+      executorLifecycleRef.current = current;
+
+      return () => {
+        queueMicrotask(() => {
+          if (executorLifecycleRef.current !== current) return;
+          executorLifecycleRef.current = null;
+          current.sceneMotion.dispose();
+          current.choreography.dispose();
+        });
+      };
+    }, [choreographyExecutor, sceneMotionExecutor]);
 
     const renderFunctionPlot = useCallback(
       (plot: FunctionPlotData) => {
