@@ -59,6 +59,7 @@ def test_fixture_is_exact_backend_generated_choreography_transcript(tmp_path: Pa
         "resultRevision",
         "transcript",
         "events",
+        "adaptiveTranscript",
     }
     assert fixture["v"] == 1
     assert fixture["fixtureId"] == "completing-the-square"
@@ -134,3 +135,68 @@ def test_fixture_is_exact_backend_generated_choreography_transcript(tmp_path: Pa
         "totalMs": 0.0,
         "repaired": False,
     }
+
+    adaptive = fixture["adaptiveTranscript"]
+    assert set(adaptive) == {
+        "baseCheckpointId",
+        "clarificationDecision",
+        "continuationDecision",
+        "checkpointIds",
+        "authoredDurationMs",
+        "events",
+    }
+    assert adaptive["baseCheckpointId"] == "missing_corner"
+    assert adaptive["clarificationDecision"] == {
+        "v": 1,
+        "decision": "clarify_corner",
+        "componentId": "square-lesson",
+    }
+    assert adaptive["continuationDecision"] == {
+        "v": 1,
+        "decision": "continue_choreography",
+        "componentId": "square-lesson",
+        "targetStage": "solve",
+    }
+    assert adaptive["checkpointIds"] == [
+        "corner_detail",
+        "balance_and_complete",
+        "factor_square",
+        "solve_roots",
+    ]
+    assert adaptive["authoredDurationMs"] == 31_850
+
+    adaptive_events = [
+        CHOREOGRAPHY_SCENE_STREAM_EVENT_ADAPTER.validate_python(event)
+        for event in adaptive["events"]
+    ]
+    assert [event.type for event in adaptive_events] == [
+        "scene_stream_started",
+        "choreography_scene_checkpoint",
+        "scene_stream_completed",
+        "scene_stream_started",
+        *("choreography_scene_checkpoint" for _ in range(3)),
+        "scene_stream_completed",
+    ]
+    adaptive_checkpoints = [
+        event for event in adaptive_events if isinstance(event, ChoreographySceneCheckpointEvent)
+    ]
+    assert [event.generation for event in adaptive_checkpoints] == [2, 3, 3, 3]
+    assert [event.sequence for event in adaptive_checkpoints] == [1, 1, 2, 3]
+    assert [event.semantic.checkpoint_id.value for event in adaptive_checkpoints] == adaptive[
+        "checkpointIds"
+    ]
+    assert [(event.base_revision, event.result_revision) for event in adaptive_checkpoints] == [
+        (5, 6),
+        (6, 7),
+        (7, 8),
+        (8, 9),
+    ]
+    assert all(event.semantic.result_component.corner_clarified for event in adaptive_checkpoints)
+    assert (
+        adaptive_checkpoints[0].semantic.certificate.body.previous_certificate_sha256
+        == checkpoints[4].semantic.certificate.certificate_sha256
+    )
+    assert [
+        event.semantic.certificate.body.previous_certificate_sha256
+        for event in adaptive_checkpoints[1:]
+    ] == [event.semantic.certificate.certificate_sha256 for event in adaptive_checkpoints[:-1]]
