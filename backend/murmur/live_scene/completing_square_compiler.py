@@ -123,6 +123,11 @@ _DETAIL_STYLE = {
     "opacity": 1.0,
 }
 
+# The solved state keeps the full derivation visible above the area model.
+# Three 48-unit token rows separated by four units leave a final composition
+# gutter before the completed-square stroke.
+_SOLUTION_ROW_Y = (70.0, 122.0, 174.0)
+
 _INITIAL_VIEWPORTS = ((0.0, 75.0, 800.0, 450.0), (70.0, 35.0, 660.0, 530.0))
 _RESULT_VIEWPORTS = {
     CompletingSquareCheckpointId.PROBLEM: (
@@ -158,8 +163,8 @@ _RESULT_VIEWPORTS = {
         (70.0, 35.0, 660.0, 530.0),
     ),
     CompletingSquareCheckpointId.SOLVE_ROOTS: (
-        (0.0, 75.0, 800.0, 450.0),
-        (70.0, 45.0, 660.0, 520.0),
+        (0.0, 25.0, 800.0, 500.0),
+        (70.0, 25.0, 660.0, 550.0),
     ),
 }
 
@@ -455,7 +460,7 @@ def _completed_equation(component_id: str) -> NodeMap:
     }
 
 
-def _factored_equation(component_id: str) -> NodeMap:
+def _factored_equation(component_id: str, *, y: float = 100.0) -> NodeMap:
     tokens = (
         ("eq_factor", "(x+3)^2", 300.0, 150.0),
         ("eq_equal_result", "=", 403.5, 25.0),
@@ -467,7 +472,7 @@ def _factored_equation(component_id: str) -> NodeMap:
             suffix,
             latex,
             x,
-            100.0,
+            y,
             width,
             style=_AMBER_EQUATION_STYLE if suffix == "eq_16" else _EQUATION_STYLE,
         )
@@ -476,17 +481,18 @@ def _factored_equation(component_id: str) -> NodeMap:
 
 
 def _solution_tokens(component_id: str) -> NodeMap:
+    root_equation_y, root_results_y = _SOLUTION_ROW_Y[1:]
     tokens = (
-        ("root_lhs", "x+3", 280.0, 150.0, 100.0),
-        ("root_equal", "=", 375.0, 150.0, 30.0),
-        ("root_pm4", r"\pm 4", 440.0, 150.0, 70.0),
-        ("root_x_left", "x", 210.0, 205.0, 30.0),
-        ("root_eq_left", "=", 250.0, 205.0, 30.0),
-        ("root_one", "1", 290.0, 205.0, 30.0),
-        ("root_or", r"\text{or}", 390.0, 205.0, 100.0),
-        ("root_x_right", "x", 500.0, 205.0, 30.0),
-        ("root_eq_right", "=", 540.0, 205.0, 30.0),
-        ("root_neg7", "-7", 590.0, 205.0, 50.0),
+        ("root_lhs", "x+3", 280.0, root_equation_y, 100.0),
+        ("root_equal", "=", 375.0, root_equation_y, 30.0),
+        ("root_pm4", r"\pm 4", 440.0, root_equation_y, 70.0),
+        ("root_x_left", "x", 210.0, root_results_y, 30.0),
+        ("root_eq_left", "=", 250.0, root_results_y, 30.0),
+        ("root_one", "1", 290.0, root_results_y, 30.0),
+        ("root_or", r"\text{or}", 390.0, root_results_y, 100.0),
+        ("root_x_right", "x", 500.0, root_results_y, 30.0),
+        ("root_eq_right", "=", 540.0, root_results_y, 30.0),
+        ("root_neg7", "-7", 590.0, root_results_y, 50.0),
     )
     return {
         _node_id(component_id, suffix): _token(
@@ -582,7 +588,8 @@ def _desired_nodes(
     elif index == 5:
         nodes = _completed_equation(component_id)
     else:
-        nodes = _factored_equation(component_id)
+        factored_y = _SOLUTION_ROW_Y[0] if index == 7 else 100.0
+        nodes = _factored_equation(component_id, y=factored_y)
         if index == 7:
             nodes.update(_solution_tokens(component_id))
 

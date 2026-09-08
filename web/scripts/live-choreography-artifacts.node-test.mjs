@@ -315,7 +315,7 @@ test("runtime evidence must equal the exact checkpoint-derived event sequence", 
   const lesson = await checkedInLesson();
   const expected = deriveRuntimeEvidence(lesson);
 
-  assert.equal(expected.length, 40);
+  assert.equal(expected.length, 41);
   assert.deepEqual(validateRuntimeEvidenceForTests(expected, lesson), expected);
 
   const swappedCues = expected.map((event) => ({ ...event }));
@@ -337,7 +337,7 @@ test("runtime evidence must equal the exact checkpoint-derived event sequence", 
 
   assert.throws(
     () => validateRuntimeEvidenceForTests(expected.slice(0, -1), lesson),
-    /must contain exactly 40 entries/,
+    /must contain exactly 41 entries/,
   );
 });
 
@@ -368,8 +368,8 @@ test("accepts the complete twenty-case interruption and eight-checkpoint replay 
   );
   assert.equal(validated.replay.liveCheckpoints.length, 8);
   assert.equal(validated.replay.replayedCheckpoints.length, 8);
-  assert.equal(validated.replay.liveEvidence.length, 40);
-  assert.equal(validated.replay.replayEvidence.length, 40);
+  assert.equal(validated.replay.liveEvidence.length, 41);
+  assert.equal(validated.replay.replayEvidence.length, 41);
 });
 
 test("rejects mutated interruption timing, settlement, stability, and target evidence", async () => {
@@ -506,7 +506,7 @@ test("rejects replay order, certificates, cue traces, retained identity, and req
     },
     {
       name: "replay trace truncation",
-      pattern: /replayEvidence: must contain exactly 40 entries/,
+      pattern: /replayEvidence: must contain exactly 41 entries/,
       mutate(value) {
         value.replay.replayEvidence.pop();
       },

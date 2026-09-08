@@ -61,6 +61,8 @@ const RESULT_VIEWPORT = Object.freeze({
 }) satisfies ViewportPoseV1;
 const BOARD_BOX = Object.freeze([0, 0, 800, 600] as const);
 const SAFE_VIEWPORT_PADDING = 12;
+const DEFERRED_ENTER_FRACTION = 0.75;
+const DEFERRED_FOCUS_SAMPLE = 0.875;
 const TRAJECTORY_SAMPLES = Object.freeze([0.25, 0.5, 0.75] as const);
 const REQUIRED_COMPATIBLE_IDS = Object.freeze({
   rearrange_halves: Object.freeze([
@@ -79,6 +81,11 @@ const REQUIRED_COMPATIBLE_IDS = Object.freeze({
   factor_square: Object.freeze([
     "square-lesson__eq_16",
     "square-lesson__eq_equal_result",
+  ]),
+  solve_roots: Object.freeze([
+    "square-lesson__eq_16",
+    "square-lesson__eq_equal_result",
+    "square-lesson__eq_factor",
   ]),
 });
 const AREA_SHAPE_IDS = Object.freeze([
@@ -549,6 +556,21 @@ const FIXTURE_CHECKPOINT_PLANS = fixtureCheckpointPlans();
 const FIXTURE_MOTION_PLANS = FIXTURE_CHECKPOINT_PLANS.filter(
   (prepared) => compatibleUpdates(prepared).length > 0,
 );
+const FIXTURE_DEFERRED_FOCUS_CASES = FIXTURE_CHECKPOINT_PLANS.flatMap(
+  (prepared) => {
+    const enteringIds = new Set(
+      prepared.plan.motionPlan.steps.flatMap((step) =>
+        step.type === "enter" ? [step.id] : [],
+      ),
+    );
+    const focusIds =
+      prepared.plan.choreographyPlan.phase.cues.find(
+        (cue) => cue.cue === "focus",
+      )?.targetIds ?? [];
+    const deferredFocusIds = focusIds.filter((id) => enteringIds.has(id));
+    return deferredFocusIds.length ? [{ prepared, deferredFocusIds }] : [];
+  },
+);
 const FIXTURE_TRAJECTORY_CASES = FIXTURE_MOTION_PLANS.flatMap((prepared) =>
   TRAJECTORY_SAMPLES.map((sample) => ({
     checkpointId: prepared.event.semantic.checkpointId,
@@ -628,6 +650,43 @@ describe("checkpoint choreography executor", () => {
         id: "square-lesson__corner_area",
       },
     ]);
+  });
+
+  it("renders the solved derivation with intentional clearance above the area model", () => {
+    const prepared = FIXTURE_CHECKPOINT_PLANS.find(
+      (candidate) => candidate.event.semantic.checkpointId === "solve_roots",
+    );
+    if (!prepared) throw new Error("Missing solve_roots fixture checkpoint");
+    const setup = harness({ viewport: prepared.plan.resultViewport });
+    setup.seed(prepared.target.scene);
+    const nodes = new Map(
+      prepared.target.scene.nodes.map((node) => [node.id, node]),
+    );
+    const box = (id: string): Box => {
+      const element = setup.elements.get(id)?.element;
+      const node = nodes.get(id);
+      if (!element || !node)
+        throw new Error(`Missing solved fixture node ${id}`);
+      return renderedBox(element, node);
+    };
+    const derivationIds = [
+      "square-lesson__eq_factor",
+      "square-lesson__eq_equal_result",
+      "square-lesson__eq_16",
+      ...prepared.target.scene.nodes
+        .map((node) => node.id)
+        .filter((id) => id.startsWith("square-lesson__root_")),
+    ];
+    const equationBottom = Math.max(...derivationIds.map((id) => box(id)[3]));
+    const geometryTop = Math.min(...AREA_SHAPE_IDS.map((id) => box(id)[1]));
+
+    expect(geometryTop - equationBottom).toBeGreaterThanOrEqual(16);
+    expect(prepared.plan.resultViewport.y).toBeLessThan(
+      prepared.plan.baseViewport.y,
+    );
+    expect(prepared.plan.resultViewport.height).toBeGreaterThan(
+      prepared.plan.baseViewport.height,
+    );
   });
 
   it.each(FIXTURE_TRAJECTORY_CASES)(
@@ -719,12 +778,19 @@ describe("checkpoint choreography executor", () => {
         prepared.plan.choreographyPlan.phase.cues.find(
           (cue) => cue.cue === "focus",
         )?.targetIds ?? [];
+      const enteringIds = new Set(
+        prepared.plan.motionPlan.steps.flatMap((step) =>
+          step.type === "enter" ? [step.id] : [],
+        ),
+      );
       for (const id of new Set([
         ...updates.map((step) => step.id),
         ...focusIds,
       ])) {
         const entry = visible.find((candidate) => candidate.id === id);
         if (!entry) {
+          if (enteringIds.has(id) && sample <= DEFERRED_ENTER_FRACTION)
+            continue;
           violations.push(`moving/focal node ${id} is not visibly rendered`);
           continue;
         }
@@ -782,6 +848,47 @@ describe("checkpoint choreography executor", () => {
 
       playback.cancel();
       expect(violations).toEqual([]);
+    },
+  );
+
+  it.each(FIXTURE_DEFERRED_FOCUS_CASES)(
+    "presents deferred $prepared.event.semantic.checkpointId focus targets after their authored handoff",
+    ({ prepared, deferredFocusIds }) => {
+      const setup = harness({ viewport: prepared.plan.baseViewport });
+      setup.seed(prepared.base.scene);
+      const timelineSpy = vi.spyOn(gsap, "timeline");
+      const playback = setup.executor.play(prepared.plan);
+      const motionSeconds =
+        prepared.plan.choreographyPlan.phase.durationMs / 1_000;
+      capturedTimeline(timelineSpy)
+        .pause()
+        .time(motionSeconds * DEFERRED_FOCUS_SAMPLE, false);
+      const viewport = setup.readViewport();
+      const safeViewport: Box = [
+        viewport.x + SAFE_VIEWPORT_PADDING,
+        viewport.y + SAFE_VIEWPORT_PADDING,
+        viewport.x + viewport.width - SAFE_VIEWPORT_PADDING,
+        viewport.y + viewport.height - SAFE_VIEWPORT_PADDING,
+      ];
+      const nodes = new Map(
+        prepared.target.scene.nodes.map((node) => [node.id, node]),
+      );
+
+      for (const id of deferredFocusIds) {
+        const element = setup.elements.get(id)?.element;
+        const node = nodes.get(id);
+        if (!element || !node)
+          throw new Error(`Missing deferred focus target ${id}`);
+        expect(renderedOpacity(element, node)).toBeGreaterThan(0);
+        expect(
+          containmentViolation(
+            renderedBox(element, node),
+            safeViewport,
+            `deferred focus node ${id}`,
+          ),
+        ).toBeNull();
+      }
+      playback.cancel();
     },
   );
 

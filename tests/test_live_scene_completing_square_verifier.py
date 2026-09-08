@@ -119,19 +119,25 @@ def _replace_result_put(
     checkpoint: CompiledCheckpointBlueprint,
     replacement: SceneNode,
 ) -> tuple[ScenePatchDraft, SceneState]:
+    return _replace_result_puts(checkpoint, {replacement.id: replacement})
+
+
+def _replace_result_puts(
+    checkpoint: CompiledCheckpointBlueprint,
+    replacements: dict[str, SceneNode],
+) -> tuple[ScenePatchDraft, SceneState]:
     operations = tuple(
-        operation.model_copy(update={"node": replacement})
-        if isinstance(operation, PutSceneOperation) and operation.target_id == replacement.id
+        operation.model_copy(update={"node": replacements[operation.target_id]})
+        if isinstance(operation, PutSceneOperation) and operation.target_id in replacements
         else operation
         for operation in checkpoint.patch.operations
     )
-    assert any(
-        isinstance(operation, PutSceneOperation) and operation.target_id == replacement.id
+    assert set(replacements) <= {
+        operation.target_id
         for operation in checkpoint.patch.operations
-    )
-    result_nodes = tuple(
-        replacement if node.id == replacement.id else node for node in checkpoint.result_nodes
-    )
+        if isinstance(operation, PutSceneOperation)
+    }
+    result_nodes = tuple(replacements.get(node.id, node) for node in checkpoint.result_nodes)
     return (
         checkpoint.patch.model_copy(update={"operations": operations}),
         SceneState.model_construct(revision=21, nodes=result_nodes),
@@ -350,6 +356,28 @@ def test_solution_requires_an_honest_geometry_domain_statement() -> None:
         _verify(checkpoint, patch=patch, presentation=presentation)
 
 
+def test_solution_derivation_requires_clearance_above_the_area_model() -> None:
+    checkpoint = _blueprint(CompletingSquareCheckpointId.SOLVE_ROOTS)
+    result_suffixes = (
+        "root_x_left",
+        "root_eq_left",
+        "root_one",
+        "root_or",
+        "root_x_right",
+        "root_eq_right",
+        "root_neg7",
+    )
+    replacements: dict[str, SceneNode] = {}
+    for suffix in result_suffixes:
+        token = _result_node(checkpoint, suffix, LatexTokenSceneNode)
+        assert isinstance(token, LatexTokenSceneNode)
+        replacements[token.id] = token.model_copy(update={"y": 224.0})
+    patch, result = _replace_result_puts(checkpoint, replacements)
+
+    with pytest.raises(CompletingSquareVerificationError, match="intentional clearance"):
+        _verify(checkpoint, patch=patch, result_scene=result)
+
+
 def test_corner_detail_rejects_annotation_collision() -> None:
     checkpoint = _detail_blueprint()
     dimension = _result_node(checkpoint, "corner_dim_v", LatexTokenSceneNode)
@@ -390,6 +418,21 @@ def test_focus_targets_must_be_exact_and_safely_visible_in_both_layouts() -> Non
         update={"result_viewports": clipped_map}
     )
     with pytest.raises(CompletingSquareVerificationError, match="safe viewport padding"):
+        _verify(checkpoint, presentation=clipped_presentation)
+
+
+def test_complete_solution_derivation_must_be_safely_visible() -> None:
+    checkpoint = _blueprint(CompletingSquareCheckpointId.SOLVE_ROOTS)
+    clipped_cinematic = ViewportPoseV1(x=0.0, y=75.0, width=800.0, height=450.0)
+    clipped_map = LayoutViewportMapV1(
+        cinematic=clipped_cinematic,
+        compact=checkpoint.presentation.result_viewports.compact,
+    )
+    clipped_presentation = checkpoint.presentation.model_copy(
+        update={"result_viewports": clipped_map}
+    )
+
+    with pytest.raises(CompletingSquareVerificationError, match=r"eq_16.*clipped"):
         _verify(checkpoint, presentation=clipped_presentation)
 
 

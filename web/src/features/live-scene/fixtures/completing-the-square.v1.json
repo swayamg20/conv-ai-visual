@@ -2393,6 +2393,72 @@
           {
             "op": "put",
             "node": {
+              "id": "square-lesson__eq_16",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 470.0,
+              "y": 70.0,
+              "width": 45.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "16",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_equal_result",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 403.5,
+              "y": 70.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_factor",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 300.0,
+              "y": 70.0,
+              "width": 150.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "(x+3)^2",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
               "id": "square-lesson__root_eq_left",
               "kind": "latex_token",
               "presentation": {
@@ -2400,7 +2466,7 @@
                 "exit": "fade"
               },
               "x": 250.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2422,7 +2488,7 @@
                 "exit": "fade"
               },
               "x": 540.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2444,7 +2510,7 @@
                 "exit": "fade"
               },
               "x": 375.0,
-              "y": 150.0,
+              "y": 122.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2466,7 +2532,7 @@
                 "exit": "fade"
               },
               "x": 280.0,
-              "y": 150.0,
+              "y": 122.0,
               "width": 100.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2488,7 +2554,7 @@
                 "exit": "fade"
               },
               "x": 590.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 50.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2510,7 +2576,7 @@
                 "exit": "fade"
               },
               "x": 290.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2532,7 +2598,7 @@
                 "exit": "fade"
               },
               "x": 390.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 100.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2554,7 +2620,7 @@
                 "exit": "fade"
               },
               "x": 440.0,
-              "y": 150.0,
+              "y": 122.0,
               "width": 70.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2576,7 +2642,7 @@
                 "exit": "fade"
               },
               "x": 210.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2598,7 +2664,7 @@
                 "exit": "fade"
               },
               "x": 500.0,
-              "y": 205.0,
+              "y": 174.0,
               "width": 30.0,
               "height": 48.0,
               "anchor": "middle",
@@ -2637,6 +2703,9 @@
           "componentId": "square-lesson",
           "checkpointId": "solve_roots",
           "operationTargets": [
+            "square-lesson__eq_16",
+            "square-lesson__eq_equal_result",
+            "square-lesson__eq_factor",
             "square-lesson__root_eq_left",
             "square-lesson__root_eq_right",
             "square-lesson__root_equal",
@@ -2692,16 +2761,16 @@
             "cinematic": {
               "v": 1,
               "x": 0.0,
-              "y": 75.0,
+              "y": 25.0,
               "width": 800.0,
-              "height": 450.0
+              "height": 500.0
             },
             "compact": {
               "v": 1,
               "x": 70.0,
-              "y": 45.0,
+              "y": 25.0,
               "width": 660.0,
-              "height": 520.0
+              "height": 550.0
             }
           },
           "transientFree": true
@@ -2724,6 +2793,14 @@
                   "square-lesson__root_x_right"
                 ],
                 "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_16",
+                  "square-lesson__eq_equal_result",
+                  "square-lesson__eq_factor"
+                ],
+                "cue": "transform"
               },
               {
                 "targetIds": [
@@ -2760,11 +2837,11 @@
             "baseRevision": 7,
             "resultRevision": 8,
             "baseLowLevelSceneSha256": "4787c5fe3fd8443a2662481ad8dbf93f519b836e37dc45ff22c31296c8ec57e3",
-            "resultLowLevelSceneSha256": "1ed86c1a102490435fd640c5d65a2ef82a6b2f11ed6678397ece24bedc988a31",
+            "resultLowLevelSceneSha256": "41f830785f5f7edbdea565be4c360779b24c4473c2c672f98028c33b59d34151",
             "baseSemanticSceneSha256": "ace5710db062456c9aec0fc761d783e629354ca03fe05c20846dc91616ced031",
             "resultSemanticSceneSha256": "d2a5a18f1f9e0a7ee17aa1965576e82bd217b46196bf6d180941b3adee442ae3",
-            "patchSha256": "fe8e3fbe988a70ad8f8d8c75473855cfbe91d74c0631122f79608534e9bf6e00",
-            "receiptSha256": "852133a9ed52bd8e6233606578d7d07fd72ee7d1313ab69dda69dc9041894482",
+            "patchSha256": "0e1678b37a89c81e8559ba3c9578a70e9409644dea978c28b859efa66730ed1c",
+            "receiptSha256": "8de93094ee073d9fe7915076255eaf13b6838cb31508d575c447fde90d03f230",
             "presentationCheckpoint": {
               "v": 1,
               "checkpointId": "solve_roots",
@@ -2789,24 +2866,24 @@
                 "cinematic": {
                   "v": 1,
                   "x": 0.0,
-                  "y": 75.0,
+                  "y": 25.0,
                   "width": 800.0,
-                  "height": 450.0
+                  "height": 500.0
                 },
                 "compact": {
                   "v": 1,
                   "x": 70.0,
-                  "y": 45.0,
+                  "y": 25.0,
                   "width": 660.0,
-                  "height": 520.0
+                  "height": 550.0
                 }
               },
               "transientFree": true
             },
-            "choreographySha256": "68a53252076a1a62dc8954f89ffc8a7bef67e06bf106d4ef1095f806ca8a55d2",
+            "choreographySha256": "374092aabab8597df82b663e38fbeba6796d828d0883d825412f0c2fdb7acf1f",
             "previousCertificateSha256": "51d8feccd80726c8a198fc6b0e874109b8a8708c68b1d0b77762c6ebeac6d129"
           },
-          "certificateSha256": "76be74384ca182a61f73ff7003712cb4637114776299ba3d3336391031bfc1a6"
+          "certificateSha256": "9a1d5c7f2b7c7caf8ec9632f0656139363f45b73f1cde3f6a4556e2b66ef4a18"
         }
       }
     },
@@ -3947,6 +4024,72 @@
             {
               "op": "put",
               "node": {
+                "id": "square-lesson__eq_16",
+                "kind": "latex_token",
+                "presentation": {
+                  "enter": "fade",
+                  "exit": "fade"
+                },
+                "x": 470.0,
+                "y": 70.0,
+                "width": 45.0,
+                "height": 48.0,
+                "anchor": "middle",
+                "latex": "16",
+                "style": {
+                  "color": "hsl(var(--amber))",
+                  "fontSize": 34.0,
+                  "opacity": 1.0
+                }
+              }
+            },
+            {
+              "op": "put",
+              "node": {
+                "id": "square-lesson__eq_equal_result",
+                "kind": "latex_token",
+                "presentation": {
+                  "enter": "fade",
+                  "exit": "fade"
+                },
+                "x": 403.5,
+                "y": 70.0,
+                "width": 25.0,
+                "height": 48.0,
+                "anchor": "middle",
+                "latex": "=",
+                "style": {
+                  "color": "hsl(var(--chalk))",
+                  "fontSize": 34.0,
+                  "opacity": 1.0
+                }
+              }
+            },
+            {
+              "op": "put",
+              "node": {
+                "id": "square-lesson__eq_factor",
+                "kind": "latex_token",
+                "presentation": {
+                  "enter": "fade",
+                  "exit": "fade"
+                },
+                "x": 300.0,
+                "y": 70.0,
+                "width": 150.0,
+                "height": 48.0,
+                "anchor": "middle",
+                "latex": "(x+3)^2",
+                "style": {
+                  "color": "hsl(var(--chalk))",
+                  "fontSize": 34.0,
+                  "opacity": 1.0
+                }
+              }
+            },
+            {
+              "op": "put",
+              "node": {
                 "id": "square-lesson__root_eq_left",
                 "kind": "latex_token",
                 "presentation": {
@@ -3954,7 +4097,7 @@
                   "exit": "fade"
                 },
                 "x": 250.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -3976,7 +4119,7 @@
                   "exit": "fade"
                 },
                 "x": 540.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -3998,7 +4141,7 @@
                   "exit": "fade"
                 },
                 "x": 375.0,
-                "y": 150.0,
+                "y": 122.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4020,7 +4163,7 @@
                   "exit": "fade"
                 },
                 "x": 280.0,
-                "y": 150.0,
+                "y": 122.0,
                 "width": 100.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4042,7 +4185,7 @@
                   "exit": "fade"
                 },
                 "x": 590.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 50.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4064,7 +4207,7 @@
                   "exit": "fade"
                 },
                 "x": 290.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4086,7 +4229,7 @@
                   "exit": "fade"
                 },
                 "x": 390.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 100.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4108,7 +4251,7 @@
                   "exit": "fade"
                 },
                 "x": 440.0,
-                "y": 150.0,
+                "y": 122.0,
                 "width": 70.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4130,7 +4273,7 @@
                   "exit": "fade"
                 },
                 "x": 210.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4152,7 +4295,7 @@
                   "exit": "fade"
                 },
                 "x": 500.0,
-                "y": 205.0,
+                "y": 174.0,
                 "width": 30.0,
                 "height": 48.0,
                 "anchor": "middle",
@@ -4191,6 +4334,9 @@
             "componentId": "square-lesson",
             "checkpointId": "solve_roots",
             "operationTargets": [
+              "square-lesson__eq_16",
+              "square-lesson__eq_equal_result",
+              "square-lesson__eq_factor",
               "square-lesson__root_eq_left",
               "square-lesson__root_eq_right",
               "square-lesson__root_equal",
@@ -4246,16 +4392,16 @@
               "cinematic": {
                 "v": 1,
                 "x": 0.0,
-                "y": 75.0,
+                "y": 25.0,
                 "width": 800.0,
-                "height": 450.0
+                "height": 500.0
               },
               "compact": {
                 "v": 1,
                 "x": 70.0,
-                "y": 45.0,
+                "y": 25.0,
                 "width": 660.0,
-                "height": 520.0
+                "height": 550.0
               }
             },
             "transientFree": true
@@ -4278,6 +4424,14 @@
                     "square-lesson__root_x_right"
                   ],
                   "cue": "enter"
+                },
+                {
+                  "targetIds": [
+                    "square-lesson__eq_16",
+                    "square-lesson__eq_equal_result",
+                    "square-lesson__eq_factor"
+                  ],
+                  "cue": "transform"
                 },
                 {
                   "targetIds": [
@@ -4314,11 +4468,11 @@
               "baseRevision": 8,
               "resultRevision": 9,
               "baseLowLevelSceneSha256": "8a09e28f4805bbba57dae4bda3d28882a2e24c1241763acf8571d34d2d141140",
-              "resultLowLevelSceneSha256": "1ebbe0e9584a7c551be76d0a2533a676a6c04993f2a3f684b12434437314d75d",
+              "resultLowLevelSceneSha256": "6ed52ea5d45db87634fb51db558539808d60060464af7ba76e5b8092adf40fc2",
               "baseSemanticSceneSha256": "1deee69f7fda3fe0742cc172b7755d3a0cf948998e8a167b06b929fc7443b4a0",
               "resultSemanticSceneSha256": "d7238150ae209b47fee001b15e12d7fc4e19e5ad547f2eecfa77df50cba55184",
-              "patchSha256": "fe8e3fbe988a70ad8f8d8c75473855cfbe91d74c0631122f79608534e9bf6e00",
-              "receiptSha256": "852133a9ed52bd8e6233606578d7d07fd72ee7d1313ab69dda69dc9041894482",
+              "patchSha256": "0e1678b37a89c81e8559ba3c9578a70e9409644dea978c28b859efa66730ed1c",
+              "receiptSha256": "8de93094ee073d9fe7915076255eaf13b6838cb31508d575c447fde90d03f230",
               "presentationCheckpoint": {
                 "v": 1,
                 "checkpointId": "solve_roots",
@@ -4343,24 +4497,24 @@
                   "cinematic": {
                     "v": 1,
                     "x": 0.0,
-                    "y": 75.0,
+                    "y": 25.0,
                     "width": 800.0,
-                    "height": 450.0
+                    "height": 500.0
                   },
                   "compact": {
                     "v": 1,
                     "x": 70.0,
-                    "y": 45.0,
+                    "y": 25.0,
                     "width": 660.0,
-                    "height": 520.0
+                    "height": 550.0
                   }
                 },
                 "transientFree": true
               },
-              "choreographySha256": "68a53252076a1a62dc8954f89ffc8a7bef67e06bf106d4ef1095f806ca8a55d2",
+              "choreographySha256": "374092aabab8597df82b663e38fbeba6796d828d0883d825412f0c2fdb7acf1f",
               "previousCertificateSha256": "05b829e1b7e35d5a96006d6ac8de90b15a42ce513e52e317349d15b51c656566"
             },
-            "certificateSha256": "87ba75df2a7ea3d570bed954c59bcb876853c8237398bde7060f91c5bcbaf9af"
+            "certificateSha256": "612565643a696f4612c9649504d153ebba75d5d71707e26ba903e3a45668cf2b"
           }
         }
       },

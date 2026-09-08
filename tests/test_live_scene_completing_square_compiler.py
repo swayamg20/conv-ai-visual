@@ -275,6 +275,45 @@ def test_full_lesson_has_exact_math_content_and_honest_domain_narration() -> Non
     )
 
 
+def test_solution_derivation_reflows_above_the_area_model_with_clearance() -> None:
+    checkpoints = _blueprints(_advance_beat(), None).checkpoints
+    factored = checkpoints[6]
+    solved = checkpoints[7]
+    factored_nodes = _node_map(factored.result_nodes)
+    solved_nodes = _node_map(solved.result_nodes)
+
+    derivation_rows = (
+        _node_bounds(solved_nodes["lesson__eq_factor"])[1],
+        _node_bounds(solved_nodes["lesson__root_lhs"])[1],
+        _node_bounds(solved_nodes["lesson__root_x_left"])[1],
+    )
+    assert all(right - left >= 52.0 for left, right in pairwise(derivation_rows))
+    derivation = tuple(
+        node
+        for node_id, node in solved_nodes.items()
+        if "__root_" in node_id
+        or node_id in {"lesson__eq_factor", "lesson__eq_equal_result", "lesson__eq_16"}
+    )
+    geometry = tuple(node for node in solved.result_nodes if isinstance(node, PathSceneNode))
+    equation_bottom = max(_node_bounds(node)[3] for node in derivation)
+    geometry_top = min(_node_bounds(node)[1] for node in geometry)
+    assert geometry_top - equation_bottom >= 16.0
+
+    for suffix in ("eq_factor", "eq_equal_result", "eq_16"):
+        node_id = f"lesson__{suffix}"
+        assert solved_nodes[node_id].id == factored_nodes[node_id].id
+        assert _node_bounds(solved_nodes[node_id])[1] < _node_bounds(factored_nodes[node_id])[1]
+    assert solved.presentation.base_viewports == factored.presentation.result_viewports
+    assert (
+        solved.presentation.result_viewports.cinematic.y
+        < solved.presentation.base_viewports.cinematic.y
+    )
+    assert (
+        solved.presentation.result_viewports.cinematic.height
+        > solved.presentation.base_viewports.cinematic.height
+    )
+
+
 def test_square_strips_and_persistent_tokens_keep_identity_and_path_topology() -> None:
     checkpoints = _blueprints(_advance_beat(), None).checkpoints
     node_maps = [_node_map(checkpoint.result_nodes) for checkpoint in checkpoints]

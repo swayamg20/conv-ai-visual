@@ -55,6 +55,7 @@ NodeMap: TypeAlias = dict[str, SceneNode]
 SAFE_VIEWPORT_PADDING = 12.0
 
 _EPSILON = 1e-6
+_MIN_EQUATION_GEOMETRY_CLEARANCE = 16.0
 _COMPONENT_ID_ADAPTER = TypeAdapter(ChoreographyComponentId)
 
 _INITIAL_EQUATION = (
@@ -456,6 +457,28 @@ def _verify_token_collisions(by_suffix: Mapping[str, SceneNode]) -> None:
     _require_no_interior_overlap(boxes, label="LaTeX token")
 
 
+def _derivation_terms(
+    checkpoint_id: CompletingSquareCheckpointId,
+) -> tuple[tuple[str, str], ...]:
+    terms = _equation_terms(checkpoint_id)
+    if checkpoint_id is CompletingSquareCheckpointId.SOLVE_ROOTS:
+        return (*terms, *_ROOT_EQUATION, *_ROOT_RESULTS)
+    return terms
+
+
+def _verify_equation_geometry_clearance(
+    checkpoint_id: CompletingSquareCheckpointId,
+    by_suffix: Mapping[str, SceneNode],
+) -> None:
+    equation_bottom = max(
+        _node_box(by_suffix[suffix])[3] for suffix, _ in _derivation_terms(checkpoint_id)
+    )
+    geometry_suffixes = (*_GEOMETRY_SUFFIXES, *(("corner",) if "corner" in by_suffix else ()))
+    geometry_top = min(_node_box(by_suffix[suffix])[1] for suffix in geometry_suffixes)
+    if geometry_top - equation_bottom < _MIN_EQUATION_GEOMETRY_CLEARANCE - _EPSILON:
+        _fail("equation derivation must keep intentional clearance above area-model geometry")
+
+
 def _verify_area_model(by_suffix: Mapping[str, SceneNode]) -> tuple[Box, Box, Box, float]:
     square = _rectangle_box(by_suffix["x2_square"], suffix="x2_square")
     strip_a = _rectangle_box(by_suffix["strip_a"], suffix="strip_a")
@@ -605,6 +628,7 @@ def _verify_snapshot(
     if not _at_or_after(checkpoint_id, "area_model"):
         return
     square, strip_a, strip_b, thickness = _verify_area_model(by_suffix)
+    _verify_equation_geometry_clearance(checkpoint_id, by_suffix)
     if not _at_or_after(checkpoint_id, "rearrange_halves"):
         _require_no_interior_overlap(
             {"x2_square": square, "strip_a": strip_a, "strip_b": strip_b},
@@ -970,7 +994,15 @@ def verify_completing_square_checkpoint(
         choreography,
     )
     _verify_snapshot(component_id, checkpoint_id, result_owned)
-    _verify_viewports(presentation, result, visible_targets)
+    viewport_targets = visible_targets
+    if checkpoint_id is CompletingSquareCheckpointId.SOLVE_ROOTS:
+        viewport_targets = tuple(
+            sorted(
+                set(visible_targets)
+                | {_node_id(component_id, suffix) for suffix, _ in _derivation_terms(checkpoint_id)}
+            )
+        )
+    _verify_viewports(presentation, result, viewport_targets)
     _verify_math(
         checkpoint_id,
         result_owned,
