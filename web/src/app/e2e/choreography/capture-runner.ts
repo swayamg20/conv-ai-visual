@@ -8,6 +8,7 @@ import {
   createChoreographySceneFixtureEvents,
   createChoreographySceneFixtureRunner,
 } from "@/features/live-scene/choreography-scene-stream-fixture";
+import type { ChoreographyEvidenceTraceEvent } from "@/features/live-scene/choreography-playback";
 
 import type { ChoreographyCapturePace } from "./capture-options";
 
@@ -25,9 +26,13 @@ export interface ChoreographyCaptureWaitingCheckpoint extends ChoreographyCaptur
   readonly openedAtMs: number;
 }
 
-export interface ChoreographyCaptureStateV1 {
+interface ChoreographyCaptureGateState {
   readonly waitingFor: ChoreographyCaptureWaitingCheckpoint | null;
   readonly acknowledgedThrough: number;
+}
+
+export interface ChoreographyCaptureStateV1 extends ChoreographyCaptureGateState {
+  readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
 }
 
 export interface ChoreographyCaptureBridgeV1 {
@@ -40,6 +45,9 @@ export interface ChoreographyCaptureBridgeV1 {
 export interface ChoreographyCaptureSession {
   readonly runner: ChoreographySceneStreamRunner;
   readonly bridge: ChoreographyCaptureBridgeV1;
+  readonly updateEvidence: (
+    evidence: readonly ChoreographyEvidenceTraceEvent[],
+  ) => void;
 }
 
 interface PendingCheckpoint {
@@ -51,7 +59,7 @@ interface PendingCheckpoint {
 }
 
 export interface ChoreographyCaptureRendezvous {
-  getState(): ChoreographyCaptureStateV1;
+  getState(): ChoreographyCaptureGateState;
   acknowledgeCheckpoint(value: unknown): void;
   waitForCheckpoint(
     expected: ChoreographyCaptureCheckpoint,
@@ -150,7 +158,7 @@ export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendez
   let pending: PendingCheckpoint | null = null;
   let acknowledgedThrough = 0;
 
-  const getState = (): ChoreographyCaptureStateV1 =>
+  const getState = (): ChoreographyCaptureGateState =>
     Object.freeze({
       waitingFor: pending
         ? Object.freeze({ ...pending.expected, openedAtMs: pending.openedAtMs })
@@ -245,14 +253,29 @@ export function createChoreographyCaptureSession(
   if (pace !== "auto" && pace !== "step") {
     throw new TypeError("capture pace must be auto or step");
   }
+  let evidence: readonly ChoreographyEvidenceTraceEvent[] = Object.freeze([]);
+  const updateEvidence = (
+    next: readonly ChoreographyEvidenceTraceEvent[],
+  ): void => {
+    evidence = Object.freeze(
+      next.map((event) => Object.freeze({ ...event })),
+    ) as readonly ChoreographyEvidenceTraceEvent[];
+  };
+  const withEvidence = (
+    state: ChoreographyCaptureGateState,
+  ): ChoreographyCaptureStateV1 => Object.freeze({ ...state, evidence });
+
   if (pace === "auto") {
     return Object.freeze({
       runner: createChoreographySceneFixtureRunner({ mode: "main" }),
+      updateEvidence,
       bridge: Object.freeze({
         version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
         pace,
         getState: () =>
-          Object.freeze({ waitingFor: null, acknowledgedThrough: 0 }),
+          withEvidence(
+            Object.freeze({ waitingFor: null, acknowledgedThrough: 0 }),
+          ),
         acknowledgeCheckpoint: (_value: unknown): void => {
           throw new Error(
             "Automatic capture does not accept checkpoint acknowledgements",
@@ -265,10 +288,11 @@ export function createChoreographyCaptureSession(
   const rendezvous = createChoreographyCaptureRendezvous();
   return Object.freeze({
     runner: createStepChoreographyCaptureRunner(rendezvous),
+    updateEvidence,
     bridge: Object.freeze({
       version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
       pace,
-      getState: rendezvous.getState,
+      getState: () => withEvidence(rendezvous.getState()),
       acknowledgeCheckpoint: rendezvous.acknowledgeCheckpoint,
     }),
   });

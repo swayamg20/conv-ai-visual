@@ -2,6 +2,8 @@ import path from "node:path";
 
 import { defineConfig, devices } from "@playwright/test";
 
+import { createChoreographyExecutionMetadata } from "./e2e/live-choreography-provenance";
+
 function integerPort(value: string): number {
   if (!/^\d+$/.test(value)) {
     throw new Error(
@@ -31,6 +33,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 const artifactDir = path.resolve(
   process.env.CHOREOGRAPHY_E2E_ARTIFACT_DIR ?? "../var/live-choreography",
 );
+const execution = createChoreographyExecutionMetadata();
 
 export default defineConfig({
   testDir: "./e2e",
@@ -44,7 +47,7 @@ export default defineConfig({
   timeout: suite === "capture" ? 150_000 : 120_000,
   expect: { timeout: 20_000 },
   captureGitInfo: { commit: false, diff: false },
-  metadata: { gate: "1.5", suite },
+  metadata: { gate: "1.5", suite, ...execution },
   outputDir: path.join(artifactDir, suite, "test-results"),
   reporter: [
     ["line"],

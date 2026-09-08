@@ -72,6 +72,21 @@ describe("ChoreographyCaptureClient", () => {
       stageOnly: true,
       autoStart: true,
     });
+    const evidence = {
+      type: "cueStarted",
+      ordinal: 1,
+      generation: 1,
+      attempt: 1,
+      sequence: 1,
+      checkpointId: "problem",
+      certificateSha256: "a".repeat(64),
+      cue: "enter",
+    };
+    const onEvidenceChange = rendered.props?.onEvidenceChange as (
+      value: readonly (typeof evidence)[],
+    ) => void;
+    act(() => onEvidenceChange([evidence]));
+    expect(bridge?.getState().evidence).toEqual([evidence]);
 
     await act(async () => root?.unmount());
     root = null;

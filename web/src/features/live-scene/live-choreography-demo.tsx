@@ -35,6 +35,7 @@ import {
 import { cn } from "@/lib/utils";
 
 import type { ChoreographySceneStreamRunner } from "./choreography-model-stream";
+import type { ChoreographyEvidenceTraceEvent } from "./choreography-playback";
 import { createChoreographySceneFixtureRunner } from "./choreography-scene-stream-fixture";
 import type { ChoreographySceneStreamRenderer } from "./choreography-stream-runtime";
 import {
@@ -108,6 +109,9 @@ export interface LiveChoreographyDemoProps {
   readonly stageOnly?: boolean;
   readonly autoStart?: boolean;
   readonly runnerFactory?: ChoreographyRunnerFactory;
+  readonly onEvidenceChange?: (
+    evidence: readonly ChoreographyEvidenceTraceEvent[],
+  ) => void;
 }
 
 const fixtureRunnerFactory: ChoreographyRunnerFactory = (path) =>
@@ -191,6 +195,7 @@ function ChoreographySession({
   playbackRate = 1,
   stageOnly = false,
   autoStart = false,
+  onEvidenceChange,
 }: ChoreographySessionProps) {
   const canvasRef = useRef<SVGCanvasHandle>(null);
   const lifecycleRef = useRef<object | null>(null);
@@ -231,6 +236,9 @@ function ChoreographySession({
   }, [autoStart, renderer, runtime]);
 
   const choreography = snapshot.choreography;
+  useEffect(() => {
+    if (choreography) onEvidenceChange?.(choreography.evidence);
+  }, [choreography, onEvidenceChange]);
   if (!choreography) {
     throw new Error("The choreography runtime did not expose its frontier.");
   }

@@ -11,6 +11,7 @@ import type {
   CompletingSquareCheckpointId,
   ViewportPoseV1,
 } from "../src/lib/live-scene";
+import type { ChoreographyEvidenceTraceEvent } from "../src/features/live-scene/choreography-playback";
 
 const CAPTURE_BRIDGE_KEY = "__MURMUR_CHOREOGRAPHY_CAPTURE__";
 
@@ -47,6 +48,7 @@ interface CaptureBridge {
       readonly openedAtMs: number;
     } | null;
     readonly acknowledgedThrough: number;
+    readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
   };
   acknowledgeCheckpoint(value: {
     readonly generation: number;
@@ -63,6 +65,7 @@ export interface CaptureBridgeState {
     readonly openedAtMs: number;
   } | null;
   readonly acknowledgedThrough: number;
+  readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
 }
 
 function checkpointEvents(): readonly ChoreographySceneCheckpointEvent[] {
@@ -119,6 +122,31 @@ function expectedCheckpoints(
 export const CINEMATIC_CHECKPOINTS = expectedCheckpoints("cinematic");
 export const COMPACT_CHECKPOINTS = expectedCheckpoints("compact");
 
+export const MAIN_CHOREOGRAPHY_EVIDENCE = Object.freeze(
+  CINEMATIC_CHECKPOINTS.flatMap((checkpoint) => {
+    const common = {
+      generation: 1,
+      attempt: 1,
+      sequence: checkpoint.ordinal,
+      checkpointId: checkpoint.checkpointId,
+      certificateSha256: checkpoint.certificateSha256,
+    } as const;
+    return [
+      ...checkpoint.cues.map((cue) => ({
+        type: "cueStarted" as const,
+        ...common,
+        cue,
+      })),
+      { type: "firstCuePresented" as const, ...common },
+      {
+        type: "checkpointSettled" as const,
+        ...common,
+        settlement: "completed" as const,
+      },
+    ];
+  }).map((event, index) => Object.freeze({ ordinal: index + 1, ...event })),
+) satisfies readonly ChoreographyEvidenceTraceEvent[];
+
 export function choreographyStage(page: Page): Locator {
   return page.getByTestId("live-choreography-stage");
 }
@@ -129,13 +157,25 @@ export async function readCaptureBridgeState(
   return page.evaluate((key) => {
     const bridge = (window as typeof window & Record<string, unknown>)[key] as
       CaptureBridge | undefined;
-    if (!bridge || bridge.version !== 1 || bridge.pace !== "step") {
-      throw new Error(
-        "The step-gated choreography capture bridge is unavailable",
-      );
+    if (
+      !bridge ||
+      bridge.version !== 1 ||
+      (bridge.pace !== "auto" && bridge.pace !== "step")
+    ) {
+      throw new Error("The choreography capture bridge is unavailable");
     }
     return bridge.getState();
   }, CAPTURE_BRIDGE_KEY);
+}
+
+export async function waitForCaptureEvidence(
+  page: Page,
+  expected: readonly ChoreographyEvidenceTraceEvent[],
+): Promise<readonly ChoreographyEvidenceTraceEvent[]> {
+  await expect
+    .poll(async () => (await readCaptureBridgeState(page)).evidence)
+    .toEqual(expected);
+  return (await readCaptureBridgeState(page)).evidence;
 }
 
 async function waitForStablePaint(stage: Locator): Promise<void> {

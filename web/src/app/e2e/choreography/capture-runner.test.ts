@@ -64,11 +64,26 @@ describe("step-gated choreography capture runner", () => {
         checkpointId: "problem",
       },
       acknowledgedThrough: 0,
+      evidence: [],
     });
     expect(
       Number.isFinite(session.bridge.getState().waitingFor?.openedAtMs),
     ).toBe(true);
     expect(Object.isFrozen(session.bridge.getState())).toBe(true);
+    const evidence = {
+      type: "cueStarted" as const,
+      ordinal: 1,
+      generation: 7,
+      attempt: 1,
+      sequence: 1,
+      checkpointId: "problem" as const,
+      certificateSha256: "a".repeat(64),
+      cue: "enter" as const,
+    };
+    session.updateEvidence([evidence]);
+    expect(session.bridge.getState().evidence).toEqual([evidence]);
+    expect(Object.isFrozen(session.bridge.getState().evidence)).toBe(true);
+    expect(Object.isFrozen(session.bridge.getState().evidence[0])).toBe(true);
     expect(events.map((event) => event.type)).toEqual([
       "scene_stream_started",
       "choreography_scene_checkpoint",
@@ -164,6 +179,7 @@ describe("step-gated choreography capture runner", () => {
     expect(session.bridge.getState()).toEqual({
       waitingFor: null,
       acknowledgedThrough: 0,
+      evidence: [],
     });
     expect(() =>
       session.bridge.acknowledgeCheckpoint({

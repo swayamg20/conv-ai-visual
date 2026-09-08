@@ -14,6 +14,11 @@ import {
   type ExpectedChoreographyCheckpoint,
   type SettledCheckpointObservation,
 } from "./live-choreography-helpers";
+import {
+  observeChoreographyExecution,
+  type ChoreographyEnvironmentObservation,
+  type ChoreographySourceObservation,
+} from "./live-choreography-provenance";
 
 const CAPTURE_BRIDGE_KEY = "__MURMUR_CHOREOGRAPHY_CAPTURE__";
 const CORNER_DETAIL_CAPTION =
@@ -32,7 +37,12 @@ interface StageSnapshot {
   readonly canonicalSvg: string;
 }
 
-interface ResponsiveObservation {
+interface ProviderFreeRequestObservation {
+  readonly liveSceneRequests: readonly string[];
+  readonly unexpectedRequests: readonly string[];
+}
+
+interface ResponsiveObservation extends ProviderFreeRequestObservation {
   readonly viewport: { readonly width: number; readonly height: number };
   readonly documentWidth: number;
   readonly bodyWidth: number;
@@ -43,35 +53,38 @@ interface ResponsiveObservation {
     readonly height: number;
   };
   readonly finalViewBox: string;
-  readonly liveSceneRequests: readonly string[];
 }
 
 interface AcceleratedObservations {
-  latency?: {
+  readonly v: 1;
+  source: ChoreographySourceObservation | null;
+  environment: ChoreographyEnvironmentObservation | null;
+  latency?: ProviderFreeRequestObservation & {
     readonly firstMeaningfulVisualMs: readonly number[];
     readonly p95Ms: number;
-    readonly liveSceneRequests: readonly string[];
   };
-  cinematic?: {
+  cinematic?: ProviderFreeRequestObservation & {
     readonly checkpoints: readonly SettledCheckpointObservation[];
-    readonly liveSceneRequests: readonly string[];
   };
-  reducedMotion?: {
+  reducedMotion?: ProviderFreeRequestObservation & {
     readonly final: SettledCheckpointObservation;
     readonly equivalentToCinematic: boolean;
-    readonly liveSceneRequests: readonly string[];
   };
   responsive: ResponsiveObservation[];
-  adaptive?: {
+  adaptive?: ProviderFreeRequestObservation & {
     readonly interruptionSettleMsSamples: readonly number[];
     readonly interruptionSettleP95Ms: number;
     readonly cornerDetailNodeIds: readonly string[];
     readonly replayEquivalent: boolean;
-    readonly liveSceneRequests: readonly string[];
   };
 }
 
-const observations: AcceleratedObservations = { responsive: [] };
+const observations: AcceleratedObservations = {
+  v: 1,
+  source: null,
+  environment: null,
+  responsive: [],
+};
 
 interface FirstMeaningfulVisualProbe {
   firstVisibleAtMs: number | null;
@@ -84,14 +97,37 @@ function captureUrl(
   return `/e2e/choreography?pace=step&timing=accelerated&layout=${layout}&motion=${motion}`;
 }
 
-function liveSceneRequests(page: Page): string[] {
-  const requests: string[] = [];
+function observeProviderFreeRequests(
+  page: Page,
+  documentTargets: readonly string[],
+): { liveSceneRequests: string[]; unexpectedRequests: string[] } {
+  const liveSceneRequests: string[] = [];
+  const unexpectedRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith("/api/live-scenes"))
-      requests.push(url.pathname);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return;
+    const isLocal =
+      url.hostname === "127.0.0.1" || url.hostname === "localhost";
+    const target = isLocal
+      ? `${url.pathname}${url.search}`
+      : `${url.origin}${url.pathname}`;
+    if (url.pathname.startsWith("/api/live-scenes")) {
+      liveSceneRequests.push(target);
+    }
+    const allowed =
+      isLocal &&
+      request.method() === "GET" &&
+      (documentTargets.includes(target) ||
+        url.pathname.startsWith("/_next/") ||
+        url.pathname === "/favicon.ico");
+    if (!allowed) unexpectedRequests.push(target);
   });
-  return requests;
+  return { liveSceneRequests, unexpectedRequests };
+}
+
+function expectProviderFree(requests: ProviderFreeRequestObservation): void {
+  expect(requests.liveSceneRequests).toEqual([]);
+  expect(requests.unexpectedRequests).toEqual([]);
 }
 
 function percentile(
@@ -104,6 +140,43 @@ function percentile(
 
 function rounded(value: number): number {
   return Number(value.toFixed(3));
+}
+
+async function interruptSettleDuration(page: Page): Promise<number> {
+  return page
+    .getByRole("button", { name: "Stop here and ask" })
+    .evaluate((button) => {
+      const stage = document.querySelector<HTMLElement>(
+        '[data-testid="live-choreography-stage"]',
+      );
+      if (!stage) throw new Error("The choreography stage is unavailable");
+
+      return new Promise<number>((resolve, reject) => {
+        let startedAt = 0;
+        const finish = (): void => {
+          observer.disconnect();
+          window.clearTimeout(timeout);
+          resolve(performance.now() - startedAt);
+        };
+        const observer = new MutationObserver(() => {
+          if (stage.dataset.phase === "interrupted") finish();
+        });
+        const timeout = window.setTimeout(() => {
+          observer.disconnect();
+          reject(
+            new Error("The choreography did not settle after interruption"),
+          );
+        }, 2_000);
+
+        observer.observe(stage, {
+          attributes: true,
+          attributeFilter: ["data-phase"],
+        });
+        startedAt = performance.now();
+        (button as HTMLButtonElement).click();
+        if (stage.dataset.phase === "interrupted") finish();
+      });
+    });
 }
 
 async function installFirstMeaningfulVisualProbe(page: Page): Promise<void> {
@@ -327,7 +400,7 @@ function expectSharedDomIdentity(
 async function responsiveObservation(
   page: Page,
   viewport: { readonly width: number; readonly height: number },
-): Promise<Omit<ResponsiveObservation, "liveSceneRequests">> {
+): Promise<Omit<ResponsiveObservation, keyof ProviderFreeRequestObservation>> {
   const measured = await page.evaluate(() => {
     const stage = document.querySelector<HTMLElement>(
       '[data-testid="live-choreography-stage"]',
@@ -361,16 +434,23 @@ async function responsiveObservation(
 }
 
 test.describe("Gate 1.5 live visual choreography", () => {
+  test.beforeAll(async ({ browser }, testInfo) => {
+    const execution = observeChoreographyExecution(testInfo.config, browser);
+    observations.source = execution.source;
+    observations.environment = execution.environment;
+  });
+
   test("starts meaningful choreography under 100ms p95 over twenty fresh runs", async ({
     page,
   }, testInfo) => {
     testInfo.setTimeout(120_000);
-    const requests = liveSceneRequests(page);
+    const route = captureUrl("cinematic", "real");
+    const requests = observeProviderFreeRequests(page, [route]);
     const samples: number[] = [];
     await installFirstMeaningfulVisualProbe(page);
 
     for (let run = 0; run < 20; run += 1) {
-      await page.goto(captureUrl("cinematic", "real"));
+      await page.goto(route);
       const firstCheckpoint = CINEMATIC_CHECKPOINTS[0];
       await waitForCheckpointGate(page, firstCheckpoint);
       const state = await readCaptureBridgeState(page);
@@ -387,34 +467,38 @@ test.describe("Gate 1.5 live visual choreography", () => {
     const p95Ms = rounded(percentile(samples, 0.95));
     expect(samples).toHaveLength(20);
     expect(p95Ms).toBeLessThan(100);
-    expect(requests).toEqual([]);
+    expectProviderFree(requests);
     observations.latency = {
       firstMeaningfulVisualMs: samples,
       p95Ms,
-      liveSceneRequests: [...requests],
+      liveSceneRequests: [...requests.liveSceneRequests],
+      unexpectedRequests: [...requests.unexpectedRequests],
     };
   });
 
   test("settles the exact eight-checkpoint lesson without replacing retained ink or calling a model", async ({
     page,
   }) => {
-    const requests = liveSceneRequests(page);
-    await page.goto(captureUrl("cinematic", "real"));
+    const route = captureUrl("cinematic", "real");
+    const requests = observeProviderFreeRequests(page, [route]);
+    await page.goto(route);
     const checkpoints = await runStepLesson(page, CINEMATIC_CHECKPOINTS);
 
     expect(checkpoints).toHaveLength(8);
-    expect(requests).toEqual([]);
+    expectProviderFree(requests);
     observations.cinematic = {
       checkpoints,
-      liveSceneRequests: [...requests],
+      liveSceneRequests: [...requests.liveSceneRequests],
+      unexpectedRequests: [...requests.unexpectedRequests],
     };
   });
 
   test("reduced motion reaches the same certified final state", async ({
     page,
   }) => {
-    const requests = liveSceneRequests(page);
-    await page.goto(captureUrl("cinematic", "reduced"));
+    const route = captureUrl("cinematic", "reduced");
+    const requests = observeProviderFreeRequests(page, [route]);
+    await page.goto(route);
     const checkpoints = await runStepLesson(page, CINEMATIC_CHECKPOINTS);
     const final = checkpoints.at(-1)!;
     const expectedFinal = CINEMATIC_CHECKPOINTS.at(-1)!;
@@ -430,11 +514,12 @@ test.describe("Gate 1.5 live visual choreography", () => {
       viewBox: `${expectedFinal.resultViewport.x} ${expectedFinal.resultViewport.y} ${expectedFinal.resultViewport.width} ${expectedFinal.resultViewport.height}`,
       nodeIds: expectedFinal.nodeIds,
     });
-    expect(requests).toEqual([]);
+    expectProviderFree(requests);
     observations.reducedMotion = {
       final,
       equivalentToCinematic: true,
-      liveSceneRequests: [...requests],
+      liveSceneRequests: [...requests.liveSceneRequests],
+      unexpectedRequests: [...requests.unexpectedRequests],
     };
   });
 
@@ -445,16 +530,18 @@ test.describe("Gate 1.5 live visual choreography", () => {
     test(`keeps the compact ${viewport.width}x${viewport.height} stage inside the viewport`, async ({
       page,
     }) => {
-      const requests = liveSceneRequests(page);
+      const route = captureUrl("compact", "reduced");
+      const requests = observeProviderFreeRequests(page, [route]);
       await page.setViewportSize(viewport);
-      await page.goto(captureUrl("compact", "reduced"));
+      await page.goto(route);
       await runStepLesson(page, COMPACT_CHECKPOINTS);
       const measured = await responsiveObservation(page, viewport);
 
-      expect(requests).toEqual([]);
+      expectProviderFree(requests);
       observations.responsive.push({
         ...measured,
-        liveSceneRequests: [...requests],
+        liveSceneRequests: [...requests.liveSceneRequests],
+        unexpectedRequests: [...requests.unexpectedRequests],
       });
     });
   }
@@ -463,7 +550,7 @@ test.describe("Gate 1.5 live visual choreography", () => {
     page,
   }, testInfo) => {
     testInfo.setTimeout(150_000);
-    const requests = liveSceneRequests(page);
+    const requests = observeProviderFreeRequests(page, ["/labs/live-scene"]);
     await page.goto("/labs/live-scene");
     await page
       .getByTestId("authoring-mode-picker")
@@ -489,17 +576,9 @@ test.describe("Gate 1.5 live visual choreography", () => {
       await expect(stage).toHaveAttribute("data-settled-main-count", "5");
       await expect(stage).toHaveAttribute("data-phase", "streaming");
       if (run === 19) beforeInterrupt = await stageSnapshot(page);
-      const interruptedAt = await page.evaluate(() => performance.now());
-      await page.getByRole("button", { name: "Stop here and ask" }).click();
+      const interruptionSettleMs = await interruptSettleDuration(page);
       await expect(stage).toHaveAttribute("data-phase", "interrupted");
-      interruptionSettleMsSamples.push(
-        rounded(
-          await page.evaluate(
-            (startedAt) => performance.now() - startedAt,
-            interruptedAt,
-          ),
-        ),
-      );
+      interruptionSettleMsSamples.push(rounded(interruptionSettleMs));
       if (run < 19) {
         await page.getByRole("button", { name: "Reset" }).click();
         await expect(stage).toHaveAttribute("data-phase", "idle");
@@ -543,7 +622,7 @@ test.describe("Gate 1.5 live visual choreography", () => {
     );
     expect(completed.nodeIds).toEqual(expectedFinal.nodeIds);
 
-    const requestsBeforeReplay = requests.length;
+    const requestsBeforeReplay = requests.liveSceneRequests.length;
     await page.getByRole("button", { name: "Replay" }).click();
     await expect(stage).toHaveAttribute("data-phase", "replaying");
     await expect(stage).toHaveAttribute("data-phase", "completed");
@@ -552,15 +631,16 @@ test.describe("Gate 1.5 live visual choreography", () => {
     expect(replayed.viewBox).toBe(completed.viewBox);
     expect(replayed.nodeIds).toEqual(completed.nodeIds);
     expect(replayed.canonicalSvg).toBe(completed.canonicalSvg);
-    expect(requests).toHaveLength(requestsBeforeReplay);
-    expect(requests).toEqual([]);
+    expect(requests.liveSceneRequests).toHaveLength(requestsBeforeReplay);
+    expectProviderFree(requests);
 
     observations.adaptive = {
       interruptionSettleMsSamples,
       interruptionSettleP95Ms,
       cornerDetailNodeIds: [...CORNER_DETAIL_NODE_IDS],
       replayEquivalent: true,
-      liveSceneRequests: [...requests],
+      liveSceneRequests: [...requests.liveSceneRequests],
+      unexpectedRequests: [...requests.unexpectedRequests],
     };
   });
 
@@ -577,7 +657,7 @@ test.describe("Gate 1.5 live visual choreography", () => {
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     await fs.writeFile(
       temporaryPath,
-      `${JSON.stringify({ v: 1, ...observations }, null, 2)}\n`,
+      `${JSON.stringify(observations, null, 2)}\n`,
       "utf8",
     );
     await fs.rename(temporaryPath, outputPath);

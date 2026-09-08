@@ -62,6 +62,7 @@ export function ChoreographyCaptureClient({
       reducedMotion={options.reducedMotion}
       playbackRate={options.playbackRate}
       runnerFactory={runnerFactory}
+      onEvidenceChange={session.updateEvidence}
       stageOnly
       autoStart
     />

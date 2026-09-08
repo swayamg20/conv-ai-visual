@@ -11,16 +11,24 @@ import {
 } from "@playwright/test";
 
 import fixtureValue from "../src/features/live-scene/fixtures/completing-the-square.v1.json";
+import type { ChoreographyEvidenceTraceEvent } from "../src/features/live-scene/choreography-playback";
 import {
   CINEMATIC_CHECKPOINTS,
+  MAIN_CHOREOGRAPHY_EVIDENCE,
   acknowledgeCheckpoint,
   assertRetainedDomIdentity,
   choreographyStage,
   observeSettledCheckpoint,
   readCaptureBridgeState,
+  waitForCaptureEvidence,
   type CaptureBridgeState,
   type SettledCheckpointObservation,
 } from "./live-choreography-helpers";
+import {
+  observeChoreographyExecution,
+  type ChoreographyEnvironmentObservation,
+  type ChoreographySourceObservation,
+} from "./live-choreography-provenance";
 
 const ARTIFACT_ROOT = path.resolve(
   process.env.CHOREOGRAPHY_E2E_ARTIFACT_DIR ?? "../var/live-choreography",
@@ -92,6 +100,7 @@ interface NetworkObservation {
   readonly requestCount: number;
   readonly resourceTypeCounts: Readonly<Record<string, number>>;
   readonly liveSceneRequests: readonly NetworkRequestObservation[];
+  readonly unexpectedRequests: readonly NetworkRequestObservation[];
   readonly failedRequests: readonly NetworkFailureObservation[];
 }
 
@@ -116,6 +125,7 @@ interface RealTimeCaptureObservation {
   readonly longFrames: readonly PerformanceSample[];
   readonly longTasks: readonly PerformanceSample[];
   readonly finalCheckpoint: SettledCheckpointObservation;
+  readonly runtimeEvidence: readonly ChoreographyEvidenceTraceEvent[];
   readonly network: NetworkObservation;
   readonly video: ArtifactObservation;
 }
@@ -125,6 +135,7 @@ interface CheckpointCaptureObservation {
   readonly layout: "cinematic";
   readonly viewport: typeof VIDEO_VIEWPORT;
   readonly network: NetworkObservation;
+  readonly runtimeEvidence: readonly ChoreographyEvidenceTraceEvent[];
   readonly checkpoints: readonly (SettledCheckpointObservation & {
     readonly gateOpenedAtMs: number;
     readonly capturedAtMs: number;
@@ -140,6 +151,8 @@ interface CheckpointCaptureObservation {
 interface CaptureObservations {
   readonly v: 1;
   readonly gate: "1.5";
+  source: ChoreographySourceObservation | null;
+  environment: ChoreographyEnvironmentObservation | null;
   readonly fixtureId: string;
   readonly compilerVersion: string;
   readonly generatedAt: string;
@@ -150,6 +163,8 @@ interface CaptureObservations {
 const observations: CaptureObservations = {
   v: 1,
   gate: "1.5",
+  source: null,
+  environment: null,
   fixtureId: fixtureValue.fixtureId,
   compilerVersion: fixtureValue.compilerVersion,
   generatedAt: new Date().toISOString(),
@@ -219,7 +234,11 @@ function normalizeRequest(
   });
 }
 
-function observeNetwork(page: Page, baseURL: string): () => NetworkObservation {
+function observeNetwork(
+  page: Page,
+  baseURL: string,
+  documentTarget: string,
+): () => NetworkObservation {
   const requests: NetworkRequestObservation[] = [];
   const failures: NetworkFailureObservation[] = [];
 
@@ -241,6 +260,11 @@ function observeNetwork(page: Page, baseURL: string): () => NetworkObservation {
       resourceTypeCounts[request.resourceType] =
         (resourceTypeCounts[request.resourceType] ?? 0) + 1;
     }
+    const allowedRequest = (request: NetworkRequestObservation): boolean =>
+      request.method === "GET" &&
+      (request.target === documentTarget ||
+        request.target.startsWith("/_next/") ||
+        request.target === "/favicon.ico");
     return Object.freeze({
       requestCount: requests.length,
       resourceTypeCounts: Object.freeze(resourceTypeCounts),
@@ -248,6 +272,9 @@ function observeNetwork(page: Page, baseURL: string): () => NetworkObservation {
         requests.filter((request) =>
           /^\/api\/live-scenes(?:[/?]|$)/.test(request.target),
         ),
+      ),
+      unexpectedRequests: Object.freeze(
+        requests.filter((request) => !allowedRequest(request)),
       ),
       failedRequests: Object.freeze([...failures]),
     });
@@ -493,7 +520,10 @@ async function composeContactSheet(
   return Buffer.from(result, "base64");
 }
 
-test.beforeAll(async () => {
+test.beforeAll(async ({ browser }, testInfo) => {
+  const execution = observeChoreographyExecution(testInfo.config, browser);
+  observations.source = execution.source;
+  observations.environment = execution.environment;
   await mkdir(CHECKPOINT_ROOT, { recursive: true });
 });
 
@@ -522,14 +552,15 @@ test("records the complete 1x cinematic choreography", async ({
   });
   await installPerformanceProbe(context);
   const page = await context.newPage();
-  const readNetwork = observeNetwork(page, baseURL);
   const route =
     "/e2e/choreography?layout=cinematic&motion=real&pace=auto&timing=real";
+  const readNetwork = observeNetwork(page, baseURL, route);
   const video = page.video();
   if (!video) throw new Error("Playwright did not attach a video recorder");
 
   let performance: CapturePerformanceSnapshot | null = null;
   let finalCheckpoint: SettledCheckpointObservation | null = null;
+  let runtimeEvidence: readonly ChoreographyEvidenceTraceEvent[] | null = null;
   try {
     await page.goto(route, { waitUntil: "domcontentloaded" });
     const stage = choreographyStage(page);
@@ -543,12 +574,17 @@ test("records the complete 1x cinematic choreography", async ({
     );
     await page.waitForTimeout(2_000);
     performance = await readPerformanceProbe(page);
+    runtimeEvidence = await waitForCaptureEvidence(
+      page,
+      MAIN_CHOREOGRAPHY_EVIDENCE,
+    );
   } finally {
     await context.close();
     await video.saveAs(VIDEO_PATH);
+    await video.delete();
   }
 
-  if (!performance || !finalCheckpoint) {
+  if (!performance || !finalCheckpoint || !runtimeEvidence) {
     throw new Error("The real-time capture did not reach its final checkpoint");
   }
   if (performance.firstMeaningfulVisualAtMs === null) {
@@ -565,6 +601,7 @@ test("records the complete 1x cinematic choreography", async ({
   expect(visualDurationMs).toBeLessThanOrEqual(90_000);
   const network = readNetwork();
   expect(network.liveSceneRequests).toEqual([]);
+  expect(network.unexpectedRequests).toEqual([]);
 
   observations.realTime = Object.freeze({
     route,
@@ -599,6 +636,7 @@ test("records the complete 1x cinematic choreography", async ({
       })),
     ),
     finalCheckpoint,
+    runtimeEvidence,
     network,
     video: await artifactObservation(VIDEO_PATH),
   });
@@ -612,7 +650,7 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
   if (!baseURL) throw new Error("The choreography base URL is unavailable");
   const route =
     "/e2e/choreography?layout=cinematic&motion=real&pace=step&timing=accelerated";
-  const readNetwork = observeNetwork(page, baseURL);
+  const readNetwork = observeNetwork(page, baseURL, route);
   await page.goto(route, { waitUntil: "domcontentloaded" });
   await expect(choreographyStage(page)).toHaveAttribute(
     "data-layout",
@@ -624,6 +662,7 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
   >[number][] = [];
   const screenshots: { label: string; png: Buffer }[] = [];
   let previous: SettledCheckpointObservation | null = null;
+  let runtimeEvidence: readonly ChoreographyEvidenceTraceEvent[] = [];
 
   for (const checkpoint of CINEMATIC_CHECKPOINTS) {
     const waiting = await waitForPendingCheckpoint(
@@ -633,6 +672,13 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
     );
     const settled = await observeSettledCheckpoint(page, checkpoint);
     if (previous) assertRetainedDomIdentity(previous, settled);
+    const expectedEvidence = MAIN_CHOREOGRAPHY_EVIDENCE.filter(
+      (event) => event.sequence <= checkpoint.ordinal,
+    );
+    runtimeEvidence = await waitForCaptureEvidence(page, expectedEvidence);
+    const checkpointEvidence = runtimeEvidence.filter(
+      (event) => event.sequence === checkpoint.ordinal,
+    );
 
     const screenshotPath = path.join(
       CHECKPOINT_ROOT,
@@ -652,7 +698,9 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
         gateOpenedAtMs: rounded(waiting.openedAtMs),
         capturedAtMs: rounded(capturedAtMs),
         gateToCaptureMs: rounded(capturedAtMs - waiting.openedAtMs),
-        cues: checkpoint.cues,
+        cues: checkpointEvidence
+          .filter((event) => event.type === "cueStarted")
+          .map((event) => event.cue),
         baseViewport: viewportString(checkpoint.baseViewport),
         resultViewport: viewportString(checkpoint.resultViewport),
         screenshot: await artifactObservation(screenshotPath, png),
@@ -674,6 +722,7 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
   await writeFile(CONTACT_SHEET_PATH, contactSheet);
   const network = readNetwork();
   expect(network.liveSceneRequests).toEqual([]);
+  expect(network.unexpectedRequests).toEqual([]);
   expect(checkpointObservations).toHaveLength(8);
 
   observations.checkpointCapture = Object.freeze({
@@ -681,6 +730,7 @@ test("captures all eight quiescent checkpoints and a two-by-four contact sheet",
     layout: "cinematic",
     viewport: VIDEO_VIEWPORT,
     network,
+    runtimeEvidence,
     checkpoints: Object.freeze(checkpointObservations),
     contactSheet: await artifactObservation(CONTACT_SHEET_PATH, contactSheet),
   });
