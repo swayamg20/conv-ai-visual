@@ -48,8 +48,7 @@ export interface SceneStreamFailedEvent {
 }
 
 export type SemanticSceneDeclineReason =
-  | "unsupported_intent"
-  | "no_forward_progress";
+  "unsupported_intent" | "no_forward_progress";
 
 export interface SemanticSceneStreamDeclinedEvent {
   readonly type: "semantic_scene_stream_declined";
@@ -111,11 +110,10 @@ export interface SemanticSceneStreamRunInvocation {
 }
 
 export type SemanticSceneStreamRunner = (
-  invocation: SemanticSceneStreamRunInvocation
+  invocation: SemanticSceneStreamRunInvocation,
 ) => Promise<void>;
 
-export interface RunSemanticSceneStreamOptions
-  extends SemanticSceneStreamRunInvocation {
+export interface RunSemanticSceneStreamOptions extends SemanticSceneStreamRunInvocation {
   readonly apiUrl: string;
   readonly endpoint: SceneStreamEndpoint;
   readonly headers?: Readonly<Record<string, string>>;
@@ -128,7 +126,9 @@ const SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
   product: "/api/live-scenes/stream",
   developmentLab: "/api/live-scenes/lab/stream",
 };
-const SEMANTIC_SCENE_STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
+const SEMANTIC_SCENE_STREAM_PATHS: Readonly<
+  Record<SceneStreamEndpoint, string>
+> = {
   product: "/api/live-scenes/semantic/stream",
   developmentLab: "/api/live-scenes/lab/semantic/stream",
 };
@@ -137,15 +137,9 @@ type UnknownRecord = Record<string, unknown>;
 
 export class SceneModelStreamError extends Error {
   readonly code:
-    | "http_error"
-    | "missing_body"
-    | "invalid_json"
-    | "invalid_event";
+    "http_error" | "missing_body" | "invalid_json" | "invalid_event";
 
-  constructor(
-    code: SceneModelStreamError["code"],
-    message: string
-  ) {
+  constructor(code: SceneModelStreamError["code"], message: string) {
     super(message);
     this.name = "SceneModelStreamError";
     this.code = code;
@@ -154,11 +148,17 @@ export class SceneModelStreamError extends Error {
 
 function record(value: unknown, field: string): UnknownRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new SceneModelStreamError("invalid_event", `${field} must be an object`);
+    throw new SceneModelStreamError(
+      "invalid_event",
+      `${field} must be an object`,
+    );
   }
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
-    throw new SceneModelStreamError("invalid_event", `${field} must be a plain object`);
+    throw new SceneModelStreamError(
+      "invalid_event",
+      `${field} must be a plain object`,
+    );
   }
   return value as UnknownRecord;
 }
@@ -166,14 +166,14 @@ function record(value: unknown, field: string): UnknownRecord {
 function exactKeys(
   value: UnknownRecord,
   required: readonly string[],
-  field: string
+  field: string,
 ): void {
   const allowed = new Set(required);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) {
       throw new SceneModelStreamError(
         "invalid_event",
-        `${field} contains unknown field ${key}`
+        `${field} contains unknown field ${key}`,
       );
     }
   }
@@ -181,7 +181,7 @@ function exactKeys(
     if (!Object.hasOwn(value, key)) {
       throw new SceneModelStreamError(
         "invalid_event",
-        `${field} is missing field ${key}`
+        `${field} is missing field ${key}`,
       );
     }
   }
@@ -191,7 +191,7 @@ function safeInteger(
   value: unknown,
   field: string,
   minimum: number,
-  maximum = Number.MAX_SAFE_INTEGER
+  maximum = Number.MAX_SAFE_INTEGER,
 ): number {
   if (
     !Number.isSafeInteger(value) ||
@@ -200,7 +200,7 @@ function safeInteger(
   ) {
     throw new SceneModelStreamError(
       "invalid_event",
-      `${field} must be a safe integer between ${minimum} and ${maximum}`
+      `${field} must be a safe integer between ${minimum} and ${maximum}`,
     );
   }
   return value as number;
@@ -210,7 +210,7 @@ function milliseconds(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     throw new SceneModelStreamError(
       "invalid_event",
-      `${field} must be a finite non-negative number`
+      `${field} must be a finite non-negative number`,
     );
   }
   return value;
@@ -218,7 +218,10 @@ function milliseconds(value: unknown, field: string): number {
 
 function booleanValue(value: unknown, field: string): boolean {
   if (typeof value !== "boolean") {
-    throw new SceneModelStreamError("invalid_event", `${field} must be a boolean`);
+    throw new SceneModelStreamError(
+      "invalid_event",
+      `${field} must be a boolean`,
+    );
   }
   return value;
 }
@@ -227,71 +230,70 @@ function boundedString(
   value: unknown,
   field: string,
   maximum: number,
-  stripWhitespace = true
+  stripWhitespace = true,
 ): string {
   if (typeof value !== "string") {
     throw new SceneModelStreamError(
       "invalid_event",
-      `${field} must be a non-empty string of at most ${maximum} characters`
+      `${field} must be a non-empty string of at most ${maximum} characters`,
     );
   }
   const normalized = stripWhitespace ? value.trim() : value;
   if (normalized.trim().length === 0 || normalized.length > maximum) {
     throw new SceneModelStreamError(
       "invalid_event",
-      `${field} must be a non-empty string of at most ${maximum} characters`
+      `${field} must be a non-empty string of at most ${maximum} characters`,
     );
   }
   return normalized;
 }
 
-function semanticSceneDeclineReason(value: unknown): SemanticSceneDeclineReason {
+function semanticSceneDeclineReason(
+  value: unknown,
+): SemanticSceneDeclineReason {
   const reason = boundedString(value, "declined reasonCode", 64, false);
   if (reason !== "unsupported_intent" && reason !== "no_forward_progress") {
     throw new SceneModelStreamError(
       "invalid_event",
-      "declined reasonCode is unsupported"
+      "declined reasonCode is unsupported",
     );
   }
   return reason;
 }
 
 function decodeSemanticSceneStreamDeclinedEvent(
-  value: unknown
+  value: unknown,
 ): SemanticSceneStreamDeclinedEvent {
   const input = record(value, "semantic declined event");
   exactKeys(
     input,
-    [
-      "type",
-      "generation",
-      "attempt",
-      "finalRevision",
-      "reasonCode",
-      "message",
-    ],
-    "semantic declined event"
+    ["type", "generation", "attempt", "finalRevision", "reasonCode", "message"],
+    "semantic declined event",
   );
   if (input.type !== "semantic_scene_stream_declined") {
     throw new SceneModelStreamError(
       "invalid_event",
-      "semantic declined event has an unsupported type"
+      "semantic declined event has an unsupported type",
     );
   }
   return Object.freeze({
     type: input.type,
     generation: safeInteger(input.generation, "declined generation", 1),
     attempt: safeInteger(input.attempt, "declined attempt", 1, 2),
-    finalRevision: safeInteger(input.finalRevision, "declined finalRevision", 0),
+    finalRevision: safeInteger(
+      input.finalRevision,
+      "declined finalRevision",
+      0,
+    ),
     reasonCode: semanticSceneDeclineReason(input.reasonCode),
     message: boundedString(input.message, "declined message", 512),
   });
 }
 
-function decodeSceneStreamEventWithPatch<PatchEvent>(
+export function decodeSceneStreamEventWithPatch<PatchEvent>(
   value: unknown,
   patchType: string,
-  decodePatch: (input: unknown) => PatchEvent
+  decodePatch: (input: unknown) => PatchEvent,
 ): SceneStreamLifecycleEvent | PatchEvent {
   const input = record(value, "scene stream event");
   const type = input.type;
@@ -302,13 +304,17 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
     } catch (error) {
       throw new SceneModelStreamError(
         "invalid_event",
-        error instanceof Error ? error.message : "scene patch event is invalid"
+        error instanceof Error ? error.message : "scene patch event is invalid",
       );
     }
   }
 
   if (type === "scene_stream_started") {
-    exactKeys(input, ["type", "generation", "attempt", "baseRevision"], "started event");
+    exactKeys(
+      input,
+      ["type", "generation", "attempt", "baseRevision"],
+      "started event",
+    );
     return Object.freeze({
       type,
       generation: safeInteger(input.generation, "started generation", 1),
@@ -328,14 +334,19 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
         "lastAcceptedRevision",
         "message",
       ],
-      "repairing event"
+      "repairing event",
     );
-    const fromAttempt = safeInteger(input.fromAttempt, "repairing fromAttempt", 1, 1);
+    const fromAttempt = safeInteger(
+      input.fromAttempt,
+      "repairing fromAttempt",
+      1,
+      1,
+    );
     const toAttempt = safeInteger(input.toAttempt, "repairing toAttempt", 2, 2);
     if (toAttempt !== fromAttempt + 1) {
       throw new SceneModelStreamError(
         "invalid_event",
-        "repairing toAttempt must follow fromAttempt"
+        "repairing toAttempt must follow fromAttempt",
       );
     }
     return Object.freeze({
@@ -346,7 +357,7 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
       lastAcceptedRevision: safeInteger(
         input.lastAcceptedRevision,
         "repairing lastAcceptedRevision",
-        0
+        0,
       ),
       message: boundedString(input.message, "repairing message", 512),
     });
@@ -364,25 +375,32 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
         "totalMs",
         "repaired",
       ],
-      "completed event"
+      "completed event",
     );
-    const firstPatchMs = milliseconds(input.firstPatchMs, "completed firstPatchMs");
+    const firstPatchMs = milliseconds(
+      input.firstPatchMs,
+      "completed firstPatchMs",
+    );
     const totalMs = milliseconds(input.totalMs, "completed totalMs");
     if (totalMs < firstPatchMs) {
       throw new SceneModelStreamError(
         "invalid_event",
-        "completed totalMs must not precede firstPatchMs"
+        "completed totalMs must not precede firstPatchMs",
       );
     }
     return Object.freeze({
       type,
       generation: safeInteger(input.generation, "completed generation", 1),
-      finalRevision: safeInteger(input.finalRevision, "completed finalRevision", 1),
+      finalRevision: safeInteger(
+        input.finalRevision,
+        "completed finalRevision",
+        1,
+      ),
       patchCount: safeInteger(
         input.patchCount,
         "completed patchCount",
         1,
-        LIVE_SCENE_MAX_ACCEPTED_PATCHES
+        LIVE_SCENE_MAX_ACCEPTED_PATCHES,
       ),
       firstPatchMs,
       totalMs,
@@ -402,11 +420,14 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
         "lastAcceptedRevision",
         "retryable",
       ],
-      "failed event"
+      "failed event",
     );
     const code = boundedString(input.code, "failed code", 64, false);
     if (!/^[a-z][a-z0-9_]*$/.test(code)) {
-      throw new SceneModelStreamError("invalid_event", "failed code has an unsafe value");
+      throw new SceneModelStreamError(
+        "invalid_event",
+        "failed code has an unsafe value",
+      );
     }
     return Object.freeze({
       type,
@@ -417,7 +438,7 @@ function decodeSceneStreamEventWithPatch<PatchEvent>(
       lastAcceptedRevision: safeInteger(
         input.lastAcceptedRevision,
         "failed lastAcceptedRevision",
-        0
+        0,
       ),
       retryable: booleanValue(input.retryable, "failed retryable"),
     });
@@ -431,13 +452,13 @@ export function decodeSceneStreamEvent(value: unknown): SceneStreamEvent {
   return decodeSceneStreamEventWithPatch(
     value,
     "scene_patch",
-    decodeScenePatchEvent
+    decodeScenePatchEvent,
   );
 }
 
 /** Decode one complete compiler-certified semantic SSE data value. */
 export function decodeSemanticSceneStreamEvent(
-  value: unknown
+  value: unknown,
 ): SemanticSceneStreamEvent {
   const input = record(value, "semantic scene stream event");
   if (input.type === "semantic_scene_stream_declined") {
@@ -446,7 +467,7 @@ export function decodeSemanticSceneStreamEvent(
   return decodeSceneStreamEventWithPatch(
     input,
     "semantic_scene_patch",
-    decodeSemanticScenePatchEvent
+    decodeSemanticScenePatchEvent,
   );
 }
 
@@ -455,36 +476,45 @@ export function parseSceneStreamEvent(data: string): SceneStreamEvent {
   try {
     value = JSON.parse(data);
   } catch {
-    throw new SceneModelStreamError("invalid_json", "SSE data must be valid JSON");
+    throw new SceneModelStreamError(
+      "invalid_json",
+      "SSE data must be valid JSON",
+    );
   }
   return decodeSceneStreamEvent(value);
 }
 
 export function parseSemanticSceneStreamEvent(
-  data: string
+  data: string,
 ): SemanticSceneStreamEvent {
   let value: unknown;
   try {
     value = JSON.parse(data);
   } catch {
-    throw new SceneModelStreamError("invalid_json", "SSE data must be valid JSON");
+    throw new SceneModelStreamError(
+      "invalid_json",
+      "SSE data must be valid JSON",
+    );
   }
   return decodeSemanticSceneStreamEvent(value);
 }
 
-async function consumeDecodedSceneStreamResponse<Event>(
+export async function consumeDecodedSceneStreamResponse<Event>(
   response: Response,
   onEvent: (event: Event) => void,
-  parseEvent: (data: string) => Event
+  parseEvent: (data: string) => Event,
 ): Promise<void> {
   if (!response.ok) {
     throw new SceneModelStreamError(
       "http_error",
-      `Scene stream request failed with HTTP ${response.status}`
+      `Scene stream request failed with HTTP ${response.status}`,
     );
   }
   if (!response.body) {
-    throw new SceneModelStreamError("missing_body", "Scene stream response had no body");
+    throw new SceneModelStreamError(
+      "missing_body",
+      "Scene stream response had no body",
+    );
   }
 
   const decoder = new LiveSceneSseDecoder();
@@ -515,30 +545,30 @@ async function consumeDecodedSceneStreamResponse<Event>(
 /** Consume a raw-patch response with a stateful UTF-8/SSE decoder. */
 export async function consumeSceneStreamResponse(
   response: Response,
-  onEvent: (event: SceneStreamEvent) => void
+  onEvent: (event: SceneStreamEvent) => void,
 ): Promise<void> {
   await consumeDecodedSceneStreamResponse(
     response,
     onEvent,
-    parseSceneStreamEvent
+    parseSceneStreamEvent,
   );
 }
 
 /** Consume a semantic response through the same byte-safe SSE transport. */
 export async function consumeSemanticSceneStreamResponse(
   response: Response,
-  onEvent: (event: SemanticSceneStreamEvent) => void
+  onEvent: (event: SemanticSceneStreamEvent) => void,
 ): Promise<void> {
   await consumeDecodedSceneStreamResponse(
     response,
     onEvent,
-    parseSemanticSceneStreamEvent
+    parseSemanticSceneStreamEvent,
   );
 }
 
 /** Start one authenticated provider stream without importing Firebase into fixture code. */
 export async function runSceneModelStream(
-  options: RunSceneStreamOptions
+  options: RunSceneStreamOptions,
 ): Promise<void> {
   const requestFetch = options.fetchImpl ?? fetch;
   const endpointPath = SCENE_STREAM_PATHS[options.endpoint ?? "product"];
@@ -552,14 +582,14 @@ export async function runSceneModelStream(
       },
       body: JSON.stringify(options.request),
       signal: options.signal,
-    }
+    },
   );
   await consumeSceneStreamResponse(response, options.onEvent);
 }
 
 /** Start one compiler-certified semantic stream against an explicit trust boundary. */
 export async function runSemanticSceneModelStream(
-  options: RunSemanticSceneStreamOptions
+  options: RunSemanticSceneStreamOptions,
 ): Promise<void> {
   const requestFetch = options.fetchImpl ?? fetch;
   const endpointPath = SEMANTIC_SCENE_STREAM_PATHS[options.endpoint];
@@ -573,7 +603,7 @@ export async function runSemanticSceneModelStream(
       },
       body: JSON.stringify(options.request),
       signal: options.signal,
-    }
+    },
   );
   await consumeSemanticSceneStreamResponse(response, options.onEvent);
 }

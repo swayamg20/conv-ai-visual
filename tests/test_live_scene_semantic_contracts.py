@@ -3,6 +3,11 @@ from __future__ import annotations
 from copy import deepcopy
 
 import pytest
+from murmur.live_scene.completing_square_contracts import (
+    COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER,
+    CompletingSquareMainCheckpoint,
+    CompletingSquareState,
+)
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
     MAX_ACCEPTED_PATCHES,
@@ -24,6 +29,7 @@ from murmur.live_scene.semantic_contracts import (
     VerificationObligation,
     VerificationReceipt,
     roles_through,
+    semantic_scene_sha256,
 )
 from pydantic import ValidationError
 
@@ -101,6 +107,19 @@ def _component(
     return PythagoreanAreaIdentityState(
         id=component_id,
         revealed_roles=roles,
+    )
+
+
+def _completing_component(
+    last_checkpoint: CompletingSquareMainCheckpoint | None,
+    *,
+    component_id: str = "square-lesson",
+    corner_clarified: bool = False,
+) -> CompletingSquareState:
+    return CompletingSquareState(
+        id=component_id,
+        last_main_checkpoint=last_checkpoint,
+        corner_clarified=corner_clarified,
     )
 
 
@@ -295,6 +314,98 @@ def test_semantic_scene_has_strict_revision_unique_ids_and_immutable_components(
         SemanticSceneState.model_validate({"revision": "3", "components": []})
     with pytest.raises(ValidationError, match="frozen"):
         scene.revision = 4
+
+
+def test_legacy_semantic_scene_wire_and_hash_remain_byte_compatible() -> None:
+    payload = {
+        "revision": 3,
+        "components": [
+            {
+                "kind": "pythagorean_area_identity",
+                "id": "area-identity",
+                "revealedRoles": ["triangle"],
+            }
+        ],
+    }
+
+    scene = SemanticSceneState.model_validate(payload)
+
+    assert scene.model_dump(mode="json", by_alias=True) == payload
+    assert semantic_scene_sha256(scene) == (
+        "d4182283368abd432063c8c294c6a888a17119c872a24326e4176a6e1d420754"
+    )
+    assert isinstance(scene.components[0], PythagoreanAreaIdentityState)
+
+
+@pytest.mark.parametrize(
+    ("last_checkpoint", "corner_clarified"),
+    [
+        (None, False),
+        *((checkpoint, False) for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER),
+        *(
+            (checkpoint, True)
+            for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER[
+                COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER.index(
+                    CompletingSquareMainCheckpoint.MISSING_CORNER
+                ) :
+            ]
+        ),
+    ],
+)
+def test_semantic_scene_round_trips_every_valid_completing_square_frontier(
+    last_checkpoint: CompletingSquareMainCheckpoint | None,
+    corner_clarified: bool,
+) -> None:
+    component = _completing_component(
+        last_checkpoint,
+        corner_clarified=corner_clarified,
+    )
+    payload = {
+        "revision": 4,
+        "components": [component.model_dump(mode="json", by_alias=True)],
+    }
+
+    scene = SemanticSceneState.model_validate(payload)
+
+    assert scene.model_dump(mode="json", by_alias=True) == payload
+    assert scene.components == (component,)
+    assert isinstance(scene.components[0], CompletingSquareState)
+    with pytest.raises(ValidationError, match="frozen"):
+        scene.components[0].corner_clarified = not corner_clarified
+
+
+def test_semantic_scene_accepts_mixed_kinds_and_rejects_cross_kind_duplicate_ids() -> None:
+    pythagorean = _component(
+        roles_through(PythagoreanStage.TRIANGLE),
+        component_id="pythagorean",
+    )
+    completing = _completing_component(
+        CompletingSquareMainCheckpoint.AREA_MODEL,
+        component_id="completing",
+    )
+    scene = SemanticSceneState(revision=2, components=(pythagorean, completing))
+
+    assert scene.components == (pythagorean, completing)
+    assert scene.model_dump(mode="json", by_alias=True)["components"] == [
+        pythagorean.model_dump(mode="json", by_alias=True),
+        completing.model_dump(mode="json", by_alias=True),
+    ]
+
+    duplicate = _completing_component(
+        CompletingSquareMainCheckpoint.AREA_MODEL,
+        component_id=pythagorean.id,
+    )
+    with pytest.raises(ValidationError, match="semantic component ids must be unique"):
+        SemanticSceneState(revision=2, components=(pythagorean, duplicate))
+
+
+def test_semantic_scene_component_union_rejects_missing_or_unknown_kind() -> None:
+    for component in (
+        {"id": "unknown"},
+        {"kind": "freeform", "id": "unknown"},
+    ):
+        with pytest.raises(ValidationError):
+            SemanticSceneState.model_validate({"revision": 1, "components": [component]})
 
 
 def test_verification_receipt_is_positive_bounded_and_unique() -> None:
@@ -504,6 +615,30 @@ def test_compiled_beat_rejects_wrong_result_state_revision_or_atom_owner() -> No
         )
 
 
+def test_legacy_compiled_beat_rejects_target_ids_owned_by_the_other_kind() -> None:
+    beat = TeachingBeatDraft.model_validate(_beat(PythagoreanStage.TRIANGLE))
+    completing = _completing_component(
+        CompletingSquareMainCheckpoint.PROBLEM,
+        component_id="area-identity",
+    )
+
+    with pytest.raises(ValidationError, match="non-Pythagorean component in baseScene"):
+        CompiledTeachingBeat(
+            beat=beat,
+            base_scene=SemanticSceneState(revision=1, components=(completing,)),
+            result_scene=SemanticSceneState(revision=1, components=(completing,)),
+            atoms=(),
+        )
+
+    with pytest.raises(ValidationError, match="non-Pythagorean component in resultScene"):
+        CompiledTeachingBeat(
+            beat=beat,
+            base_scene=SemanticSceneState(revision=0),
+            result_scene=SemanticSceneState(revision=1, components=(completing,)),
+            atoms=(_atom(PythagoreanRole.TRIANGLE),),
+        )
+
+
 def test_compiled_beat_preserves_unrelated_components_exactly() -> None:
     unrelated = _component(roles_through(PythagoreanStage.TRIANGLE), component_id="other")
     target = _component(roles_through(PythagoreanStage.TRIANGLE))
@@ -528,3 +663,22 @@ def test_compiled_beat_preserves_unrelated_components_exactly() -> None:
                 "atoms": [_atom(PythagoreanRole.TRIANGLE)],
             }
         )
+
+
+def test_legacy_compiled_beat_preserves_an_unrelated_completing_square_component() -> None:
+    unrelated = _completing_component(
+        CompletingSquareMainCheckpoint.MISSING_CORNER,
+        component_id="square-lesson",
+        corner_clarified=True,
+    )
+    target_roles = roles_through(PythagoreanStage.TRIANGLE)
+    target = _component(target_roles)
+
+    compiled = CompiledTeachingBeat(
+        beat=TeachingBeatDraft.model_validate(_beat(PythagoreanStage.TRIANGLE)),
+        base_scene=SemanticSceneState(revision=4, components=(unrelated,)),
+        result_scene=SemanticSceneState(revision=5, components=(unrelated, target)),
+        atoms=(_atom(PythagoreanRole.TRIANGLE),),
+    )
+
+    assert compiled.result_scene.components[0] == unrelated

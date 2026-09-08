@@ -1,5 +1,6 @@
 import type {
   LatexStyle,
+  LatexTokenSceneNode,
   LineSceneNode,
   PathSceneNode,
   RectSceneNode,
@@ -199,6 +200,51 @@ function cloneTextNode(
   });
 }
 
+function cloneLatexTokenNode(
+  node: LatexTokenSceneNode,
+  presentation: ScenePresentation
+): LatexTokenSceneNode {
+  assertFinite(node.x, `node ${node.id} x`);
+  assertFinite(node.y, `node ${node.id} y`);
+  assertPositive(node.width, `node ${node.id} width`);
+  assertPositive(node.height, `node ${node.id} height`);
+  if (!["start", "middle", "end"].includes(node.anchor)) {
+    validationError(`node ${node.id} has an invalid LaTeX token anchor`);
+  }
+  const left =
+    node.anchor === "middle"
+      ? node.x - node.width / 2
+      : node.anchor === "end"
+        ? node.x - node.width
+        : node.x;
+  if (
+    node.x < 0 ||
+    node.x > 800 ||
+    node.y < 0 ||
+    node.y > 600 ||
+    node.width > 800 ||
+    node.height > 600 ||
+    left < 0 ||
+    left + node.width > 800 ||
+    node.y + node.height > 600
+  ) {
+    validationError(`node ${node.id} LaTeX token must stay inside the logical board`);
+  }
+  assertNonEmpty(node.latex, `node ${node.id} latex`);
+  return Object.freeze({
+    id: node.id,
+    kind: "latex_token",
+    presentation,
+    x: node.x,
+    y: node.y,
+    width: node.width,
+    height: node.height,
+    anchor: node.anchor,
+    latex: node.latex,
+    style: cloneLatexStyle(node.style, node.id),
+  });
+}
+
 function cloneSceneNode(node: SceneNode): SceneNode {
   if (!node || typeof node !== "object") validationError("each node must be an object");
   if (typeof node.id !== "string" || !SCENE_NODE_ID_PATTERN.test(node.id)) {
@@ -231,6 +277,8 @@ function cloneSceneNode(node: SceneNode): SceneNode {
         style: cloneLatexStyle(node.style, node.id),
       });
     }
+    case "latex_token":
+      return cloneLatexTokenNode(node, presentation);
     default:
       return validationError("node has an unsupported kind");
   }

@@ -1,5 +1,6 @@
 import { createSceneState } from "./state";
 import type {
+  LatexStyle,
   MotionPlan,
   MotionStep,
   SceneNode,
@@ -43,6 +44,14 @@ function sameTextStyle(left: TextStyle, right: TextStyle): boolean {
     left.fontFamily === right.fontFamily &&
     left.opacity === right.opacity &&
     left.anchor === right.anchor
+  );
+}
+
+function sameLatexStyle(left: LatexStyle, right: LatexStyle): boolean {
+  return (
+    left.color === right.color &&
+    left.fontSize === right.fontSize &&
+    left.opacity === right.opacity
   );
 }
 
@@ -92,9 +101,18 @@ function sameNode(left: SceneNode, right: SceneNode): boolean {
         left.x === right.x &&
         left.y === right.y &&
         left.latex === right.latex &&
-        left.style.color === right.style.color &&
-        left.style.fontSize === right.style.fontSize &&
-        left.style.opacity === right.style.opacity
+        sameLatexStyle(left.style, right.style)
+      );
+    case "latex_token":
+      return (
+        right.kind === "latex_token" &&
+        left.x === right.x &&
+        left.y === right.y &&
+        left.width === right.width &&
+        left.height === right.height &&
+        left.anchor === right.anchor &&
+        left.latex === right.latex &&
+        sameLatexStyle(left.style, right.style)
       );
   }
 }
@@ -112,6 +130,13 @@ function updateTransition(previous: SceneNode, next: SceneNode): "transform" | "
     return "crossfade";
   }
   if (previous.kind === "latex" && next.kind === "latex" && previous.latex !== next.latex) {
+    return "crossfade";
+  }
+  if (
+    previous.kind === "latex_token" &&
+    next.kind === "latex_token" &&
+    previous.latex !== next.latex
+  ) {
     return "crossfade";
   }
   return "transform";

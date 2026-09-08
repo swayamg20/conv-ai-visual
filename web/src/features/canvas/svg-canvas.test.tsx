@@ -1,12 +1,17 @@
 /** @vitest-environment happy-dom */
 
-import { act, createRef } from "react";
+import { act, createRef, StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { gsap } from "gsap";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SVGCanvas } from "@/components/svg-canvas";
-import { createSceneState, planSceneTransition } from "@/lib/live-scene";
+import type { ChoreographyExecutorSignal } from "@/features/live-scene/choreography-executor";
+import {
+  createSceneState,
+  planSceneTransition,
+  type PlannedCheckpointChoreography,
+} from "@/lib/live-scene";
 
 import type { SVGCanvasHandle } from "./types";
 
@@ -16,8 +21,25 @@ const actEnvironment = globalThis as typeof globalThis & {
 actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   document.body.replaceChildren();
 });
+
+function animationSnapshot(): ReadonlySet<gsap.core.Animation> {
+  return new Set(gsap.globalTimeline.getChildren(true, true, true));
+}
+
+function capturedTween(
+  before: ReadonlySet<gsap.core.Animation>,
+): gsap.core.Tween {
+  const value = gsap.globalTimeline
+    .getChildren(true, true, false)
+    .find((animation) => !before.has(animation));
+  if (!value || typeof value !== "object" || !("progress" in value)) {
+    throw new Error("Expected one captured GSAP tween");
+  }
+  return value as gsap.core.Tween;
+}
 
 describe("SVGCanvas", () => {
   it("renders direct and caller-controlled scenes through its public handle", async () => {
@@ -27,7 +49,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
     act(() => {
       canvas.current?.render([
@@ -42,7 +66,9 @@ describe("SVGCanvas", () => {
       ]);
     });
 
-    const rendered = host.querySelector<SVGGElement>("[data-element-id='answer']");
+    const rendered = host.querySelector<SVGGElement>(
+      "[data-element-id='answer']",
+    );
     expect(rendered?.querySelector("text")?.textContent).toBe("x = 4");
     expect(rendered?.querySelector("text")?.getAttribute("x")).toBe("20");
     expect(rendered?.querySelector("text")?.getAttribute("y")).toBe("40");
@@ -63,7 +89,8 @@ describe("SVGCanvas", () => {
       timeline?.progress(1);
     });
     expect(
-      host.querySelector("[data-element-id='sequence-answer'] text")?.textContent
+      host.querySelector("[data-element-id='sequence-answer'] text")
+        ?.textContent,
     ).toBe("2 + 2 = 4");
 
     await act(async () => root.unmount());
@@ -76,7 +103,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
     act(() => {
       canvas.current?.render([
@@ -90,10 +119,12 @@ describe("SVGCanvas", () => {
       ]);
     });
     const committed = host.querySelector<SVGGElement>(
-      "[data-element-id='committed-ink']"
+      "[data-element-id='committed-ink']",
     );
     expect(committed).not.toBeNull();
-    expect(gsap.getTweensOf(committed as SVGGElement).length).toBeGreaterThan(0);
+    expect(gsap.getTweensOf(committed as SVGGElement).length).toBeGreaterThan(
+      0,
+    );
 
     const future = canvas.current?.createPausedSequence({
       steps: [
@@ -113,7 +144,9 @@ describe("SVGCanvas", () => {
 
     expect(gsap.getTweensOf(committed as SVGGElement)).toHaveLength(0);
     expect(future?.isActive()).toBe(false);
-    expect(host.querySelector("[data-element-id='committed-ink']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-element-id='committed-ink']"),
+    ).not.toBeNull();
     expect(host.querySelector("[data-element-id='stale-future']")).toBeNull();
 
     await act(async () => root.unmount());
@@ -126,7 +159,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -156,7 +191,7 @@ describe("SVGCanvas", () => {
 
     const playback = canvas.current?.playMotionPlan(
       planSceneTransition(empty, foundation),
-      { staggerMs: 10_000 }
+      { staggerMs: 10_000 },
     );
     act(() => {
       playback?.cancel();
@@ -166,7 +201,9 @@ describe("SVGCanvas", () => {
       status: "cancelled",
       appliedStepIds: ["visible-now"],
     });
-    expect(host.querySelector("[data-element-id='visible-now']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-element-id='visible-now']"),
+    ).not.toBeNull();
     expect(host.querySelector("[data-element-id='stale-later']")).toBeNull();
 
     await act(async () => root.unmount());
@@ -179,7 +216,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -211,13 +250,19 @@ describe("SVGCanvas", () => {
 
     let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, oldScene));
+      initial = canvas.current?.playMotionPlan(
+        planSceneTransition(empty, oldScene),
+      );
     });
-    await expect(initial?.finished).resolves.toMatchObject({ status: "completed" });
+    await expect(initial?.finished).resolves.toMatchObject({
+      status: "completed",
+    });
     const before = host.querySelector("[data-element-id='stable-title']");
     let update: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      update = canvas.current?.playMotionPlan(planSceneTransition(oldScene, newScene));
+      update = canvas.current?.playMotionPlan(
+        planSceneTransition(oldScene, newScene),
+      );
       update?.cancel();
     });
 
@@ -225,12 +270,18 @@ describe("SVGCanvas", () => {
       status: "cancelled",
       appliedStepIds: ["stable-title"],
     });
-    const stableElements = host.querySelectorAll("[data-element-id='stable-title']");
+    const stableElements = host.querySelectorAll(
+      "[data-element-id='stable-title']",
+    );
     expect(stableElements).toHaveLength(1);
     expect(stableElements[0]).not.toBe(before);
-    expect(stableElements[0].querySelector("text")?.textContent).toBe("New title");
+    expect(stableElements[0].querySelector("text")?.textContent).toBe(
+      "New title",
+    );
     expect(getComputedStyle(stableElements[0]).opacity).toBe("1");
-    expect(host.querySelector("[data-element-id='stable-title--outgoing']")).toBeNull();
+    expect(
+      host.querySelector("[data-element-id='stable-title--outgoing']"),
+    ).toBeNull();
 
     await act(async () => root.unmount());
   });
@@ -242,7 +293,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -269,18 +322,22 @@ describe("SVGCanvas", () => {
 
     let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, first));
+      initial = canvas.current?.playMotionPlan(
+        planSceneTransition(empty, first),
+      );
     });
     await initial?.finished;
     const before = host.querySelector("[data-element-id='moving-title']");
     before?.setAttribute("clip-path", "url(#stale-reveal)");
     before?.setAttribute(
       "style",
-      `${before.getAttribute("style") ?? ""}; clip-path: url(#stale-reveal)`
+      `${before.getAttribute("style") ?? ""}; clip-path: url(#stale-reveal)`,
     );
     let update: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      update = canvas.current?.playMotionPlan(planSceneTransition(first, moved));
+      update = canvas.current?.playMotionPlan(
+        planSceneTransition(first, moved),
+      );
       update?.cancel();
     });
 
@@ -307,7 +364,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -329,13 +388,17 @@ describe("SVGCanvas", () => {
 
     let initial: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      initial = canvas.current?.playMotionPlan(planSceneTransition(empty, visible));
+      initial = canvas.current?.playMotionPlan(
+        planSceneTransition(empty, visible),
+      );
     });
     await initial?.finished;
     const before = host.querySelector("[data-element-id='retained-note']");
     let removal: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      removal = canvas.current?.playMotionPlan(planSceneTransition(visible, removed));
+      removal = canvas.current?.playMotionPlan(
+        planSceneTransition(visible, removed),
+      );
       removal?.cancel();
     });
 
@@ -357,7 +420,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
     act(() => {
       canvas.current?.render([
@@ -383,7 +448,9 @@ describe("SVGCanvas", () => {
     });
 
     expect(host.querySelector("[data-element-id='stale-callout']")).toBeNull();
-    expect(host.querySelector("[data-element-id='fresh-board']")).not.toBeNull();
+    expect(
+      host.querySelector("[data-element-id='fresh-board']"),
+    ).not.toBeNull();
 
     await act(async () => root.unmount());
   });
@@ -396,7 +463,9 @@ describe("SVGCanvas", () => {
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -426,7 +495,9 @@ describe("SVGCanvas", () => {
 
     let playback: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      playback = canvas.current?.playMotionPlan(planSceneTransition(empty, scene));
+      playback = canvas.current?.playMotionPlan(
+        planSceneTransition(empty, scene),
+      );
       playback?.cancel();
     });
 
@@ -451,14 +522,19 @@ describe("SVGCanvas", () => {
 
   it("resolves CSS variable colors before running an emphasis tween", async () => {
     document.documentElement.style.setProperty("--test-stroke", "252 36% 64%");
-    document.documentElement.style.setProperty("--test-highlight", "38 91% 55%");
+    document.documentElement.style.setProperty(
+      "--test-highlight",
+      "38 91% 55%",
+    );
     const host = document.createElement("div");
     document.body.appendChild(host);
     const root = createRoot(host);
     const canvas = createRef<SVGCanvasHandle>();
 
     await act(async () => {
-      root.render(<SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />);
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
     });
 
     const empty = createSceneState({ revision: 0, nodes: [] });
@@ -488,17 +564,21 @@ describe("SVGCanvas", () => {
 
     let playback: ReturnType<SVGCanvasHandle["playMotionPlan"]> | undefined;
     act(() => {
-      playback = canvas.current?.playMotionPlan(planSceneTransition(empty, scene));
+      playback = canvas.current?.playMotionPlan(
+        planSceneTransition(empty, scene),
+      );
     });
     await playback?.finished;
 
-    const path = host.querySelector("[data-element-id='css-colored-angle'] path");
+    const path = host.querySelector(
+      "[data-element-id='css-colored-angle'] path",
+    );
     expect(path?.getAttribute("stroke")).toBe("hsl(var(--test-stroke))");
     expect(() => {
       act(() => {
         canvas.current?.emphasizeElement(
           "css-colored-angle",
-          "hsl(var(--test-highlight))"
+          "hsl(var(--test-highlight))",
         );
         gsap.ticker.tick();
       });
@@ -509,6 +589,494 @@ describe("SVGCanvas", () => {
 
     document.documentElement.style.removeProperty("--test-stroke");
     document.documentElement.style.removeProperty("--test-highlight");
+    await act(async () => root.unmount());
+  });
+
+  it("owns exact viewport materialization, cancellation, and reset", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+
+    const establishingPose = Object.freeze({
+      v: 1 as const,
+      x: 40,
+      y: 75,
+      width: 720,
+      height: 405,
+    });
+    act(() => canvas.current?.materializeViewport(establishingPose));
+    expect(host.querySelector("svg")?.getAttribute("viewBox")).toBe(
+      "40 75 720 405",
+    );
+    expect(canvas.current?.readViewport()).toEqual(establishingPose);
+    expect(Object.isFrozen(canvas.current?.readViewport())).toBe(true);
+
+    const destination = Object.freeze({
+      v: 1 as const,
+      x: 340,
+      y: 340,
+      width: 220,
+      height: 150,
+    });
+    const playback = canvas.current?.animateViewport(destination, {
+      durationMs: 10_000,
+      easing: "linear",
+    });
+    const cancelled = playback?.cancel();
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.pose).toEqual(canvas.current?.readViewport());
+    expect(cancelled?.pose).not.toEqual(destination);
+    await expect(playback?.finished).resolves.toEqual(cancelled);
+
+    act(() => canvas.current?.resetViewport(destination));
+    expect(canvas.current?.readViewport()).toEqual(destination);
+    act(() => canvas.current?.resetViewport());
+    expect(canvas.current?.readViewport()).toEqual({
+      v: 1,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
+    expect(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 700,
+        y: 0,
+        width: 101,
+        height: 100,
+      }),
+    ).toThrow("inside the logical canvas");
+
+    await act(async () => root.unmount());
+  });
+
+  it("interpolates certified camera samples and completes at the exact destination", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+
+    const start = {
+      v: 1 as const,
+      x: 40,
+      y: 75,
+      width: 720,
+      height: 405,
+    };
+    const destination = {
+      v: 1 as const,
+      x: 340,
+      y: 340,
+      width: 220,
+      height: 150,
+    };
+    act(() => canvas.current?.materializeViewport(start));
+    const beforeAnimation = animationSnapshot();
+    let playback: ReturnType<SVGCanvasHandle["animateViewport"]> | undefined;
+    act(() => {
+      playback = canvas.current?.animateViewport(destination, {
+        durationMs: 10_000,
+        easing: "linear",
+      });
+    });
+    const tween = capturedTween(beforeAnimation);
+    tween.pause();
+
+    for (const sample of [0.25, 0.5, 0.75]) {
+      act(() => {
+        tween.progress(sample);
+      });
+      const pose = canvas.current?.readViewport();
+      expect(pose?.x).toBeCloseTo(start.x + (destination.x - start.x) * sample);
+      expect(pose?.y).toBeCloseTo(start.y + (destination.y - start.y) * sample);
+      expect(pose?.width).toBeCloseTo(
+        start.width + (destination.width - start.width) * sample,
+      );
+      expect(pose?.height).toBeCloseTo(
+        start.height + (destination.height - start.height) * sample,
+      );
+    }
+
+    act(() => {
+      tween.progress(1);
+    });
+    await expect(playback?.finished).resolves.toEqual({
+      status: "completed",
+      pose: destination,
+    });
+    expect(canvas.current?.readViewport()).toEqual(destination);
+
+    await act(async () => root.unmount());
+  });
+
+  it("writes in-flight certified frames without cancelling or rendering control state", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+
+    expect(canvas.current).not.toBeNull();
+    const beforeAnimation = animationSnapshot();
+    const playback = canvas.current!.animateViewport(
+      { v: 1, x: 100, y: 100, width: 500, height: 350 },
+      { durationMs: 10_000, easing: "linear" },
+    );
+    const tween = capturedTween(beforeAnimation);
+    tween.pause();
+    act(() => {
+      tween.progress(0.25);
+    });
+
+    const frame = { v: 1 as const, x: 160, y: 120, width: 400, height: 300 };
+    act(() => canvas.current?.renderViewportFrame(frame));
+    expect(canvas.current?.readViewport()).toEqual(frame);
+    expect(host.querySelector("[title='Reset zoom']")?.textContent).toBe(
+      "100%",
+    );
+
+    const cancelled = canvas.current?.cancelViewportAnimation();
+    expect(cancelled).toEqual({ status: "cancelled", pose: frame });
+    await expect(playback?.finished).resolves.toEqual(cancelled);
+
+    await act(async () => root.unmount());
+  });
+
+  it("validates materialization before preserving and explicitly cancelling active playback", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+
+    const beforeAnimation = animationSnapshot();
+    const playback = canvas.current?.animateViewport(
+      { v: 1, x: 200, y: 180, width: 400, height: 300 },
+      { durationMs: 10_000, easing: "linear" },
+    );
+    const tween = capturedTween(beforeAnimation);
+    tween.pause();
+    act(() => {
+      tween.progress(0.4);
+    });
+    const beforeInvalidMaterialization = canvas.current?.readViewport();
+
+    expect(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 700,
+        y: 0,
+        width: 101,
+        height: 100,
+      }),
+    ).toThrow("inside the logical canvas");
+    expect(canvas.current?.readViewport()).toEqual(
+      beforeInvalidMaterialization,
+    );
+
+    const cancelled = canvas.current?.cancelViewportAnimation();
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.pose).toEqual(beforeInvalidMaterialization);
+    await expect(playback?.finished).resolves.toEqual(cancelled);
+
+    await act(async () => root.unmount());
+  });
+
+  it("cancels the prior camera transaction before starting its successor", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+
+    const beforeFirstAnimation = animationSnapshot();
+    const first = canvas.current?.animateViewport(
+      { v: 1, x: 200, y: 150, width: 500, height: 400 },
+      { durationMs: 10_000, easing: "linear" },
+    );
+    const firstTween = capturedTween(beforeFirstAnimation);
+    firstTween.pause();
+    act(() => {
+      firstTween.progress(0.5);
+    });
+    const handoffPose = canvas.current?.readViewport();
+
+    const secondDestination = {
+      v: 1 as const,
+      x: 320,
+      y: 260,
+      width: 300,
+      height: 220,
+    };
+    const beforeSecondAnimation = animationSnapshot();
+    const second = canvas.current?.animateViewport(secondDestination, {
+      durationMs: 10_000,
+      easing: "linear",
+    });
+    await expect(first?.finished).resolves.toEqual({
+      status: "cancelled",
+      pose: handoffPose,
+    });
+
+    const secondTween = capturedTween(beforeSecondAnimation);
+    secondTween.pause();
+    act(() => {
+      secondTween.progress(1);
+    });
+    await expect(second?.finished).resolves.toEqual({
+      status: "completed",
+      pose: secondDestination,
+    });
+
+    await act(async () => root.unmount());
+  });
+
+  it("preserves the legacy unlocked zoom-out and unbounded pan policy", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+    expect(host.firstElementChild?.getAttribute("style")).toContain(
+      "touch-action: none",
+    );
+
+    const beforeZoomAnimation = animationSnapshot();
+    act(() => canvas.current?.zoomOut());
+    const zoomTween = capturedTween(beforeZoomAnimation);
+    zoomTween.pause();
+    act(() => {
+      zoomTween.progress(1);
+    });
+    const zoomedOut = canvas.current?.readViewport();
+    expect(zoomedOut?.x).toBeCloseTo(-133.3333333333);
+    expect(zoomedOut?.y).toBeCloseTo(-100);
+    expect(zoomedOut?.width).toBeCloseTo(1066.6666666667);
+    expect(zoomedOut?.height).toBeCloseTo(800);
+
+    const beforePanAnimation = animationSnapshot();
+    act(() => canvas.current?.panTo(0, 0, 0.5));
+    const panTween = capturedTween(beforePanAnimation);
+    panTween.pause();
+    act(() => {
+      panTween.progress(1);
+    });
+    expect(canvas.current?.readViewport()).toEqual({
+      v: 1,
+      x: -800,
+      y: -600,
+      width: 1600,
+      height: 1200,
+    });
+
+    await act(async () => root.unmount());
+  });
+
+  it("locks manual camera controls without blocking certified poses", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas
+          ref={canvas}
+          width={800}
+          height={600}
+          showGrid={false}
+          viewportInteractionLocked
+        />,
+      );
+    });
+
+    act(() => {
+      canvas.current?.zoomIn();
+      canvas.current?.zoomOut();
+      canvas.current?.panTo(400, 300);
+    });
+    expect(canvas.current?.readViewport()).toEqual({
+      v: 1,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
+    expect(
+      host
+        .querySelector("[title='Zoom in']")
+        ?.parentElement?.classList.contains("hidden"),
+    ).toBe(true);
+    expect(host.firstElementChild?.getAttribute("style")).toContain(
+      "touch-action: pan-y",
+    );
+
+    const certifiedPose = Object.freeze({
+      v: 1 as const,
+      x: 120,
+      y: 90,
+      width: 560,
+      height: 420,
+    });
+    act(() => canvas.current?.materializeViewport(certifiedPose));
+    expect(canvas.current?.readViewport()).toEqual(certifiedPose);
+
+    await act(async () => root.unmount());
+  });
+
+  it("owns verified checkpoint choreography through one narrow canvas handle in Strict Mode", async () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      (callback: FrameRequestCallback): number => {
+        queueMicrotask(() => callback(performance.now()));
+        return 1;
+      },
+    );
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <SVGCanvas
+            ref={canvas}
+            width={320}
+            height={220}
+            showGrid={false}
+            viewportInteractionLocked
+            reducedMotion
+            choreographyPlaybackRate={16}
+          />
+        </StrictMode>,
+      );
+    });
+
+    const base = createSceneState({ revision: 0, nodes: [] });
+    const target = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "square-lesson__equation",
+          kind: "text",
+          x: 80,
+          y: 60,
+          text: "x² + 6x = 7",
+          presentation: { enter: "fade", exit: "fade" },
+          style: {
+            color: "#ffffff",
+            fontSize: 22,
+            opacity: 1,
+            anchor: "start",
+          },
+        },
+      ],
+    });
+    const resultViewport = Object.freeze({
+      v: 1 as const,
+      x: 20,
+      y: 20,
+      width: 280,
+      height: 180,
+    });
+    const plan: PlannedCheckpointChoreography = Object.freeze({
+      targetScene: target,
+      motionPlan: planSceneTransition(base, target),
+      baseViewport: Object.freeze({
+        v: 1,
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 220,
+      }),
+      resultViewport,
+      choreographyPlan: Object.freeze({
+        v: 1,
+        phase: Object.freeze({
+          cues: Object.freeze([
+            Object.freeze({
+              cue: "enter" as const,
+              targetIds: Object.freeze(["square-lesson__equation"]),
+            }),
+            Object.freeze({
+              cue: "focus" as const,
+              targetIds: Object.freeze(["square-lesson__equation"]),
+            }),
+          ]),
+          durationMs: 800,
+          easing: "ease_out_quart",
+          holdAfterMs: 1_600,
+        }),
+      }),
+    });
+    const signals: ChoreographyExecutorSignal[] = [];
+    let playback: ReturnType<
+      SVGCanvasHandle["playCheckpointChoreography"]
+    > | null = null;
+    const timelineSpy = vi.spyOn(gsap, "timeline");
+
+    await act(async () => {
+      playback = canvas.current!.playCheckpointChoreography(plan, (signal) => {
+        signals.push(signal);
+      });
+      const timeline = timelineSpy.mock.results.at(-1)?.value as
+        gsap.core.Timeline | undefined;
+      expect(timeline?.duration()).toBeCloseTo(0.1);
+      await playback.finished;
+    });
+
+    expect(playback).not.toBeNull();
+    await expect(playback!.finished).resolves.toEqual({
+      status: "completed",
+      firstCuePresented: true,
+    });
+    expect(signals).toEqual([
+      { type: "cueStarted", cue: "enter" },
+      { type: "cueStarted", cue: "focus" },
+      { type: "firstCuePresented" },
+      { type: "checkpointSettled", settlement: "completed" },
+    ]);
+    expect(
+      host.querySelector("[data-element-id='square-lesson__equation'] text")
+        ?.textContent,
+    ).toBe("x² + 6x = 7");
+    expect(canvas.current?.readViewport()).toEqual(resultViewport);
+
     await act(async () => root.unmount());
   });
 });

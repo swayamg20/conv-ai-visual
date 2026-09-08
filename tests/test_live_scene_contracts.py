@@ -11,6 +11,7 @@ from murmur.live_scene.contracts import (
     MAX_SCENE_NODES,
     MAX_SCENE_PROMPT_CHARS,
     MAX_SCENE_TEXT_CHARS,
+    LatexTokenSceneNode,
     LiveSceneRequest,
     ScenePatchDraft,
     ScenePatchEvent,
@@ -45,6 +46,49 @@ def _line(node_id: str = "triangle-side-a") -> dict[str, object]:
         "presentation": _presentation(),
         "points": [[185, 405], [525, 405]],
         "style": _stroke_style(),
+    }
+
+
+def _latex(node_id: str = "theorem-equation") -> dict[str, object]:
+    return {
+        "id": node_id,
+        "kind": "latex",
+        "presentation": _presentation("fade"),
+        "x": 130,
+        "y": 470,
+        "latex": "a^2+b^2=c^2",
+        "style": {
+            "color": "hsl(var(--amber))",
+            "fontSize": 30,
+            "opacity": 1,
+        },
+    }
+
+
+def _latex_token(
+    *,
+    node_id: str = "equation-x-squared",
+    x: float = 400,
+    y: float = 500,
+    width: float = 80,
+    height: float = 48,
+    anchor: str = "middle",
+) -> dict[str, object]:
+    return {
+        "id": node_id,
+        "kind": "latex_token",
+        "presentation": _presentation("fade"),
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "anchor": anchor,
+        "latex": "x^2",
+        "style": {
+            "color": "hsl(var(--amber))",
+            "fontSize": 30,
+            "opacity": 1,
+        },
     }
 
 
@@ -98,25 +142,25 @@ def test_scene_state_accepts_every_bounded_node_variant_and_freezes_it() -> None
                         "anchor": "middle",
                     },
                 },
-                {
-                    "id": "theorem-equation",
-                    "kind": "latex",
-                    "presentation": _presentation("fade"),
-                    "x": 130,
-                    "y": 470,
-                    "latex": "a^2+b^2=c^2",
-                    "style": {
-                        "color": "hsl(var(--amber))",
-                        "fontSize": 30,
-                        "opacity": 1,
-                    },
-                },
+                _latex(),
+                _latex_token(),
             ],
         }
     )
 
-    assert [node.kind for node in state.nodes] == ["line", "path", "rect", "text", "latex"]
+    assert [node.kind for node in state.nodes] == [
+        "line",
+        "path",
+        "rect",
+        "text",
+        "latex",
+        "latex_token",
+    ]
     assert state.nodes[0].points[0] == (185.0, 405.0)  # type: ignore[union-attr]
+    token = state.nodes[-1]
+    assert isinstance(token, LatexTokenSceneNode)
+    assert token.anchor == "middle"
+    assert token.width == 80.0
     with pytest.raises(ValidationError, match="frozen"):
         state.revision = 5
 
@@ -171,6 +215,49 @@ def test_rectangle_must_fit_fully_inside_the_board() -> None:
         invalid = {**base, **change}
         with pytest.raises(ValidationError, match="inside the board"):
             SceneState.model_validate({"revision": 0, "nodes": [invalid]})
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        _latex_token(x=0, width=80, anchor="start"),
+        _latex_token(x=400, width=800, anchor="middle"),
+        _latex_token(x=800, width=80, anchor="end"),
+        _latex_token(y=500, height=100),
+    ],
+)
+def test_latex_token_accepts_anchored_boxes_on_board_edges(node: dict[str, object]) -> None:
+    token = SceneState.model_validate({"revision": 0, "nodes": [node]}).nodes[0]
+
+    assert isinstance(token, LatexTokenSceneNode)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"x": 721, "width": 80, "anchor": "start"}, "board width"),
+        ({"x": 39, "width": 80, "anchor": "middle"}, "board width"),
+        ({"x": 79, "width": 80, "anchor": "end"}, "board width"),
+        ({"y": 501, "height": 100}, "board height"),
+        ({"anchor": "center"}, "Input should be"),
+        ({"width": 0}, "greater than 0"),
+        ({"extra": True}, "Extra inputs"),
+    ],
+)
+def test_latex_token_rejects_invalid_or_unmeasured_boxes(
+    changes: dict[str, object], message: str
+) -> None:
+    node = {**_latex_token(), **changes}
+
+    with pytest.raises(ValidationError, match=message):
+        SceneState.model_validate({"revision": 0, "nodes": [node]})
+
+
+def test_legacy_latex_wire_shape_is_unchanged() -> None:
+    legacy = _latex()
+    patch = ScenePatchDraft.model_validate(_patch({"op": "put", "node": legacy}))
+
+    assert patch.model_dump(mode="json", by_alias=True)["operations"][0]["node"] == legacy
 
 
 def test_style_bounds_and_exact_theme_paints_match_the_frontend_decoder() -> None:

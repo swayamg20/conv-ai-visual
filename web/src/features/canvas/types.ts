@@ -1,6 +1,18 @@
 import type { gsap } from "gsap";
 
-import type { MotionPlan } from "@/lib/live-scene";
+import type {
+  ChoreographyExecutorObserver,
+  ChoreographyPlayback,
+} from "@/features/live-scene/choreography-executor";
+import type {
+  MotionPlan,
+  PlannedCheckpointChoreography,
+  SceneState,
+} from "@/lib/live-scene";
+import type {
+  ChoreographyEasing,
+  ViewportPoseV1,
+} from "@/lib/live-scene/choreography";
 
 export type MotionPlaybackStatus = "completed" | "cancelled" | "failed";
 
@@ -23,6 +35,26 @@ export interface MotionPlayback {
 export interface MotionPlaybackOptions {
   /** Delay between starting adjacent plan steps. */
   staggerMs?: number;
+}
+
+export type ViewportPlaybackStatus = "completed" | "cancelled" | "failed";
+
+export interface ViewportPlaybackOutcome {
+  readonly status: ViewportPlaybackStatus;
+  /** Exact pose materialized when playback settled. */
+  readonly pose: ViewportPoseV1;
+  readonly error?: string;
+}
+
+export interface ViewportPlayback {
+  readonly finished: Promise<ViewportPlaybackOutcome>;
+  /** Stop at the currently rendered pose without substituting the destination. */
+  cancel(): ViewportPlaybackOutcome;
+}
+
+export interface ViewportPlaybackOptions {
+  readonly durationMs: number;
+  readonly easing: ChoreographyEasing;
 }
 
 export interface CanvasOperation {
@@ -68,6 +100,21 @@ export interface LatexOperation {
   latex: string;
   x: number;
   y: number;
+  font_size: number;
+  color: string;
+}
+
+export interface LatexTokenOperation {
+  type: "latex_token";
+  id: string;
+  latex: string;
+  /** Horizontal anchor coordinate in the logical canvas. */
+  x: number;
+  /** Top edge of the measured token box. */
+  y: number;
+  width: number;
+  height: number;
+  anchor: "start" | "middle" | "end";
   font_size: number;
   color: string;
 }
@@ -129,7 +176,32 @@ export interface SVGCanvasHandle {
   createSequence(sequence: TeachingSequence): gsap.core.Timeline;
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
-  playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
+  playMotionPlan(
+    plan: MotionPlan,
+    options?: MotionPlaybackOptions,
+  ): MotionPlayback;
+  /** Execute one verified checkpoint through the closed choreography engine. */
+  playCheckpointChoreography(
+    plan: PlannedCheckpointChoreography,
+    observer?: ChoreographyExecutorObserver,
+  ): ChoreographyPlayback;
+  /** Return the exact viewBox currently rendered, including during a tween. */
+  readViewport(): ViewportPoseV1;
+  /** Animate only through the closed choreography camera vocabulary. */
+  animateViewport(
+    pose: ViewportPoseV1,
+    options: ViewportPlaybackOptions,
+  ): ViewportPlayback;
+  /** Write one certified frame without cancelling playback or updating React state. */
+  renderViewportFrame(pose: ViewportPoseV1): void;
+  /** Kill camera motion and atomically apply an exact certified pose. */
+  materializeViewport(pose: ViewportPoseV1): void;
+  /** Reset to a supplied certified pose or the complete logical board. */
+  resetViewport(pose?: ViewportPoseV1): void;
+  /** Stop camera motion at its actually rendered pose. */
+  cancelViewportAnimation(): ViewportPlaybackOutcome | null;
+  /** Atomically reconcile the retained SVG to one canonical scene snapshot. */
+  materializeScene(scene: SceneState): void;
   emphasizeElement(id: string, color?: string): void;
   /** Stop queued work and settle each active motion to its canonical terminal state. */
   cancelMotion(): void;
@@ -138,14 +210,23 @@ export interface SVGCanvasHandle {
   zoomIn(): void;
   zoomOut(): void;
   resetZoom(): void;
-  panTo(x: number, y: number): void;
+  panTo(x: number, y: number, zoom?: number): void;
 }
+
+/** Closed playback rates supported by the certified choreography renderer. */
+export type ChoreographyPlaybackRate = 1 | 16;
 
 export interface SVGCanvasProps {
   width?: number;
   height?: number;
   className?: string;
   showGrid?: boolean;
+  /** Disable manual pan and zoom for a certified choreography session. */
+  viewportInteractionLocked?: boolean;
+  /** Preserve every checkpoint while eliminating spatial travel and tweening. */
+  reducedMotion?: boolean;
+  /** Scale only certified choreography timing; legacy canvas motion is unchanged. */
+  choreographyPlaybackRate?: ChoreographyPlaybackRate;
 }
 
 export interface CanvasPalette {

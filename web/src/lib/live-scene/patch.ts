@@ -2,6 +2,7 @@ import { planSceneTransition } from "./planner";
 import { createSceneState } from "./state";
 import type {
   LatexSceneNode,
+  LatexTokenSceneNode,
   LineSceneNode,
   MotionPlan,
   PathSceneNode,
@@ -418,6 +419,57 @@ function decodeNode(value: unknown): SceneNode {
       } as LatexSceneNode;
       break;
     }
+    case "latex_token": {
+      exactKeys(
+        input,
+        [
+          "id",
+          "kind",
+          "presentation",
+          "x",
+          "y",
+          "width",
+          "height",
+          "anchor",
+          "latex",
+          "style",
+        ],
+        [],
+        `node ${id}`,
+        "invalid_node"
+      );
+      if (!["start", "middle", "end"].includes(input.anchor as string)) {
+        fail("invalid_node", `node ${id} has an invalid LaTeX token anchor`);
+      }
+      const x = finiteNumber(input.x, `node ${id} x`, 0, LIVE_SCENE_BOARD_WIDTH);
+      const y = finiteNumber(input.y, `node ${id} y`, 0, LIVE_SCENE_BOARD_HEIGHT);
+      const width = positiveNumber(input.width, `node ${id} width`, LIVE_SCENE_BOARD_WIDTH);
+      const height = positiveNumber(input.height, `node ${id} height`, LIVE_SCENE_BOARD_HEIGHT);
+      const anchor = input.anchor as LatexTokenSceneNode["anchor"];
+      const left = anchor === "middle" ? x - width / 2 : anchor === "end" ? x - width : x;
+      if (left < 0 || left + width > LIVE_SCENE_BOARD_WIDTH || y + height > LIVE_SCENE_BOARD_HEIGHT) {
+        fail("invalid_node", `node ${id} LaTeX token must stay inside the logical board`);
+      }
+      candidate = {
+        id,
+        kind: "latex_token",
+        presentation: nodePresentation,
+        x,
+        y,
+        width,
+        height,
+        anchor,
+        latex: stringValue(
+          input.latex,
+          `node ${id} latex`,
+          LIVE_SCENE_MAX_LATEX_LENGTH,
+          "invalid_node",
+          true
+        ),
+        style: latexStyle(input.style, id),
+      } as LatexTokenSceneNode;
+      break;
+    }
     default:
       return fail("invalid_node", `node ${id} has an unsupported kind`);
   }
@@ -474,6 +526,11 @@ function decodePatch(value: unknown): ScenePatchDraft {
     ),
     operations: Object.freeze(operations),
   });
+}
+
+/** Strictly decode one lifecycle-free scene patch draft. */
+export function decodeScenePatchDraft(inputValue: unknown): ScenePatchDraft {
+  return decodePatch(inputValue);
 }
 
 /** Strictly decode one server-authoritative `scene_patch` event. */

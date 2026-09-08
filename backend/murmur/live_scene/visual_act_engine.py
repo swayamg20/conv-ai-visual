@@ -23,7 +23,7 @@ from murmur.live_scene.semantic_stream_parser import (
     VisualActDecisionStreamParser,
 )
 from murmur.live_scene.visual_act_router import (
-    ResolvedVisualAct,
+    ResolvedVisualRoute,
     VisualActRoutingError,
     VisualActRoutingErrorCode,
     resolve_visual_act,
@@ -47,6 +47,12 @@ _ROUTING_REPAIR_HINTS = {
     VisualActRoutingErrorCode.PROOF_REQUIRES_IDENTITY: (
         "visual_act_state: reveal the identity before continuing to proof"
     ),
+    VisualActRoutingErrorCode.COMPONENT_KIND_MISMATCH: (
+        "visual_act_state: use the decision vocabulary for the accepted component kind"
+    ),
+    VisualActRoutingErrorCode.CLARIFICATION_UNAVAILABLE: (
+        "visual_act_state: clarify the corner only at its unclarified checkpoint"
+    ),
 }
 
 
@@ -67,7 +73,7 @@ class VisualActRoutingResult:
     """One accepted decision and its deterministic server resolution."""
 
     decision: VisualActDecision
-    resolved: ResolvedVisualAct | None
+    resolved: ResolvedVisualRoute | None
     provider_attempts: Literal[1, 2]
 
     @property
@@ -305,7 +311,7 @@ class VisualActRoutingEngine:
         messages: list[dict[str, str]],
         scene: SemanticSceneState,
         attempt: Literal[1, 2],
-    ) -> tuple[VisualActDecision, ResolvedVisualAct | None]:
+    ) -> tuple[VisualActDecision, ResolvedVisualRoute | None]:
         parser = VisualActDecisionStreamParser()
         upstream: object | None = None
 
@@ -391,7 +397,7 @@ class VisualActRoutingEngine:
         *,
         scene: SemanticSceneState,
         attempt: Literal[1, 2],
-    ) -> tuple[VisualActDecision, ResolvedVisualAct | None]:
+    ) -> tuple[VisualActDecision, ResolvedVisualRoute | None]:
         try:
             return decision, resolve_visual_act(decision, scene)
         except VisualActRoutingError as exc:

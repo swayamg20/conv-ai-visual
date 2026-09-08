@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createSceneState } from "./state";
-import type { LineSceneNode, SceneState } from "./types";
+import type { LatexTokenSceneNode, LineSceneNode, SceneState } from "./types";
 
 const presentation = { enter: "draw", exit: "fade" } as const;
 
@@ -20,6 +20,24 @@ function line(id = "triangle-base"): LineSceneNode {
       opacity: 1,
       roughness: 1,
     },
+  };
+}
+
+function latexToken(
+  overrides: Partial<LatexTokenSceneNode> = {}
+): LatexTokenSceneNode {
+  return {
+    id: "equation-x-squared",
+    kind: "latex_token",
+    presentation: { enter: "fade", exit: "fade" },
+    x: 300,
+    y: 120,
+    width: 80,
+    height: 48,
+    anchor: "middle",
+    latex: "x^2",
+    style: { color: "#e2e8f0", fontSize: 28, opacity: 1 },
+    ...overrides,
   };
 }
 
@@ -193,6 +211,7 @@ describe("createSceneState", () => {
           latex: "a^2+b^2=c^2",
           style: { color: "#e2e8f0", fontSize: 28, opacity: 1 },
         },
+        latexToken(),
       ],
     });
 
@@ -202,7 +221,49 @@ describe("createSceneState", () => {
       "rect",
       "text",
       "latex",
+      "latex_token",
     ]);
     expect(snapshot.nodes.every(Object.isFrozen)).toBe(true);
+    expect(Object.isFrozen(snapshot.nodes.at(-1)?.style)).toBe(true);
+  });
+
+  it.each([
+    [0, 80, "start"],
+    [400, 800, "middle"],
+    [800, 80, "end"],
+  ] as const)(
+    "accepts and freezes an anchored LaTeX token at a board edge",
+    (x, width, anchor) => {
+      const token = createSceneState({
+        revision: 0,
+        nodes: [latexToken({ x, width, anchor })],
+      }).nodes[0] as LatexTokenSceneNode;
+
+      expect(token).toMatchObject({ x, width, anchor });
+      expect(Object.isFrozen(token)).toBe(true);
+      expect(Object.isFrozen(token.presentation)).toBe(true);
+      expect(Object.isFrozen(token.style)).toBe(true);
+    }
+  );
+
+  it.each([
+    [{ x: 721, width: 80, anchor: "start" as const }],
+    [{ x: 39, width: 80, anchor: "middle" as const }],
+    [{ x: 79, width: 80, anchor: "end" as const }],
+    [{ y: 553, height: 48 }],
+    [{ width: 0 }],
+  ])("rejects an invalid LaTeX token box %j", (overrides) => {
+    expect(() =>
+      createSceneState({ revision: 0, nodes: [latexToken(overrides)] })
+    ).toThrow();
+  });
+
+  it("rejects invalid LaTeX token anchors", () => {
+    const invalid = latexToken({ anchor: "middle" });
+    (invalid as unknown as { anchor: string }).anchor = "center";
+
+    expect(() => createSceneState({ revision: 0, nodes: [invalid] })).toThrow(
+      "invalid LaTeX token anchor"
+    );
   });
 });
