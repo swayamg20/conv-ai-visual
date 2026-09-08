@@ -1109,7 +1109,11 @@ function validateRuntimeEvidence(value, lesson, location) {
   observed.forEach((eventValue, index) => {
     const expectedEvent = expected[index];
     const eventLocation = `${location}[${index}]`;
-    const event = exactKeys(eventValue, Object.keys(expectedEvent), eventLocation);
+    const event = exactKeys(
+      eventValue,
+      Object.keys(expectedEvent),
+      eventLocation,
+    );
     for (const [key, expectedValue] of Object.entries(expectedEvent)) {
       literal(event[key], expectedValue, `${eventLocation}.${key}`);
     }
@@ -1728,7 +1732,8 @@ function validateRealTimePacing(
     const startedAtMs =
       index === 0 ? firstVisibleAtMs : settlements[index - 1].atMs;
     const observedMs = settlement.atMs - startedAtMs;
-    const authoredMs = checkpoint.phase.durationMs + checkpoint.phase.holdAfterMs;
+    const authoredMs =
+      checkpoint.phase.durationMs + checkpoint.phase.holdAfterMs;
     const unexplainedMs = observedMs - authoredMs;
     if (unexplainedMs < -MAX_EARLY_SETTLEMENT_JITTER_MS) {
       fail(
@@ -2115,6 +2120,69 @@ function collectReportTests(suites, files, tests, location = "report.suites") {
   }
 }
 
+function validatePlaywrightCi(value, source, location) {
+  const ci = exactKeys(
+    value,
+    ["commitHref", "commitHash", "buildHref"],
+    location,
+  );
+  literal(ci.commitHash, source.gitCommit, `${location}.commitHash`);
+  let commitUrl;
+  let buildUrl;
+  try {
+    commitUrl = new URL(string(ci.commitHref, `${location}.commitHref`));
+    buildUrl = new URL(string(ci.buildHref, `${location}.buildHref`));
+  } catch {
+    fail(location, "must contain absolute GitHub URLs");
+  }
+  for (const [name, url] of [
+    ["commitHref", commitUrl],
+    ["buildHref", buildUrl],
+  ]) {
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      fail(`${location}.${name}`, "must be a canonical github.com HTTPS URL");
+    }
+  }
+  const escapedCommit = source.gitCommit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const commitMatch = commitUrl.pathname.match(
+    new RegExp(`^/([^/]+)/([^/]+)/commit/${escapedCommit}/?$`),
+  );
+  if (!commitMatch) {
+    fail(
+      `${location}.commitHref`,
+      "must identify the exact report source commit",
+    );
+  }
+  const [, owner, repository] = commitMatch;
+  if (
+    !new RegExp(`^/${owner}/${repository}/actions/runs/[1-9][0-9]*/?$`).test(
+      buildUrl.pathname,
+    )
+  ) {
+    fail(
+      `${location}.buildHref`,
+      "must identify a workflow run in the same GitHub repository",
+    );
+  }
+  return {
+    commitHref: commitUrl.href.replace(/\/$/, ""),
+    commitHash: ci.commitHash,
+    buildHref: buildUrl.href.replace(/\/$/, ""),
+  };
+}
+
+/** Test-only wrapper for Playwright's optional GitHub report provenance. */
+export function validatePlaywrightCiForTests(value, source) {
+  return validatePlaywrightCi(value, source, "report.config.metadata.ci");
+}
+
 function validateReport(
   value,
   expectedFile,
@@ -2128,9 +2196,17 @@ function validateReport(
     config.version,
     `${location}.config.version`,
   );
+  const metadataValue = object(config.metadata, `${location}.config.metadata`);
   const metadata = exactKeys(
-    config.metadata,
-    ["gate", "suite", "source", "environment", "actualWorkers"],
+    metadataValue,
+    [
+      "gate",
+      "suite",
+      "source",
+      "environment",
+      "actualWorkers",
+      ...(Object.hasOwn(metadataValue, "ci") ? ["ci"] : []),
+    ],
     `${location}.config.metadata`,
   );
   literal(metadata.gate, "1.5", `${location}.config.metadata.gate`);
@@ -2153,6 +2229,13 @@ function validateReport(
     playwrightVersion,
     `${location}.config.metadata.environment.playwrightVersion`,
   );
+  const ci = metadata.ci
+    ? validatePlaywrightCi(
+        metadata.ci,
+        source,
+        `${location}.config.metadata.ci`,
+      )
+    : null;
   const stats = object(report.stats, `${location}.stats`);
   const expected = number(stats.expected, `${location}.stats.expected`, {
     integer: true,
@@ -2181,6 +2264,7 @@ function validateReport(
     tests,
     source,
     environment,
+    ci,
   };
 }
 
@@ -2676,7 +2760,10 @@ async function withFinalizationLock(artifactRoot, action) {
       handle = await open(lockPath, "wx", 0o600);
     } catch (error) {
       if (error?.code === "EEXIST") {
-        fail("manifest finalization", "another finalizer already holds the lock");
+        fail(
+          "manifest finalization",
+          "another finalizer already holds the lock",
+        );
       }
       throw error;
     }

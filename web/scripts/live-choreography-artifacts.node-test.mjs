@@ -32,6 +32,7 @@ import {
   validateExpectedShaForTests,
   validateManifest,
   validateProviderFreeRequestsForTests,
+  validatePlaywrightCiForTests,
   validateRealTimePacingForTests,
   validateRuntimeEvidenceForTests,
   verifyEvidenceProvenance,
@@ -592,5 +593,34 @@ test("an explicit choreography SHA uses its own fail-closed provenance label", (
         "CHOREOGRAPHY_EXPECTED_SHA",
       ),
     /CHOREOGRAPHY_EXPECTED_SHA/,
+  );
+});
+
+test("Playwright CI metadata binds the report to one commit and repository run", () => {
+  const ci = {
+    commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${GIT_COMMIT}`,
+    commitHash: GIT_COMMIT,
+    buildHref:
+      "https://github.com/swayamg20/conv-ai-visual/actions/runs/34256064840",
+  };
+  assert.deepEqual(validatePlaywrightCiForTests(ci, SOURCE), ci);
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...ci, commitHash: "3".repeat(40) },
+        SOURCE,
+      ),
+    /commitHash/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        {
+          ...ci,
+          buildHref: "https://github.com/other/repository/actions/runs/1",
+        },
+        SOURCE,
+      ),
+    /same GitHub repository/,
   );
 });
