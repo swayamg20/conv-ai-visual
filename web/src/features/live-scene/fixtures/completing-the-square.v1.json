@@ -1,0 +1,2823 @@
+{
+  "v": 1,
+  "fixtureId": "completing-the-square",
+  "compilerVersion": "murmur.completing_square_choreography.v1",
+  "generation": 1,
+  "attempt": 1,
+  "baseRevision": 0,
+  "resultRevision": 8,
+  "transcript": {
+    "prompt": "Solve x² + 6x = 7 visually by completing the square.",
+    "routeDecision": {
+      "v": 1,
+      "decision": "start_choreography",
+      "componentKind": "completing_square",
+      "targetStage": "solve"
+    },
+    "routedBeat": {
+      "v": 2,
+      "beatId": "route-1",
+      "componentKind": "completing_square",
+      "componentId": "square-lesson",
+      "route": {
+        "intent": "advance",
+        "targetStage": "solve"
+      }
+    },
+    "checkpointIds": [
+      "problem",
+      "area_model",
+      "split_linear_term",
+      "rearrange_halves",
+      "missing_corner",
+      "balance_and_complete",
+      "factor_square",
+      "solve_roots"
+    ],
+    "checkpointCount": 8,
+    "authoredDurationMs": 63800,
+    "providerRequestCount": 0
+  },
+  "events": [
+    {
+      "type": "scene_stream_started",
+      "generation": 1,
+      "attempt": 1,
+      "baseRevision": 0
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 1,
+      "baseRevision": 0,
+      "resultRevision": 1,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_problem",
+        "narration": "We will solve x squared plus six x equals seven by turning the left side into an area.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_6x",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 280.0,
+              "y": 100.0,
+              "width": 90.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "6x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_equal_main",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 403.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_plus_a",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 205.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "+",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_rhs7",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 438.0,
+              "y": 100.0,
+              "width": 28.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "7",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_x2",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 151.0,
+              "y": 100.0,
+              "width": 62.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x^2",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "problem",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "problem",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 0,
+        "semanticResultRevision": 1,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "problem",
+          "operationTargets": [
+            "square-lesson__eq_6x",
+            "square-lesson__eq_equal_main",
+            "square-lesson__eq_plus_a",
+            "square-lesson__eq_rhs7",
+            "square-lesson__eq_x2"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "problem",
+          "checkpointNarration": "We will solve x squared plus six x equals seven by turning the left side into an area.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 40.0,
+              "y": 75.0,
+              "width": 720.0,
+              "height": 405.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 95.0,
+              "y": 40.0,
+              "width": 610.0,
+              "height": 500.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__eq_6x",
+                  "square-lesson__eq_equal_main",
+                  "square-lesson__eq_plus_a",
+                  "square-lesson__eq_rhs7",
+                  "square-lesson__eq_x2"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_6x",
+                  "square-lesson__eq_x2"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 700,
+            "easing": "ease_out_quart",
+            "holdAfterMs": 6500
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "problem",
+            "baseRevision": 0,
+            "resultRevision": 1,
+            "baseLowLevelSceneSha256": "9d3cb28d5d8e997cc85e3124d3d3077189020c3eb32d6d1f6af84bdc579aabc5",
+            "resultLowLevelSceneSha256": "4bbb6f70c7146692b75dbda3fb87b180be4181fec19bfa4d3bb28057fc3da5c2",
+            "baseSemanticSceneSha256": "a8a338405d84e56a062bb45ec4800cfb09e8af57bbcec8560069464ff3f7dee0",
+            "resultSemanticSceneSha256": "4559baac0e4e2ed27c884ba9b223c96db2178acfa3918ffe08ce8b57320cc671",
+            "patchSha256": "521a0100a5f8e0def583b2142dfc6b7afa3cfd4e3af0d872aa6c61fcd5e44054",
+            "receiptSha256": "2010f68f0e919446e256e9cff3c17470eeed18b534d0e8da7a49e0efbc54d1d7",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "problem",
+              "checkpointNarration": "We will solve x squared plus six x equals seven by turning the left side into an area.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 40.0,
+                  "y": 75.0,
+                  "width": 720.0,
+                  "height": 405.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 95.0,
+                  "y": 40.0,
+                  "width": 610.0,
+                  "height": 500.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "397b36f53e0e361af0e76f4d4e8ad2fec8df1254a5d18a64b55504414375d7f5",
+            "previousCertificateSha256": null
+          },
+          "certificateSha256": "5f8a09f8307c3d97556525efb8290968c95712e0deb0d3a23f727ae64b9a125b"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 2,
+      "baseRevision": 1,
+      "resultRevision": 2,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_area_model",
+        "narration": "The x squared term is a square, while six x is represented as two equal three x strips.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_3x_a",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 480.0,
+              "y": 290.0,
+              "width": 50.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_3x_b",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 480.0,
+              "y": 380.0,
+              "width": 50.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_x2",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 230.0,
+              "y": 345.0,
+              "width": 70.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x^2",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__strip_a",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  390.0,
+                  280.0
+                ],
+                [
+                  570.0,
+                  280.0
+                ],
+                [
+                  570.0,
+                  334.0
+                ],
+                [
+                  390.0,
+                  334.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--sage))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#173626"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__strip_b",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  390.0,
+                  370.0
+                ],
+                [
+                  570.0,
+                  370.0
+                ],
+                [
+                  570.0,
+                  424.0
+                ],
+                [
+                  390.0,
+                  424.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--lavender))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#2E2850"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__x2_square",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  140.0,
+                  270.0
+                ],
+                [
+                  320.0,
+                  270.0
+                ],
+                [
+                  320.0,
+                  450.0
+                ],
+                [
+                  140.0,
+                  450.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--chalk))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#16171C"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "area_model",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "area_model",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 1,
+        "semanticResultRevision": 2,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "area_model",
+          "operationTargets": [
+            "square-lesson__area_3x_a",
+            "square-lesson__area_3x_b",
+            "square-lesson__area_x2",
+            "square-lesson__strip_a",
+            "square-lesson__strip_b",
+            "square-lesson__x2_square"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "area_model",
+          "checkpointNarration": "The x squared term is a square, while six x is represented as two equal three x strips.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 40.0,
+              "y": 75.0,
+              "width": 720.0,
+              "height": 405.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 95.0,
+              "y": 40.0,
+              "width": 610.0,
+              "height": 500.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__area_3x_a",
+                  "square-lesson__area_3x_b",
+                  "square-lesson__area_x2",
+                  "square-lesson__strip_a",
+                  "square-lesson__strip_b",
+                  "square-lesson__x2_square"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__strip_a",
+                  "square-lesson__strip_b",
+                  "square-lesson__x2_square"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 1200,
+            "easing": "ease_out_quint",
+            "holdAfterMs": 7000
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "area_model",
+            "baseRevision": 1,
+            "resultRevision": 2,
+            "baseLowLevelSceneSha256": "4bbb6f70c7146692b75dbda3fb87b180be4181fec19bfa4d3bb28057fc3da5c2",
+            "resultLowLevelSceneSha256": "dfd4be1bd03ddf286274822871599be6af90c6a909d2614e8842b03db5b921f9",
+            "baseSemanticSceneSha256": "4559baac0e4e2ed27c884ba9b223c96db2178acfa3918ffe08ce8b57320cc671",
+            "resultSemanticSceneSha256": "c8e5898c0ad3f62704170c405604cfbfcf8b0e37967bee0a6052ef7e645a48bf",
+            "patchSha256": "6a54d6dc2a7c8384ea03e3f0ac4359923b495b4fe8ac0a8019a5842f28715777",
+            "receiptSha256": "8965ee95105e1407bc0838fa0af92baeae3afe57220f4be7165ae977e71544e5",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "area_model",
+              "checkpointNarration": "The x squared term is a square, while six x is represented as two equal three x strips.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 40.0,
+                  "y": 75.0,
+                  "width": 720.0,
+                  "height": 405.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 95.0,
+                  "y": 40.0,
+                  "width": 610.0,
+                  "height": 500.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "41a338c2568a60b5998094ff39ce86cfe7b0362c91ad08c871f0226f2e772d98",
+            "previousCertificateSha256": "5f8a09f8307c3d97556525efb8290968c95712e0deb0d3a23f727ae64b9a125b"
+          },
+          "certificateSha256": "339621514f86d1276fb349615414784283d4b4108298660bc5f8192ae09f2c82"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 3,
+      "baseRevision": 2,
+      "resultRevision": 3,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_split_linear_term",
+        "narration": "Splitting six x evenly gives three x plus three x, one strip for each adjacent side.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_3x_a",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 255.0,
+              "y": 100.0,
+              "width": 58.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_3x_b",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 354.0,
+              "y": 100.0,
+              "width": 58.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_6x"
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_plus_b",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 304.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "+",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "split_linear_term",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "split_linear_term",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 2,
+        "semanticResultRevision": 3,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "split_linear_term",
+          "operationTargets": [
+            "square-lesson__eq_3x_a",
+            "square-lesson__eq_3x_b",
+            "square-lesson__eq_6x",
+            "square-lesson__eq_plus_b"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "split_linear_term",
+          "checkpointNarration": "Splitting six x evenly gives three x plus three x, one strip for each adjacent side.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__eq_3x_a",
+                  "square-lesson__eq_3x_b",
+                  "square-lesson__eq_plus_b"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_6x"
+                ],
+                "cue": "exit"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_3x_a",
+                  "square-lesson__eq_3x_b"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 900,
+            "easing": "ease_in_out",
+            "holdAfterMs": 6500
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "split_linear_term",
+            "baseRevision": 2,
+            "resultRevision": 3,
+            "baseLowLevelSceneSha256": "dfd4be1bd03ddf286274822871599be6af90c6a909d2614e8842b03db5b921f9",
+            "resultLowLevelSceneSha256": "c0036d3368deb74d7149977667ac108ccc580a254032ade11f78022316958873",
+            "baseSemanticSceneSha256": "c8e5898c0ad3f62704170c405604cfbfcf8b0e37967bee0a6052ef7e645a48bf",
+            "resultSemanticSceneSha256": "b5a11c3da033d2e134f463bffa1b01f18772d97dc78d37385df06b4e1ab9cb3f",
+            "patchSha256": "931d3e10a2251d2597c6d21ea9ec47d6ad5990af96434a1ca6f22c539d470d11",
+            "receiptSha256": "e299a02187b8210bd3b65fb5c099fcfbe41ef412660e66327e5377bcc8e1e5af",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "split_linear_term",
+              "checkpointNarration": "Splitting six x evenly gives three x plus three x, one strip for each adjacent side.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "1fcbb88185e22a949155b196200435c6eb84a1f50802e468e1290724f69247a0",
+            "previousCertificateSha256": "339621514f86d1276fb349615414784283d4b4108298660bc5f8192ae09f2c82"
+          },
+          "certificateSha256": "302d3c0de08907a5717ad93a156666211fda11eb5456de44c23a634f4aa1ecc0"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 4,
+      "baseRevision": 3,
+      "resultRevision": 4,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_rearrange_halves",
+        "narration": "Move those same strips beside the x by x square; no area has been added or removed.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_3x_a",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 330.0,
+              "y": 428.0,
+              "width": 50.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_3x_b",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 447.0,
+              "y": 315.0,
+              "width": 50.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "3x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__area_x2",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 330.0,
+              "y": 315.0,
+              "width": 70.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x^2",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__strip_a",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  240.0,
+                  420.0
+                ],
+                [
+                  420.0,
+                  420.0
+                ],
+                [
+                  420.0,
+                  474.0
+                ],
+                [
+                  240.0,
+                  474.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--sage))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#173626"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__strip_b",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  420.0,
+                  240.0
+                ],
+                [
+                  474.0,
+                  240.0
+                ],
+                [
+                  474.0,
+                  420.0
+                ],
+                [
+                  420.0,
+                  420.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--lavender))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#2E2850"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__x2_square",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  240.0,
+                  240.0
+                ],
+                [
+                  420.0,
+                  240.0
+                ],
+                [
+                  420.0,
+                  420.0
+                ],
+                [
+                  240.0,
+                  420.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--chalk))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#16171C"
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "rearrange_halves",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "rearrange_halves",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 3,
+        "semanticResultRevision": 4,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "rearrange_halves",
+          "operationTargets": [
+            "square-lesson__area_3x_a",
+            "square-lesson__area_3x_b",
+            "square-lesson__area_x2",
+            "square-lesson__strip_a",
+            "square-lesson__strip_b",
+            "square-lesson__x2_square"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split",
+            "adjacent_rearrangement"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "rearrange_halves",
+          "checkpointNarration": "Move those same strips beside the x by x square; no area has been added or removed.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 32.0,
+              "y": 72.0,
+              "width": 736.0,
+              "height": 420.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 100.0,
+              "y": 55.0,
+              "width": 600.0,
+              "height": 500.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__area_3x_a",
+                  "square-lesson__area_3x_b",
+                  "square-lesson__area_x2",
+                  "square-lesson__strip_a",
+                  "square-lesson__strip_b",
+                  "square-lesson__x2_square"
+                ],
+                "cue": "transform"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__strip_a",
+                  "square-lesson__strip_b"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 1600,
+            "easing": "ease_in_out",
+            "holdAfterMs": 7200
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "rearrange_halves",
+            "baseRevision": 3,
+            "resultRevision": 4,
+            "baseLowLevelSceneSha256": "c0036d3368deb74d7149977667ac108ccc580a254032ade11f78022316958873",
+            "resultLowLevelSceneSha256": "4e637bb916e1f6e70a4e63825bb2a28b8c0ea1f574f7a709ca3bd4aa0197e6cd",
+            "baseSemanticSceneSha256": "b5a11c3da033d2e134f463bffa1b01f18772d97dc78d37385df06b4e1ab9cb3f",
+            "resultSemanticSceneSha256": "2dea2a02d780744adbe57734c1d2df067efca062292a927c8544508f7307ea5a",
+            "patchSha256": "ca4f28e4b640c9e38059db3ca00ce76069048805c7942ddd07a68ff300451390",
+            "receiptSha256": "07444b149386849f337476dde16312d0af69877dbe0aad13c9a2de48aa79f61e",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "rearrange_halves",
+              "checkpointNarration": "Move those same strips beside the x by x square; no area has been added or removed.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 32.0,
+                  "y": 72.0,
+                  "width": 736.0,
+                  "height": 420.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 100.0,
+                  "y": 55.0,
+                  "width": 600.0,
+                  "height": 500.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "f8f1365d8ed14e87c38ae3847e5b5ad32d7b545d669aa873af7b645b63c9d605",
+            "previousCertificateSha256": "302d3c0de08907a5717ad93a156666211fda11eb5456de44c23a634f4aa1ecc0"
+          },
+          "certificateSha256": "b43642871b28508a7ade0ad029d750eac2541b185045637f3c450c26cc8c71e6"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 5,
+      "baseRevision": 4,
+      "resultRevision": 5,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_missing_corner",
+        "narration": "The almost-square is missing one corner whose side lengths are both three.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__corner",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  420.0,
+                  420.0
+                ],
+                [
+                  474.0,
+                  420.0
+                ],
+                [
+                  474.0,
+                  474.0
+                ],
+                [
+                  420.0,
+                  474.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--amber))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "transparent"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__corner_area",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 447.0,
+              "y": 425.0,
+              "width": 34.0,
+              "height": 42.0,
+              "anchor": "middle",
+              "latex": "?",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "missing_corner",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "missing_corner",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 4,
+        "semanticResultRevision": 5,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "missing_corner",
+          "operationTargets": [
+            "square-lesson__corner",
+            "square-lesson__corner_area"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split",
+            "adjacent_rearrangement",
+            "missing_corner"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "missing_corner",
+          "checkpointNarration": "The almost-square is missing one corner whose side lengths are both three.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 32.0,
+              "y": 72.0,
+              "width": 736.0,
+              "height": 420.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 100.0,
+              "y": 55.0,
+              "width": 600.0,
+              "height": 500.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 340.0,
+              "y": 340.0,
+              "width": 220.0,
+              "height": 150.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 330.0,
+              "y": 330.0,
+              "width": 240.0,
+              "height": 200.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__corner",
+                  "square-lesson__corner_area"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__corner",
+                  "square-lesson__corner_area"
+                ],
+                "cue": "emphasize"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__corner"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 850,
+            "easing": "ease_out_quart",
+            "holdAfterMs": 6500
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "missing_corner",
+            "baseRevision": 4,
+            "resultRevision": 5,
+            "baseLowLevelSceneSha256": "4e637bb916e1f6e70a4e63825bb2a28b8c0ea1f574f7a709ca3bd4aa0197e6cd",
+            "resultLowLevelSceneSha256": "59f02c49234a90c5a2b8f527df433d30c6748b472ae886e587a2894265a67170",
+            "baseSemanticSceneSha256": "2dea2a02d780744adbe57734c1d2df067efca062292a927c8544508f7307ea5a",
+            "resultSemanticSceneSha256": "b15fb881f803bd5a1be2ace7a9675f3a03181e4b98191ff8b0d4b0a4f918c17b",
+            "patchSha256": "c4a57a7231983970091bd26aa14b92f99a2b783e9b08b7f3c6327e014f26d209",
+            "receiptSha256": "622134db90e76c4423a948e1951298ef21baa14d459a8efa15301ea5c7aaaf2b",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "missing_corner",
+              "checkpointNarration": "The almost-square is missing one corner whose side lengths are both three.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 32.0,
+                  "y": 72.0,
+                  "width": 736.0,
+                  "height": 420.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 100.0,
+                  "y": 55.0,
+                  "width": 600.0,
+                  "height": 500.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 340.0,
+                  "y": 340.0,
+                  "width": 220.0,
+                  "height": 150.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 330.0,
+                  "y": 330.0,
+                  "width": 240.0,
+                  "height": 200.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "45b5f2e5b04cea30963737c31770a7e0a4358eb37ebf989339ed069843491d23",
+            "previousCertificateSha256": "b43642871b28508a7ade0ad029d750eac2541b185045637f3c450c26cc8c71e6"
+          },
+          "certificateSha256": "124145f6aebd49621f8c53ef22a61628f72ba3527b0a84e55dc1d278a5a38200"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 6,
+      "baseRevision": 5,
+      "resultRevision": 6,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_balance_and_complete",
+        "narration": "A three-by-three corner has area nine, so add nine to both sides: the right side becomes sixteen.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__corner",
+              "kind": "path",
+              "presentation": {
+                "enter": "draw",
+                "exit": "fade"
+              },
+              "points": [
+                [
+                  420.0,
+                  420.0
+                ],
+                [
+                  474.0,
+                  420.0
+                ],
+                [
+                  474.0,
+                  474.0
+                ],
+                [
+                  420.0,
+                  474.0
+                ]
+              ],
+              "closed": true,
+              "style": {
+                "stroke": "hsl(var(--amber))",
+                "strokeWidth": 3.0,
+                "opacity": 1.0,
+                "roughness": 0.0,
+                "fill": "#4A3212"
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__corner_area",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 447.0,
+              "y": 425.0,
+              "width": 34.0,
+              "height": 42.0,
+              "anchor": "middle",
+              "latex": "9",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 24.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_16",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 653.5,
+              "y": 100.0,
+              "width": 45.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "16",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_corner9",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 438.0,
+              "y": 100.0,
+              "width": 28.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "9",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_equal_main",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 472.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_equal_result",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 610.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_plus_corner",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 403.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "+",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_plus_rhs",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 541.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "+",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_rhs7",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 507.0,
+              "y": 100.0,
+              "width": 28.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "7",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_rhs9",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 576.0,
+              "y": 100.0,
+              "width": 28.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "9",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "balance_and_complete",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "balance_and_complete",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 5,
+        "semanticResultRevision": 6,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "balance_and_complete",
+          "operationTargets": [
+            "square-lesson__corner",
+            "square-lesson__corner_area",
+            "square-lesson__eq_16",
+            "square-lesson__eq_corner9",
+            "square-lesson__eq_equal_main",
+            "square-lesson__eq_equal_result",
+            "square-lesson__eq_plus_corner",
+            "square-lesson__eq_plus_rhs",
+            "square-lesson__eq_rhs7",
+            "square-lesson__eq_rhs9"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split",
+            "adjacent_rearrangement",
+            "missing_corner",
+            "balanced_completion"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "balance_and_complete",
+          "checkpointNarration": "A three-by-three corner has area nine, so add nine to both sides: the right side becomes sixteen.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 340.0,
+              "y": 340.0,
+              "width": 220.0,
+              "height": 150.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 330.0,
+              "y": 330.0,
+              "width": 240.0,
+              "height": 200.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__eq_16",
+                  "square-lesson__eq_corner9",
+                  "square-lesson__eq_equal_result",
+                  "square-lesson__eq_plus_corner",
+                  "square-lesson__eq_plus_rhs",
+                  "square-lesson__eq_rhs9"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__corner",
+                  "square-lesson__corner_area",
+                  "square-lesson__eq_equal_main",
+                  "square-lesson__eq_rhs7"
+                ],
+                "cue": "transform"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__corner",
+                  "square-lesson__eq_corner9",
+                  "square-lesson__eq_rhs9"
+                ],
+                "cue": "emphasize"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__corner",
+                  "square-lesson__x2_square"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 1250,
+            "easing": "ease_in_out",
+            "holdAfterMs": 7000
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "balance_and_complete",
+            "baseRevision": 5,
+            "resultRevision": 6,
+            "baseLowLevelSceneSha256": "59f02c49234a90c5a2b8f527df433d30c6748b472ae886e587a2894265a67170",
+            "resultLowLevelSceneSha256": "d49142d0bf3286ed95d94923de202526c7c9aaf70854c04e730d565fb87a89d3",
+            "baseSemanticSceneSha256": "b15fb881f803bd5a1be2ace7a9675f3a03181e4b98191ff8b0d4b0a4f918c17b",
+            "resultSemanticSceneSha256": "e179c9a4923a77e2dfbf320c30e7db9385efd050cfce5cb8b2911c04dc6b7674",
+            "patchSha256": "86e7ffcd59c52434e3d39361dfa24d80217c730c5ae4593df73fe808623147d5",
+            "receiptSha256": "fa614d6413399fae8da07d82c5aee2ebd6a71e72dbbab072f3fb1ffa7b1d6781",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "balance_and_complete",
+              "checkpointNarration": "A three-by-three corner has area nine, so add nine to both sides: the right side becomes sixteen.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 340.0,
+                  "y": 340.0,
+                  "width": 220.0,
+                  "height": 150.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 330.0,
+                  "y": 330.0,
+                  "width": 240.0,
+                  "height": 200.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "6bd7d1246052b851a794fc77eeb522cb6208ca44be2b9601fd4343b1e7e0d7c1",
+            "previousCertificateSha256": "124145f6aebd49621f8c53ef22a61628f72ba3527b0a84e55dc1d278a5a38200"
+          },
+          "certificateSha256": "4431ad55e04c79aed55eee9c525a2ee26641dd793bf7d5433a1b2cbb723e53d1"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 7,
+      "baseRevision": 6,
+      "resultRevision": 7,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_factor_square",
+        "narration": "The completed square factors as x plus three, squared, and equals sixteen.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_16",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 470.0,
+              "y": 100.0,
+              "width": 45.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "16",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_3x_a"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_3x_b"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_corner9"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_equal_main"
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_equal_result",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 403.5,
+              "y": 100.0,
+              "width": 25.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__eq_factor",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 300.0,
+              "y": 100.0,
+              "width": 150.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "(x+3)^2",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_plus_a"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_plus_b"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_plus_corner"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_plus_rhs"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_rhs7"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_rhs9"
+          },
+          {
+            "op": "remove",
+            "id": "square-lesson__eq_x2"
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "factor_square",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "factor_square",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 6,
+        "semanticResultRevision": 7,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "factor_square",
+          "operationTargets": [
+            "square-lesson__eq_16",
+            "square-lesson__eq_3x_a",
+            "square-lesson__eq_3x_b",
+            "square-lesson__eq_corner9",
+            "square-lesson__eq_equal_main",
+            "square-lesson__eq_equal_result",
+            "square-lesson__eq_factor",
+            "square-lesson__eq_plus_a",
+            "square-lesson__eq_plus_b",
+            "square-lesson__eq_plus_corner",
+            "square-lesson__eq_plus_rhs",
+            "square-lesson__eq_rhs7",
+            "square-lesson__eq_rhs9",
+            "square-lesson__eq_x2"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split",
+            "adjacent_rearrangement",
+            "missing_corner",
+            "balanced_completion",
+            "factorization"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "factor_square",
+          "checkpointNarration": "The completed square factors as x plus three, squared, and equals sixteen.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__eq_factor"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_3x_a",
+                  "square-lesson__eq_3x_b",
+                  "square-lesson__eq_corner9",
+                  "square-lesson__eq_equal_main",
+                  "square-lesson__eq_plus_a",
+                  "square-lesson__eq_plus_b",
+                  "square-lesson__eq_plus_corner",
+                  "square-lesson__eq_plus_rhs",
+                  "square-lesson__eq_rhs7",
+                  "square-lesson__eq_rhs9",
+                  "square-lesson__eq_x2"
+                ],
+                "cue": "exit"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_16",
+                  "square-lesson__eq_equal_result"
+                ],
+                "cue": "transform"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_factor",
+                  "square-lesson__x2_square"
+                ],
+                "cue": "emphasize"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__eq_factor"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 1100,
+            "easing": "ease_out_quint",
+            "holdAfterMs": 6500
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "factor_square",
+            "baseRevision": 6,
+            "resultRevision": 7,
+            "baseLowLevelSceneSha256": "d49142d0bf3286ed95d94923de202526c7c9aaf70854c04e730d565fb87a89d3",
+            "resultLowLevelSceneSha256": "4787c5fe3fd8443a2662481ad8dbf93f519b836e37dc45ff22c31296c8ec57e3",
+            "baseSemanticSceneSha256": "e179c9a4923a77e2dfbf320c30e7db9385efd050cfce5cb8b2911c04dc6b7674",
+            "resultSemanticSceneSha256": "ace5710db062456c9aec0fc761d783e629354ca03fe05c20846dc91616ced031",
+            "patchSha256": "fc1886ad969c8e568311c5659a0c020aa7fe13937c59bc47956eab84dae0c2ca",
+            "receiptSha256": "c13f4ca3a584617190ee0f141d59eb7b3f9b3e1536306d026f132f0c9791e42c",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "factor_square",
+              "checkpointNarration": "The completed square factors as x plus three, squared, and equals sixteen.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "5a0878becce6c87ec62e641746832260588cf85fd56f69786c94727d99158718",
+            "previousCertificateSha256": "4431ad55e04c79aed55eee9c525a2ee26641dd793bf7d5433a1b2cbb723e53d1"
+          },
+          "certificateSha256": "bf7414238b28f229e5e9ffb41aac535bf54025e010799bebc01a6e5964580574"
+        }
+      }
+    },
+    {
+      "type": "choreography_scene_checkpoint",
+      "generation": 1,
+      "attempt": 1,
+      "sequence": 8,
+      "baseRevision": 7,
+      "resultRevision": 8,
+      "patch": {
+        "v": 1,
+        "patchId": "square-lesson__cp_solve_roots",
+        "narration": "Therefore x plus three equals plus or minus four, so x is one or negative seven. The picture shows the nonnegative-length branch; the algebra recovers both roots.",
+        "operations": [
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_eq_left",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 250.0,
+              "y": 205.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_eq_right",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 540.0,
+              "y": 205.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_equal",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 375.0,
+              "y": 150.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "=",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_lhs",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 280.0,
+              "y": 150.0,
+              "width": 100.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x+3",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_neg7",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 590.0,
+              "y": 205.0,
+              "width": 50.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "-7",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_one",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 290.0,
+              "y": 205.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "1",
+              "style": {
+                "color": "hsl(var(--amber))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_or",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 390.0,
+              "y": 205.0,
+              "width": 100.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "\\text{or}",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_pm4",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 440.0,
+              "y": 150.0,
+              "width": 70.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "\\pm 4",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_x_left",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 210.0,
+              "y": 205.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          },
+          {
+            "op": "put",
+            "node": {
+              "id": "square-lesson__root_x_right",
+              "kind": "latex_token",
+              "presentation": {
+                "enter": "fade",
+                "exit": "fade"
+              },
+              "x": 500.0,
+              "y": 205.0,
+              "width": 30.0,
+              "height": 48.0,
+              "anchor": "middle",
+              "latex": "x",
+              "style": {
+                "color": "hsl(var(--chalk))",
+                "fontSize": 34.0,
+                "opacity": 1.0
+              }
+            }
+          }
+        ]
+      },
+      "semantic": {
+        "beat": {
+          "v": 2,
+          "beatId": "route-1",
+          "componentKind": "completing_square",
+          "componentId": "square-lesson",
+          "route": {
+            "intent": "advance",
+            "targetStage": "solve"
+          }
+        },
+        "checkpointId": "solve_roots",
+        "resultComponent": {
+          "kind": "completing_square",
+          "id": "square-lesson",
+          "lastMainCheckpoint": "solve_roots",
+          "cornerClarified": false
+        },
+        "semanticBaseRevision": 7,
+        "semanticResultRevision": 8,
+        "receipt": {
+          "issuer": "completing_square_verifier",
+          "componentId": "square-lesson",
+          "checkpointId": "solve_roots",
+          "operationTargets": [
+            "square-lesson__root_eq_left",
+            "square-lesson__root_eq_right",
+            "square-lesson__root_equal",
+            "square-lesson__root_lhs",
+            "square-lesson__root_neg7",
+            "square-lesson__root_one",
+            "square-lesson__root_or",
+            "square-lesson__root_pm4",
+            "square-lesson__root_x_left",
+            "square-lesson__root_x_right"
+          ],
+          "obligationCodes": [
+            "stable_id",
+            "unique_ids",
+            "board_bounds",
+            "component_ownership",
+            "patch_materialization",
+            "compatible_morph",
+            "viewport_containment",
+            "equation_identity",
+            "area_model",
+            "equal_linear_split",
+            "adjacent_rearrangement",
+            "missing_corner",
+            "balanced_completion",
+            "factorization",
+            "roots",
+            "geometry_domain"
+          ],
+          "verified": true
+        },
+        "presentation": {
+          "v": 1,
+          "checkpointId": "solve_roots",
+          "checkpointNarration": "Therefore x plus three equals plus or minus four, so x is one or negative seven. The picture shows the nonnegative-length branch; the algebra recovers both roots.",
+          "baseViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 35.0,
+              "width": 660.0,
+              "height": 530.0
+            }
+          },
+          "resultViewports": {
+            "cinematic": {
+              "v": 1,
+              "x": 0.0,
+              "y": 75.0,
+              "width": 800.0,
+              "height": 450.0
+            },
+            "compact": {
+              "v": 1,
+              "x": 70.0,
+              "y": 45.0,
+              "width": 660.0,
+              "height": 520.0
+            }
+          },
+          "transientFree": true
+        },
+        "choreography": {
+          "v": 1,
+          "phase": {
+            "cues": [
+              {
+                "targetIds": [
+                  "square-lesson__root_eq_left",
+                  "square-lesson__root_eq_right",
+                  "square-lesson__root_equal",
+                  "square-lesson__root_lhs",
+                  "square-lesson__root_neg7",
+                  "square-lesson__root_one",
+                  "square-lesson__root_or",
+                  "square-lesson__root_pm4",
+                  "square-lesson__root_x_left",
+                  "square-lesson__root_x_right"
+                ],
+                "cue": "enter"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__root_neg7",
+                  "square-lesson__root_one"
+                ],
+                "cue": "emphasize"
+              },
+              {
+                "targetIds": [
+                  "square-lesson__root_neg7",
+                  "square-lesson__root_one"
+                ],
+                "cue": "focus"
+              }
+            ],
+            "durationMs": 1200,
+            "easing": "ease_out_quart",
+            "holdAfterMs": 7800
+          }
+        },
+        "certificate": {
+          "body": {
+            "v": 2,
+            "issuer": "semantic_compiler",
+            "compilerVersion": "murmur.completing_square_choreography.v1",
+            "canonicalization": "murmur-json-v1",
+            "hashAlgorithm": "sha256",
+            "beatId": "route-1",
+            "routedBeatSha256": "41cc7d4e2c7a4f8af98f0ea5b9557f218b7f32f917f70bec1dad99c03a2e07b3",
+            "componentKind": "completing_square",
+            "componentId": "square-lesson",
+            "checkpointId": "solve_roots",
+            "baseRevision": 7,
+            "resultRevision": 8,
+            "baseLowLevelSceneSha256": "4787c5fe3fd8443a2662481ad8dbf93f519b836e37dc45ff22c31296c8ec57e3",
+            "resultLowLevelSceneSha256": "1ed86c1a102490435fd640c5d65a2ef82a6b2f11ed6678397ece24bedc988a31",
+            "baseSemanticSceneSha256": "ace5710db062456c9aec0fc761d783e629354ca03fe05c20846dc91616ced031",
+            "resultSemanticSceneSha256": "d2a5a18f1f9e0a7ee17aa1965576e82bd217b46196bf6d180941b3adee442ae3",
+            "patchSha256": "fe8e3fbe988a70ad8f8d8c75473855cfbe91d74c0631122f79608534e9bf6e00",
+            "receiptSha256": "852133a9ed52bd8e6233606578d7d07fd72ee7d1313ab69dda69dc9041894482",
+            "presentationCheckpoint": {
+              "v": 1,
+              "checkpointId": "solve_roots",
+              "checkpointNarration": "Therefore x plus three equals plus or minus four, so x is one or negative seven. The picture shows the nonnegative-length branch; the algebra recovers both roots.",
+              "baseViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 35.0,
+                  "width": 660.0,
+                  "height": 530.0
+                }
+              },
+              "resultViewports": {
+                "cinematic": {
+                  "v": 1,
+                  "x": 0.0,
+                  "y": 75.0,
+                  "width": 800.0,
+                  "height": 450.0
+                },
+                "compact": {
+                  "v": 1,
+                  "x": 70.0,
+                  "y": 45.0,
+                  "width": 660.0,
+                  "height": 520.0
+                }
+              },
+              "transientFree": true
+            },
+            "choreographySha256": "68a53252076a1a62dc8954f89ffc8a7bef67e06bf106d4ef1095f806ca8a55d2",
+            "previousCertificateSha256": "bf7414238b28f229e5e9ffb41aac535bf54025e010799bebc01a6e5964580574"
+          },
+          "certificateSha256": "5a4c8ba7f5136d2019c296481541ff877963fd6282084822f9101dda747c7a2c"
+        }
+      }
+    },
+    {
+      "type": "scene_stream_completed",
+      "generation": 1,
+      "finalRevision": 8,
+      "patchCount": 8,
+      "firstPatchMs": 0.0,
+      "totalMs": 0.0,
+      "repaired": false
+    }
+  ]
+}
