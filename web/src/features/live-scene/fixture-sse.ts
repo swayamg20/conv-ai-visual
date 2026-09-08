@@ -7,6 +7,8 @@ export interface FixtureSseResponseOptions {
   readonly chunkDelayMs: number;
   readonly idPrefix: string;
   readonly ignoreAbort?: boolean;
+  /** Keep the decoded event source pending until the owning runtime interrupts it. */
+  readonly holdOpenUntilAbort?: boolean;
 }
 
 function abortException(): Error {
@@ -62,6 +64,15 @@ function splitFrame(frame: Uint8Array): readonly Uint8Array[] {
   return chunks;
 }
 
+function waitForAbort(signal: AbortSignal): Promise<never> {
+  if (signal.aborted) return Promise.reject(abortException());
+  return new Promise((_, reject) => {
+    signal.addEventListener("abort", () => reject(abortException()), {
+      once: true,
+    });
+  });
+}
+
 /**
  * Exercise the production byte-stream decoder with deterministic awkward SSE
  * and UTF-8 chunk boundaries, without opening a network connection.
@@ -97,6 +108,12 @@ export function createFixtureSseResponse<Event extends FixtureSseEvent>(
               controller.enqueue(chunk);
               await wait(options.chunkDelayMs, signal, ignoreAbort);
             }
+          }
+          if (options.holdOpenUntilAbort) {
+            if (ignoreAbort) {
+              throw new Error("A stale fixture cannot hold its stream open");
+            }
+            await waitForAbort(signal);
           }
           if (!stopped) {
             stopped = true;
