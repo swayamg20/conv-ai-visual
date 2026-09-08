@@ -31,6 +31,7 @@ import type {
   TeachingSequence,
   TeachingStep,
 } from "@/features/canvas/types";
+import { createChoreographyExecutor } from "@/features/live-scene/choreography-executor";
 import { createSvgMotionExecutor } from "@/features/live-scene/svg-motion-executor";
 import { createSvgNodeReconciler } from "@/features/live-scene/svg-node-reconciler";
 import { useCanvasViewport } from "@/features/canvas/viewport";
@@ -66,6 +67,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       className,
       showGrid = true,
       viewportInteractionLocked = false,
+      reducedMotion = false,
     },
     ref,
   ) => {
@@ -168,12 +170,32 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       () => createSvgMotionExecutor(sceneRendererContext),
       [sceneRendererContext],
     );
+    const choreographyExecutor = useMemo(
+      () =>
+        createChoreographyExecutor(
+          {
+            ...sceneRendererContext,
+            readViewport,
+            renderViewportFrame,
+            materializeViewport,
+          },
+          { reducedMotion },
+        ),
+      [
+        materializeViewport,
+        readViewport,
+        reducedMotion,
+        renderViewportFrame,
+        sceneRendererContext,
+      ],
+    );
 
     useEffect(
       () => () => {
         sceneMotionExecutor.dispose();
+        choreographyExecutor.dispose();
       },
-      [sceneMotionExecutor],
+      [choreographyExecutor, sceneMotionExecutor],
     );
 
     const renderFunctionPlot = useCallback(
@@ -489,6 +511,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const playMotionPlan = sceneMotionExecutor.play;
     const emphasizeElement = sceneMotionExecutor.emphasize;
     const cancelMotion = useCallback(() => {
+      choreographyExecutor.cancel();
       sceneMotionExecutor.cancel();
       cancelViewportAnimation();
       sequenceQueueRef.current.forEach((timeline) => timeline.kill());
@@ -501,7 +524,17 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       if (!svg) return;
       const canvasTargets = [svg, ...Array.from(svg.querySelectorAll("*"))];
       gsap.getTweensOf(canvasTargets).forEach((animation) => animation.kill());
-    }, [cancelViewportAnimation, sceneMotionExecutor]);
+    }, [cancelViewportAnimation, choreographyExecutor, sceneMotionExecutor]);
+
+    const playCheckpointChoreography = useCallback<
+      SVGCanvasHandle["playCheckpointChoreography"]
+    >(
+      (plan, observer) => {
+        cancelMotion();
+        return choreographyExecutor.play(plan, observer);
+      },
+      [cancelMotion, choreographyExecutor],
+    );
 
     const materializeScene = useCallback(
       (scene: Parameters<SVGCanvasHandle["materializeScene"]>[0]) => {
@@ -545,6 +578,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         createPausedSequence,
         renderFunctionPlot,
         playMotionPlan,
+        playCheckpointChoreography,
         readViewport,
         animateViewport,
         renderViewportFrame,
@@ -573,6 +607,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         materializeScene,
         materializeViewport,
         panTo,
+        playCheckpointChoreography,
         playMotionPlan,
         readViewport,
         render,

@@ -262,7 +262,7 @@ function planned(
             : step.type === "update",
       )
       .map((step) => step.id);
-  const cues: ChoreographyCueV1[] = [
+  const candidates: ChoreographyCueV1[] = [
     { cue: "enter", targetIds: cue("enter") },
     { cue: "exit", targetIds: cue("exit") },
     { cue: "transform", targetIds: cue("transform") },
@@ -272,6 +272,7 @@ function planned(
       targetIds: target.nodes.length ? [target.nodes[0].id] : [],
     },
   ];
+  const cues = candidates.filter((candidate) => candidate.targetIds.length > 0);
   return Object.freeze({
     targetScene: target,
     motionPlan,
@@ -814,6 +815,32 @@ describe("checkpoint choreography executor", () => {
     expect(setup.elements.get("new")?.data).toEqual(target.nodes[1]);
     expect(setup.readViewport()).toEqual(RESULT_VIEWPORT);
     expectClean(setup.svg);
+  });
+
+  it("reports only the certified closed cue order and presentation milestones", async () => {
+    const base = scene(35, [textNode("move", 20)]);
+    const target = scene(36, [textNode("move", 200), textNode("new", 320)]);
+    const setup = harness({ barrier: () => Promise.resolve() });
+    setup.seed(base);
+    const signals: unknown[] = [];
+    const timelineSpy = vi.spyOn(gsap, "timeline");
+    const playback = setup.executor.play(planned(base, target), (signal) => {
+      signals.push(signal);
+    });
+    const timeline = capturedTimeline(timelineSpy);
+    timeline.progress(1, false);
+
+    await expect(playback.finished).resolves.toEqual({
+      status: "completed",
+      firstCuePresented: true,
+    });
+    expect(signals).toEqual([
+      { type: "cueStarted", cue: "enter" },
+      { type: "cueStarted", cue: "transform" },
+      { type: "cueStarted", cue: "focus" },
+      { type: "firstCuePresented" },
+      { type: "checkpointSettled", settlement: "completed" },
+    ]);
   });
 
   it("settles a token morph and emphasis when cancelled during the reading hold", async () => {

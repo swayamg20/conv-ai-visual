@@ -3,10 +3,15 @@
 import { act, createRef } from "react";
 import { createRoot } from "react-dom/client";
 import { gsap } from "gsap";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { SVGCanvas } from "@/components/svg-canvas";
-import { createSceneState, planSceneTransition } from "@/lib/live-scene";
+import type { ChoreographyExecutorSignal } from "@/features/live-scene/choreography-executor";
+import {
+  createSceneState,
+  planSceneTransition,
+  type PlannedCheckpointChoreography,
+} from "@/lib/live-scene";
 
 import type { SVGCanvasHandle } from "./types";
 
@@ -16,6 +21,7 @@ const actEnvironment = globalThis as typeof globalThis & {
 actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   document.body.replaceChildren();
 });
 
@@ -948,6 +954,121 @@ describe("SVGCanvas", () => {
     });
     act(() => canvas.current?.materializeViewport(certifiedPose));
     expect(canvas.current?.readViewport()).toEqual(certifiedPose);
+
+    await act(async () => root.unmount());
+  });
+
+  it("owns verified checkpoint choreography through one narrow canvas handle", async () => {
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      (callback: FrameRequestCallback): number => {
+        queueMicrotask(() => callback(performance.now()));
+        return 1;
+      },
+    );
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas
+          ref={canvas}
+          width={320}
+          height={220}
+          showGrid={false}
+          viewportInteractionLocked
+          reducedMotion
+        />,
+      );
+    });
+
+    const base = createSceneState({ revision: 0, nodes: [] });
+    const target = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "square-lesson__equation",
+          kind: "text",
+          x: 80,
+          y: 60,
+          text: "x² + 6x = 7",
+          presentation: { enter: "fade", exit: "fade" },
+          style: {
+            color: "#ffffff",
+            fontSize: 22,
+            opacity: 1,
+            anchor: "start",
+          },
+        },
+      ],
+    });
+    const resultViewport = Object.freeze({
+      v: 1 as const,
+      x: 20,
+      y: 20,
+      width: 280,
+      height: 180,
+    });
+    const plan: PlannedCheckpointChoreography = Object.freeze({
+      targetScene: target,
+      motionPlan: planSceneTransition(base, target),
+      baseViewport: Object.freeze({
+        v: 1,
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 220,
+      }),
+      resultViewport,
+      choreographyPlan: Object.freeze({
+        v: 1,
+        phase: Object.freeze({
+          cues: Object.freeze([
+            Object.freeze({
+              cue: "enter" as const,
+              targetIds: Object.freeze(["square-lesson__equation"]),
+            }),
+            Object.freeze({
+              cue: "focus" as const,
+              targetIds: Object.freeze(["square-lesson__equation"]),
+            }),
+          ]),
+          durationMs: 800,
+          easing: "ease_out_quart",
+          holdAfterMs: 0,
+        }),
+      }),
+    });
+    const signals: ChoreographyExecutorSignal[] = [];
+    let playback: ReturnType<
+      SVGCanvasHandle["playCheckpointChoreography"]
+    > | null = null;
+
+    await act(async () => {
+      playback = canvas.current!.playCheckpointChoreography(plan, (signal) => {
+        signals.push(signal);
+      });
+      await playback.finished;
+    });
+
+    expect(playback).not.toBeNull();
+    await expect(playback!.finished).resolves.toEqual({
+      status: "completed",
+      firstCuePresented: true,
+    });
+    expect(signals).toEqual([
+      { type: "cueStarted", cue: "enter" },
+      { type: "cueStarted", cue: "focus" },
+      { type: "firstCuePresented" },
+      { type: "checkpointSettled", settlement: "completed" },
+    ]);
+    expect(
+      host.querySelector("[data-element-id='square-lesson__equation'] text")
+        ?.textContent,
+    ).toBe("x² + 6x = 7");
+    expect(canvas.current?.readViewport()).toEqual(resultViewport);
 
     await act(async () => root.unmount());
   });

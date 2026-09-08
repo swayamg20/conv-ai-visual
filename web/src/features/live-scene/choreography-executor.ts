@@ -3,6 +3,7 @@ import { gsap } from "gsap";
 import type { SVGElementData } from "@/features/canvas/types";
 import {
   createSceneState,
+  type ChoreographyCueKind,
   type PlannedCheckpointChoreography,
   type SceneNode,
   type SceneState,
@@ -35,6 +36,22 @@ export interface ChoreographyPlayback {
   cancel(): void;
 }
 
+export type ChoreographyExecutorSignal =
+  | {
+      readonly type: "cueStarted";
+      readonly cue: ChoreographyCueKind;
+    }
+  | { readonly type: "firstCuePresented" }
+  | {
+      readonly type: "checkpointSettled";
+      readonly settlement: "completed" | "cancelled_to_checkpoint";
+    };
+
+/** Receives only closed choreography vocabulary, never model-authored text or IDs. */
+export type ChoreographyExecutorObserver = (
+  signal: ChoreographyExecutorSignal,
+) => void;
+
 export type ChoreographyPresentationBarrier = () => Promise<void>;
 
 export interface ChoreographyExecutorOptions {
@@ -50,7 +67,10 @@ export interface ChoreographyExecutorContext extends SvgNodeReconcilerContext {
 }
 
 export interface ChoreographyExecutor {
-  play(plan: PlannedCheckpointChoreography): ChoreographyPlayback;
+  play(
+    plan: PlannedCheckpointChoreography,
+    observer?: ChoreographyExecutorObserver,
+  ): ChoreographyPlayback;
   cancel(): void;
   dispose(): void;
 }
@@ -197,7 +217,10 @@ export function createChoreographyExecutor(
   let active: ChoreographyPlayback | null = null;
   let disposed = false;
 
-  const play = (plan: PlannedCheckpointChoreography): ChoreographyPlayback => {
+  const play = (
+    plan: PlannedCheckpointChoreography,
+    observer?: ChoreographyExecutorObserver,
+  ): ChoreographyPlayback => {
     if (disposed) throw new Error("The choreography executor is disposed");
     if (active) throw new Error("A checkpoint choreography is already active");
 
@@ -313,6 +336,9 @@ export function createChoreographyExecutor(
         .then(() => {
           if (terminalOutcome || epoch !== barrierEpoch) return;
           if (status === "cancelled_before_presented") resolveFirstCue(false);
+          else {
+            observer?.({ type: "checkpointSettled", settlement: status });
+          }
           finish(status);
         })
         .catch((error: unknown) => {
@@ -340,6 +366,7 @@ export function createChoreographyExecutor(
           if (settling || terminalOutcome || epoch !== barrierEpoch) return;
           firstCuePresented = true;
           resolveFirstCue(true);
+          observer?.({ type: "firstCuePresented" });
           completeIfReady();
         })
         .catch((error: unknown) => {
@@ -372,13 +399,21 @@ export function createChoreographyExecutor(
       baseScene = validateAndReadBaseScene(context, plan);
       const phase = plan.choreographyPlan.phase;
       const duration = options.reducedMotion ? 0 : phase.durationMs / 1_000;
+      const emitCueStarts = () => {
+        for (const cue of phase.cues) {
+          observer?.({ type: "cueStarted", cue: cue.cue });
+        }
+      };
 
       if (options.reducedMotion) {
+        emitCueStarts();
+        materializeExact(plan.targetScene, plan.resultViewport);
+        crossFirstPresentationBoundary();
+      } else {
         timeline.call(
           () => {
             try {
-              materializeExact(plan.targetScene, plan.resultViewport);
-              crossFirstPresentationBoundary();
+              emitCueStarts();
             } catch (error) {
               fail(error);
             }
@@ -386,7 +421,6 @@ export function createChoreographyExecutor(
           [],
           0,
         );
-      } else {
         appendChoreographyPhaseTweens({
           timeline,
           reconciler,
@@ -412,15 +446,17 @@ export function createChoreographyExecutor(
         phaseFinished = true;
         completeIfReady();
       });
-      timeline.play(0);
-      // GSAP normally renders on the next ticker. Render through the first
-      // presentation marker now so the barrier can never race a hidden enter.
-      timeline.totalTime(
-        options.reducedMotion
-          ? 0.000001
-          : Math.min(duration, 1 / 60) + 0.000001,
-        false,
-      );
+      if (options.reducedMotion && phase.holdAfterMs === 0) {
+        phaseFinished = true;
+        completeIfReady();
+      } else {
+        timeline.play(0);
+        if (!options.reducedMotion) {
+          // GSAP normally renders on the next ticker. Render through the first
+          // presentation marker now so the barrier cannot race a hidden enter.
+          timeline.totalTime(Math.min(duration, 1 / 60) + 0.000001, false);
+        }
+      }
     } catch (error) {
       fail(error);
     }

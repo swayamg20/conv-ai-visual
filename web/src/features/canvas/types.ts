@@ -1,6 +1,14 @@
 import type { gsap } from "gsap";
 
-import type { MotionPlan, SceneState } from "@/lib/live-scene";
+import type {
+  ChoreographyExecutorObserver,
+  ChoreographyPlayback,
+} from "@/features/live-scene/choreography-executor";
+import type {
+  MotionPlan,
+  PlannedCheckpointChoreography,
+  SceneState,
+} from "@/lib/live-scene";
 import type {
   ChoreographyEasing,
   ViewportPoseV1,
@@ -172,6 +180,11 @@ export interface SVGCanvasHandle {
     plan: MotionPlan,
     options?: MotionPlaybackOptions,
   ): MotionPlayback;
+  /** Execute one verified checkpoint through the closed choreography engine. */
+  playCheckpointChoreography(
+    plan: PlannedCheckpointChoreography,
+    observer?: ChoreographyExecutorObserver,
+  ): ChoreographyPlayback;
   /** Return the exact viewBox currently rendered, including during a tween. */
   readViewport(): ViewportPoseV1;
   /** Animate only through the closed choreography camera vocabulary. */
@@ -207,6 +220,8 @@ export interface SVGCanvasProps {
   showGrid?: boolean;
   /** Disable manual pan and zoom for a certified choreography session. */
   viewportInteractionLocked?: boolean;
+  /** Preserve every checkpoint while eliminating spatial travel and tweening. */
+  reducedMotion?: boolean;
 }
 
 export interface CanvasPalette {
