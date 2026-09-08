@@ -11,6 +11,7 @@ import {
   type SemanticSceneState,
 } from "@/lib/live-scene";
 
+import { createFixtureSseResponse } from "./fixture-sse";
 import {
   consumeSemanticSceneStreamResponse,
   decodeSemanticSceneStreamEvent,
@@ -32,9 +33,7 @@ export interface SemanticSceneFixtureRunnerOptions {
   readonly chunkDelayMs?: number;
 }
 
-export type SemanticSceneFixtureErrorCode =
-  | "invalid_fixture"
-  | "base_mismatch";
+export type SemanticSceneFixtureErrorCode = "invalid_fixture" | "base_mismatch";
 
 export class SemanticSceneFixtureError extends Error {
   readonly code: SemanticSceneFixtureErrorCode;
@@ -62,7 +61,7 @@ type UnknownRecord = Record<string, unknown>;
 
 function fixtureFailure(
   code: SemanticSceneFixtureErrorCode,
-  message: string
+  message: string,
 ): never {
   throw new SemanticSceneFixtureError(code, message);
 }
@@ -81,7 +80,7 @@ function record(value: unknown, field: string): UnknownRecord {
 function requireExactKeys(
   value: UnknownRecord,
   expected: readonly string[],
-  field: string
+  field: string,
 ): void {
   const actual = Object.keys(value).sort();
   const required = [...expected].sort();
@@ -91,7 +90,7 @@ function requireExactKeys(
   ) {
     fixtureFailure(
       "invalid_fixture",
-      `${field} must contain exactly ${required.join(", ")}`
+      `${field} must contain exactly ${required.join(", ")}`,
     );
   }
 }
@@ -128,7 +127,7 @@ function canonicalEqual(left: unknown, right: unknown): boolean {
     leftKeys.every(
       (key, index) =>
         key === rightKeys[index] &&
-        canonicalEqual(leftRecord[key], rightRecord[key])
+        canonicalEqual(leftRecord[key], rightRecord[key]),
     )
   );
 }
@@ -138,7 +137,7 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
   requireExactKeys(
     input,
     ["v", "fixtureId", "componentId", "generation", "baseRevision", "events"],
-    "semantic fixture transcript"
+    "semantic fixture transcript",
   );
   if (
     input.v !== 1 ||
@@ -151,7 +150,7 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
   ) {
     fixtureFailure(
       "invalid_fixture",
-      "semantic fixture transcript identity, base, or atom count is invalid"
+      "semantic fixture transcript identity, base, or atom count is invalid",
     );
   }
 
@@ -170,12 +169,11 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
     } catch (error) {
       fixtureFailure(
         "invalid_fixture",
-        `semantic fixture atom ${index + 1} is invalid: ${errorMessage(error)}`
+        `semantic fixture atom ${index + 1} is invalid: ${errorMessage(error)}`,
       );
     }
     const beatIndex = Math.floor(index / PYTHAGOREAN_IDENTITY_ROLE_COUNT);
-    const expectedSequence =
-      (index % PYTHAGOREAN_IDENTITY_ROLE_COUNT) + 1;
+    const expectedSequence = (index % PYTHAGOREAN_IDENTITY_ROLE_COUNT) + 1;
     const expectedStage = beatIndex === 0 ? "identity" : "proof";
     if (
       decoded.type !== "semantic_scene_patch" ||
@@ -191,7 +189,7 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
     ) {
       fixtureFailure(
         "invalid_fixture",
-        `semantic fixture atom ${index + 1} does not occupy its exact golden prefix position`
+        `semantic fixture atom ${index + 1} does not occupy its exact golden prefix position`,
       );
     }
 
@@ -202,7 +200,7 @@ function decodeGoldenTranscript(value: unknown): GoldenTranscript {
     } catch (error) {
       fixtureFailure(
         "invalid_fixture",
-        `semantic fixture atom ${index + 1} cannot extend the golden prefix: ${errorMessage(error)}`
+        `semantic fixture atom ${index + 1} cannot extend the golden prefix: ${errorMessage(error)}`,
       );
     }
     events.push(decoded);
@@ -234,7 +232,7 @@ function exactGoldenPrefix(request: SemanticSceneStreamRequest): {
   } catch (error) {
     fixtureFailure(
       "base_mismatch",
-      `fixture request base is invalid: ${errorMessage(error)}`
+      `fixture request base is invalid: ${errorMessage(error)}`,
     );
   }
 
@@ -244,13 +242,13 @@ function exactGoldenPrefix(request: SemanticSceneStreamRequest): {
   ) {
     fixtureFailure(
       "base_mismatch",
-      "fixture request base must already be a canonical paired scene snapshot"
+      "fixture request base must already be a canonical paired scene snapshot",
     );
   }
   if (scene.revision !== semanticScene.revision) {
     fixtureFailure(
       "base_mismatch",
-      "fixture request low-level and semantic revisions must match"
+      "fixture request low-level and semantic revisions must match",
     );
   }
 
@@ -263,7 +261,7 @@ function exactGoldenPrefix(request: SemanticSceneStreamRequest): {
   ) {
     fixtureFailure(
       "base_mismatch",
-      "fixture request must equal one exact low-level and semantic golden prefix"
+      "fixture request must equal one exact low-level and semantic golden prefix",
     );
   }
   return { prefix, nextAtomIndex };
@@ -276,7 +274,7 @@ function decodedLifecycleEvent(value: unknown): SemanticSceneStreamEvent {
 function adaptedAtom(
   source: SemanticScenePatchEvent,
   generation: number,
-  sequence: number
+  sequence: number,
 ): SemanticScenePatchEvent {
   // generation/attempt/stream sequence are transport envelope fields, not
   // compiler-certificate body fields. All patch, semantic, revision, receipt,
@@ -288,7 +286,10 @@ function adaptedAtom(
     sequence,
   });
   if (decoded.type !== "semantic_scene_patch") {
-    return fixtureFailure("invalid_fixture", "adapted fixture atom changed discriminator");
+    return fixtureFailure(
+      "invalid_fixture",
+      "adapted fixture atom changed discriminator",
+    );
   }
   return decoded;
 }
@@ -300,7 +301,7 @@ function adaptedAtom(
  * one exact paired prefix previously derived from this checked-in artifact.
  */
 export function createSemanticSceneFixtureEvents(
-  request: SemanticSceneStreamRequest
+  request: SemanticSceneStreamRequest,
 ): readonly SemanticSceneStreamEvent[] {
   const { nextAtomIndex } = exactGoldenPrefix(request);
   const started = decodedLifecycleEvent({
@@ -315,7 +316,7 @@ export function createSemanticSceneFixtureEvents(
       : GOLDEN_TRANSCRIPT.events.length;
   const sourceSuffix = GOLDEN_TRANSCRIPT.events.slice(
     nextAtomIndex,
-    turnEndIndex
+    turnEndIndex,
   );
 
   // The production lifecycle contract requires at least one patch before a
@@ -329,7 +330,8 @@ export function createSemanticSceneFixtureEvents(
         generation: request.generation,
         attempt: 1,
         code: "semantic_fixture_complete",
-        message: "The verified fixture is already fully presented. Reset to teach it again.",
+        message:
+          "The verified fixture is already fully presented. Reset to teach it again.",
         lastAcceptedRevision: request.baseScene.revision,
         retryable: false,
       }),
@@ -337,7 +339,7 @@ export function createSemanticSceneFixtureEvents(
   }
 
   const atoms = sourceSuffix.map((source, index) =>
-    adaptedAtom(source, request.generation, index + 1)
+    adaptedAtom(source, request.generation, index + 1),
   );
   return Object.freeze([
     started,
@@ -354,131 +356,25 @@ export function createSemanticSceneFixtureEvents(
   ]);
 }
 
-function abortException(): Error {
-  if (typeof DOMException !== "undefined") {
-    return new DOMException("Aborted", "AbortError");
-  }
-  return Object.assign(new Error("Aborted"), { name: "AbortError" });
-}
-
-function wait(
-  milliseconds: number,
-  signal: AbortSignal,
-  ignoreAbort: boolean
-): Promise<void> {
-  if (!ignoreAbort && signal.aborted) return Promise.reject(abortException());
-  if (milliseconds <= 0) return Promise.resolve();
-  if (ignoreAbort) {
-    return new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
-  }
-  return new Promise((resolve, reject) => {
-    const timer = globalThis.setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, milliseconds);
-    const onAbort = () => {
-      globalThis.clearTimeout(timer);
-      reject(abortException());
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-function splitFrame(frame: Uint8Array): readonly Uint8Array[] {
-  const offsets = [
-    1,
-    13,
-    Math.max(14, Math.floor(frame.length * 0.53)),
-    frame.length - 3,
-  ]
-    .filter(
-      (offset, index, values) =>
-        offset > 0 && offset < frame.length && values.indexOf(offset) === index
-    )
-    .sort((left, right) => left - right);
-  const chunks: Uint8Array[] = [];
-  let start = 0;
-  for (const end of [...offsets, frame.length]) {
-    chunks.push(frame.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
-
-function fixtureResponse(
-  events: readonly SemanticSceneStreamEvent[],
-  signal: AbortSignal,
-  options: Required<
-    Pick<SemanticSceneFixtureRunnerOptions, "eventDelayMs" | "chunkDelayMs">
-  >,
-  ignoreAbort: boolean
-): Response {
-  const encoder = new TextEncoder();
-  let stopped = false;
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      void (async () => {
-        try {
-          for (const [index, event] of events.entries()) {
-            await wait(
-              index === 0 ? Math.min(options.eventDelayMs, 80) : options.eventDelayMs,
-              signal,
-              ignoreAbort
-            );
-            if (stopped) return;
-            if (!ignoreAbort && signal.aborted) throw abortException();
-            const frame = encoder.encode(
-              `id: semantic-fixture-${index + 1}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
-            );
-            for (const chunk of splitFrame(frame)) {
-              if (stopped) return;
-              if (!ignoreAbort && signal.aborted) throw abortException();
-              controller.enqueue(chunk);
-              await wait(options.chunkDelayMs, signal, ignoreAbort);
-            }
-          }
-          if (!stopped) {
-            stopped = true;
-            controller.close();
-          }
-        } catch (error) {
-          if (!stopped) {
-            stopped = true;
-            controller.error(error);
-          }
-        }
-      })();
-    },
-    cancel() {
-      stopped = true;
-    },
-  });
-
-  return new Response(body, {
-    status: 200,
-    headers: { "Content-Type": "text/event-stream; charset=utf-8" },
-  });
-}
-
 /**
  * Build a zero-network semantic runner that still traverses the production
  * UTF-8/SSE decoder. `stale` deliberately ignores AbortSignal so runtime token
  * rejection can be exercised without a provider, Firebase, or fetch call.
  */
 export function createSemanticSceneFixtureRunner(
-  options: SemanticSceneFixtureRunnerOptions = {}
+  options: SemanticSceneFixtureRunnerOptions = {},
 ): SemanticSceneStreamRunner {
   const mode = options.mode ?? "normal";
   const eventDelayMs = options.eventDelayMs ?? (mode === "stale" ? 520 : 220);
   const chunkDelayMs = options.chunkDelayMs ?? 3;
   return async ({ request, signal, onEvent }) => {
     const events = createSemanticSceneFixtureEvents(request);
-    const response = fixtureResponse(
-      events,
-      signal,
-      { eventDelayMs, chunkDelayMs },
-      mode === "stale"
-    );
+    const response = createFixtureSseResponse(events, signal, {
+      eventDelayMs,
+      chunkDelayMs,
+      idPrefix: "semantic-fixture",
+      ignoreAbort: mode === "stale",
+    });
     await consumeSemanticSceneStreamResponse(response, onEvent);
   };
 }

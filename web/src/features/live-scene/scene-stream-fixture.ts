@@ -1,6 +1,10 @@
 import type { SceneNode } from "@/lib/live-scene";
-import type { ScenePatchEvent, ScenePatchOperation } from "@/lib/live-scene/patch";
+import type {
+  ScenePatchEvent,
+  ScenePatchOperation,
+} from "@/lib/live-scene/patch";
 
+import { createFixtureSseResponse } from "./fixture-sse";
 import {
   consumeSceneStreamResponse,
   type SceneStreamEvent,
@@ -26,14 +30,21 @@ export interface SceneFixtureRunnerOptions {
 }
 
 const PRESENTATION = Object.freeze({ enter: "draw", exit: "fade" } as const);
-const TEXT_PRESENTATION = Object.freeze({ enter: "fade", exit: "fade" } as const);
+const TEXT_PRESENTATION = Object.freeze({
+  enter: "fade",
+  exit: "fade",
+} as const);
 const CHALK = "hsl(var(--chalk))";
 const CHALK_SOFT = "hsl(var(--chalk-soft))";
 const AMBER = "hsl(var(--amber))";
 const LAVENDER = "hsl(var(--lavender))";
 const SAGE = "hsl(var(--sage))";
 
-function line(id: string, start: readonly [number, number], end: readonly [number, number]): SceneNode {
+function line(
+  id: string,
+  start: readonly [number, number],
+  end: readonly [number, number],
+): SceneNode {
   return Object.freeze({
     id,
     kind: "line",
@@ -42,11 +53,20 @@ function line(id: string, start: readonly [number, number], end: readonly [numbe
       readonly [number, number],
       readonly [number, number],
     ],
-    style: Object.freeze({ stroke: CHALK, strokeWidth: 4, opacity: 1, roughness: 1.4 }),
+    style: Object.freeze({
+      stroke: CHALK,
+      strokeWidth: 4,
+      opacity: 1,
+      roughness: 1.4,
+    }),
   });
 }
 
-function path(id: string, points: readonly (readonly [number, number])[], color = AMBER): SceneNode {
+function path(
+  id: string,
+  points: readonly (readonly [number, number])[],
+  color = AMBER,
+): SceneNode {
   return Object.freeze({
     id,
     kind: "path",
@@ -68,7 +88,11 @@ function text(
   x: number,
   y: number,
   value: string,
-  options: { readonly color?: string; readonly fontSize?: number; readonly anchor?: "start" | "middle" | "end" } = {}
+  options: {
+    readonly color?: string;
+    readonly fontSize?: number;
+    readonly anchor?: "start" | "middle" | "end";
+  } = {},
 ): SceneNode {
   return Object.freeze({
     id,
@@ -98,7 +122,13 @@ function latex(id: string, x: number, y: number, value: string): SceneNode {
   });
 }
 
-function rect(id: string, x: number, y: number, width: number, height: number): SceneNode {
+function rect(
+  id: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): SceneNode {
   return Object.freeze({
     id,
     kind: "rect",
@@ -126,7 +156,7 @@ function patch(
   attempt: number,
   sequence: number,
   operations: readonly ScenePatchOperation[],
-  narration: string
+  narration: string,
 ): ScenePatchEvent {
   const baseRevision = request.baseScene.revision + sequence - 1;
   return Object.freeze({
@@ -145,7 +175,10 @@ function patch(
   });
 }
 
-function authoredPatches(request: SceneStreamRequest, attempt: number): readonly ScenePatchEvent[] {
+function authoredPatches(
+  request: SceneStreamRequest,
+  attempt: number,
+): readonly ScenePatchEvent[] {
   const suffix = `G${request.generation}`;
   return Object.freeze([
     patch(
@@ -153,24 +186,53 @@ function authoredPatches(request: SceneStreamRequest, attempt: number): readonly
       attempt,
       1,
       [
-        put(text(`title${suffix}`, 400, 64, "Why does a² + b² = c²?", { fontSize: 30, anchor: "middle" })),
+        put(
+          text(`title${suffix}`, 400, 64, "Why does a² + b² = c²?", {
+            fontSize: 30,
+            anchor: "middle",
+          }),
+        ),
         put(line(`legA${suffix}`, [190, 450], [520, 450])),
         put(line(`legB${suffix}`, [520, 450], [520, 170])),
         put(line(`hypotenuse${suffix}`, [190, 450], [520, 170])),
       ],
-      "First, I’m keeping only the right triangle on the board."
+      "First, I’m keeping only the right triangle on the board.",
     ),
     patch(
       request,
       attempt,
       2,
       [
-        put(path(`rightAngle${suffix}`, [[488, 450], [488, 418], [520, 418]], AMBER)),
-        put(text(`labelA${suffix}`, 350, 482, "a", { color: SAGE, fontSize: 27, anchor: "middle" })),
-        put(text(`labelB${suffix}`, 550, 320, "b", { color: SAGE, fontSize: 27 })),
-        put(text(`labelC${suffix}`, 337, 286, "c", { color: LAVENDER, fontSize: 27, anchor: "middle" })),
+        put(
+          path(
+            `rightAngle${suffix}`,
+            [
+              [488, 450],
+              [488, 418],
+              [520, 418],
+            ],
+            AMBER,
+          ),
+        ),
+        put(
+          text(`labelA${suffix}`, 350, 482, "a", {
+            color: SAGE,
+            fontSize: 27,
+            anchor: "middle",
+          }),
+        ),
+        put(
+          text(`labelB${suffix}`, 550, 320, "b", { color: SAGE, fontSize: 27 }),
+        ),
+        put(
+          text(`labelC${suffix}`, 337, 286, "c", {
+            color: LAVENDER,
+            fontSize: 27,
+            anchor: "middle",
+          }),
+        ),
       ],
-      "The marked corner makes a and b perpendicular, so c is the hypotenuse."
+      "The marked corner makes a and b perpendicular, so c is the hypotenuse.",
     ),
     patch(
       request,
@@ -182,18 +244,33 @@ function authoredPatches(request: SceneStreamRequest, attempt: number): readonly
         // origin so KaTeX's centered content lands inside the visible frame.
         put(latex(`equation${suffix}`, 407, 205, "a^2 + b^2 = c^2")),
       ],
-      "Now the relationship appears beside the geometry instead of replacing it."
+      "Now the relationship appears beside the geometry instead of replacing it.",
     ),
     patch(
       request,
       attempt,
       4,
       [
-        put(text(`areaNote${suffix}`, 555, 360, "areas on the legs", { color: CHALK_SOFT, fontSize: 18 })),
-        put(text(`equalsNote${suffix}`, 555, 394, "combine into the area", { color: CHALK_SOFT, fontSize: 18 })),
-        put(text(`hypNote${suffix}`, 555, 428, "on the hypotenuse", { color: AMBER, fontSize: 18 })),
+        put(
+          text(`areaNote${suffix}`, 555, 360, "areas on the legs", {
+            color: CHALK_SOFT,
+            fontSize: 18,
+          }),
+        ),
+        put(
+          text(`equalsNote${suffix}`, 555, 394, "combine into the area", {
+            color: CHALK_SOFT,
+            fontSize: 18,
+          }),
+        ),
+        put(
+          text(`hypNote${suffix}`, 555, 428, "on the hypotenuse", {
+            color: AMBER,
+            fontSize: 18,
+          }),
+        ),
       ],
-      "Read the equation as an area statement: the two smaller squares combine into the largest one."
+      "Read the equation as an area statement: the two smaller squares combine into the largest one.",
     ),
   ]);
 }
@@ -201,7 +278,7 @@ function authoredPatches(request: SceneStreamRequest, attempt: number): readonly
 /** Build deterministic server-shaped events; the model draft is never trusted with lifecycle fields. */
 export function createSceneFixtureEvents(
   request: SceneStreamRequest,
-  mode: SceneFixtureMode
+  mode: SceneFixtureMode,
 ): readonly SceneStreamEvent[] {
   const started: SceneStreamEvent = Object.freeze({
     type: "scene_stream_started",
@@ -219,7 +296,8 @@ export function createSceneFixtureEvents(
         fromAttempt: 1,
         toAttempt: 2,
         lastAcceptedRevision: request.baseScene.revision,
-        message: "The first draft was invalid. Repairing once from the safe board…",
+        message:
+          "The first draft was invalid. Repairing once from the safe board…",
       }),
       Object.freeze({
         type: "scene_stream_failed",
@@ -244,7 +322,8 @@ export function createSceneFixtureEvents(
             fromAttempt: 1,
             toAttempt: 2,
             lastAcceptedRevision: request.baseScene.revision,
-            message: "The first draft missed the scene contract. Repairing once…",
+            message:
+              "The first draft missed the scene contract. Repairing once…",
           }),
         ]
       : [];
@@ -264,98 +343,25 @@ export function createSceneFixtureEvents(
   ]);
 }
 
-function wait(milliseconds: number): Promise<void> {
-  if (milliseconds <= 0) return Promise.resolve();
-  return new Promise((resolve) => globalThis.setTimeout(resolve, milliseconds));
-}
-
-function abortException(): Error {
-  if (typeof DOMException !== "undefined") return new DOMException("Aborted", "AbortError");
-  return Object.assign(new Error("Aborted"), { name: "AbortError" });
-}
-
-function splitFrame(frame: Uint8Array): readonly Uint8Array[] {
-  // Fixed byte offsets deliberately split JSON tokens and occasionally a UTF-8 code point.
-  const offsets = [1, 11, Math.max(12, Math.floor(frame.length * 0.57)), frame.length - 3]
-    .filter((offset, index, values) => offset > 0 && offset < frame.length && values.indexOf(offset) === index)
-    .sort((left, right) => left - right);
-  const chunks: Uint8Array[] = [];
-  let start = 0;
-  for (const end of [...offsets, frame.length]) {
-    chunks.push(frame.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
-
-function fixtureResponse(
-  events: readonly SceneStreamEvent[],
-  signal: AbortSignal,
-  options: Required<Pick<SceneFixtureRunnerOptions, "eventDelayMs" | "chunkDelayMs">>,
-  ignoreAbort: boolean
-): Response {
-  const encoder = new TextEncoder();
-  let stopped = false;
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      void (async () => {
-        try {
-          for (const [index, event] of events.entries()) {
-            await wait(index === 0 ? Math.min(options.eventDelayMs, 80) : options.eventDelayMs);
-            if (signal.aborted && !ignoreAbort) throw abortException();
-            const frame = encoder.encode(
-              `id: fixture-${index + 1}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
-            );
-            for (const chunk of splitFrame(frame)) {
-              if (signal.aborted && !ignoreAbort) throw abortException();
-              controller.enqueue(chunk);
-              await wait(options.chunkDelayMs);
-            }
-          }
-          stopped = true;
-          controller.close();
-        } catch (error) {
-          stopped = true;
-          controller.error(error);
-        }
-      })();
-    },
-    cancel() {
-      stopped = true;
-    },
-  });
-
-  signal.addEventListener(
-    "abort",
-    () => {
-      // The stale fixture intentionally keeps producing to prove token rejection.
-      if (!ignoreAbort && !stopped) stopped = true;
-    },
-    { once: true }
-  );
-
-  return new Response(body, {
-    status: 200,
-    headers: { "Content-Type": "text/event-stream; charset=utf-8" },
-  });
-}
-
 /**
  * Create an auth-free lab source that still traverses the production UTF-8/SSE
  * parser. `stale` intentionally ignores AbortSignal so the runtime must reject
  * old-generation events itself.
  */
-export function createSceneFixtureRunner(options: SceneFixtureRunnerOptions): SceneStreamRunner {
-  const eventDelayMs = options.eventDelayMs ?? (options.mode === "stale" ? 520 : 260);
+export function createSceneFixtureRunner(
+  options: SceneFixtureRunnerOptions,
+): SceneStreamRunner {
+  const eventDelayMs =
+    options.eventDelayMs ?? (options.mode === "stale" ? 520 : 260);
   const chunkDelayMs = options.chunkDelayMs ?? 3;
   return async ({ request, signal, onEvent }) => {
     const events = createSceneFixtureEvents(request, options.mode);
-    const response = fixtureResponse(
-      events,
-      signal,
-      { eventDelayMs, chunkDelayMs },
-      options.mode === "stale"
-    );
+    const response = createFixtureSseResponse(events, signal, {
+      eventDelayMs,
+      chunkDelayMs,
+      idPrefix: "fixture",
+      ignoreAbort: options.mode === "stale",
+    });
     await consumeSceneStreamResponse(response, onEvent);
   };
 }
