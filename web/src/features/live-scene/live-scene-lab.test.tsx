@@ -75,12 +75,16 @@ interface MountedLab {
   readonly root: Root;
 }
 
-async function mount(): Promise<MountedLab> {
+async function mount(
+  choreographyPlaybackRate: 1 | 16 = 1,
+): Promise<MountedLab> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<LiveSceneLab />);
+    root.render(
+      <LiveSceneLab choreographyPlaybackRate={choreographyPlaybackRate} />,
+    );
   });
   return { container, root };
 }
@@ -270,7 +274,18 @@ describe("LiveSceneLab", () => {
     ).toBeNull();
     expect(choreography.props?.sourceLabel).toBe("Generated fixture · $0");
     expect(choreography.props?.backHref).toBe("/");
+    expect(choreography.props?.playbackRate).toBe(1);
     expect(fetchSpy).not.toHaveBeenCalled();
+
+    await act(async () => lab.root.unmount());
+  });
+
+  it("can accelerate only the choreography lesson in the e2e lab", async () => {
+    const lab = await mount(16);
+
+    await choose(lab.container, "choreography");
+
+    expect(choreography.props?.playbackRate).toBe(16);
 
     await act(async () => lab.root.unmount());
   });

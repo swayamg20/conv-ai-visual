@@ -47,6 +47,7 @@ describe("ChoreographyCaptureClient", () => {
             layout: "cinematic",
             reducedMotion: false,
             pace: "step",
+            playbackRate: 16,
           }}
         />,
       );
@@ -67,6 +68,7 @@ describe("ChoreographyCaptureClient", () => {
       pathLocked: true,
       layout: "cinematic",
       reducedMotion: false,
+      playbackRate: 16,
       stageOnly: true,
       autoStart: true,
     });

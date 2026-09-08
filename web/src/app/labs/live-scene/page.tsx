@@ -19,5 +19,9 @@ export default function LiveSceneLabPage() {
     notFound();
   }
 
-  return <LiveSceneLab />;
+  return (
+    <LiveSceneLab
+      choreographyPlaybackRate={process.env.MURMUR_E2E_MODE === "1" ? 16 : 1}
+    />
+  );
 }

@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 
+import type { ChoreographyPlaybackRate } from "@/features/canvas/types";
 import { cn } from "@/lib/utils";
 
 import { LiveChoreographyDemo } from "./live-choreography-demo";
@@ -77,7 +78,13 @@ const choiceClass = (selected: boolean): string =>
       : "border-chalk-faint/20 bg-slate/20 text-muted-foreground hover:text-foreground",
   );
 
-export function LiveSceneLab() {
+interface LiveSceneLabProps {
+  readonly choreographyPlaybackRate?: ChoreographyPlaybackRate;
+}
+
+export function LiveSceneLab({
+  choreographyPlaybackRate = 1,
+}: LiveSceneLabProps) {
   const [authoring, setAuthoring] = useState<LabAuthoringMode>("semantic");
   const [source, setSource] = useState<LabSceneSource>("fixture");
   const [mode, setMode] = useState<SceneFixtureMode>("normal");
@@ -235,6 +242,7 @@ export function LiveSceneLab() {
         scenarioControl={scenarioControl}
         sourceLabel="Generated fixture · $0"
         backHref="/"
+        playbackRate={choreographyPlaybackRate}
       />
     );
   }

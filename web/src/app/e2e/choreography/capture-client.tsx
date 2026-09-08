@@ -55,11 +55,12 @@ export function ChoreographyCaptureClient({
 
   return (
     <LiveChoreographyDemo
-      key={options.pace}
+      key={`${options.pace}:${options.playbackRate}`}
       initialPath="full"
       pathLocked
       layout={options.layout}
       reducedMotion={options.reducedMotion}
+      playbackRate={options.playbackRate}
       runnerFactory={runnerFactory}
       stageOnly
       autoStart

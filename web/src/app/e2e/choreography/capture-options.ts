@@ -1,9 +1,11 @@
 import type { ChoreographyLayout } from "@/lib/live-scene";
+import type { ChoreographyPlaybackRate } from "@/features/canvas/types";
 
 export interface ChoreographyCaptureOptions {
   readonly layout: ChoreographyLayout;
   readonly reducedMotion: boolean;
   readonly pace: ChoreographyCapturePace;
+  readonly playbackRate: ChoreographyPlaybackRate;
 }
 
 export const CHOREOGRAPHY_CAPTURE_PACES = ["auto", "step"] as const;
@@ -29,7 +31,11 @@ export function parseChoreographyCaptureOptions(
   searchParams: CaptureSearchParams,
 ): ChoreographyCaptureOptions {
   const unknown = Object.keys(searchParams).filter(
-    (key) => key !== "layout" && key !== "motion" && key !== "pace",
+    (key) =>
+      key !== "layout" &&
+      key !== "motion" &&
+      key !== "pace" &&
+      key !== "timing",
   );
   if (unknown.length > 0) {
     throw new TypeError(`unsupported capture option: ${unknown[0]}`);
@@ -50,9 +56,15 @@ export function parseChoreographyCaptureOptions(
     throw new TypeError("pace must be auto or step");
   }
 
+  const timing = singleValue(searchParams.timing, "timing") ?? "real";
+  if (timing !== "real" && timing !== "accelerated") {
+    throw new TypeError("timing must be real or accelerated");
+  }
+
   return Object.freeze({
     layout,
     reducedMotion: motion === "reduced",
     pace: pace as ChoreographyCapturePace,
+    playbackRate: timing === "accelerated" ? 16 : 1,
   });
 }

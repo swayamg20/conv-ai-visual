@@ -8,6 +8,7 @@ describe("parseChoreographyCaptureOptions", () => {
       layout: "cinematic",
       reducedMotion: false,
       pace: "auto",
+      playbackRate: 1,
     });
   });
 
@@ -17,8 +18,14 @@ describe("parseChoreographyCaptureOptions", () => {
         layout: "compact",
         motion: "reduced",
         pace: "step",
+        timing: "accelerated",
       }),
-    ).toEqual({ layout: "compact", reducedMotion: true, pace: "step" });
+    ).toEqual({
+      layout: "compact",
+      reducedMotion: true,
+      pace: "step",
+      playbackRate: 16,
+    });
   });
 
   it.each([
@@ -27,6 +34,8 @@ describe("parseChoreographyCaptureOptions", () => {
     [{ motion: "fast" }, "motion must be real or reduced"],
     [{ pace: "manual" }, "pace must be auto or step"],
     [{ pace: ["auto", "step"] }, "pace must appear at most once"],
+    [{ timing: "instant" }, "timing must be real or accelerated"],
+    [{ timing: ["real", "accelerated"] }, "timing must appear at most once"],
     [{ layout: ["compact", "cinematic"] }, "layout must appear at most once"],
   ] as const)("rejects invalid query input %#", (input, message) => {
     expect(() => parseChoreographyCaptureOptions(input)).toThrow(message);

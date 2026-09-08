@@ -57,6 +57,18 @@ describe("step-gated choreography capture runner", () => {
     expect(Object.isFrozen(session)).toBe(true);
     expect(Object.isFrozen(session.bridge)).toBe(true);
     expect(session.bridge).toMatchObject({ version: 1, pace: "step" });
+    expect(session.bridge.getState()).toMatchObject({
+      waitingFor: {
+        generation: 7,
+        sequence: 1,
+        checkpointId: "problem",
+      },
+      acknowledgedThrough: 0,
+    });
+    expect(
+      Number.isFinite(session.bridge.getState().waitingFor?.openedAtMs),
+    ).toBe(true);
+    expect(Object.isFrozen(session.bridge.getState())).toBe(true);
     expect(events.map((event) => event.type)).toEqual([
       "scene_stream_started",
       "choreography_scene_checkpoint",
@@ -103,6 +115,7 @@ describe("step-gated choreography capture runner", () => {
         events,
         index === CHECKPOINT_IDS.length - 1 ? 10 : index + 3,
       );
+      expect(session.bridge.getState().acknowledgedThrough).toBe(index + 1);
     }
 
     await running;
@@ -148,6 +161,10 @@ describe("step-gated choreography capture runner", () => {
     const events: ChoreographySceneStreamEvent[] = [];
 
     expect(session.bridge).toMatchObject({ version: 1, pace: "auto" });
+    expect(session.bridge.getState()).toEqual({
+      waitingFor: null,
+      acknowledgedThrough: 0,
+    });
     expect(() =>
       session.bridge.acknowledgeCheckpoint({
         generation: 1,

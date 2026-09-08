@@ -21,9 +21,19 @@ export interface ChoreographyCaptureCheckpoint {
   readonly checkpointId: CompletingSquareMainCheckpoint;
 }
 
+export interface ChoreographyCaptureWaitingCheckpoint extends ChoreographyCaptureCheckpoint {
+  readonly openedAtMs: number;
+}
+
+export interface ChoreographyCaptureStateV1 {
+  readonly waitingFor: ChoreographyCaptureWaitingCheckpoint | null;
+  readonly acknowledgedThrough: number;
+}
+
 export interface ChoreographyCaptureBridgeV1 {
   readonly version: typeof CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION;
   readonly pace: ChoreographyCapturePace;
+  getState(): ChoreographyCaptureStateV1;
   acknowledgeCheckpoint(value: unknown): void;
 }
 
@@ -34,16 +44,19 @@ export interface ChoreographyCaptureSession {
 
 interface PendingCheckpoint {
   readonly expected: ChoreographyCaptureCheckpoint;
+  readonly openedAtMs: number;
   readonly signal: AbortSignal;
   readonly onAbort: () => void;
   readonly resolve: () => void;
 }
 
 export interface ChoreographyCaptureRendezvous {
+  getState(): ChoreographyCaptureStateV1;
   acknowledgeCheckpoint(value: unknown): void;
   waitForCheckpoint(
     expected: ChoreographyCaptureCheckpoint,
     signal: AbortSignal,
+    openedAtMs?: number,
   ): Promise<void>;
 }
 
@@ -135,6 +148,15 @@ function checkpointTuple(
 /** One in-order checkpoint wait. Early, duplicate, and mismatched acks fail closed. */
 export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendezvous {
   let pending: PendingCheckpoint | null = null;
+  let acknowledgedThrough = 0;
+
+  const getState = (): ChoreographyCaptureStateV1 =>
+    Object.freeze({
+      waitingFor: pending
+        ? Object.freeze({ ...pending.expected, openedAtMs: pending.openedAtMs })
+        : null,
+      acknowledgedThrough,
+    });
 
   const acknowledgeCheckpoint = (value: unknown): void => {
     const acknowledged = decodeCheckpoint(value);
@@ -148,6 +170,7 @@ export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendez
       );
     }
     pending = null;
+    acknowledgedThrough = acknowledged.sequence;
     current.signal.removeEventListener("abort", current.onAbort);
     current.resolve();
   };
@@ -155,6 +178,7 @@ export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendez
   const waitForCheckpoint = (
     expectedValue: ChoreographyCaptureCheckpoint,
     signal: AbortSignal,
+    openedAtMs = globalThis.performance.now(),
   ): Promise<void> => {
     if (pending) {
       throw new Error(
@@ -162,6 +186,14 @@ export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendez
       );
     }
     const expected = decodeCheckpoint(expectedValue, "expected checkpoint");
+    if (expected.sequence !== acknowledgedThrough + 1) {
+      throw new Error("Capture checkpoints must open in exact sequence order");
+    }
+    if (!Number.isFinite(openedAtMs) || openedAtMs < 0) {
+      throw new TypeError(
+        "capture checkpoint openedAtMs must be nonnegative and finite",
+      );
+    }
     if (signal.aborted) return Promise.reject(abortError());
 
     return new Promise<void>((resolve, reject) => {
@@ -170,13 +202,19 @@ export function createChoreographyCaptureRendezvous(): ChoreographyCaptureRendez
         pending = null;
         reject(abortError());
       };
-      pending = Object.freeze({ expected, signal, onAbort, resolve });
+      pending = Object.freeze({
+        expected,
+        openedAtMs,
+        signal,
+        onAbort,
+        resolve,
+      });
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
     });
   };
 
-  return Object.freeze({ acknowledgeCheckpoint, waitForCheckpoint });
+  return Object.freeze({ getState, acknowledgeCheckpoint, waitForCheckpoint });
 }
 
 /** Emit the exact main fixture, pausing after each checkpoint before its successor. */
@@ -187,9 +225,14 @@ export function createStepChoreographyCaptureRunner(
     const events = createChoreographySceneFixtureEvents(request, "main");
     for (const event of events) {
       if (signal.aborted) throw abortError();
+      const openedAtMs = globalThis.performance.now();
       onEvent(event);
       if (event.type === "choreography_scene_checkpoint") {
-        await rendezvous.waitForCheckpoint(checkpointTuple(event), signal);
+        await rendezvous.waitForCheckpoint(
+          checkpointTuple(event),
+          signal,
+          openedAtMs,
+        );
       }
     }
   };
@@ -208,6 +251,8 @@ export function createChoreographyCaptureSession(
       bridge: Object.freeze({
         version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
         pace,
+        getState: () =>
+          Object.freeze({ waitingFor: null, acknowledgedThrough: 0 }),
         acknowledgeCheckpoint: (_value: unknown): void => {
           throw new Error(
             "Automatic capture does not accept checkpoint acknowledgements",
@@ -223,6 +268,7 @@ export function createChoreographyCaptureSession(
     bridge: Object.freeze({
       version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
       pace,
+      getState: rendezvous.getState,
       acknowledgeCheckpoint: rendezvous.acknowledgeCheckpoint,
     }),
   });
