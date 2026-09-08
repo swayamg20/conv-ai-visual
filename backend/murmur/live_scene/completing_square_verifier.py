@@ -29,6 +29,8 @@ from murmur.live_scene.choreography_contracts import (
 from murmur.live_scene.completing_square_contracts import (
     COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER,
     CompletingSquareCheckpointId,
+    CompletingSquareMainCheckpoint,
+    CompletingSquareState,
 )
 from murmur.live_scene.contracts import (
     LIVE_SCENE_BOARD_HEIGHT,
@@ -649,6 +651,33 @@ def _verify_checkpoint_order(
     _fail(f"base scene is not a legal immediate predecessor of {checkpoint_id.value}")
 
 
+def verify_completing_square_frontier(
+    component: CompletingSquareState,
+    scene: SceneState,
+) -> None:
+    """Verify that one semantic frontier exactly describes its owned scene nodes."""
+
+    if not isinstance(component, CompletingSquareState):
+        _fail("component must be a CompletingSquareState contract")
+    if not isinstance(scene, SceneState):
+        _fail("scene must be a SceneState contract")
+
+    owned = _owned_nodes(scene.nodes, component.id)
+    _verify_board_bounds(owned.values(), label="base")
+    if component.last_main_checkpoint is None:
+        if owned:
+            _fail("an unrevealed completing-square frontier must own no scene nodes")
+        return
+
+    checkpoint_id = CompletingSquareCheckpointId(component.last_main_checkpoint.value)
+    if (
+        component.last_main_checkpoint is CompletingSquareMainCheckpoint.MISSING_CORNER
+        and component.corner_clarified
+    ):
+        checkpoint_id = CompletingSquareCheckpointId.CORNER_DETAIL
+    _verify_snapshot(component.id, checkpoint_id, owned)
+
+
 def _cue_targets(choreography: ChoreographyPlanV1, cue: str) -> tuple[str, ...]:
     for item in choreography.phase.cues:
         if item.cue == cue:
@@ -961,4 +990,5 @@ __all__ = [
     "SAFE_VIEWPORT_PADDING",
     "CompletingSquareVerificationError",
     "verify_completing_square_checkpoint",
+    "verify_completing_square_frontier",
 ]

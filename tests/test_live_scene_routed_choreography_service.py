@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
+from murmur.live_scene import completing_square_compiler as compiler_module
 from murmur.live_scene import service as service_module
 from murmur.live_scene.checkpoint_contracts import (
     CheckpointCompilerCertificateV2,
@@ -38,10 +40,14 @@ from murmur.live_scene.completing_square_verifier import (
 )
 from murmur.live_scene.contracts import (
     MAX_SAFE_SEQUENCE,
+    MAX_SCENE_NODES,
+    RectSceneNode,
+    ScenePresentation,
     SceneState,
     SceneStreamCompletedEvent,
     SceneStreamFailedEvent,
     SceneStreamRepairingEvent,
+    ShapeStyle,
 )
 from murmur.live_scene.semantic_contracts import SemanticSceneState
 from murmur.live_scene.semantic_service_contracts import (
@@ -361,6 +367,33 @@ async def test_corrupt_later_checkpoint_fails_before_checkpoint_one(
 
 
 @pytest.mark.asyncio
+async def test_routed_suffix_check_rejects_shared_compiler_validator_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_compile_blueprints = compiler_module._compile_blueprints
+
+    def truncate_suffix(*args: object, **kwargs: object) -> object:
+        batch = original_compile_blueprints(*args, **kwargs)
+        first = batch.checkpoints[0]
+        return replace(
+            batch,
+            result_component=first.result_component,
+            checkpoints=(first,),
+        )
+
+    monkeypatch.setattr(compiler_module, "_compile_blueprints", truncate_suffix)
+    events = await _collect(
+        service_module.SceneAuthoringService(_Client([[_decision_line("start_choreography")]]))
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="choreography_integrity_error",
+        retryable=False,
+    )
+
+
+@pytest.mark.asyncio
 async def test_independent_verifier_receipt_mismatch_fails_before_emission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -412,12 +445,10 @@ async def test_later_wire_overflow_fails_the_whole_suffix_before_checkpoint_one(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("budget_name", ["MAX_SCENE_NODES", "MAX_SEMANTIC_COMPONENTS"])
-async def test_independent_node_and_component_caps_fail_without_partial_output(
+async def test_component_cap_fails_without_partial_output(
     monkeypatch: pytest.MonkeyPatch,
-    budget_name: str,
 ) -> None:
-    monkeypatch.setattr(service_module, budget_name, 0)
+    monkeypatch.setattr(service_module, "MAX_SEMANTIC_COMPONENTS", 0)
     events = await _collect(
         service_module.SceneAuthoringService(
             _Client([[_decision_line("start_choreography", stage="setup")]])
@@ -429,6 +460,44 @@ async def test_independent_node_and_component_caps_fail_without_partial_output(
         code="choreography_capacity_limit",
         retryable=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_real_scene_node_ceiling_fails_before_provider_dispatch() -> None:
+    presentation = ScenePresentation(enter="none", exit="none")
+    style = ShapeStyle(
+        stroke="#000000",
+        stroke_width=1.0,
+        fill="none",
+        opacity=1.0,
+        roughness=0.0,
+    )
+    nodes = tuple(
+        RectSceneNode(
+            id=f"foreign_node_{index}",
+            kind="rect",
+            presentation=presentation,
+            x=0.0,
+            y=0.0,
+            width=1.0,
+            height=1.0,
+            style=style,
+        )
+        for index in range(MAX_SCENE_NODES)
+    )
+    client = _Client([])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(scene=SceneState(revision=0, nodes=nodes)),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="choreography_capacity_exceeded",
+        retryable=False,
+    )
+    assert client.calls == []
 
 
 @pytest.mark.asyncio
@@ -494,6 +563,67 @@ async def test_revision_mismatch_fails_before_provider_dispatch() -> None:
         events,
         code="semantic_base_mismatch",
         retryable=False,
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_orphan_certificate_head_fails_before_provider_dispatch() -> None:
+    client = _Client([])
+    semantic_scene = SemanticSceneState(
+        revision=0,
+        certificate_head_sha256="a" * 64,
+    )
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(semantic_scene=semantic_scene),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="semantic_base_mismatch",
+        retryable=False,
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_committed_frontier_without_certificate_head_fails_before_provider_dispatch() -> None:
+    scene, semantic_scene = _materialized_through(CompletingSquareMainCheckpoint.PROBLEM)
+    semantic_scene = semantic_scene.model_copy(update={"certificate_head_sha256": None})
+    client = _Client([])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(scene=scene, semantic_scene=semantic_scene),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="semantic_base_mismatch",
+        retryable=False,
+        revision=scene.revision,
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_semantic_low_level_mismatch_fails_before_provider_dispatch() -> None:
+    scene, semantic_scene = _materialized_through(CompletingSquareMainCheckpoint.PROBLEM)
+    mismatched_scene = SceneState(revision=scene.revision)
+    client = _Client([])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(scene=mismatched_scene, semantic_scene=semantic_scene),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="semantic_base_mismatch",
+        retryable=False,
+        revision=scene.revision,
     )
     assert client.calls == []
 

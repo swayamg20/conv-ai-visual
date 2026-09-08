@@ -50,6 +50,7 @@ from murmur.live_scene.completing_square_contracts import (
 from murmur.live_scene.completing_square_verifier import (
     CompletingSquareVerificationError,
     verify_completing_square_checkpoint,
+    verify_completing_square_frontier,
 )
 from murmur.live_scene.contracts import (
     MAX_ACCEPTED_PATCHES,
@@ -652,6 +653,33 @@ def _serialized_semantic_prefix(
     return tuple(serialized)
 
 
+def _validate_pythagorean_realizations(
+    scene: SceneState,
+    components: tuple[PythagoreanAreaIdentityState, ...],
+) -> None:
+    node_ids = {node.id for node in scene.nodes}
+    for component in components:
+        role_count = len(component.revealed_roles)
+        for role_index in range(role_count, len(PYTHAGOREAN_ROLE_ORDER)):
+            if _semantic_role_node_id(component.id, role_index) in node_ids:
+                raise _SemanticBaseError(
+                    "semantic_base: an unrevealed role already exists in the low-level scene"
+                )
+        if role_count == 0:
+            continue
+        try:
+            serialized = _serialized_semantic_prefix(
+                scene,
+                component_id=component.id,
+                role_count=role_count,
+            )
+            verify_pythagorean_realization(component.id, serialized)
+        except (_SemanticInvariantError, SemanticVerificationError):
+            raise _SemanticBaseError(
+                "semantic_base: the low-level realization failed verification"
+            ) from None
+
+
 def _validate_semantic_base(
     scene: SceneState,
     semantic_scene: SemanticSceneState,
@@ -673,28 +701,54 @@ def _validate_semantic_base(
         raise _SemanticBaseError(
             "semantic_base: committed roles and certificate chain head must agree"
         )
+    _validate_pythagorean_realizations(
+        scene,
+        cast(tuple[PythagoreanAreaIdentityState, ...], semantic_scene.components),
+    )
 
-    node_ids = {node.id for node in scene.nodes}
-    for component in semantic_scene.components:
-        role_count = len(component.revealed_roles)
-        for role_index in range(role_count, len(PYTHAGOREAN_ROLE_ORDER)):
-            if _semantic_role_node_id(component.id, role_index) in node_ids:
-                raise _SemanticBaseError(
-                    "semantic_base: an unrevealed role already exists in the low-level scene"
-                )
-        if role_count == 0:
-            continue
-        try:
-            serialized = _serialized_semantic_prefix(
-                scene,
-                component_id=component.id,
-                role_count=role_count,
-            )
-            verify_pythagorean_realization(component.id, serialized)
-        except (_SemanticInvariantError, SemanticVerificationError):
-            raise _SemanticBaseError(
-                "semantic_base: the low-level realization failed verification"
-            ) from None
+
+def _validate_choreography_base(
+    scene: SceneState,
+    semantic_scene: SemanticSceneState,
+) -> None:
+    """Reject a V2 semantic frontier that does not describe the accepted board."""
+
+    if scene.revision != semantic_scene.revision:
+        raise _SemanticBaseError("semantic_base: low-level and semantic revisions differ")
+
+    has_committed_frontier = any(
+        (isinstance(component, PythagoreanAreaIdentityState) and bool(component.revealed_roles))
+        or (
+            isinstance(component, CompletingSquareState)
+            and component.last_main_checkpoint is not None
+        )
+        for component in semantic_scene.components
+    )
+    if has_committed_frontier != (semantic_scene.certificate_head_sha256 is not None):
+        raise _SemanticBaseError(
+            "semantic_base: committed checkpoints and certificate chain head must agree"
+        )
+
+    pythagorean_components = tuple(
+        component
+        for component in semantic_scene.components
+        if isinstance(component, PythagoreanAreaIdentityState)
+    )
+    try:
+        _validate_pythagorean_realizations(scene, pythagorean_components)
+    except _SemanticBaseError:
+        raise _SemanticBaseError(
+            "semantic_base: a Pythagorean component did not match the low-level scene"
+        ) from None
+
+    try:
+        for component in semantic_scene.components:
+            if isinstance(component, CompletingSquareState):
+                verify_completing_square_frontier(component, scene)
+    except CompletingSquareVerificationError:
+        raise _SemanticBaseError(
+            "semantic_base: a completing-square component did not match the low-level scene"
+        ) from None
 
 
 def _preflight_semantic_intent(
@@ -1090,6 +1144,7 @@ def _prepare_choreography_batch(
     compiled_candidate: CompiledCheckpointBeatV2,
     *,
     attempt: int,
+    expected_checkpoint_ids: tuple[CompletingSquareCheckpointId, ...],
 ) -> _PreparedChoreographyBatch:
     """Clone and independently preflight a full suffix before any checkpoint is emitted."""
 
@@ -1112,6 +1167,11 @@ def _prepare_choreography_batch(
     if compiled.base_semantic_scene != state.semantic_scene:
         raise _ChoreographyInvariantError(
             "choreography_batch: compiler semantic base did not match the request"
+        )
+    actual_checkpoint_ids = tuple(checkpoint.checkpoint_id for checkpoint in compiled.checkpoints)
+    if actual_checkpoint_ids != expected_checkpoint_ids:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler did not return the exact routed checkpoint suffix"
         )
     if not compiled.checkpoints:
         raise _ChoreographyInvariantError(
@@ -1665,10 +1725,17 @@ class SceneAuthoringService:
                 retryable=False,
             )
             return
-        if (
-            len(state.scene.nodes) > MAX_SCENE_NODES
-            or len(state.semantic_scene.components) > MAX_SEMANTIC_COMPONENTS
-        ):
+        if len(state.scene.nodes) >= MAX_SCENE_NODES:
+            yield _choreography_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="choreography_capacity_exceeded",
+                message=_CHOREOGRAPHY_CAPACITY_MESSAGE,
+                retryable=False,
+            )
+            return
+        if len(state.semantic_scene.components) > MAX_SEMANTIC_COMPONENTS:
             yield _choreography_failure_event(
                 generation=request.generation,
                 attempt=1,
@@ -1685,6 +1752,19 @@ class SceneAuthoringService:
                 revision=state.scene.revision,
                 code="revision_limit",
                 message=_REVISION_LIMIT_MESSAGE,
+                retryable=False,
+            )
+            return
+
+        try:
+            _validate_choreography_base(state.scene, state.semantic_scene)
+        except _SemanticBaseError:
+            yield _choreography_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="semantic_base_mismatch",
+                message=_SEMANTIC_BASE_MISMATCH_MESSAGE,
                 retryable=False,
             )
             return
@@ -1804,8 +1884,13 @@ class SceneAuthoringService:
                     generation=request.generation,
                 )
                 expected_checkpoint_count = len(resolved.missing_checkpoints)
+                expected_checkpoint_ids = tuple(
+                    CompletingSquareCheckpointId(checkpoint.value)
+                    for checkpoint in resolved.missing_checkpoints
+                )
                 if isinstance(resolved.route, ClarifyCornerRouteV2):
                     expected_checkpoint_count = 1
+                    expected_checkpoint_ids = (CompletingSquareCheckpointId.CORNER_DETAIL,)
                 if expected_checkpoint_count > state.remaining_checkpoint_budget:
                     raise _ChoreographyCapacityError(
                         "choreography_batch: routed suffix exceeded the revision budget"
@@ -1820,6 +1905,7 @@ class SceneAuthoringService:
                     beat,
                     compiled_candidate,
                     attempt=attempt,
+                    expected_checkpoint_ids=expected_checkpoint_ids,
                 )
             except _ChoreographyCapacityError:
                 yield _choreography_failure_event(
