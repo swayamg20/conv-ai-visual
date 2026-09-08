@@ -21,8 +21,8 @@ const CLOSED_EASINGS: Readonly<Record<ChoreographyEasing, string>> =
   Object.freeze({
     linear: "none",
     ease_in: "power2.in",
-    ease_out_quart: "power4.out",
-    ease_out_quint: "power5.out",
+    ease_out_quart: "power3.out",
+    ease_out_quint: "power4.out",
     ease_in_out: "power2.inOut",
   });
 
@@ -37,6 +37,45 @@ interface AppendPhaseTweensOptions {
   readonly plan: PlannedCheckpointChoreography;
   readonly duration: number;
   readonly onError: (error: unknown) => void;
+}
+
+interface PhaseSchedule {
+  readonly exitDuration: number;
+  readonly updateStart: number;
+  readonly updateDuration: number;
+  readonly enterStart: number;
+  readonly enterDuration: number;
+}
+
+const EXIT_HANDOFF_FRACTION = 0.2;
+const DEFERRED_ENTER_FRACTION = 0.75;
+
+/** Keep mutually exclusive layouts apart while retained identities move. */
+function phaseSchedule(
+  steps: readonly MotionStep[],
+  duration: number,
+): PhaseSchedule {
+  const hasEnter = steps.some((step) => step.type === "enter");
+  const hasExit = steps.some((step) => step.type === "remove");
+  const hasUpdate = steps.some((step) => step.type === "update");
+  const needsExitHandoff = hasExit && (hasEnter || hasUpdate);
+  const exitDuration = needsExitHandoff
+    ? duration * EXIT_HANDOFF_FRACTION
+    : duration;
+  const updateStart = hasExit && hasUpdate ? exitDuration : 0;
+  const enterStart = hasExit
+    ? exitDuration
+    : hasEnter && hasUpdate
+      ? duration * DEFERRED_ENTER_FRACTION
+      : 0;
+
+  return {
+    exitDuration,
+    updateStart,
+    updateDuration: duration - updateStart,
+    enterStart,
+    enterDuration: duration - enterStart,
+  };
 }
 
 function replaceCanonicalContent(target: SVGElement, source: SVGElement): void {
@@ -78,18 +117,23 @@ function addCrossfade(
   step: Extract<MotionStep, { type: "update" }>,
   duration: number,
   ease: string,
+  position: number,
 ): void {
   const canonical = reconciler.create(step.next, `${step.id}--canonical`);
   if (!canonical) {
     throw new Error(`Could not render crossfade target ${step.id}`);
   }
   const half = duration / 2;
-  timeline.to(element, { opacity: 0, duration: half, ease }, 0);
-  timeline.call(() => replaceCanonicalContent(element, canonical), [], half);
+  timeline.to(element, { opacity: 0, duration: half, ease }, position);
+  timeline.call(
+    () => replaceCanonicalContent(element, canonical),
+    [],
+    position + half,
+  );
   timeline.to(
     element,
     { opacity: step.next.style.opacity, duration: half, ease },
-    half,
+    position + half,
   );
 }
 
@@ -100,6 +144,7 @@ function addEnter(
   step: Extract<MotionStep, { type: "enter" }>,
   duration: number,
   ease: string,
+  position: number,
 ): void {
   const svg = context.getSvg();
   if (!svg) throw new Error("The SVG canvas is unavailable");
@@ -116,7 +161,7 @@ function addEnter(
         element.style.opacity = String(opacity);
       },
       [],
-      0,
+      position,
     );
     return;
   }
@@ -137,7 +182,7 @@ function addEnter(
           element.style.transform = `scale(${0.94 + proxy.progress * 0.06})`;
         },
       },
-      0,
+      position,
     );
     return;
   }
@@ -174,12 +219,17 @@ function addEnter(
           element.style.opacity = String(opacity * proxy.progress);
         },
       },
-      0,
+      position,
     );
     return;
   }
 
-  timeline.fromTo(element, { opacity: 0 }, { opacity, duration, ease }, 0);
+  timeline.fromTo(
+    element,
+    { opacity: 0 },
+    { opacity, duration, ease },
+    position,
+  );
 }
 
 function addExit(
@@ -188,6 +238,7 @@ function addExit(
   step: Extract<MotionStep, { type: "remove" }>,
   duration: number,
   ease: string,
+  position: number,
 ): void {
   if (step.effect === "none") {
     timeline.call(
@@ -195,11 +246,11 @@ function addExit(
         element.style.opacity = "0";
       },
       [],
-      0,
+      position,
     );
     return;
   }
-  timeline.to(element, { opacity: 0, duration, ease }, 0);
+  timeline.to(element, { opacity: 0, duration, ease }, position);
 }
 
 function addEmphasis(
@@ -207,6 +258,7 @@ function addEmphasis(
   element: SVGElement,
   duration: number,
   ease: string,
+  position: number,
 ): void {
   const proxy = { progress: 0 };
   timeline.to(
@@ -220,7 +272,7 @@ function addEmphasis(
         element.style.filter = `brightness(${brightness})`;
       },
     },
-    0,
+    position,
   );
 }
 
@@ -229,29 +281,46 @@ function addMotionStep(
   reconciler: SvgNodeReconciler,
   context: TimelineContext,
   step: MotionStep,
-  duration: number,
   ease: string,
   onError: (error: unknown) => void,
+  schedule: PhaseSchedule,
 ): void {
   if (step.type === "enter") {
-    addEnter(timeline, reconciler, context, step, duration, ease);
+    addEnter(
+      timeline,
+      reconciler,
+      context,
+      step,
+      schedule.enterDuration,
+      ease,
+      schedule.enterStart,
+    );
     return;
   }
 
   const data = context.elements.get(step.id);
   if (!data) throw new Error(`Missing ${step.type} target ${step.id}`);
   if (step.type === "remove") {
-    addExit(timeline, data.element, step, duration, ease);
+    addExit(timeline, data.element, step, schedule.exitDuration, ease, 0);
   } else if (step.transition === "crossfade") {
-    addCrossfade(timeline, reconciler, data.element, step, duration, ease);
+    addCrossfade(
+      timeline,
+      reconciler,
+      data.element,
+      step,
+      schedule.updateDuration,
+      ease,
+      schedule.updateStart,
+    );
   } else {
     addCompatibleTransform(
       timeline,
       data.element,
       step,
-      duration,
+      schedule.updateDuration,
       ease,
       onError,
+      schedule.updateStart,
     );
   }
 }
@@ -266,16 +335,31 @@ export function appendChoreographyPhaseTweens({
   onError,
 }: AppendPhaseTweensOptions): void {
   const ease = CLOSED_EASINGS[plan.choreographyPlan.phase.easing];
+  const schedule = phaseSchedule(plan.motionPlan.steps, duration);
   for (const step of plan.motionPlan.steps) {
-    addMotionStep(timeline, reconciler, context, step, duration, ease, onError);
+    addMotionStep(
+      timeline,
+      reconciler,
+      context,
+      step,
+      ease,
+      onError,
+      schedule,
+    );
   }
 
   const camera = { progress: 0 };
+  const cameraStart = plan.motionPlan.steps.some(
+    (step) => step.type === "update",
+  )
+    ? schedule.updateStart
+    : 0;
+  const cameraDuration = duration - cameraStart;
   timeline.to(
     camera,
     {
       progress: 1,
-      duration,
+      duration: cameraDuration,
       ease,
       onUpdate: () => {
         try {
@@ -291,7 +375,7 @@ export function appendChoreographyPhaseTweens({
         }
       },
     },
-    0,
+    cameraStart,
   );
 
   const emphasized =
@@ -300,6 +384,6 @@ export function appendChoreographyPhaseTweens({
   for (const id of emphasized) {
     const element = context.elements.get(id)?.element;
     if (!element) throw new Error(`Missing emphasis target ${id}`);
-    addEmphasis(timeline, element, duration, ease);
+    addEmphasis(timeline, element, duration, ease, 0);
   }
 }

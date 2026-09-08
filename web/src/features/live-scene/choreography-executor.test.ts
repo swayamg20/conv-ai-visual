@@ -17,6 +17,7 @@ import {
   type ChoreographyCueV1,
   type LatexTokenSceneNode,
   type LineSceneNode,
+  type MotionStep,
   type PathSceneNode,
   type PlannedCheckpointChoreography,
   type RectSceneNode,
@@ -27,6 +28,13 @@ import {
 } from "@/lib/live-scene";
 
 import { createChoreographyExecutor } from "./choreography-executor";
+import {
+  EMPTY_CHOREOGRAPHY_SEMANTIC_SCENE,
+  createChoreographyFrontier,
+  prepareChoreographyCheckpoint,
+  type PreparedChoreographyCheckpoint,
+} from "./choreography-playback";
+import fixtureValue from "./fixtures/completing-the-square.v1.json";
 import { createSvgNodeReconciler } from "./svg-node-reconciler";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
@@ -51,6 +59,39 @@ const RESULT_VIEWPORT = Object.freeze({
   width: 400,
   height: 300,
 }) satisfies ViewportPoseV1;
+const BOARD_BOX = Object.freeze([0, 0, 800, 600] as const);
+const SAFE_VIEWPORT_PADDING = 12;
+const TRAJECTORY_SAMPLES = Object.freeze([0.25, 0.5, 0.75] as const);
+const REQUIRED_COMPATIBLE_IDS = Object.freeze({
+  rearrange_halves: Object.freeze([
+    "square-lesson__area_3x_a",
+    "square-lesson__area_3x_b",
+    "square-lesson__area_x2",
+    "square-lesson__strip_a",
+    "square-lesson__strip_b",
+    "square-lesson__x2_square",
+  ]),
+  balance_and_complete: Object.freeze([
+    "square-lesson__corner",
+    "square-lesson__eq_equal_main",
+    "square-lesson__eq_rhs7",
+  ]),
+  factor_square: Object.freeze([
+    "square-lesson__eq_16",
+    "square-lesson__eq_equal_result",
+  ]),
+});
+const AREA_SHAPE_IDS = Object.freeze([
+  "square-lesson__x2_square",
+  "square-lesson__strip_a",
+  "square-lesson__strip_b",
+  "square-lesson__corner",
+]);
+
+type Box = readonly [left: number, top: number, right: number, bottom: number];
+type CompatibleUpdate = Extract<MotionStep, { type: "update" }> & {
+  readonly transition: "transform";
+};
 
 interface VoidDeferred {
   readonly promise: Promise<void>;
@@ -87,7 +128,9 @@ function svgChild<Name extends keyof SVGElementTagNameMap>(
   return document.createElementNS(SVG_NAMESPACE, name);
 }
 
-function tokenLeft(operation: LatexTokenOperation): number {
+function tokenLeft(
+  operation: Pick<LatexTokenOperation, "anchor" | "x" | "width">,
+): number {
   if (operation.anchor === "middle") return operation.x - operation.width / 2;
   if (operation.anchor === "end") return operation.x - operation.width;
   return operation.x;
@@ -291,6 +334,35 @@ function planned(
   });
 }
 
+function fixtureCheckpointPlans(): PreparedChoreographyCheckpoint[] {
+  let frontier = createChoreographyFrontier({
+    scene: scene(0, []),
+    semanticScene: EMPTY_CHOREOGRAPHY_SEMANTIC_SCENE,
+    viewport: null,
+    layout: null,
+    certificateHeadSha256: null,
+  });
+  return fixtureValue.events.flatMap((event) => {
+    if (event.type !== "choreography_scene_checkpoint") return [];
+    const prepared = prepareChoreographyCheckpoint(
+      frontier,
+      event,
+      "cinematic",
+    );
+    frontier = prepared.target;
+    return [prepared];
+  });
+}
+
+function compatibleUpdates(
+  prepared: PreparedChoreographyCheckpoint,
+): CompatibleUpdate[] {
+  return prepared.plan.motionPlan.steps.filter(
+    (step): step is CompatibleUpdate =>
+      step.type === "update" && step.transition === "transform",
+  );
+}
+
 function harness(
   options: {
     readonly barrier?: () => Promise<void>;
@@ -354,6 +426,138 @@ function capturedTimeline(
   return value as gsap.core.Timeline;
 }
 
+function numericAttribute(element: Element, name: string): number {
+  const raw = element.getAttribute(name);
+  const value = raw === null ? Number.NaN : Number(raw);
+  if (!Number.isFinite(value)) {
+    throw new Error(`Expected finite ${name} on ${element.tagName}`);
+  }
+  return value;
+}
+
+function pathCoordinates(element: SVGElement): number[] {
+  const value = element.querySelector("path")?.getAttribute("d") ?? "";
+  const coordinates = value.match(/-?\d*\.?\d+(?:e[-+]?\d+)?/gi)?.map(Number);
+  if (!coordinates?.length || coordinates.some((entry) => !Number.isFinite(entry))) {
+    throw new Error(`Expected finite path coordinates for ${element.id}`);
+  }
+  return coordinates;
+}
+
+function nodeGeometry(node: SceneNode): number[] {
+  if (node.kind === "path") return node.points.flatMap((point) => [...point]);
+  if (node.kind === "latex_token") {
+    return [tokenLeft(node), node.y, node.width, node.height];
+  }
+  throw new Error(`Fixture motion test does not support ${node.kind}`);
+}
+
+function renderedGeometry(element: SVGElement, node: SceneNode): number[] {
+  if (node.kind === "path") return pathCoordinates(element);
+  if (node.kind === "latex_token") {
+    const token = element.querySelector("foreignObject");
+    if (!token) throw new Error(`Expected measured token ${node.id}`);
+    return ["x", "y", "width", "height"].map((name) =>
+      numericAttribute(token, name),
+    );
+  }
+  throw new Error(`Fixture motion test does not support ${node.kind}`);
+}
+
+function interpolationProgress(
+  actual: readonly number[],
+  previous: readonly number[],
+  next: readonly number[],
+): number | null {
+  expect(actual).toHaveLength(previous.length);
+  expect(next).toHaveLength(previous.length);
+  const progress = actual.flatMap((value, index) => {
+    const delta = next[index] - previous[index];
+    if (Math.abs(delta) < 1e-9) {
+      expect(value).toBeCloseTo(previous[index], 6);
+      return [];
+    }
+    const ratio = (value - previous[index]) / delta;
+    expect(ratio).toBeGreaterThan(0);
+    expect(ratio).toBeLessThan(1);
+    return [ratio];
+  });
+  if (!progress.length) return null;
+  progress.slice(1).forEach((value) =>
+    expect(value).toBeCloseTo(progress[0], 6),
+  );
+  return progress[0];
+}
+
+function renderedBox(element: SVGElement, node: SceneNode): Box {
+  const geometry = renderedGeometry(element, node);
+  if (node.kind === "latex_token") {
+    const [left, top, width, height] = geometry;
+    return [left, top, left + width, top + height];
+  }
+  const xs = geometry.filter((_, index) => index % 2 === 0);
+  const ys = geometry.filter((_, index) => index % 2 === 1);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+function containmentViolation(
+  inner: Box,
+  outer: Box,
+  label: string,
+): string | null {
+  if (
+    inner[0] < outer[0] - 1e-6 ||
+    inner[1] < outer[1] - 1e-6 ||
+    inner[2] > outer[2] + 1e-6 ||
+    inner[3] > outer[3] + 1e-6
+  ) {
+    return `${label} ${JSON.stringify(inner)} escapes ${JSON.stringify(outer)}`;
+  }
+  return null;
+}
+
+function interiorsOverlap(left: Box, right: Box): boolean {
+  return (
+    Math.min(left[2], right[2]) - Math.max(left[0], right[0]) > 1e-6 &&
+    Math.min(left[3], right[3]) - Math.max(left[1], right[1]) > 1e-6
+  );
+}
+
+function collisionViolations(
+  entries: readonly { readonly id: string; readonly box: Box }[],
+  label: string,
+): string[] {
+  const violations: string[] = [];
+  entries.forEach((left, index) => {
+    entries.slice(index + 1).forEach((right) => {
+      if (interiorsOverlap(left.box, right.box)) {
+        violations.push(
+          `${label} collision between ${left.id} and ${right.id}`,
+        );
+      }
+    });
+  });
+  return violations;
+}
+
+function renderedOpacity(element: SVGElement, node: SceneNode): number {
+  const value = element.style.opacity;
+  return value === "" ? node.style.opacity : Number(value);
+}
+
+const FIXTURE_CHECKPOINT_PLANS = fixtureCheckpointPlans();
+const FIXTURE_MOTION_PLANS = FIXTURE_CHECKPOINT_PLANS.filter(
+  (prepared) => compatibleUpdates(prepared).length > 0,
+);
+const FIXTURE_TRAJECTORY_CASES = FIXTURE_MOTION_PLANS.flatMap((prepared) =>
+  TRAJECTORY_SAMPLES.map((sample) => ({
+    checkpointId: prepared.event.semantic.checkpointId,
+    percentage: sample * 100,
+    prepared,
+    sample,
+  })),
+);
+
 function expectClean(svg: SVGSVGElement): void {
   expect(
     svg.querySelector(
@@ -386,6 +590,198 @@ describe("checkpoint choreography executor", () => {
           playbackRate: playbackRate as unknown as ChoreographyPlaybackRate,
         }),
       ).toThrow("playbackRate must be exactly 1 or 16");
+    },
+  );
+
+  it("binds every compatible checked-in motion to its required stable correspondence", () => {
+    const actual = Object.fromEntries(
+      FIXTURE_MOTION_PLANS.map((prepared) => [
+        prepared.event.semantic.checkpointId,
+        compatibleUpdates(prepared)
+          .map((step) => step.id)
+          .sort(),
+      ]),
+    );
+    const expected = Object.fromEntries(
+      Object.entries(REQUIRED_COMPATIBLE_IDS).map(([checkpointId, ids]) => [
+        checkpointId,
+        [...ids].sort(),
+      ]),
+    );
+    expect(actual).toEqual(expected);
+    expect(
+      FIXTURE_CHECKPOINT_PLANS.flatMap((prepared) =>
+        prepared.plan.motionPlan.steps.flatMap((step) =>
+          step.type === "update" && step.transition === "crossfade"
+            ? [
+                {
+                  checkpointId: prepared.event.semantic.checkpointId,
+                  id: step.id,
+                },
+              ]
+            : [],
+        ),
+      ),
+    ).toEqual([
+      {
+        checkpointId: "balance_and_complete",
+        id: "square-lesson__corner_area",
+      },
+    ]);
+  });
+
+  it.each(FIXTURE_TRAJECTORY_CASES)(
+    "executes checked-in $checkpointId motion at $percentage% without continuity or composition drift",
+    ({ prepared, sample }) => {
+      const setup = harness({
+        barrier: () => Promise.resolve(),
+        viewport: prepared.plan.baseViewport,
+      });
+      setup.seed(prepared.base.scene);
+      const updates = compatibleUpdates(prepared);
+      const targetIds = new Set(
+        prepared.target.scene.nodes.map((node) => node.id),
+      );
+      const retainedIds = prepared.base.scene.nodes
+        .map((node) => node.id)
+        .filter((id) => targetIds.has(id));
+      const identities = new Map(
+        retainedIds.map((id) => [id, setup.elements.get(id)?.element]),
+      );
+      const timelineSpy = vi.spyOn(gsap, "timeline");
+      const playback = setup.executor.play(prepared.plan);
+      const motionSeconds =
+        prepared.plan.choreographyPlan.phase.durationMs / 1_000;
+      const timeline = capturedTimeline(timelineSpy).pause();
+      timeline.time(motionSeconds * sample, false);
+      expect(timeline.time()).toBeCloseTo(motionSeconds * sample, 6);
+      expect(timeline.time()).toBeLessThan(motionSeconds);
+      retainedIds.forEach((id) =>
+        expect(setup.elements.get(id)?.element).toBe(identities.get(id)),
+      );
+
+      const motionProgress = updates.map((step) => {
+        const element = setup.elements.get(step.id)?.element;
+        if (!element) throw new Error(`Missing retained fixture node ${step.id}`);
+        const geometryProgress = interpolationProgress(
+          renderedGeometry(element, step.next),
+          nodeGeometry(step.previous),
+          nodeGeometry(step.next),
+        );
+        if (geometryProgress !== null) return geometryProgress;
+        if (step.id !== "square-lesson__corner") {
+          throw new Error(`${step.id} has no observable compatible motion`);
+        }
+        const path = element.querySelector("path");
+        const alpha = Number(
+          gsap.utils.splitColor(path?.getAttribute("fill") ?? "")[3],
+        );
+        expect(alpha).toBeGreaterThan(0);
+        expect(alpha).toBeLessThan(1);
+        return alpha;
+      });
+
+      const viewport = setup.readViewport();
+      const viewportProgress = interpolationProgress(
+        [viewport.x, viewport.y, viewport.width, viewport.height],
+        [
+          prepared.plan.baseViewport.x,
+          prepared.plan.baseViewport.y,
+          prepared.plan.baseViewport.width,
+          prepared.plan.baseViewport.height,
+        ],
+        [
+          prepared.plan.resultViewport.x,
+          prepared.plan.resultViewport.y,
+          prepared.plan.resultViewport.width,
+          prepared.plan.resultViewport.height,
+        ],
+      );
+      if (viewportProgress !== null) {
+        motionProgress.forEach((progress) =>
+          expect(progress).toBeCloseTo(viewportProgress, 6),
+        );
+      }
+
+      const nodeById = new Map(
+        [...prepared.base.scene.nodes, ...prepared.target.scene.nodes].map(
+          (node) => [node.id, node],
+        ),
+      );
+      const visible = [...setup.elements].flatMap(([id, data]) => {
+        const node = nodeById.get(id);
+        return node && renderedOpacity(data.element, node) > 0
+          ? [{ id, element: data.element, node }]
+          : [];
+      });
+      const violations: string[] = [];
+      const focusIds =
+        prepared.plan.choreographyPlan.phase.cues.find(
+          (cue) => cue.cue === "focus",
+        )?.targetIds ?? [];
+      for (const id of new Set([
+        ...updates.map((step) => step.id),
+        ...focusIds,
+      ])) {
+        const entry = visible.find((candidate) => candidate.id === id);
+        if (!entry) {
+          violations.push(`moving/focal node ${id} is not visibly rendered`);
+          continue;
+        }
+        const violation = containmentViolation(
+          renderedBox(entry.element, entry.node),
+          BOARD_BOX,
+          `moving/focal node ${id}`,
+        );
+        if (violation) violations.push(violation);
+      }
+
+      const tokens = visible.flatMap((entry) => {
+        if (entry.node.kind !== "latex_token") return [];
+        const box = renderedBox(entry.element, entry.node);
+        if (
+          box[2] - box[0] < 24 ||
+          box[3] - box[1] < 40 ||
+          !entry.element.textContent?.trim()
+        ) {
+          violations.push(`unreadable measured token ${entry.id}`);
+        }
+        const boardViolation = containmentViolation(
+          box,
+          BOARD_BOX,
+          `token ${entry.id}`,
+        );
+        if (boardViolation) violations.push(boardViolation);
+        return [{ id: entry.id, box }];
+      });
+      violations.push(...collisionViolations(tokens, "visible token"));
+
+      const shapes = visible.flatMap((entry) =>
+        entry.node.kind === "path" && AREA_SHAPE_IDS.includes(entry.id)
+          ? [{ id: entry.id, box: renderedBox(entry.element, entry.node) }]
+          : [],
+      );
+      violations.push(...collisionViolations(shapes, "area shape"));
+
+      const safeViewport: Box = [
+        viewport.x + SAFE_VIEWPORT_PADDING,
+        viewport.y + SAFE_VIEWPORT_PADDING,
+        viewport.x + viewport.width - SAFE_VIEWPORT_PADDING,
+        viewport.y + viewport.height - SAFE_VIEWPORT_PADDING,
+      ];
+      for (const id of focusIds) {
+        const entry = visible.find((candidate) => candidate.id === id);
+        if (!entry) continue;
+        const violation = containmentViolation(
+          renderedBox(entry.element, entry.node),
+          safeViewport,
+          `focus node ${id}`,
+        );
+        if (violation) violations.push(violation);
+      }
+
+      playback.cancel();
+      expect(violations).toEqual([]);
     },
   );
 

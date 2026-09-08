@@ -142,12 +142,12 @@ _RESULT_VIEWPORTS = {
         (100.0, 55.0, 600.0, 500.0),
     ),
     CompletingSquareCheckpointId.MISSING_CORNER: (
-        (340.0, 340.0, 220.0, 150.0),
-        (330.0, 330.0, 240.0, 200.0),
+        (220.0, 220.0, 280.0, 280.0),
+        (205.0, 205.0, 310.0, 310.0),
     ),
     CompletingSquareCheckpointId.CORNER_DETAIL: (
-        (380.0, 380.0, 260.0, 160.0),
-        (370.0, 360.0, 290.0, 190.0),
+        (220.0, 220.0, 420.0, 330.0),
+        (200.0, 200.0, 460.0, 370.0),
     ),
     CompletingSquareCheckpointId.BALANCE_AND_COMPLETE: (
         (0.0, 75.0, 800.0, 450.0),
@@ -512,10 +512,13 @@ def _geometry(component_id: str, checkpoint_index: int) -> NodeMap:
         strip_b = ((420.0, 240.0), (474.0, 240.0), (474.0, 420.0), (420.0, 420.0))
         centers = ((330.0, 315.0), (330.0, 428.0), (447.0, 315.0))
     else:
-        square = ((140.0, 270.0), (320.0, 270.0), (320.0, 450.0), (140.0, 450.0))
-        strip_a = ((390.0, 280.0), (570.0, 280.0), (570.0, 334.0), (390.0, 334.0))
-        strip_b = ((390.0, 370.0), (570.0, 370.0), (570.0, 424.0), (390.0, 424.0))
-        centers = ((230.0, 345.0), (480.0, 290.0), (480.0, 380.0))
+        # Keep each detached piece on the same side of the square it will
+        # eventually occupy. Straight interpolation can then close the gaps
+        # without one identity cutting through another on its way into place.
+        square = ((210.0, 210.0), (390.0, 210.0), (390.0, 390.0), (210.0, 390.0))
+        strip_a = ((210.0, 450.0), (390.0, 450.0), (390.0, 504.0), (210.0, 504.0))
+        strip_b = ((450.0, 210.0), (504.0, 210.0), (504.0, 390.0), (450.0, 390.0))
+        centers = ((300.0, 285.0), (300.0, 458.0), (477.0, 285.0))
 
     nodes: tuple[SceneNode, ...] = (
         _path(component_id, "x2_square", square, _GEOMETRY_STYLE),

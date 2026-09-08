@@ -240,6 +240,7 @@ export function addCompatibleTransform(
   duration: number,
   ease: string,
   onError: (error: unknown) => void,
+  position = 0,
 ): void {
   const { previous, next } = step;
   if (previous.kind !== next.kind) {
@@ -419,5 +420,9 @@ export function addCompatibleTransform(
       onError(error);
     }
   };
-  timeline.to(proxy, { progress: 1, duration, ease, onUpdate: render }, 0);
+  timeline.to(
+    proxy,
+    { progress: 1, duration, ease, onUpdate: render },
+    position,
+  );
 }
