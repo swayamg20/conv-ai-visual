@@ -24,6 +24,12 @@ from murmur.live_scene import (
     SceneStreamEvent,
     encode_scene_stream_event,
 )
+from murmur.live_scene.choreography_service_contracts import (
+    ChoreographySceneStreamEvent,
+)
+from murmur.live_scene.choreography_wire import (
+    encode_choreography_scene_stream_event,
+)
 from murmur.live_scene.semantic_service_contracts import (
     SemanticLiveSceneRequest,
     SemanticSceneStreamEvent,
@@ -95,6 +101,17 @@ async def _encode_semantic_scene_events(
         await close_async_resource(events)
 
 
+async def _encode_choreography_scene_events(
+    events: AsyncIterator[ChoreographySceneStreamEvent],
+) -> AsyncIterator[str]:
+    """Encode strict choreography events and release every owned upstream resource."""
+    try:
+        async for event in events:
+            yield encode_choreography_scene_stream_event(event)
+    finally:
+        await close_async_resource(events)
+
+
 async def _stream_semantic_scene(
     body: SemanticLiveSceneRequest,
     *,
@@ -111,6 +128,31 @@ async def _stream_semantic_scene(
     events = scene_service.stream_routed_semantic_events(body)
     return _OwnedStreamingResponse(
         _encode_semantic_scene_events(events),
+        admission_lease=lease,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _stream_choreography_scene(
+    body: SemanticLiveSceneRequest,
+    *,
+    admission_identity: str,
+    admission: SceneAuthoringAdmission,
+    scene_service: SceneAuthoringService,
+) -> StreamingResponse:
+    """Acquire paid capacity and stream routed, preflighted V2 checkpoints."""
+
+    try:
+        lease = await admission.acquire(admission_identity)
+    except SceneAdmissionError as exc:
+        raise ApiError(429, str(exc)) from None
+    events = scene_service.stream_routed_choreography_events(body)
+    return _OwnedStreamingResponse(
+        _encode_choreography_scene_events(events),
         admission_lease=lease,
         media_type="text/event-stream",
         headers={
@@ -154,6 +196,23 @@ async def stream_semantic_live_scene(
     """Stream compiler-verified semantic atoms for an authenticated caller."""
 
     return await _stream_semantic_scene(
+        body,
+        admission_identity=user["id"],
+        admission=admission,
+        scene_service=scene_service,
+    )
+
+
+@router.post("/choreography/stream")
+async def stream_choreography_live_scene(
+    body: SemanticLiveSceneRequest,
+    user: CurrentUserDependency,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream compiler-verified choreography checkpoints for a trusted caller."""
+
+    return await _stream_choreography_scene(
         body,
         admission_identity=user["id"],
         admission=admission,
@@ -207,8 +266,30 @@ async def stream_development_semantic_live_scene(
     )
 
 
+@router.post(
+    "/lab/choreography/stream",
+    include_in_schema=False,
+    dependencies=[Depends(_require_development_scene_lab)],
+)
+async def stream_development_choreography_live_scene(
+    body: SemanticLiveSceneRequest,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream verified choreography in the guarded loopback development lab."""
+
+    return await _stream_choreography_scene(
+        body,
+        admission_identity=_DEVELOPMENT_SCENE_LAB_IDENTITY,
+        admission=admission,
+        scene_service=scene_service,
+    )
+
+
 __all__ = [
     "router",
+    "stream_choreography_live_scene",
+    "stream_development_choreography_live_scene",
     "stream_development_live_scene",
     "stream_development_semantic_live_scene",
     "stream_live_scene",
