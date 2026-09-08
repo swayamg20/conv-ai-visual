@@ -264,6 +264,7 @@ function observeNetwork(
       request.method === "GET" &&
       (request.target === documentTarget ||
         request.target.startsWith("/_next/") ||
+        request.target.startsWith("/__nextjs_font/") ||
         request.target === "/favicon.ico");
     return Object.freeze({
       requestCount: requests.length,

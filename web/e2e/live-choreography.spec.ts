@@ -233,6 +233,7 @@ function observeProviderFreeRequests(
       request.method() === "GET" &&
       (documentTargets.includes(target) ||
         url.pathname.startsWith("/_next/") ||
+        url.pathname.startsWith("/__nextjs_font/") ||
         url.pathname === "/favicon.ico");
     if (!allowed) unexpectedRequests.push(target);
   });
