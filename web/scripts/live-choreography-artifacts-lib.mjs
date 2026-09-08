@@ -1670,6 +1670,92 @@ function validateCaptureCheckpoint(value, expected, index) {
   };
 }
 
+const MAX_UNEXPLAINED_PACING_GAP_MS = 1_200;
+const MAX_EARLY_SETTLEMENT_JITTER_MS = 250;
+
+function validateRealTimePacing(
+  { firstVisibleAtMs, completedAtMs, settlements, phaseTransitions },
+  lesson,
+) {
+  const expectedTransitions = [
+    { phase: "idle", checkpointId: "none", settledMainCount: 0 },
+    { phase: "connecting", checkpointId: "none", settledMainCount: 0 },
+    { phase: "streaming", checkpointId: "none", settledMainCount: 0 },
+    { phase: "completing", checkpointId: "none", settledMainCount: 0 },
+    ...lesson.checkpoints.map((checkpoint, index) => ({
+      phase:
+        index === lesson.checkpoints.length - 1 ? "completed" : "completing",
+      checkpointId: checkpoint.checkpointId,
+      settledMainCount: index + 1,
+    })),
+  ];
+  if (phaseTransitions.length !== expectedTransitions.length) {
+    fail(
+      "capture.realTime.phaseTransitions",
+      `must contain exactly ${expectedTransitions.length} closed transitions`,
+    );
+  }
+  phaseTransitions.forEach((transition, index) => {
+    const location = `capture.realTime.phaseTransitions[${index}]`;
+    const expected = expectedTransitions[index];
+    literal(transition.phase, expected.phase, `${location}.phase`);
+    literal(
+      transition.checkpointId,
+      expected.checkpointId,
+      `${location}.checkpointId`,
+    );
+    literal(
+      transition.settledMainCount,
+      expected.settledMainCount,
+      `${location}.settledMainCount`,
+    );
+    if (index > 0 && transition.atMs <= phaseTransitions[index - 1].atMs) {
+      fail(`${location}.atMs`, "must increase strictly");
+    }
+    if (transition.atMs > completedAtMs + 1) {
+      fail(`${location}.atMs`, "must not occur after completion");
+    }
+  });
+
+  return settlements.map((settlement, index) => {
+    const checkpoint = lesson.checkpoints[index];
+    const transition = phaseTransitions[index + 4];
+    literal(
+      transition.atMs,
+      settlement.atMs,
+      `capture.realTime.phaseTransitions[${index + 4}].atMs`,
+    );
+    const startedAtMs =
+      index === 0 ? firstVisibleAtMs : settlements[index - 1].atMs;
+    const observedMs = settlement.atMs - startedAtMs;
+    const authoredMs = checkpoint.phase.durationMs + checkpoint.phase.holdAfterMs;
+    const unexplainedMs = observedMs - authoredMs;
+    if (unexplainedMs < -MAX_EARLY_SETTLEMENT_JITTER_MS) {
+      fail(
+        `capture.realTime.settlements[${index}].atMs`,
+        `settles ${Math.abs(unexplainedMs).toFixed(1)} ms before its authored motion and hold`,
+      );
+    }
+    if (unexplainedMs > MAX_UNEXPLAINED_PACING_GAP_MS) {
+      fail(
+        `capture.realTime.settlements[${index}].atMs`,
+        `contains an unexplained ${unexplainedMs.toFixed(1)} ms gap beyond its authored motion and hold`,
+      );
+    }
+    return {
+      checkpointId: checkpoint.checkpointId,
+      authoredMs,
+      observedMs,
+      unexplainedMs,
+    };
+  });
+}
+
+/** Test-only wrapper for the closed real-time phase and pacing validator. */
+export function validateRealTimePacingForTests(evidence, lesson) {
+  return validateRealTimePacing(evidence, lesson);
+}
+
 function validateCapture(value, lesson) {
   const root = exactKeys(
     value,
@@ -1839,6 +1925,10 @@ function validateCapture(value, lesson) {
     EXPECTED_CHECKPOINT_IDS,
     "capture.realTime.phaseTransitions checkpoint sequence",
   );
+  const timingWindows = validateRealTimePacing(
+    { firstVisibleAtMs, completedAtMs, settlements, phaseTransitions },
+    lesson,
+  );
   const samples = (name) =>
     array(realTime[name], `capture.realTime.${name}`).map(
       (entryValue, index) => {
@@ -1953,6 +2043,7 @@ function validateCapture(value, lesson) {
       visualDurationMs,
       settlements,
       phaseTransitions,
+      timingWindows,
       longFrames,
       longTasks,
       finalCheckpoint,
@@ -2521,6 +2612,8 @@ async function buildManifestFromSnapshot(rootSnapshot) {
           acceptedRangeMs: [60_000, 90_000],
           settlements: capture.realTime.settlements,
           phaseTransitions: capture.realTime.phaseTransitions,
+          checkpointWindows: capture.realTime.timingWindows,
+          maximumUnexplainedGapMs: MAX_UNEXPLAINED_PACING_GAP_MS,
           longFrames: capture.realTime.longFrames,
           longTasks: capture.realTime.longTasks,
         },

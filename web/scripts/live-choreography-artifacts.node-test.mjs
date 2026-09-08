@@ -32,6 +32,7 @@ import {
   validateExpectedShaForTests,
   validateManifest,
   validateProviderFreeRequestsForTests,
+  validateRealTimePacingForTests,
   validateRuntimeEvidenceForTests,
   verifyEvidenceProvenance,
   writeManifest,
@@ -168,6 +169,141 @@ test("computes SHA-256 and the strict twenty-sample nearest-rank p95", () => {
     (error) =>
       error instanceof EvidenceError &&
       /exactly 20 entries/.test(error.message),
+  );
+});
+
+test("real-time pacing accepts only the closed phase path and authored timing", async () => {
+  const lesson = await checkedInLesson();
+  const firstVisibleAtMs = 500;
+  let settledAtMs = firstVisibleAtMs;
+  const settlements = lesson.checkpoints.map((checkpoint, index) => {
+    settledAtMs += checkpoint.phase.durationMs + checkpoint.phase.holdAfterMs;
+    return {
+      ordinal: index + 1,
+      checkpointId: checkpoint.checkpointId,
+      phase:
+        index === lesson.checkpoints.length - 1 ? "completed" : "completing",
+      atMs: settledAtMs,
+    };
+  });
+  const phaseTransitions = [
+    { phase: "idle", checkpointId: "none", settledMainCount: 0, atMs: 10 },
+    {
+      phase: "connecting",
+      checkpointId: "none",
+      settledMainCount: 0,
+      atMs: 100,
+    },
+    {
+      phase: "streaming",
+      checkpointId: "none",
+      settledMainCount: 0,
+      atMs: 200,
+    },
+    {
+      phase: "completing",
+      checkpointId: "none",
+      settledMainCount: 0,
+      atMs: 300,
+    },
+    ...settlements.map((settlement) => ({
+      phase: settlement.phase,
+      checkpointId: settlement.checkpointId,
+      settledMainCount: settlement.ordinal,
+      atMs: settlement.atMs,
+    })),
+  ];
+  const evidence = {
+    firstVisibleAtMs,
+    completedAtMs: settlements.at(-1).atMs,
+    settlements,
+    phaseTransitions,
+  };
+
+  const timing = validateRealTimePacingForTests(evidence, lesson);
+  assert.deepEqual(
+    timing.map(({ checkpointId, unexplainedMs }) => ({
+      checkpointId,
+      unexplainedMs,
+    })),
+    lesson.checkpoints.map(({ checkpointId }) => ({
+      checkpointId,
+      unexplainedMs: 0,
+    })),
+  );
+
+  assert.throws(
+    () =>
+      validateRealTimePacingForTests(
+        {
+          ...evidence,
+          phaseTransitions: phaseTransitions.with(2, {
+            ...phaseTransitions[2],
+            phase: "thinking",
+          }),
+        },
+        lesson,
+      ),
+    /phaseTransitions\[2\]\.phase/,
+  );
+
+  assert.throws(
+    () =>
+      validateRealTimePacingForTests(
+        {
+          ...evidence,
+          phaseTransitions: phaseTransitions.with(2, {
+            ...phaseTransitions[2],
+            atMs: phaseTransitions[1].atMs,
+          }),
+        },
+        lesson,
+      ),
+    /phaseTransitions\[2\]\.atMs: must increase strictly/,
+  );
+
+  const delayedSettlements = settlements.map((settlement, index) => ({
+    ...settlement,
+    atMs: settlement.atMs + (index >= 2 ? 1_201 : 0),
+  }));
+  assert.throws(
+    () =>
+      validateRealTimePacingForTests(
+        {
+          ...evidence,
+          completedAtMs: delayedSettlements.at(-1).atMs,
+          settlements: delayedSettlements,
+          phaseTransitions: phaseTransitions.map((transition, index) =>
+            index >= 6
+              ? { ...transition, atMs: transition.atMs + 1_201 }
+              : transition,
+          ),
+        },
+        lesson,
+      ),
+    /unexplained 1201\.0 ms gap/,
+  );
+
+  const earlySettlements = settlements.map((settlement, index) => ({
+    ...settlement,
+    atMs: settlement.atMs - (index >= 4 ? 251 : 0),
+  }));
+  assert.throws(
+    () =>
+      validateRealTimePacingForTests(
+        {
+          ...evidence,
+          completedAtMs: earlySettlements.at(-1).atMs,
+          settlements: earlySettlements,
+          phaseTransitions: phaseTransitions.map((transition, index) =>
+            index >= 8
+              ? { ...transition, atMs: transition.atMs - 251 }
+              : transition,
+          ),
+        },
+        lesson,
+      ),
+    /settles 251\.0 ms before its authored motion and hold/,
   );
 });
 
