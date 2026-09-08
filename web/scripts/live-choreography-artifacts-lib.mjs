@@ -13,6 +13,7 @@ import { constants, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,13 +56,45 @@ const EXPECTED_RESPONSIVE_VIEWPORTS = Object.freeze([
   Object.freeze({ width: 320, height: 568 }),
   Object.freeze({ width: 375, height: 812 }),
 ]);
+const INTERRUPTION_DEFINITIONS = Object.freeze([
+  Object.freeze({
+    category: "move",
+    checkpointOrdinal: 4,
+    cue: "transform",
+    timing: "motion",
+  }),
+  Object.freeze({
+    category: "token_morph",
+    checkpointOrdinal: 7,
+    cue: "transform",
+    timing: "motion",
+  }),
+  Object.freeze({
+    category: "camera_focus",
+    checkpointOrdinal: 4,
+    cue: "focus",
+    timing: "motion",
+  }),
+  Object.freeze({
+    category: "emphasis",
+    checkpointOrdinal: 6,
+    cue: "emphasize",
+    timing: "motion",
+  }),
+  Object.freeze({
+    category: "authored_hold",
+    checkpointOrdinal: 4,
+    cue: "hold",
+    timing: "hold",
+  }),
+]);
 const EXPECTED_ACCELERATED_TESTS = Object.freeze([
   "starts meaningful choreography under 100ms p95 over twenty fresh runs",
   "settles the exact eight-checkpoint lesson without replacing retained ink or calling a model",
   "reduced motion reaches the same certified final state",
   "keeps the compact 375x812 stage inside the viewport",
   "keeps the compact 320x568 stage inside the viewport",
-  "pauses at the visible corner, answers it, continues, and replays the exact visual state",
+  "interrupts twenty active checkpoints, proves stale-window stability, and replays every frontier",
 ]);
 const EXPECTED_CAPTURE_TESTS = Object.freeze([
   "records the complete 1x cinematic choreography",
@@ -181,6 +214,12 @@ function assertArrayEqual(actual, expected, location) {
       location,
       `must equal ${JSON.stringify(expected)}; received ${JSON.stringify(actual)}`,
     );
+  }
+}
+
+function assertDeepEqual(actual, expected, location) {
+  if (!isDeepStrictEqual(actual, expected)) {
+    fail(location, "must be deeply equal");
   }
 }
 
@@ -1103,8 +1142,7 @@ export function deriveRuntimeEvidence(lesson) {
     .map((event, index) => ({ ordinal: index + 1, ...event }));
 }
 
-function validateRuntimeEvidence(value, lesson, location) {
-  const expected = deriveRuntimeEvidence(lesson);
+function validateExpectedEvidence(value, expected, location) {
   const observed = array(value, location, expected.length);
   observed.forEach((eventValue, index) => {
     const expectedEvent = expected[index];
@@ -1121,6 +1159,14 @@ function validateRuntimeEvidence(value, lesson, location) {
   return expected;
 }
 
+function validateRuntimeEvidence(value, lesson, location) {
+  return validateExpectedEvidence(
+    value,
+    deriveRuntimeEvidence(lesson),
+    location,
+  );
+}
+
 /** Test-only wrapper for the checkpoint-derived runtime trace validator. */
 export function validateRuntimeEvidenceForTests(value, lesson) {
   return validateRuntimeEvidence(value, lesson, "runtime evidence");
@@ -1131,8 +1177,8 @@ function validateDomIdentity(observation, expectedNodeIds, location) {
   assertArrayEqual(nodeIds, expectedNodeIds, `${location}.nodeIds`);
   const identities = object(observation.domIdentity, `${location}.domIdentity`);
   assertArrayEqual(
-    Object.keys(identities).sort(),
-    [...nodeIds].sort(),
+    Object.keys(identities),
+    nodeIds,
     `${location}.domIdentity keys`,
   );
   const tokens = nodeIds.map((id) =>
@@ -1144,7 +1190,7 @@ function validateDomIdentity(observation, expectedNodeIds, location) {
   if (new Set(tokens).size !== tokens.length) {
     fail(`${location}.domIdentity`, "must assign one unique token per node");
   }
-  return { nodeIds, identities };
+  return { nodeIds, domIdentity: identities };
 }
 
 function validateSettledCheckpoint(observationValue, expected, location) {
@@ -1184,10 +1230,36 @@ function validateSettledCheckpoint(observationValue, expected, location) {
   return { ...observation, ...identity };
 }
 
-function validateIdentityContinuity(observations, location) {
-  for (let index = 1; index < observations.length; index += 1) {
+function validateIdentityContinuity(
+  observations,
+  location,
+  earlierRunTokenOwners = new Map(),
+) {
+  const tokenOwners = new Map(earlierRunTokenOwners);
+  const earlierRunTokens = new Set(earlierRunTokenOwners.keys());
+  for (let index = 0; index < observations.length; index += 1) {
+    const observation = observations[index];
+    for (const id of observation.nodeIds) {
+      const token = observation.domIdentity[id];
+      if (earlierRunTokens.has(token)) {
+        fail(
+          `${location}[${index}].domIdentity.${id}`,
+          "reuses a DOM token from the earlier run",
+        );
+      }
+      const owner = tokenOwners.get(token);
+      if (owner !== undefined && owner !== id) {
+        fail(
+          `${location}[${index}].domIdentity.${id}`,
+          `reuses token already assigned to ${owner}`,
+        );
+      }
+      tokenOwners.set(token, id);
+    }
+
+    if (index === 0) continue;
     const previous = observations[index - 1];
-    const current = observations[index];
+    const current = observation;
     for (const id of previous.nodeIds) {
       if (
         current.domIdentity[id] !== undefined &&
@@ -1200,6 +1272,560 @@ function validateIdentityContinuity(observations, location) {
       }
     }
   }
+  return tokenOwners;
+}
+
+function expectedInterruptionCases(lesson) {
+  return INTERRUPTION_DEFINITIONS.flatMap((definition) =>
+    Array.from({ length: 4 }, (_, repeat) => ({
+      ...definition,
+      label: `${definition.category}-${repeat + 1}`,
+      checkpoint: lesson.checkpoints[definition.checkpointOrdinal - 1],
+    })),
+  );
+}
+
+function cueTargetIds(checkpoint, cue, location) {
+  if (cue === "hold") return [];
+  const matches = checkpoint.phase.cues.filter((entry) => entry.cue === cue);
+  if (matches.length !== 1) {
+    fail(location, `fixture must contain exactly one ${cue} cue`);
+  }
+  return matches[0].targetIds;
+}
+
+function interruptedEvidence(lesson, checkpoint) {
+  return deriveRuntimeEvidence(lesson)
+    .filter((event) => event.sequence <= checkpoint.sequence)
+    .map((event) =>
+      event.sequence === checkpoint.sequence &&
+      event.type === "checkpointSettled"
+        ? { ...event, settlement: "cancelled_to_checkpoint" }
+        : event,
+    );
+}
+
+function validateStageSnapshot(value, target, location) {
+  const stage = exactKeys(
+    value,
+    ["caption", "viewBox", "nodeIds", "domIdentity", "canonicalSvg"],
+    location,
+  );
+  literal(stage.caption, target.caption, `${location}.caption`);
+  literal(stage.viewBox, target.viewBox, `${location}.viewBox`);
+  const identity = validateDomIdentity(stage, target.nodeIds, location);
+  assertDeepEqual(
+    stage.domIdentity,
+    target.domIdentity,
+    `${location}.domIdentity against target`,
+  );
+  return {
+    caption: stage.caption,
+    viewBox: stage.viewBox,
+    nodeIds: identity.nodeIds,
+    domIdentity: stage.domIdentity,
+    canonicalSvg: string(stage.canonicalSvg, `${location}.canonicalSvg`),
+  };
+}
+
+function validateInterruptedStability(
+  value,
+  checkpoint,
+  target,
+  expectedEvidence,
+  location,
+) {
+  const snapshot = exactKeys(
+    value,
+    ["stage", "frontier", "evidence"],
+    location,
+  );
+  const stage = validateStageSnapshot(
+    snapshot.stage,
+    target,
+    `${location}.stage`,
+  );
+  const frontier = exactKeys(
+    snapshot.frontier,
+    [
+      "phase",
+      "checkpointId",
+      "settledMainCount",
+      "rendererTrusted",
+      "waitingFor",
+    ],
+    `${location}.frontier`,
+  );
+  literal(frontier.phase, "interrupted", `${location}.frontier.phase`);
+  literal(
+    frontier.checkpointId,
+    checkpoint.checkpointId,
+    `${location}.frontier.checkpointId`,
+  );
+  literal(
+    frontier.settledMainCount,
+    checkpoint.ordinal,
+    `${location}.frontier.settledMainCount`,
+  );
+  literal(
+    frontier.rendererTrusted,
+    true,
+    `${location}.frontier.rendererTrusted`,
+  );
+  literal(frontier.waitingFor, null, `${location}.frontier.waitingFor`);
+  const evidence = validateExpectedEvidence(
+    snapshot.evidence,
+    expectedEvidence,
+    `${location}.evidence`,
+  );
+  return { stage, frontier: { ...frontier }, evidence };
+}
+
+function validateInterruptionCase(value, expected, lesson, index) {
+  const location = `accelerated.adaptive.interruptionCases[${index}]`;
+  const observation = exactKeys(
+    value,
+    [
+      "label",
+      "category",
+      "checkpointId",
+      "sequence",
+      "cue",
+      "cueTargetIds",
+      "timing",
+      "authoredDurationMs",
+      "authoredHoldAfterMs",
+      "trigger",
+      "delayAfterPresentedMs",
+      "activeRevision",
+      "requestedAtMs",
+      "settledAtMs",
+      "settleMs",
+      "target",
+      "evidenceBefore",
+      "evidenceAfter",
+      "staleWindowMs",
+      "stabilityBefore",
+      "stabilityAfter",
+      "staleStable",
+    ],
+    location,
+  );
+  const checkpoint = expected.checkpoint;
+  literal(observation.label, expected.label, `${location}.label`);
+  literal(observation.category, expected.category, `${location}.category`);
+  literal(
+    observation.checkpointId,
+    checkpoint.checkpointId,
+    `${location}.checkpointId`,
+  );
+  literal(observation.sequence, checkpoint.sequence, `${location}.sequence`);
+  literal(observation.cue, expected.cue, `${location}.cue`);
+  const expectedTargets = cueTargetIds(
+    checkpoint,
+    expected.cue,
+    `${location}.cueTargetIds`,
+  );
+  assertArrayEqual(
+    stringArray(
+      observation.cueTargetIds,
+      `${location}.cueTargetIds`,
+      expectedTargets.length,
+    ),
+    expectedTargets,
+    `${location}.cueTargetIds`,
+  );
+  literal(observation.timing, expected.timing, `${location}.timing`);
+  literal(
+    observation.authoredDurationMs,
+    checkpoint.phase.durationMs,
+    `${location}.authoredDurationMs`,
+  );
+  literal(
+    observation.authoredHoldAfterMs,
+    checkpoint.phase.holdAfterMs,
+    `${location}.authoredHoldAfterMs`,
+  );
+  const expectedTrigger =
+    expected.timing === "hold"
+      ? "afterFirstCuePresentedDelay"
+      : "firstCuePresented";
+  literal(observation.trigger, expectedTrigger, `${location}.trigger`);
+  literal(
+    observation.delayAfterPresentedMs,
+    expected.timing === "hold"
+      ? Math.ceil(checkpoint.phase.durationMs / 16) + 50
+      : 0,
+    `${location}.delayAfterPresentedMs`,
+  );
+  literal(
+    observation.activeRevision,
+    checkpoint.resultRevision,
+    `${location}.activeRevision`,
+  );
+  const requestedAtMs = number(
+    observation.requestedAtMs,
+    `${location}.requestedAtMs`,
+    { minimum: 0 },
+  );
+  const settledAtMs = number(
+    observation.settledAtMs,
+    `${location}.settledAtMs`,
+    { minimum: 0 },
+  );
+  if (settledAtMs < requestedAtMs) {
+    fail(`${location}.settledAtMs`, "must not precede requestedAtMs");
+  }
+  const settleMs = number(observation.settleMs, `${location}.settleMs`, {
+    minimum: 0,
+  });
+  if (Math.abs(settledAtMs - requestedAtMs - settleMs) > 0.00101) {
+    fail(
+      `${location}.settleMs`,
+      "must equal settledAtMs - requestedAtMs within serialized precision",
+    );
+  }
+
+  const target = validateSettledCheckpoint(
+    observation.target,
+    checkpoint,
+    `${location}.target`,
+  );
+  const expectedAfter = interruptedEvidence(lesson, checkpoint);
+  const expectedBefore = expectedAfter.slice(0, -1);
+  const evidenceBefore = validateExpectedEvidence(
+    observation.evidenceBefore,
+    expectedBefore,
+    `${location}.evidenceBefore`,
+  );
+  const evidenceAfter = validateExpectedEvidence(
+    observation.evidenceAfter,
+    expectedAfter,
+    `${location}.evidenceAfter`,
+  );
+  const targetSettlements = evidenceAfter.filter(
+    (event) =>
+      event.sequence === checkpoint.sequence &&
+      event.type === "checkpointSettled",
+  );
+  if (
+    targetSettlements.length !== 1 ||
+    targetSettlements[0].settlement !== "cancelled_to_checkpoint" ||
+    evidenceAfter.at(-1) !== targetSettlements[0]
+  ) {
+    fail(
+      `${location}.evidenceAfter`,
+      "must end once in cancelled_to_checkpoint for the target",
+    );
+  }
+  if (evidenceAfter.some((event) => event.sequence > checkpoint.sequence)) {
+    fail(`${location}.evidenceAfter`, "must contain no later sequence");
+  }
+  literal(observation.staleWindowMs, 2_000, `${location}.staleWindowMs`);
+  literal(observation.staleStable, true, `${location}.staleStable`);
+  const stabilityBefore = validateInterruptedStability(
+    observation.stabilityBefore,
+    checkpoint,
+    target,
+    expectedAfter,
+    `${location}.stabilityBefore`,
+  );
+  const stabilityAfter = validateInterruptedStability(
+    observation.stabilityAfter,
+    checkpoint,
+    target,
+    expectedAfter,
+    `${location}.stabilityAfter`,
+  );
+  assertDeepEqual(
+    stabilityAfter,
+    stabilityBefore,
+    `${location}.stabilityAfter`,
+  );
+
+  return {
+    label: observation.label,
+    category: observation.category,
+    checkpointId: observation.checkpointId,
+    sequence: observation.sequence,
+    cue: observation.cue,
+    cueTargetIds: [...observation.cueTargetIds],
+    timing: observation.timing,
+    authoredDurationMs: observation.authoredDurationMs,
+    authoredHoldAfterMs: observation.authoredHoldAfterMs,
+    trigger: observation.trigger,
+    delayAfterPresentedMs: observation.delayAfterPresentedMs,
+    activeRevision: observation.activeRevision,
+    requestedAtMs,
+    settledAtMs,
+    settleMs,
+    target,
+    evidenceBefore,
+    evidenceAfter,
+    staleWindowMs: 2_000,
+    stabilityBefore,
+    stabilityAfter,
+    staleStable: true,
+  };
+}
+
+function validateReplayViewport(value, expected, location) {
+  const viewport = exactKeys(
+    value,
+    ["v", "x", "y", "width", "height"],
+    location,
+  );
+  literal(viewportString(viewport, location), expected, location);
+  return { ...viewport };
+}
+
+function validateReplayCheckpoint(value, expected, live, lesson, index) {
+  const location = `accelerated.adaptive.replay.replayedCheckpoints[${index}]`;
+  const checkpoint = exactKeys(
+    value,
+    [
+      "ordinal",
+      "checkpointId",
+      "certificateSha256",
+      "caption",
+      "viewport",
+      "nodeIds",
+      "domIdentity",
+      "rendererTrusted",
+      "cueTrace",
+    ],
+    location,
+  );
+  literal(checkpoint.ordinal, expected.ordinal, `${location}.ordinal`);
+  literal(
+    checkpoint.checkpointId,
+    expected.checkpointId,
+    `${location}.checkpointId`,
+  );
+  literal(
+    checkpoint.certificateSha256,
+    expected.certificateSha256,
+    `${location}.certificateSha256`,
+  );
+  literal(checkpoint.caption, expected.caption, `${location}.caption`);
+  literal(checkpoint.caption, live.caption, `${location}.caption against live`);
+  const viewport = validateReplayViewport(
+    checkpoint.viewport,
+    expected.viewports.cinematic.result,
+    `${location}.viewport`,
+  );
+  const identity = validateDomIdentity(checkpoint, expected.nodeIds, location);
+  assertArrayEqual(
+    identity.nodeIds,
+    live.nodeIds,
+    `${location}.nodeIds against live`,
+  );
+  literal(checkpoint.rendererTrusted, true, `${location}.rendererTrusted`);
+  const cueTrace = validateExpectedEvidence(
+    checkpoint.cueTrace,
+    deriveRuntimeEvidence(lesson).filter(
+      (event) => event.sequence === expected.sequence,
+    ),
+    `${location}.cueTrace`,
+  );
+  return {
+    ordinal: checkpoint.ordinal,
+    checkpointId: checkpoint.checkpointId,
+    certificateSha256: checkpoint.certificateSha256,
+    caption: checkpoint.caption,
+    viewport,
+    nodeIds: identity.nodeIds,
+    domIdentity: checkpoint.domIdentity,
+    rendererTrusted: true,
+    cueTrace,
+  };
+}
+
+function validateReplay(value, lesson) {
+  const location = "accelerated.adaptive.replay";
+  const replay = exactKeys(
+    value,
+    [
+      "liveCheckpoints",
+      "replayedCheckpoints",
+      "checkpointIds",
+      "certificateSha256s",
+      "liveEvidence",
+      "replayEvidence",
+      "finalCanonicalSvgMatches",
+      "equivalent",
+    ],
+    location,
+  );
+  const liveCheckpoints = array(
+    replay.liveCheckpoints,
+    `${location}.liveCheckpoints`,
+    lesson.checkpoints.length,
+  ).map((checkpoint, index) =>
+    validateSettledCheckpoint(
+      checkpoint,
+      lesson.checkpoints[index],
+      `${location}.liveCheckpoints[${index}]`,
+    ),
+  );
+  const liveTokenOwners = validateIdentityContinuity(
+    liveCheckpoints,
+    `${location}.liveCheckpoints`,
+  );
+  const replayedCheckpoints = array(
+    replay.replayedCheckpoints,
+    `${location}.replayedCheckpoints`,
+    lesson.checkpoints.length,
+  ).map((checkpoint, index) =>
+    validateReplayCheckpoint(
+      checkpoint,
+      lesson.checkpoints[index],
+      liveCheckpoints[index],
+      lesson,
+      index,
+    ),
+  );
+  validateIdentityContinuity(
+    replayedCheckpoints,
+    `${location}.replayedCheckpoints`,
+    liveTokenOwners,
+  );
+  assertArrayEqual(
+    stringArray(
+      replay.checkpointIds,
+      `${location}.checkpointIds`,
+      lesson.checkpoints.length,
+    ),
+    lesson.checkpoints.map((checkpoint) => checkpoint.checkpointId),
+    `${location}.checkpointIds`,
+  );
+  assertArrayEqual(
+    stringArray(
+      replay.certificateSha256s,
+      `${location}.certificateSha256s`,
+      lesson.checkpoints.length,
+    ),
+    lesson.checkpoints.map((checkpoint) => checkpoint.certificateSha256),
+    `${location}.certificateSha256s`,
+  );
+  const liveEvidence = validateRuntimeEvidence(
+    replay.liveEvidence,
+    lesson,
+    `${location}.liveEvidence`,
+  );
+  const replayEvidence = validateRuntimeEvidence(
+    replay.replayEvidence,
+    lesson,
+    `${location}.replayEvidence`,
+  );
+  assertDeepEqual(
+    replayEvidence,
+    liveEvidence,
+    `${location}.replayEvidence against liveEvidence`,
+  );
+  literal(
+    replay.finalCanonicalSvgMatches,
+    true,
+    `${location}.finalCanonicalSvgMatches`,
+  );
+  literal(replay.equivalent, true, `${location}.equivalent`);
+  return {
+    liveCheckpoints,
+    replayedCheckpoints,
+    checkpointIds: [...replay.checkpointIds],
+    certificateSha256s: [...replay.certificateSha256s],
+    liveEvidence,
+    replayEvidence,
+    finalCanonicalSvgMatches: true,
+    equivalent: true,
+  };
+}
+
+function validateAdaptive(value, lesson, location = "accelerated.adaptive") {
+  const adaptive = exactKeys(
+    value,
+    [
+      "interruptionSettleMsSamples",
+      "interruptionSettleP95Ms",
+      "interruptionCases",
+      "cornerDetailNodeIds",
+      "replay",
+      "replayEquivalent",
+      "liveSceneRequests",
+      "unexpectedRequests",
+    ],
+    location,
+  );
+  const interruptionSamples = numericSamples(
+    adaptive.interruptionSettleMsSamples,
+    `${location}.interruptionSettleMsSamples`,
+  );
+  const expectedCases = expectedInterruptionCases(lesson);
+  const caseValues = array(
+    adaptive.interruptionCases,
+    `${location}.interruptionCases`,
+    expectedCases.length,
+  );
+  const labels = caseValues.map((entry, index) =>
+    string(
+      object(entry, `${location}.interruptionCases[${index}]`).label,
+      `${location}.interruptionCases[${index}].label`,
+    ),
+  );
+  if (new Set(labels).size !== labels.length) {
+    fail(`${location}.interruptionCases`, "labels must be unique");
+  }
+  const interruptionCases = caseValues.map((entry, index) =>
+    validateInterruptionCase(entry, expectedCases[index], lesson, index),
+  );
+  for (const definition of INTERRUPTION_DEFINITIONS) {
+    const count = interruptionCases.filter(
+      (entry) => entry.category === definition.category,
+    ).length;
+    literal(count, 4, `${location}.interruptionCases.${definition.category}`);
+  }
+  assertArrayEqual(
+    interruptionSamples,
+    interruptionCases.map((entry) => entry.settleMs),
+    `${location}.interruptionSettleMsSamples`,
+  );
+  const interruptionP95Ms = rounded(nearestRankP95(interruptionSamples));
+  literal(
+    adaptive.interruptionSettleP95Ms,
+    interruptionP95Ms,
+    `${location}.interruptionSettleP95Ms`,
+  );
+  if (interruptionP95Ms >= 150) {
+    fail(`${location}.interruptionSettleP95Ms`, "must be below 150 ms");
+  }
+  assertArrayEqual(
+    stringArray(
+      adaptive.cornerDetailNodeIds,
+      `${location}.cornerDetailNodeIds`,
+      3,
+    ),
+    lesson.adaptive.cornerDetail.nodeIds,
+    `${location}.cornerDetailNodeIds`,
+  );
+  const replay = validateReplay(adaptive.replay, lesson);
+  literal(adaptive.replayEquivalent, true, `${location}.replayEquivalent`);
+  const requests = validateProviderFreeRequests(adaptive, location);
+  return {
+    interruptionSampleCount: interruptionSamples.length,
+    interruptionSamplesMs: interruptionSamples,
+    interruptionP95Ms,
+    interruptionThresholdExclusiveMs: 150,
+    interruptionCases,
+    cornerDetailNodeIds: [...adaptive.cornerDetailNodeIds],
+    replay,
+    replayEquivalent: true,
+    requests,
+  };
+}
+
+/** Test-only wrapper for the complete accelerated adaptive evidence contract. */
+export function validateAdaptiveEvidenceForTests(value, lesson) {
+  return validateAdaptive(value, lesson);
 }
 
 function validateRequestList(value, location) {
@@ -1471,52 +2097,7 @@ function validateAccelerated(value, lesson) {
     );
   }
 
-  const adaptive = exactKeys(
-    root.adaptive,
-    [
-      "interruptionSettleMsSamples",
-      "interruptionSettleP95Ms",
-      "cornerDetailNodeIds",
-      "replayEquivalent",
-      "liveSceneRequests",
-      "unexpectedRequests",
-    ],
-    "accelerated.adaptive",
-  );
-  const interruptionSamples = numericSamples(
-    adaptive.interruptionSettleMsSamples,
-    "accelerated.adaptive.interruptionSettleMsSamples",
-  );
-  const interruptionP95Ms = rounded(nearestRankP95(interruptionSamples));
-  literal(
-    adaptive.interruptionSettleP95Ms,
-    interruptionP95Ms,
-    "accelerated.adaptive.interruptionSettleP95Ms",
-  );
-  if (interruptionP95Ms >= 150) {
-    fail(
-      "accelerated.adaptive.interruptionSettleP95Ms",
-      "must be below 150 ms",
-    );
-  }
-  assertArrayEqual(
-    stringArray(
-      adaptive.cornerDetailNodeIds,
-      "accelerated.adaptive.cornerDetailNodeIds",
-      3,
-    ),
-    lesson.adaptive.cornerDetail.nodeIds,
-    "accelerated.adaptive.cornerDetailNodeIds",
-  );
-  literal(
-    adaptive.replayEquivalent,
-    true,
-    "accelerated.adaptive.replayEquivalent",
-  );
-  const adaptiveRequests = validateProviderFreeRequests(
-    adaptive,
-    "accelerated.adaptive",
-  );
+  const adaptive = validateAdaptive(root.adaptive, lesson);
 
   return {
     source,
@@ -1535,14 +2116,7 @@ function validateAccelerated(value, lesson) {
       finalNodeIds: reducedFinal.nodeIds,
     },
     responsive,
-    adaptive: {
-      interruptionSampleCount: interruptionSamples.length,
-      interruptionSamplesMs: interruptionSamples,
-      interruptionP95Ms,
-      interruptionThresholdExclusiveMs: 150,
-      cornerDetailNodeIds: [...adaptive.cornerDetailNodeIds],
-      replayEquivalent: true,
-    },
+    adaptive,
     requests: {
       latency: providerFreeRequestCounts(latencyRequests),
       cinematic: providerFreeRequestCounts(cinematicRequests),
@@ -1550,7 +2124,7 @@ function validateAccelerated(value, lesson) {
       responsive: responsiveRequestEvidence.sort(
         (left, right) => left.viewport.width - right.viewport.width,
       ),
-      adaptive: providerFreeRequestCounts(adaptiveRequests),
+      adaptive: providerFreeRequestCounts(adaptive.requests),
     },
   };
 }
@@ -2417,6 +2991,83 @@ function stableIdentityEvidence(checkpoints) {
   };
 }
 
+function interruptionManifestEvidence(adaptive, lesson) {
+  return {
+    caseCount: adaptive.interruptionCases.length,
+    categoryCounts: Object.fromEntries(
+      INTERRUPTION_DEFINITIONS.map(({ category }) => [
+        category,
+        adaptive.interruptionCases.filter(
+          (entry) => entry.category === category,
+        ).length,
+      ]),
+    ),
+    staleWindowMs: 2_000,
+    staleStable: true,
+    cases: adaptive.interruptionCases.map((entry) => ({
+      label: entry.label,
+      category: entry.category,
+      checkpointId: entry.checkpointId,
+      sequence: entry.sequence,
+      certificateSha256:
+        lesson.checkpoints[entry.sequence - 1].certificateSha256,
+      cue: entry.cue,
+      cueTargetIds: entry.cueTargetIds,
+      timing: entry.timing,
+      authoredDurationMs: entry.authoredDurationMs,
+      authoredHoldAfterMs: entry.authoredHoldAfterMs,
+      trigger: entry.trigger,
+      delayAfterPresentedMs: entry.delayAfterPresentedMs,
+      activeRevision: entry.activeRevision,
+      requestedAtMs: entry.requestedAtMs,
+      settledAtMs: entry.settledAtMs,
+      settleMs: entry.settleMs,
+      targetRendererTrusted: true,
+      targetTransientResidueCount: 0,
+      evidenceBeforeEventCount: entry.evidenceBefore.length,
+      evidenceAfterEventCount: entry.evidenceAfter.length,
+      evidenceAfterSha256: sha256(
+        Buffer.from(canonicalJson(entry.evidenceAfter)),
+      ),
+      settlement: "cancelled_to_checkpoint",
+      laterSequenceCount: 0,
+      staleWindowMs: entry.staleWindowMs,
+      staleStable: entry.staleStable,
+      stabilitySnapshotSha256: sha256(
+        Buffer.from(canonicalJson(entry.stabilityBefore)),
+      ),
+    })),
+  };
+}
+
+function replayManifestEvidence(replay) {
+  return {
+    checkpointCount: replay.replayedCheckpoints.length,
+    checkpointIds: replay.checkpointIds,
+    certificateSha256s: replay.certificateSha256s,
+    checkpoints: replay.replayedCheckpoints.map((checkpoint) => ({
+      ordinal: checkpoint.ordinal,
+      checkpointId: checkpoint.checkpointId,
+      certificateSha256: checkpoint.certificateSha256,
+      caption: checkpoint.caption,
+      viewport: checkpoint.viewport,
+      nodeIds: checkpoint.nodeIds,
+      rendererTrusted: checkpoint.rendererTrusted,
+      cueTrace: checkpoint.cueTrace,
+    })),
+    stableIds: stableIdentityEvidence(replay.replayedCheckpoints),
+    liveEvidenceEventCount: replay.liveEvidence.length,
+    replayEvidenceEventCount: replay.replayEvidence.length,
+    liveEvidenceSha256: sha256(Buffer.from(canonicalJson(replay.liveEvidence))),
+    replayEvidenceSha256: sha256(
+      Buffer.from(canonicalJson(replay.replayEvidence)),
+    ),
+    evidenceEquivalent: true,
+    finalCanonicalSvgMatches: replay.finalCanonicalSvgMatches,
+    equivalent: replay.equivalent,
+  };
+}
+
 async function buildManifestFromSnapshot(rootSnapshot) {
   await assertArtifactRootSnapshot(rootSnapshot);
   const artifactRoot = rootSnapshot.canonicalRoot;
@@ -2728,7 +3379,13 @@ async function buildManifestFromSnapshot(rootSnapshot) {
         cornerDetailNodeIds: accelerated.adaptive.cornerDetailNodeIds,
         cornerDetailViewport:
           lesson.adaptive.cornerDetail.cinematicResultViewport,
+        interruption: interruptionManifestEvidence(
+          accelerated.adaptive,
+          lesson,
+        ),
+        replay: replayManifestEvidence(accelerated.adaptive.replay),
         replayEquivalent: accelerated.adaptive.replayEquivalent,
+        requests: providerFreeRequestCounts(accelerated.adaptive.requests),
       },
       checkpointCapture: capture.checkpointCapture.checkpoints.map(
         (checkpoint) => ({
