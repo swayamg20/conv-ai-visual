@@ -17,6 +17,40 @@ from murmur.core.async_cleanup import (
     close_async_resource,
 )
 from murmur.live_scene.admission import SceneAdmissionError
+from murmur.live_scene.checkpoint_contracts import (
+    CompiledCheckpointV2,
+    checkpoint_certificate_sha256,
+    checkpoint_receipt_sha256,
+    low_level_scene_sha256,
+)
+from murmur.live_scene.choreography_contracts import (
+    ClarifyCornerRouteV2,
+    RoutedChoreographyBeatV2,
+    choreography_plan_sha256,
+    routed_choreography_beat_sha256,
+)
+from murmur.live_scene.choreography_service_contracts import (
+    MAX_CHOREOGRAPHY_CHECKPOINTS,
+    CheckpointSemanticMetadataV2,
+    ChoreographySceneCheckpointEvent,
+    ChoreographySceneStreamDeclinedEvent,
+    ChoreographySceneStreamEvent,
+)
+from murmur.live_scene.choreography_wire import encode_choreography_scene_stream_event
+from murmur.live_scene.completing_square_compiler import (
+    CompiledCheckpointBeatV2,
+    CompletingSquareCompilationError,
+    compile_checkpoint_beat,
+)
+from murmur.live_scene.completing_square_contracts import (
+    CompletingSquareCheckpointId,
+    CompletingSquareMainCheckpoint,
+    CompletingSquareState,
+)
+from murmur.live_scene.completing_square_verifier import (
+    CompletingSquareVerificationError,
+    verify_completing_square_checkpoint,
+)
 from murmur.live_scene.contracts import (
     MAX_ACCEPTED_PATCHES,
     MAX_SAFE_SEQUENCE,
@@ -51,6 +85,7 @@ from murmur.live_scene.semantic_contracts import (
     VisualActAbstainReason,
     compiler_certificate_sha256,
     roles_through,
+    scene_patch_sha256,
     semantic_scene_sha256,
 )
 from murmur.live_scene.semantic_integrity import digest_matches
@@ -81,7 +116,11 @@ from murmur.live_scene.visual_act_engine import (
     VisualActRoutingRepairing,
     VisualActRoutingResult,
 )
-from murmur.live_scene.visual_act_lowering import lower_resolved_visual_act
+from murmur.live_scene.visual_act_lowering import (
+    lower_resolved_choreography_act,
+    lower_resolved_visual_act,
+)
+from murmur.live_scene.visual_act_router import ResolvedChoreographyAct
 from murmur.live_scene.wire import SceneStreamWireError, encode_scene_stream_event
 
 _REPAIR_MESSAGE = "The first visual draft needed correction. The last board is safe while I retry."
@@ -112,6 +151,12 @@ _SEMANTIC_INTEGRITY_MESSAGE = (
 )
 _SEMANTIC_NAMESPACE_MESSAGE = (
     "The current board conflicts with this verified visual. Reset the board before trying again."
+)
+_CHOREOGRAPHY_CAPACITY_MESSAGE = (
+    "This board has no room for the requested visual sequence. The current board remains safe."
+)
+_CHOREOGRAPHY_INTEGRITY_MESSAGE = (
+    "The choreography runtime rejected an internal result. The current board remains safe."
 )
 _UNSUPPORTED_VISUAL_MESSAGE = (
     "This request does not match a visual I can draw yet. The current board is unchanged."
@@ -221,6 +266,59 @@ def _semantic_repairing_event(
     return event
 
 
+def _choreography_failure_event(
+    *,
+    generation: int,
+    attempt: int,
+    revision: int,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> SceneStreamFailedEvent:
+    event = SceneStreamFailedEvent(
+        generation=generation,
+        attempt=attempt,
+        code=code,
+        message=message,
+        last_accepted_revision=revision,
+        retryable=retryable,
+    )
+    encode_choreography_scene_stream_event(event)
+    return event
+
+
+def _choreography_integrity_failure_event(
+    *,
+    generation: int,
+    attempt: int,
+    revision: int,
+) -> SceneStreamFailedEvent:
+    return _choreography_failure_event(
+        generation=generation,
+        attempt=attempt,
+        revision=revision,
+        code="choreography_integrity_error",
+        message=_CHOREOGRAPHY_INTEGRITY_MESSAGE,
+        retryable=False,
+    )
+
+
+def _choreography_repairing_event(
+    *,
+    generation: int,
+    revision: int,
+) -> SceneStreamRepairingEvent:
+    event = SceneStreamRepairingEvent(
+        generation=generation,
+        from_attempt=1,
+        to_attempt=2,
+        last_accepted_revision=revision,
+        message=_ROUTING_REPAIR_MESSAGE,
+    )
+    encode_choreography_scene_stream_event(event)
+    return event
+
+
 class SceneModelClient(Protocol):
     """Small provider surface required by scene authoring."""
 
@@ -259,6 +357,14 @@ class _SemanticNamespaceCollisionError(_SemanticRepairableError):
 
 class _SemanticInvariantError(RuntimeError):
     """Raised when deterministic server-owned compilation or admission fails."""
+
+
+class _ChoreographyCapacityError(ValueError):
+    """Raised when a valid checkpoint suffix cannot fit the accepted scene budgets."""
+
+
+class _ChoreographyInvariantError(RuntimeError):
+    """Raised when a compiler-owned checkpoint batch fails independent preflight."""
 
 
 def _scene_json(scene: SceneState) -> str:
@@ -477,6 +583,53 @@ class _SemanticGenerationState:
         )
 
 
+@dataclass(frozen=True)
+class _PreparedChoreographyCheckpoint:
+    event: ChoreographySceneCheckpointEvent
+    scene: SceneState
+    semantic_scene: SemanticSceneState
+
+
+@dataclass(frozen=True)
+class _PreparedChoreographyBatch:
+    checkpoints: tuple[_PreparedChoreographyCheckpoint, ...]
+
+
+@dataclass
+class _ChoreographyGenerationState:
+    generation: int
+    scene: SceneState
+    semantic_scene: SemanticSceneState
+    checkpoint_limit: int
+    started_at: float
+    clock: SceneClock
+    checkpoint_count: int = 0
+    first_checkpoint_ms: float | None = None
+
+    @property
+    def remaining_checkpoint_budget(self) -> int:
+        return self.checkpoint_limit - self.checkpoint_count
+
+    def commit_checkpoint(self, checkpoint: _PreparedChoreographyCheckpoint) -> None:
+        self.scene = checkpoint.scene
+        self.semantic_scene = checkpoint.semantic_scene
+        self.checkpoint_count += 1
+        if self.first_checkpoint_ms is None:
+            self.first_checkpoint_ms = _elapsed_ms(self.started_at, self.clock())
+
+    def completed_event(self, *, repaired: bool) -> SceneStreamCompletedEvent:
+        assert self.first_checkpoint_ms is not None
+        total_ms = max(self.first_checkpoint_ms, _elapsed_ms(self.started_at, self.clock()))
+        return SceneStreamCompletedEvent(
+            generation=self.generation,
+            final_revision=self.scene.revision,
+            patch_count=self.checkpoint_count,
+            first_patch_ms=self.first_checkpoint_ms,
+            total_ms=total_ms,
+            repaired=repaired,
+        )
+
+
 def _semantic_role_node_id(component_id: str, role_index: int) -> str:
     return f"{component_id}__{PYTHAGOREAN_ROLE_ORDER[role_index].value}"
 
@@ -505,6 +658,13 @@ def _validate_semantic_base(
 ) -> None:
     if scene.revision != semantic_scene.revision:
         raise _SemanticBaseError("semantic_base: low-level and semantic revisions differ")
+    if any(
+        not isinstance(component, PythagoreanAreaIdentityState)
+        for component in semantic_scene.components
+    ):
+        raise _SemanticBaseError(
+            "semantic_base: V1 authoring cannot consume a choreography component"
+        )
     has_committed_semantic_atoms = any(
         component.revealed_roles for component in semantic_scene.components
     )
@@ -812,6 +972,286 @@ def _compile_semantic_batch(
             "semantic_batch: compiler result failed independent validation"
         ) from None
     return _prepare_semantic_batch(state, compiled, attempt=attempt)
+
+
+def _advance_choreography_semantic_scene(
+    scene: SemanticSceneState,
+    checkpoint: CompiledCheckpointV2,
+) -> tuple[SemanticSceneState, CompletingSquareState]:
+    """Derive the exact semantic frontier instead of trusting compiler output."""
+
+    existing = next(
+        (
+            component
+            for component in scene.components
+            if component.id == checkpoint.beat.component_id
+        ),
+        None,
+    )
+    if existing is not None and not isinstance(existing, CompletingSquareState):
+        raise _ChoreographyInvariantError(
+            "choreography_batch: componentId belongs to a different semantic kind"
+        )
+    if existing is None and len(scene.components) >= MAX_SEMANTIC_COMPONENTS:
+        raise _ChoreographyCapacityError(
+            "choreography_batch: semantic component capacity was insufficient"
+        )
+    if scene.revision >= MAX_SAFE_SEQUENCE:
+        raise _ChoreographyCapacityError(
+            "choreography_batch: semantic revision capacity was insufficient"
+        )
+
+    checkpoint_id = checkpoint.checkpoint_id
+    if checkpoint_id is CompletingSquareCheckpointId.CORNER_DETAIL:
+        if (
+            existing is None
+            or existing.last_main_checkpoint is not CompletingSquareMainCheckpoint.MISSING_CORNER
+            or existing.corner_clarified
+        ):
+            raise _ChoreographyInvariantError(
+                "choreography_batch: corner_detail did not extend the exact semantic frontier"
+            )
+        result_component = CompletingSquareState(
+            id=checkpoint.beat.component_id,
+            last_main_checkpoint=CompletingSquareMainCheckpoint.MISSING_CORNER,
+            corner_clarified=True,
+        )
+    else:
+        result_component = CompletingSquareState(
+            id=checkpoint.beat.component_id,
+            last_main_checkpoint=CompletingSquareMainCheckpoint(checkpoint_id.value),
+            corner_clarified=False if existing is None else existing.corner_clarified,
+        )
+
+    found = False
+    components = []
+    for component in scene.components:
+        if component.id == result_component.id:
+            components.append(result_component)
+            found = True
+        else:
+            components.append(component)
+    if not found:
+        components.append(result_component)
+    try:
+        result_scene = SemanticSceneState(
+            revision=scene.revision + 1,
+            components=tuple(components),
+            certificate_head_sha256=checkpoint.certificate.certificate_sha256,
+        )
+    except ValidationError:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: derived semantic result violated its contract"
+        ) from None
+    return result_scene, result_component
+
+
+def _validate_choreography_certificate_transition(
+    checkpoint: CompiledCheckpointV2,
+    *,
+    base_scene: SceneState,
+    result_scene: SceneState,
+    base_semantic_scene: SemanticSceneState,
+    result_semantic_scene: SemanticSceneState,
+) -> None:
+    """Independently bind one V2 certificate to both materialized transitions."""
+
+    certificate = checkpoint.certificate
+    body = certificate.body
+    scalar_bindings_match = (
+        body.previous_certificate_sha256 == base_semantic_scene.certificate_head_sha256
+        and body.base_revision == base_scene.revision == base_semantic_scene.revision
+        and body.result_revision == result_scene.revision == result_semantic_scene.revision
+        and body.presentation_checkpoint == checkpoint.presentation
+        and result_semantic_scene.certificate_head_sha256 == certificate.certificate_sha256
+    )
+    digest_bindings = (
+        (certificate.certificate_sha256, checkpoint_certificate_sha256(body)),
+        (body.routed_beat_sha256, routed_choreography_beat_sha256(checkpoint.beat)),
+        (body.patch_sha256, scene_patch_sha256(checkpoint.patch)),
+        (body.receipt_sha256, checkpoint_receipt_sha256(checkpoint.receipt)),
+        (body.choreography_sha256, choreography_plan_sha256(checkpoint.choreography)),
+        (body.base_low_level_scene_sha256, low_level_scene_sha256(base_scene)),
+        (body.result_low_level_scene_sha256, low_level_scene_sha256(result_scene)),
+        (body.base_semantic_scene_sha256, semantic_scene_sha256(base_semantic_scene)),
+        (body.result_semantic_scene_sha256, semantic_scene_sha256(result_semantic_scene)),
+    )
+    if not scalar_bindings_match or any(
+        not digest_matches(actual, expected) for actual, expected in digest_bindings
+    ):
+        raise _ChoreographyInvariantError(
+            "choreography_batch: certificate did not bind the materialized transition"
+        )
+
+
+def _prepare_choreography_batch(
+    state: _ChoreographyGenerationState,
+    beat: RoutedChoreographyBeatV2,
+    compiled_candidate: CompiledCheckpointBeatV2,
+    *,
+    attempt: int,
+) -> _PreparedChoreographyBatch:
+    """Clone and independently preflight a full suffix before any checkpoint is emitted."""
+
+    try:
+        compiled = CompiledCheckpointBeatV2.model_validate(
+            compiled_candidate.model_dump(mode="json", by_alias=True),
+        )
+    except (AttributeError, TypeError, ValueError, ValidationError):
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler result failed independent validation"
+        ) from None
+    if compiled.beat != beat:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler changed the routed choreography beat"
+        )
+    if compiled.base_scene != state.scene:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler low-level base did not match the request"
+        )
+    if compiled.base_semantic_scene != state.semantic_scene:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler semantic base did not match the request"
+        )
+    if not compiled.checkpoints:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler emitted an empty checkpoint suffix"
+        )
+
+    checkpoint_count = len(compiled.checkpoints)
+    if checkpoint_count > MAX_CHOREOGRAPHY_CHECKPOINTS:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: compiler bypassed the checkpoint limit"
+        )
+    if checkpoint_count > state.remaining_checkpoint_budget:
+        raise _ChoreographyCapacityError(
+            "choreography_batch: suffix exceeded the remaining revision budget"
+        )
+    if checkpoint_count > MAX_SAFE_SEQUENCE - state.scene.revision:
+        raise _ChoreographyCapacityError(
+            "choreography_batch: low-level revision capacity was insufficient"
+        )
+    if checkpoint_count > MAX_SAFE_SEQUENCE - state.semantic_scene.revision:
+        raise _ChoreographyCapacityError(
+            "choreography_batch: semantic revision capacity was insufficient"
+        )
+
+    patch_ids = tuple(checkpoint.patch.patch_id for checkpoint in compiled.checkpoints)
+    if len(patch_ids) != len(set(patch_ids)):
+        raise _ChoreographyInvariantError("choreography_batch: compiled patch IDs were not unique")
+
+    candidate_scene = state.scene
+    candidate_semantic_scene = state.semantic_scene
+    prepared: list[_PreparedChoreographyCheckpoint] = []
+    previous_viewports = None
+    for offset, checkpoint in enumerate(compiled.checkpoints, start=1):
+        try:
+            checkpoint = CompiledCheckpointV2.model_validate(
+                checkpoint.model_dump(mode="json", by_alias=True)
+            )
+        except (AttributeError, TypeError, ValueError, ValidationError):
+            raise _ChoreographyInvariantError(
+                "choreography_batch: checkpoint failed independent contract validation"
+            ) from None
+        if checkpoint.beat != compiled.beat:
+            raise _ChoreographyInvariantError(
+                "choreography_batch: checkpoint changed the routed beat"
+            )
+        if (
+            previous_viewports is not None
+            and checkpoint.presentation.base_viewports != previous_viewports
+        ):
+            raise _ChoreographyInvariantError(
+                "choreography_batch: checkpoint viewport transitions did not join"
+            )
+        try:
+            next_scene = _apply_patch(candidate_scene, checkpoint.patch)
+        except _ScenePatchApplicationError:
+            raise _ChoreographyInvariantError(
+                "choreography_batch: checkpoint patch could not be materialized"
+            ) from None
+        if len(next_scene.nodes) > MAX_SCENE_NODES:
+            raise _ChoreographyCapacityError(
+                "choreography_batch: checkpoint exceeded the low-level node budget"
+            )
+        next_semantic_scene, result_component = _advance_choreography_semantic_scene(
+            candidate_semantic_scene,
+            checkpoint,
+        )
+        try:
+            verified_receipt = verify_completing_square_checkpoint(
+                checkpoint.beat.component_id,
+                checkpoint.checkpoint_id,
+                candidate_scene,
+                next_scene,
+                checkpoint.patch,
+                checkpoint.presentation,
+                checkpoint.choreography,
+            )
+        except CompletingSquareVerificationError:
+            raise _ChoreographyInvariantError(
+                "choreography_batch: independently verified checkpoint was rejected"
+            ) from None
+        if verified_receipt != checkpoint.receipt:
+            raise _ChoreographyInvariantError(
+                "choreography_batch: verifier receipt changed after materialization"
+            )
+        _validate_choreography_certificate_transition(
+            checkpoint,
+            base_scene=candidate_scene,
+            result_scene=next_scene,
+            base_semantic_scene=candidate_semantic_scene,
+            result_semantic_scene=next_semantic_scene,
+        )
+
+        try:
+            event_candidate = ChoreographySceneCheckpointEvent(
+                generation=state.generation,
+                attempt=attempt,
+                sequence=state.checkpoint_count + offset,
+                base_revision=candidate_scene.revision,
+                result_revision=next_scene.revision,
+                patch=checkpoint.patch,
+                semantic=CheckpointSemanticMetadataV2(
+                    beat=checkpoint.beat,
+                    checkpoint_id=checkpoint.checkpoint_id,
+                    result_component=result_component,
+                    semantic_base_revision=candidate_semantic_scene.revision,
+                    semantic_result_revision=next_semantic_scene.revision,
+                    receipt=checkpoint.receipt,
+                    presentation=checkpoint.presentation,
+                    choreography=checkpoint.choreography,
+                    certificate=checkpoint.certificate,
+                ),
+            )
+            event = ChoreographySceneCheckpointEvent.model_validate(
+                event_candidate.model_dump(mode="json", by_alias=True)
+            )
+            encode_choreography_scene_stream_event(event)
+        except (SceneStreamWireError, TypeError, ValueError, ValidationError):
+            raise _ChoreographyInvariantError(
+                "choreography_batch: checkpoint event failed wire preflight"
+            ) from None
+        prepared.append(
+            _PreparedChoreographyCheckpoint(
+                event=event,
+                scene=next_scene,
+                semantic_scene=next_semantic_scene,
+            )
+        )
+        candidate_scene = next_scene
+        candidate_semantic_scene = next_semantic_scene
+        previous_viewports = checkpoint.presentation.result_viewports
+
+    if candidate_scene != compiled.result_scene:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: materialized low-level result did not match the compiler batch"
+        )
+    if candidate_semantic_scene != compiled.result_semantic_scene:
+        raise _ChoreographyInvariantError(
+            "choreography_batch: derived semantic result did not match the compiler batch"
+        )
+    return _PreparedChoreographyBatch(checkpoints=tuple(prepared))
 
 
 async def _next_before_deadline(
@@ -1176,6 +1616,265 @@ class SceneAuthoringService:
                     retryable=True,
                 )
                 return
+        finally:
+            if owns_client:
+                await _close_upstream(
+                    client,
+                    timeout_seconds=self._cleanup_timeout_seconds,
+                )
+
+    async def stream_routed_choreography_events(
+        self,
+        request: SemanticLiveSceneRequest,
+    ) -> AsyncIterator[ChoreographySceneStreamEvent]:
+        """Route and fully preflight one V2 choreography suffix before checkpoint one."""
+
+        if not isinstance(request, SemanticLiveSceneRequest):
+            raise TypeError("request must be a SemanticLiveSceneRequest")
+
+        started_at = self._clock()
+        checkpoint_limit = min(
+            MAX_CHOREOGRAPHY_CHECKPOINTS,
+            MAX_SAFE_SEQUENCE - request.base_scene.revision,
+            MAX_SAFE_SEQUENCE - request.base_semantic_scene.revision,
+        )
+        state = _ChoreographyGenerationState(
+            generation=request.generation,
+            scene=request.base_scene,
+            semantic_scene=request.base_semantic_scene,
+            checkpoint_limit=checkpoint_limit,
+            started_at=started_at,
+            clock=self._clock,
+        )
+
+        started = SceneStreamStartedEvent(
+            generation=request.generation,
+            attempt=1,
+            base_revision=state.scene.revision,
+        )
+        encode_choreography_scene_stream_event(started)
+        yield started
+
+        if state.scene.revision != state.semantic_scene.revision:
+            yield _choreography_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="semantic_base_mismatch",
+                message=_SEMANTIC_BASE_MISMATCH_MESSAGE,
+                retryable=False,
+            )
+            return
+        if (
+            len(state.scene.nodes) > MAX_SCENE_NODES
+            or len(state.semantic_scene.components) > MAX_SEMANTIC_COMPONENTS
+        ):
+            yield _choreography_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="choreography_capacity_limit",
+                message=_CHOREOGRAPHY_CAPACITY_MESSAGE,
+                retryable=False,
+            )
+            return
+        if checkpoint_limit <= 0:
+            yield _choreography_failure_event(
+                generation=request.generation,
+                attempt=1,
+                revision=state.scene.revision,
+                code="revision_limit",
+                message=_REVISION_LIMIT_MESSAGE,
+                retryable=False,
+            )
+            return
+
+        client: SceneModelClient | None = None
+        owns_client = self._client is None
+        try:
+            try:
+                client = self._resolve_client()
+            except Exception:
+                yield _choreography_failure_event(
+                    generation=request.generation,
+                    attempt=1,
+                    revision=state.scene.revision,
+                    code="provider_error",
+                    message=_PROVIDER_ERROR_MESSAGE,
+                    retryable=True,
+                )
+                return
+
+            routing: VisualActRoutingResult | None = None
+            repair_announced = False
+            try:
+                engine = VisualActRoutingEngine(
+                    client,
+                    max_tokens=min(self._max_tokens, DEFAULT_VISUAL_ACT_MAX_TOKENS),
+                    timeout_seconds=self._timeout_seconds,
+                    before_dispatch=self._admit_provider_dispatch,
+                )
+                async for step in engine.stream_route(
+                    prompt=request.prompt,
+                    semantic_scene=state.semantic_scene,
+                ):
+                    if isinstance(step, VisualActRoutingRepairing):
+                        if repair_announced:
+                            raise RuntimeError("visual routing emitted duplicate repair boundaries")
+                        repair_announced = True
+                        yield _choreography_repairing_event(
+                            generation=request.generation,
+                            revision=state.scene.revision,
+                        )
+                    elif isinstance(step, VisualActRoutingResult) and routing is None:
+                        routing = step
+                    else:
+                        raise RuntimeError("visual routing emitted an invalid lifecycle step")
+            except VisualActEngineError as exc:
+                attempt = 2 if repair_announced else 1
+                code, message = _VISUAL_ROUTING_FAILURES[exc.code]
+                if code == "semantic_integrity_error":
+                    code = "choreography_integrity_error"
+                    message = _CHOREOGRAPHY_INTEGRITY_MESSAGE
+                yield _choreography_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                    code=code,
+                    message=message,
+                    retryable=exc.retryable,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=2 if repair_announced else 1,
+                    revision=state.scene.revision,
+                )
+                return
+
+            if routing is None or routing.repaired != repair_announced:
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=2 if repair_announced else 1,
+                    revision=state.scene.revision,
+                )
+                return
+
+            attempt = routing.provider_attempts
+            decision = routing.decision
+            resolved = routing.resolved
+            if isinstance(decision, AbstainVisualDecision) != (resolved is None):
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                )
+                return
+
+            if isinstance(decision, AbstainVisualDecision):
+                declined = ChoreographySceneStreamDeclinedEvent(
+                    generation=request.generation,
+                    attempt=attempt,
+                    final_revision=state.scene.revision,
+                    reason_code=decision.reason_code,
+                    message=_visual_decline_message(decision.reason_code),
+                )
+                encode_choreography_scene_stream_event(declined)
+                yield declined
+                return
+
+            if not isinstance(resolved, ResolvedChoreographyAct):
+                declined = ChoreographySceneStreamDeclinedEvent(
+                    generation=request.generation,
+                    attempt=attempt,
+                    final_revision=state.scene.revision,
+                    reason_code=VisualActAbstainReason.UNSUPPORTED_INTENT,
+                    message=_UNSUPPORTED_VISUAL_MESSAGE,
+                )
+                encode_choreography_scene_stream_event(declined)
+                yield declined
+                return
+
+            try:
+                beat = lower_resolved_choreography_act(
+                    resolved,
+                    generation=request.generation,
+                )
+                expected_checkpoint_count = len(resolved.missing_checkpoints)
+                if isinstance(resolved.route, ClarifyCornerRouteV2):
+                    expected_checkpoint_count = 1
+                if expected_checkpoint_count > state.remaining_checkpoint_budget:
+                    raise _ChoreographyCapacityError(
+                        "choreography_batch: routed suffix exceeded the revision budget"
+                    )
+                compiled_candidate = compile_checkpoint_beat(
+                    beat,
+                    base_scene=state.scene,
+                    base_semantic_scene=state.semantic_scene,
+                )
+                batch = _prepare_choreography_batch(
+                    state,
+                    beat,
+                    compiled_candidate,
+                    attempt=attempt,
+                )
+            except _ChoreographyCapacityError:
+                yield _choreography_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                    code="choreography_capacity_limit",
+                    message=_CHOREOGRAPHY_CAPACITY_MESSAGE,
+                    retryable=True,
+                )
+                return
+            except asyncio.CancelledError:
+                raise
+            except (
+                _ChoreographyInvariantError,
+                CompletingSquareCompilationError,
+                CompletingSquareVerificationError,
+                SceneStreamWireError,
+                TypeError,
+                ValueError,
+                ValidationError,
+            ):
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                )
+                return
+            except Exception:
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=state.scene.revision,
+                )
+                return
+
+            prepared_checkpoints = batch.checkpoints
+            try:
+                for prepared_checkpoint in prepared_checkpoints:
+                    state.commit_checkpoint(prepared_checkpoint)
+                completed = state.completed_event(repaired=attempt == 2)
+                encode_choreography_scene_stream_event(completed)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                yield _choreography_integrity_failure_event(
+                    generation=request.generation,
+                    attempt=attempt,
+                    revision=request.base_scene.revision,
+                )
+                return
+
+            for prepared_checkpoint in prepared_checkpoints:
+                yield prepared_checkpoint.event
+            yield completed
         finally:
             if owns_client:
                 await _close_upstream(
