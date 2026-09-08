@@ -3,7 +3,12 @@ import type { ChoreographyLayout } from "@/lib/live-scene";
 export interface ChoreographyCaptureOptions {
   readonly layout: ChoreographyLayout;
   readonly reducedMotion: boolean;
+  readonly pace: ChoreographyCapturePace;
 }
+
+export const CHOREOGRAPHY_CAPTURE_PACES = ["auto", "step"] as const;
+export type ChoreographyCapturePace =
+  (typeof CHOREOGRAPHY_CAPTURE_PACES)[number];
 
 type CaptureSearchParams = Readonly<
   Record<string, string | readonly string[] | undefined>
@@ -19,12 +24,12 @@ function singleValue(
   return value;
 }
 
-/** Decode only the two closed capture controls; arbitrary lesson input is forbidden. */
+/** Decode only the closed capture controls; arbitrary lesson input is forbidden. */
 export function parseChoreographyCaptureOptions(
   searchParams: CaptureSearchParams,
 ): ChoreographyCaptureOptions {
   const unknown = Object.keys(searchParams).filter(
-    (key) => key !== "layout" && key !== "motion",
+    (key) => key !== "layout" && key !== "motion" && key !== "pace",
   );
   if (unknown.length > 0) {
     throw new TypeError(`unsupported capture option: ${unknown[0]}`);
@@ -40,8 +45,14 @@ export function parseChoreographyCaptureOptions(
     throw new TypeError("motion must be real or reduced");
   }
 
+  const pace = singleValue(searchParams.pace, "pace") ?? "auto";
+  if (!CHOREOGRAPHY_CAPTURE_PACES.some((candidate) => candidate === pace)) {
+    throw new TypeError("pace must be auto or step");
+  }
+
   return Object.freeze({
     layout,
     reducedMotion: motion === "reduced",
+    pace: pace as ChoreographyCapturePace,
   });
 }

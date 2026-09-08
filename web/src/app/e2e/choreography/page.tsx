@@ -1,8 +1,7 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 
-import { LiveChoreographyDemo } from "@/features/live-scene/live-choreography-demo";
-
+import { ChoreographyCaptureClient } from "./capture-client";
 import { parseChoreographyCaptureOptions } from "./capture-options";
 
 export const dynamic = "force-dynamic";
@@ -32,14 +31,7 @@ export default async function ChoreographyCapturePage({
 
   return (
     <div className="dark">
-      <LiveChoreographyDemo
-        initialPath="full"
-        pathLocked
-        layout={options.layout}
-        reducedMotion={options.reducedMotion}
-        stageOnly
-        autoStart
-      />
+      <ChoreographyCaptureClient options={options} />
     </div>
   );
 }

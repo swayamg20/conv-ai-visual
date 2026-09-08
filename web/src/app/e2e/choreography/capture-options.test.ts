@@ -7,6 +7,7 @@ describe("parseChoreographyCaptureOptions", () => {
     expect(parseChoreographyCaptureOptions({})).toEqual({
       layout: "cinematic",
       reducedMotion: false,
+      pace: "auto",
     });
   });
 
@@ -15,14 +16,17 @@ describe("parseChoreographyCaptureOptions", () => {
       parseChoreographyCaptureOptions({
         layout: "compact",
         motion: "reduced",
+        pace: "step",
       }),
-    ).toEqual({ layout: "compact", reducedMotion: true });
+    ).toEqual({ layout: "compact", reducedMotion: true, pace: "step" });
   });
 
   it.each([
     [{ prompt: "author arbitrary ink" }, "unsupported capture option"],
     [{ layout: "wide" }, "layout must be cinematic or compact"],
     [{ motion: "fast" }, "motion must be real or reduced"],
+    [{ pace: "manual" }, "pace must be auto or step"],
+    [{ pace: ["auto", "step"] }, "pace must appear at most once"],
     [{ layout: ["compact", "cinematic"] }, "layout must appear at most once"],
   ] as const)("rejects invalid query input %#", (input, message) => {
     expect(() => parseChoreographyCaptureOptions(input)).toThrow(message);
