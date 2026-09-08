@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
+import { LiveChoreographyDemo } from "./live-choreography-demo";
 import { ModelSceneDemo } from "./model-scene-demo";
 import {
   runSceneModelStream,
@@ -19,7 +20,7 @@ import type { SceneStreamRunner } from "./stream-runtime";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-type LabAuthoringMode = "semantic" | "raw";
+type LabAuthoringMode = "choreography" | "semantic" | "raw";
 type LabSceneSource = "fixture" | "azure";
 
 const runDevelopmentLabSceneStream: SceneStreamRunner = async (invocation) => {
@@ -31,7 +32,7 @@ const runDevelopmentLabSceneStream: SceneStreamRunner = async (invocation) => {
 };
 
 const runDevelopmentLabSemanticSceneStream: SemanticSceneStreamRunner = async (
-  invocation
+  invocation,
 ) => {
   await runSemanticSceneModelStream({
     apiUrl: API_BASE,
@@ -63,7 +64,8 @@ const SCENARIOS: readonly {
   {
     mode: "stale",
     label: "Late output",
-    description: "The source ignores cancellation so stale-token rejection is visible.",
+    description:
+      "The source ignores cancellation so stale-token rejection is visible.",
   },
 ] as const;
 
@@ -72,7 +74,7 @@ const choiceClass = (selected: boolean): string =>
     "flex min-h-11 cursor-pointer items-center justify-center rounded-lg border px-2.5 py-2 text-center text-xs transition focus-within:ring-2 focus-within:ring-ring",
     selected
       ? "border-lavender/45 bg-lavender/12 font-medium text-foreground"
-      : "border-chalk-faint/20 bg-slate/20 text-muted-foreground hover:text-foreground"
+      : "border-chalk-faint/20 bg-slate/20 text-muted-foreground hover:text-foreground",
   );
 
 export function LiveSceneLab() {
@@ -84,14 +86,14 @@ export function LiveSceneLab() {
       source === "azure"
         ? runDevelopmentLabSceneStream
         : createSceneFixtureRunner({ mode }),
-    [mode, source]
+    [mode, source],
   );
   const semanticRunner = useMemo(
     () =>
       source === "azure"
         ? runDevelopmentLabSemanticSceneStream
         : createSemanticSceneFixtureRunner(),
-    [source]
+    [source],
   );
   const selected =
     SCENARIOS.find((scenario) => scenario.mode === mode) ?? SCENARIOS[0];
@@ -109,9 +111,13 @@ export function LiveSceneLab() {
     <div className="mb-5 space-y-5">
       <fieldset>
         <legend className="mb-2 text-sm font-medium">Authoring contract</legend>
-        <div className="grid grid-cols-2 gap-2" data-testid="authoring-mode-picker">
+        <div
+          className="grid grid-cols-3 gap-2"
+          data-testid="authoring-mode-picker"
+        >
           {(
             [
+              ["choreography", "Live choreography"],
               ["semantic", "Verified acts"],
               ["raw", "Raw coordinates"],
             ] as const
@@ -130,43 +136,61 @@ export function LiveSceneLab() {
           ))}
         </div>
         <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-          {authoring === "semantic"
-            ? "The model routes only start, continue, or abstain and a target stage; the server owns narration, teaching acts, geometry, and verified atoms."
-            : "Gate 1 baseline: the model authors coordinates, styles, and complete low-level patches."}
+          {authoring === "choreography"
+            ? "The server owns a verified mathematical story while the browser preserves object identity, camera continuity, interruption, and exact Replay."
+            : authoring === "semantic"
+              ? "The model routes only start, continue, or abstain and a target stage; the server owns narration, teaching acts, geometry, and verified atoms."
+              : "Gate 1 baseline: the model authors coordinates, styles, and complete low-level patches."}
         </p>
       </fieldset>
 
-      <fieldset>
-        <legend className="mb-2 text-sm font-medium">Lesson source</legend>
-        <div className="grid grid-cols-2 gap-2" data-testid="scene-source-picker">
-          {(
-            [
-              ["fixture", "Fixture · $0"],
-              ["azure", "Azure · paid"],
-            ] as const
-          ).map(([value, label]) => (
-            <label key={value} className={choiceClass(source === value)}>
-              <input
-                type="radio"
-                name="scene-source"
-                value={value}
-                checked={source === value}
-                onChange={() => setSource(value)}
-                className="sr-only"
-              />
-              {label}
-            </label>
-          ))}
+      {authoring === "choreography" ? (
+        <div className="border-l-2 border-sage/45 pl-3 text-[11px] leading-4 text-muted-foreground">
+          The compiler-generated main and question paths run locally for $0. No
+          authentication, network request, or provider quota is used in this
+          gate.
         </div>
-        <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
-          {sourceDescription}
-        </p>
-      </fieldset>
+      ) : (
+        <fieldset>
+          <legend className="mb-2 text-sm font-medium">Lesson source</legend>
+          <div
+            className="grid grid-cols-2 gap-2"
+            data-testid="scene-source-picker"
+          >
+            {(
+              [
+                ["fixture", "Fixture · $0"],
+                ["azure", "Azure · paid"],
+              ] as const
+            ).map(([value, label]) => (
+              <label key={value} className={choiceClass(source === value)}>
+                <input
+                  type="radio"
+                  name="scene-source"
+                  value={value}
+                  checked={source === value}
+                  onChange={() => setSource(value)}
+                  className="sr-only"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <p className="mt-2 text-[11px] leading-4 text-muted-foreground">
+            {sourceDescription}
+          </p>
+        </fieldset>
+      )}
 
       {authoring === "raw" && source === "fixture" && (
         <fieldset>
-          <legend className="mb-2 text-sm font-medium">Baseline scenario</legend>
-          <div className="grid grid-cols-2 gap-2" data-testid="fixture-mode-picker">
+          <legend className="mb-2 text-sm font-medium">
+            Baseline scenario
+          </legend>
+          <div
+            className="grid grid-cols-2 gap-2"
+            data-testid="fixture-mode-picker"
+          >
             {SCENARIOS.map((scenario) => (
               <label
                 key={scenario.mode}
@@ -204,6 +228,17 @@ export function LiveSceneLab() {
     ],
   } as const;
 
+  if (authoring === "choreography") {
+    return (
+      <LiveChoreographyDemo
+        key="choreography:fixture"
+        scenarioControl={scenarioControl}
+        sourceLabel="Generated fixture · $0"
+        backHref="/"
+      />
+    );
+  }
+
   if (authoring === "semantic") {
     return (
       <ModelSceneDemo
@@ -217,9 +252,7 @@ export function LiveSceneLab() {
             : "Verified fixture · $0"
         }
         startLabel={
-          source === "azure"
-            ? "Run paid Azure lesson"
-            : "Begin verified lesson"
+          source === "azure" ? "Run paid Azure lesson" : "Begin verified lesson"
         }
         defaultPrompt="Teach the Pythagorean area identity one verified act at a time."
       />

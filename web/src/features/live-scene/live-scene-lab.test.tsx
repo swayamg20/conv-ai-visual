@@ -11,10 +11,33 @@ import {
 } from "@/lib/live-scene";
 
 import type { ModelSceneDemoProps } from "./model-scene-demo";
+import type { LiveChoreographyDemoProps } from "./live-choreography-demo";
 
 const demo = vi.hoisted(() => ({
   props: null as ModelSceneDemoProps | null,
 }));
+const choreography = vi.hoisted(() => ({
+  props: null as LiveChoreographyDemoProps | null,
+}));
+
+vi.mock("./live-choreography-demo", async () => {
+  const React = await import("react");
+  return {
+    LiveChoreographyDemo: (props: LiveChoreographyDemoProps) => {
+      choreography.props = props;
+      return React.createElement(
+        "main",
+        null,
+        React.createElement(
+          "p",
+          { "data-testid": "choreography-source-label" },
+          props.sourceLabel,
+        ),
+        props.scenarioControl as ReactNode,
+      );
+    },
+  };
+});
 
 vi.mock("./model-scene-demo", async () => {
   const React = await import("react");
@@ -24,9 +47,17 @@ vi.mock("./model-scene-demo", async () => {
       return React.createElement(
         "main",
         null,
-        React.createElement("p", { "data-testid": "source-label" }, props.sourceLabel),
-        React.createElement("p", { "data-testid": "start-label" }, props.startLabel),
-        props.scenarioControl as ReactNode
+        React.createElement(
+          "p",
+          { "data-testid": "source-label" },
+          props.sourceLabel,
+        ),
+        React.createElement(
+          "p",
+          { "data-testid": "start-label" },
+          props.startLabel,
+        ),
+        props.scenarioControl as ReactNode,
       );
     },
   };
@@ -35,8 +66,9 @@ vi.mock("./model-scene-demo", async () => {
 import { LiveSceneLab } from "./live-scene-lab";
 import type { SemanticSceneStreamEvent } from "./model-stream";
 
-(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
-  .IS_REACT_ACT_ENVIRONMENT = true;
+(
+  globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 interface MountedLab {
   readonly container: HTMLDivElement;
@@ -60,7 +92,7 @@ function latestProps(): ModelSceneDemoProps {
 
 function radio(container: HTMLElement, value: string): HTMLInputElement {
   const input = container.querySelector<HTMLInputElement>(
-    `input[type="radio"][value="${value}"]`
+    `input[type="radio"][value="${value}"]`,
   );
   if (!input) throw new Error(`Missing radio value: ${value}`);
   return input;
@@ -101,6 +133,7 @@ function interceptedSemanticResponse(): Response {
 describe("LiveSceneLab", () => {
   beforeEach(() => {
     demo.props = null;
+    choreography.props = null;
     vi.restoreAllMocks();
   });
 
@@ -116,21 +149,26 @@ describe("LiveSceneLab", () => {
 
     expect(radio(lab.container, "semantic").checked).toBe(true);
     expect(radio(lab.container, "fixture").checked).toBe(true);
-    expect(lab.container.textContent).toContain("no sign-in, network request, or Azure spend");
     expect(lab.container.textContent).toContain(
-      "The model routes only start, continue, or abstain and a target stage"
+      "no sign-in, network request, or Azure spend",
     );
     expect(lab.container.textContent).toContain(
-      "the server owns narration, teaching acts, geometry, and verified atoms"
+      "The model routes only start, continue, or abstain and a target stage",
     );
-    expect(lab.container.textContent).not.toContain("The model chooses a teaching act");
+    expect(lab.container.textContent).toContain(
+      "the server owns narration, teaching acts, geometry, and verified atoms",
+    );
+    expect(lab.container.textContent).not.toContain(
+      "The model chooses a teaching act",
+    );
     expect(lab.container.textContent).not.toContain("Baseline scenario");
 
     const props = latestProps();
     expect(props.protocol).toBe("semantic");
     expect(props.sourceLabel).toBe("Verified fixture · $0");
     expect(props.startLabel).toBe("Begin verified lesson");
-    if (props.protocol !== "semantic") throw new Error("Expected semantic props");
+    if (props.protocol !== "semantic")
+      throw new Error("Expected semantic props");
 
     const events: SemanticSceneStreamEvent[] = [];
     await props.runStream({
@@ -150,8 +188,8 @@ describe("LiveSceneLab", () => {
     expect(
       events.filter(
         (event): event is SemanticScenePatchEvent =>
-          event.type === "semantic_scene_patch"
-      )
+          event.type === "semantic_scene_patch",
+      ),
     ).toHaveLength(8);
     expect(fetchSpy).not.toHaveBeenCalled();
 
@@ -172,7 +210,8 @@ describe("LiveSceneLab", () => {
     expect(props.protocol).toBe("semantic");
     expect(props.sourceLabel).toBe("Verified acts · Azure paid");
     expect(props.startLabel).toBe("Run paid Azure lesson");
-    if (props.protocol !== "semantic") throw new Error("Expected semantic props");
+    if (props.protocol !== "semantic")
+      throw new Error("Expected semantic props");
 
     const request = {
       prompt: "Intercept this paid lesson request",
@@ -210,6 +249,28 @@ describe("LiveSceneLab", () => {
     expect(props.protocol ?? "raw").toBe("raw");
     expect(props.sourceLabel).toBe("Raw fixture · Normal · $0");
     expect(props.startLabel).toBe("Run raw fixture");
+
+    await act(async () => lab.root.unmount());
+  });
+
+  it("exposes choreography as a distinct provider-free authoring contract", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const lab = await mount();
+
+    await choose(lab.container, "choreography");
+
+    expect(lab.container.textContent).toContain(
+      "browser preserves object identity, camera continuity, interruption, and exact Replay",
+    );
+    expect(lab.container.textContent).toContain(
+      "No authentication, network request, or provider quota is used",
+    );
+    expect(
+      lab.container.querySelector('[data-testid="scene-source-picker"]'),
+    ).toBeNull();
+    expect(choreography.props?.sourceLabel).toBe("Generated fixture · $0");
+    expect(choreography.props?.backHref).toBe("/");
+    expect(fetchSpy).not.toHaveBeenCalled();
 
     await act(async () => lab.root.unmount());
   });
