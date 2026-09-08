@@ -43,9 +43,15 @@ interface ResponsiveObservation {
     readonly height: number;
   };
   readonly finalViewBox: string;
+  readonly liveSceneRequests: readonly string[];
 }
 
 interface AcceleratedObservations {
+  latency?: {
+    readonly firstMeaningfulVisualMs: readonly number[];
+    readonly p95Ms: number;
+    readonly liveSceneRequests: readonly string[];
+  };
   cinematic?: {
     readonly checkpoints: readonly SettledCheckpointObservation[];
     readonly liveSceneRequests: readonly string[];
@@ -57,7 +63,8 @@ interface AcceleratedObservations {
   };
   responsive: ResponsiveObservation[];
   adaptive?: {
-    readonly interruptionSettleMs: number;
+    readonly interruptionSettleMsSamples: readonly number[];
+    readonly interruptionSettleP95Ms: number;
     readonly cornerDetailNodeIds: readonly string[];
     readonly replayEquivalent: boolean;
     readonly liveSceneRequests: readonly string[];
@@ -65,6 +72,10 @@ interface AcceleratedObservations {
 }
 
 const observations: AcceleratedObservations = { responsive: [] };
+
+interface FirstMeaningfulVisualProbe {
+  firstVisibleAtMs: number | null;
+}
 
 function captureUrl(
   layout: "cinematic" | "compact",
@@ -81,6 +92,75 @@ function liveSceneRequests(page: Page): string[] {
       requests.push(url.pathname);
   });
   return requests;
+}
+
+function percentile(
+  samples: readonly number[],
+  percentileValue: number,
+): number {
+  const sorted = [...samples].sort((left, right) => left - right);
+  return sorted[Math.max(0, Math.ceil(sorted.length * percentileValue) - 1)];
+}
+
+function rounded(value: number): number {
+  return Number(value.toFixed(3));
+}
+
+async function installFirstMeaningfulVisualProbe(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const probe: FirstMeaningfulVisualProbe = { firstVisibleAtMs: null };
+    Object.defineProperty(window, "__MURMUR_FIRST_MEANINGFUL_VISUAL__", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: probe,
+    });
+
+    const sample = (): void => {
+      const nodes = Array.from(
+        document.querySelectorAll<SVGGraphicsElement>(
+          '[data-testid="live-choreography-stage"] svg > [data-element-id]',
+        ),
+      );
+      const visible = nodes.some((node) => {
+        const bounds = node.getBoundingClientRect();
+        const opacity = Number.parseFloat(
+          getComputedStyle(node).opacity || "0",
+        );
+        return bounds.width > 0 && bounds.height > 0 && opacity > 0;
+      });
+      if (visible) {
+        probe.firstVisibleAtMs = performance.now();
+        return;
+      }
+      requestAnimationFrame(sample);
+    };
+    requestAnimationFrame(sample);
+  });
+}
+
+async function firstMeaningfulVisualAtMs(page: Page): Promise<number> {
+  await page.waitForFunction(() => {
+    const probe = (
+      window as typeof window & {
+        __MURMUR_FIRST_MEANINGFUL_VISUAL__?: FirstMeaningfulVisualProbe;
+      }
+    ).__MURMUR_FIRST_MEANINGFUL_VISUAL__;
+    return (
+      probe?.firstVisibleAtMs !== null && probe?.firstVisibleAtMs !== undefined
+    );
+  });
+  return page.evaluate(() => {
+    const probe = (
+      window as typeof window & {
+        __MURMUR_FIRST_MEANINGFUL_VISUAL__: FirstMeaningfulVisualProbe;
+      }
+    ).__MURMUR_FIRST_MEANINGFUL_VISUAL__;
+    if (probe.firstVisibleAtMs === null) {
+      throw new Error("The first meaningful visual probe did not settle");
+    }
+    return probe.firstVisibleAtMs;
+  });
 }
 
 async function waitForCheckpointGate(
@@ -247,7 +327,7 @@ function expectSharedDomIdentity(
 async function responsiveObservation(
   page: Page,
   viewport: { readonly width: number; readonly height: number },
-): Promise<ResponsiveObservation> {
+): Promise<Omit<ResponsiveObservation, "liveSceneRequests">> {
   const measured = await page.evaluate(() => {
     const stage = document.querySelector<HTMLElement>(
       '[data-testid="live-choreography-stage"]',
@@ -281,6 +361,40 @@ async function responsiveObservation(
 }
 
 test.describe("Gate 1.5 live visual choreography", () => {
+  test("starts meaningful choreography under 100ms p95 over twenty fresh runs", async ({
+    page,
+  }, testInfo) => {
+    testInfo.setTimeout(120_000);
+    const requests = liveSceneRequests(page);
+    const samples: number[] = [];
+    await installFirstMeaningfulVisualProbe(page);
+
+    for (let run = 0; run < 20; run += 1) {
+      await page.goto(captureUrl("cinematic", "real"));
+      const firstCheckpoint = CINEMATIC_CHECKPOINTS[0];
+      await waitForCheckpointGate(page, firstCheckpoint);
+      const state = await readCaptureBridgeState(page);
+      const openedAtMs = state.waitingFor?.openedAtMs;
+      if (openedAtMs === undefined) {
+        throw new Error("The first checkpoint gate did not expose its origin");
+      }
+      const sample = (await firstMeaningfulVisualAtMs(page)) - openedAtMs;
+      expect(sample).toBeGreaterThanOrEqual(0);
+      samples.push(rounded(sample));
+      await page.goto("about:blank");
+    }
+
+    const p95Ms = rounded(percentile(samples, 0.95));
+    expect(samples).toHaveLength(20);
+    expect(p95Ms).toBeLessThan(100);
+    expect(requests).toEqual([]);
+    observations.latency = {
+      firstMeaningfulVisualMs: samples,
+      p95Ms,
+      liveSceneRequests: [...requests],
+    };
+  });
+
   test("settles the exact eight-checkpoint lesson without replacing retained ink or calling a model", async ({
     page,
   }) => {
@@ -338,13 +452,17 @@ test.describe("Gate 1.5 live visual choreography", () => {
       const measured = await responsiveObservation(page, viewport);
 
       expect(requests).toEqual([]);
-      observations.responsive.push(measured);
+      observations.responsive.push({
+        ...measured,
+        liveSceneRequests: [...requests],
+      });
     });
   }
 
   test("pauses at the visible corner, answers it, continues, and replays the exact visual state", async ({
     page,
-  }) => {
+  }, testInfo) => {
+    testInfo.setTimeout(150_000);
     const requests = liveSceneRequests(page);
     await page.goto("/labs/live-scene");
     await page
@@ -358,22 +476,46 @@ test.describe("Gate 1.5 live visual choreography", () => {
       page.getByRole("radio", { name: "Ask at the corner" }),
     ).toBeChecked();
 
-    await page.getByRole("button", { name: "Begin the lesson" }).click();
     const stage = choreographyStage(page);
-    await expect(stage).toHaveAttribute("data-checkpoint-id", "missing_corner");
-    await expect(stage).toHaveAttribute("data-settled-main-count", "5");
-    await expect(stage).toHaveAttribute("data-phase", "streaming");
-    const beforeInterrupt = await stageSnapshot(page);
+    const interruptionSettleMsSamples: number[] = [];
+    let beforeInterrupt: StageSnapshot | null = null;
 
-    const interruptedAt = await page.evaluate(() => performance.now());
-    await page.getByRole("button", { name: "Stop here and ask" }).click();
-    await expect(stage).toHaveAttribute("data-phase", "interrupted");
-    const interruptionSettleMs = await page.evaluate(
-      (startedAt) => performance.now() - startedAt,
-      interruptedAt,
+    for (let run = 0; run < 20; run += 1) {
+      await page.getByRole("button", { name: "Begin the lesson" }).click();
+      await expect(stage).toHaveAttribute(
+        "data-checkpoint-id",
+        "missing_corner",
+      );
+      await expect(stage).toHaveAttribute("data-settled-main-count", "5");
+      await expect(stage).toHaveAttribute("data-phase", "streaming");
+      if (run === 19) beforeInterrupt = await stageSnapshot(page);
+      const interruptedAt = await page.evaluate(() => performance.now());
+      await page.getByRole("button", { name: "Stop here and ask" }).click();
+      await expect(stage).toHaveAttribute("data-phase", "interrupted");
+      interruptionSettleMsSamples.push(
+        rounded(
+          await page.evaluate(
+            (startedAt) => performance.now() - startedAt,
+            interruptedAt,
+          ),
+        ),
+      );
+      if (run < 19) {
+        await page.getByRole("button", { name: "Reset" }).click();
+        await expect(stage).toHaveAttribute("data-phase", "idle");
+        await expect(stage).toHaveAttribute("data-checkpoint-id", "none");
+        await expect(stage).toHaveAttribute("data-settled-main-count", "0");
+      }
+    }
+
+    const interruptionSettleP95Ms = rounded(
+      percentile(interruptionSettleMsSamples, 0.95),
     );
+    expect(interruptionSettleMsSamples).toHaveLength(20);
+    expect(interruptionSettleP95Ms).toBeLessThan(150);
+    expect(beforeInterrupt).not.toBeNull();
     const interrupted = await stageSnapshot(page);
-    expect(interrupted).toEqual(beforeInterrupt);
+    expect(interrupted).toEqual(beforeInterrupt as StageSnapshot);
 
     await page.getByRole("button", { name: "Why is the corner 9?" }).click();
     await expect(stage).toHaveAttribute("data-checkpoint-id", "corner_detail");
@@ -414,7 +556,8 @@ test.describe("Gate 1.5 live visual choreography", () => {
     expect(requests).toEqual([]);
 
     observations.adaptive = {
-      interruptionSettleMs,
+      interruptionSettleMsSamples,
+      interruptionSettleP95Ms,
       cornerDetailNodeIds: [...CORNER_DETAIL_NODE_IDS],
       replayEquivalent: true,
       liveSceneRequests: [...requests],
