@@ -9,6 +9,12 @@ import {
   createChoreographySceneFixtureRunner,
 } from "@/features/live-scene/choreography-scene-stream-fixture";
 import type { ChoreographyEvidenceTraceEvent } from "@/features/live-scene/choreography-playback";
+import type {
+  LiveChoreographyCaptureControl,
+  LiveChoreographyCaptureInterruptRequest,
+  LiveChoreographyCaptureInterruptResult,
+  LiveChoreographyReplayObservation,
+} from "@/features/live-scene/live-choreography-demo";
 
 import type { ChoreographyCapturePace } from "./capture-options";
 
@@ -40,6 +46,10 @@ export interface ChoreographyCaptureBridgeV1 {
   readonly pace: ChoreographyCapturePace;
   getState(): ChoreographyCaptureStateV1;
   acknowledgeCheckpoint(value: unknown): void;
+  interruptCheckpoint(
+    value: unknown,
+  ): Promise<LiveChoreographyCaptureInterruptResult>;
+  replayAccepted(): Promise<LiveChoreographyReplayObservation>;
 }
 
 export interface ChoreographyCaptureSession {
@@ -47,6 +57,9 @@ export interface ChoreographyCaptureSession {
   readonly bridge: ChoreographyCaptureBridgeV1;
   readonly updateEvidence: (
     evidence: readonly ChoreographyEvidenceTraceEvent[],
+  ) => void;
+  readonly attachControl: (
+    control: LiveChoreographyCaptureControl | null,
   ) => void;
 }
 
@@ -77,7 +90,7 @@ function abortError(): DOMException {
   );
 }
 
-function record(value: unknown): UnknownRecord {
+function record(value: unknown, field: string): UnknownRecord {
   if (
     typeof value !== "object" ||
     value === null ||
@@ -85,7 +98,7 @@ function record(value: unknown): UnknownRecord {
     (Object.getPrototypeOf(value) !== Object.prototype &&
       Object.getPrototypeOf(value) !== null)
   ) {
-    throw new TypeError("checkpoint acknowledgement must be a plain object");
+    throw new TypeError(`${field} must be a plain object`);
   }
   return value as UnknownRecord;
 }
@@ -94,7 +107,7 @@ function decodeCheckpoint(
   value: unknown,
   field = "checkpoint acknowledgement",
 ): ChoreographyCaptureCheckpoint {
-  const input = record(value);
+  const input = record(value, field);
   const keys = Object.keys(input).sort();
   if (keys.join(",") !== "checkpointId,generation,sequence") {
     throw new TypeError(
@@ -126,6 +139,50 @@ function decodeCheckpoint(
     generation: input.generation as number,
     sequence: input.sequence as number,
     checkpointId,
+  });
+}
+
+function decodeInterruptRequest(
+  value: unknown,
+): LiveChoreographyCaptureInterruptRequest {
+  const field = "checkpoint interruption";
+  const input = record(value, field);
+  const keys = Object.keys(input).sort();
+  if (
+    keys.join(",") !==
+    "certificateSha256,checkpointId,delayAfterPresentedMs,generation,sequence"
+  ) {
+    throw new TypeError(
+      `${field} must contain exactly certificateSha256, checkpointId, delayAfterPresentedMs, generation, sequence`,
+    );
+  }
+  const checkpoint = decodeCheckpoint(
+    {
+      generation: input.generation,
+      sequence: input.sequence,
+      checkpointId: input.checkpointId,
+    },
+    field,
+  );
+  if (
+    typeof input.certificateSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(input.certificateSha256)
+  ) {
+    throw new TypeError(`${field} certificateSha256 must be a SHA-256 digest`);
+  }
+  if (
+    !Number.isSafeInteger(input.delayAfterPresentedMs) ||
+    (input.delayAfterPresentedMs as number) < 0 ||
+    (input.delayAfterPresentedMs as number) > 1_000
+  ) {
+    throw new TypeError(
+      `${field} delayAfterPresentedMs must be between 0 and 1000`,
+    );
+  }
+  return Object.freeze({
+    ...checkpoint,
+    certificateSha256: input.certificateSha256,
+    delayAfterPresentedMs: input.delayAfterPresentedMs as number,
   });
 }
 
@@ -254,6 +311,26 @@ export function createChoreographyCaptureSession(
     throw new TypeError("capture pace must be auto or step");
   }
   let evidence: readonly ChoreographyEvidenceTraceEvent[] = Object.freeze([]);
+  let control: LiveChoreographyCaptureControl | null = null;
+  const attachControl = (next: LiveChoreographyCaptureControl | null): void => {
+    control = next;
+  };
+  const requireControl = (): LiveChoreographyCaptureControl => {
+    if (!control) {
+      throw new Error("The choreography capture control is unavailable");
+    }
+    return control;
+  };
+  const controlBridge = Object.freeze({
+    interruptCheckpoint: (
+      value: unknown,
+    ): Promise<LiveChoreographyCaptureInterruptResult> => {
+      const request = decodeInterruptRequest(value);
+      return requireControl().interruptCheckpoint(request);
+    },
+    replayAccepted: (): Promise<LiveChoreographyReplayObservation> =>
+      requireControl().replayAccepted(),
+  });
   const updateEvidence = (
     next: readonly ChoreographyEvidenceTraceEvent[],
   ): void => {
@@ -269,6 +346,7 @@ export function createChoreographyCaptureSession(
     return Object.freeze({
       runner: createChoreographySceneFixtureRunner({ mode: "main" }),
       updateEvidence,
+      attachControl,
       bridge: Object.freeze({
         version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
         pace,
@@ -281,6 +359,7 @@ export function createChoreographyCaptureSession(
             "Automatic capture does not accept checkpoint acknowledgements",
           );
         },
+        ...controlBridge,
       }),
     });
   }
@@ -289,11 +368,13 @@ export function createChoreographyCaptureSession(
   return Object.freeze({
     runner: createStepChoreographyCaptureRunner(rendezvous),
     updateEvidence,
+    attachControl,
     bridge: Object.freeze({
       version: CHOREOGRAPHY_CAPTURE_BRIDGE_VERSION,
       pace,
       getState: () => withEvidence(rendezvous.getState()),
       acknowledgeCheckpoint: rendezvous.acknowledgeCheckpoint,
+      ...controlBridge,
     }),
   });
 }

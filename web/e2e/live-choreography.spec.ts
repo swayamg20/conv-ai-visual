@@ -6,14 +6,23 @@ import { expect, test, type Page } from "@playwright/test";
 import {
   CINEMATIC_CHECKPOINTS,
   COMPACT_CHECKPOINTS,
+  MAIN_CHOREOGRAPHY_EVIDENCE,
   acknowledgeCheckpoint,
   assertRetainedDomIdentity,
   choreographyStage,
+  interruptCaptureCheckpoint,
   observeSettledCheckpoint,
   readCaptureBridgeState,
+  replayAcceptedChoreography,
+  waitForCaptureEvidence,
   type ExpectedChoreographyCheckpoint,
   type SettledCheckpointObservation,
 } from "./live-choreography-helpers";
+import type {
+  LiveChoreographyCaptureInterruptResult,
+  LiveChoreographyReplayCheckpointObservation,
+} from "../src/features/live-scene/live-choreography-demo";
+import type { ChoreographyEvidenceTraceEvent } from "../src/features/live-scene/choreography-playback";
 import {
   observeChoreographyExecution,
   type ChoreographyEnvironmentObservation,
@@ -35,6 +44,65 @@ interface StageSnapshot {
   readonly nodeIds: readonly string[];
   readonly domIdentity: Readonly<Record<string, number>>;
   readonly canonicalSvg: string;
+}
+
+type InterruptionCategory =
+  "move" | "token_morph" | "camera_focus" | "emphasis" | "authored_hold";
+
+interface InterruptionTrial {
+  readonly label: string;
+  readonly category: InterruptionCategory;
+  readonly checkpointOrdinal: number;
+  readonly cue: "transform" | "focus" | "emphasize" | "hold";
+  readonly timing: "motion" | "hold";
+}
+
+interface InterruptionCaseObservation {
+  readonly label: string;
+  readonly category: InterruptionCategory;
+  readonly checkpointId: ExpectedChoreographyCheckpoint["checkpointId"];
+  readonly sequence: number;
+  readonly cue: InterruptionTrial["cue"];
+  readonly cueTargetIds: readonly string[];
+  readonly timing: InterruptionTrial["timing"];
+  readonly authoredDurationMs: number;
+  readonly authoredHoldAfterMs: number;
+  readonly trigger: LiveChoreographyCaptureInterruptResult["trigger"];
+  readonly delayAfterPresentedMs: number;
+  readonly activeRevision: number;
+  readonly requestedAtMs: number;
+  readonly settledAtMs: number;
+  readonly settleMs: number;
+  readonly target: SettledCheckpointObservation;
+  readonly evidenceBefore: readonly ChoreographyEvidenceTraceEvent[];
+  readonly evidenceAfter: readonly ChoreographyEvidenceTraceEvent[];
+  readonly staleWindowMs: 2_000;
+  readonly stabilityBefore: InterruptedStabilitySnapshot;
+  readonly stabilityAfter: InterruptedStabilitySnapshot;
+  readonly staleStable: true;
+}
+
+interface InterruptedStabilitySnapshot {
+  readonly stage: StageSnapshot;
+  readonly frontier: {
+    readonly phase: "interrupted";
+    readonly checkpointId: ExpectedChoreographyCheckpoint["checkpointId"];
+    readonly settledMainCount: number;
+    readonly rendererTrusted: true;
+    readonly waitingFor: null;
+  };
+  readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
+}
+
+interface ReplayObservation {
+  readonly liveCheckpoints: readonly SettledCheckpointObservation[];
+  readonly replayedCheckpoints: readonly LiveChoreographyReplayCheckpointObservation[];
+  readonly checkpointIds: readonly string[];
+  readonly certificateSha256s: readonly string[];
+  readonly liveEvidence: readonly ChoreographyEvidenceTraceEvent[];
+  readonly replayEvidence: readonly ChoreographyEvidenceTraceEvent[];
+  readonly finalCanonicalSvgMatches: true;
+  readonly equivalent: true;
 }
 
 interface ProviderFreeRequestObservation {
@@ -74,7 +142,9 @@ interface AcceleratedObservations {
   adaptive?: ProviderFreeRequestObservation & {
     readonly interruptionSettleMsSamples: readonly number[];
     readonly interruptionSettleP95Ms: number;
+    readonly interruptionCases: readonly InterruptionCaseObservation[];
     readonly cornerDetailNodeIds: readonly string[];
+    readonly replay: ReplayObservation;
     readonly replayEquivalent: boolean;
   };
 }
@@ -96,6 +166,50 @@ function captureUrl(
 ): string {
   return `/e2e/choreography?pace=step&timing=accelerated&layout=${layout}&motion=${motion}`;
 }
+
+const INTERRUPTION_TRIALS: readonly InterruptionTrial[] = Object.freeze(
+  (
+    [
+      {
+        category: "move",
+        checkpointOrdinal: 4,
+        cue: "transform",
+        timing: "motion",
+      },
+      {
+        category: "token_morph",
+        checkpointOrdinal: 7,
+        cue: "transform",
+        timing: "motion",
+      },
+      {
+        category: "camera_focus",
+        checkpointOrdinal: 4,
+        cue: "focus",
+        timing: "motion",
+      },
+      {
+        category: "emphasis",
+        checkpointOrdinal: 6,
+        cue: "emphasize",
+        timing: "motion",
+      },
+      {
+        category: "authored_hold",
+        checkpointOrdinal: 4,
+        cue: "hold",
+        timing: "hold",
+      },
+    ] as const
+  ).flatMap((definition) =>
+    Array.from({ length: 4 }, (_, index) =>
+      Object.freeze({
+        ...definition,
+        label: `${definition.category}-${index + 1}`,
+      }),
+    ),
+  ),
+);
 
 function observeProviderFreeRequests(
   page: Page,
@@ -140,43 +254,6 @@ function percentile(
 
 function rounded(value: number): number {
   return Number(value.toFixed(3));
-}
-
-async function interruptSettleDuration(page: Page): Promise<number> {
-  return page
-    .getByRole("button", { name: "Stop here and ask" })
-    .evaluate((button) => {
-      const stage = document.querySelector<HTMLElement>(
-        '[data-testid="live-choreography-stage"]',
-      );
-      if (!stage) throw new Error("The choreography stage is unavailable");
-
-      return new Promise<number>((resolve, reject) => {
-        let startedAt = 0;
-        const finish = (): void => {
-          observer.disconnect();
-          window.clearTimeout(timeout);
-          resolve(performance.now() - startedAt);
-        };
-        const observer = new MutationObserver(() => {
-          if (stage.dataset.phase === "interrupted") finish();
-        });
-        const timeout = window.setTimeout(() => {
-          observer.disconnect();
-          reject(
-            new Error("The choreography did not settle after interruption"),
-          );
-        }, 2_000);
-
-        observer.observe(stage, {
-          attributes: true,
-          attributeFilter: ["data-phase"],
-        });
-        startedAt = performance.now();
-        (button as HTMLButtonElement).click();
-        if (stage.dataset.phase === "interrupted") finish();
-      });
-    });
 }
 
 async function installFirstMeaningfulVisualProbe(page: Page): Promise<void> {
@@ -397,6 +474,287 @@ function expectSharedDomIdentity(
   }
 }
 
+function interruptedEvidenceThrough(
+  target: ExpectedChoreographyCheckpoint,
+): readonly ChoreographyEvidenceTraceEvent[] {
+  return Object.freeze(
+    MAIN_CHOREOGRAPHY_EVIDENCE.filter(
+      (event) => event.sequence <= target.ordinal,
+    ).map((event) =>
+      event.sequence === target.ordinal && event.type === "checkpointSettled"
+        ? Object.freeze({
+            ...event,
+            settlement: "cancelled_to_checkpoint" as const,
+          })
+        : event,
+    ),
+  );
+}
+
+async function interruptedStabilitySnapshot(
+  page: Page,
+  target: ExpectedChoreographyCheckpoint,
+  expectedEvidence: readonly ChoreographyEvidenceTraceEvent[],
+): Promise<InterruptedStabilitySnapshot> {
+  await expect
+    .poll(async () => (await readCaptureBridgeState(page)).waitingFor)
+    .toBeNull();
+  const [rendered, state, attributes] = await Promise.all([
+    stageSnapshot(page),
+    readCaptureBridgeState(page),
+    choreographyStage(page).evaluate((element) => ({
+      phase: element.getAttribute("data-phase"),
+      checkpointId: element.getAttribute("data-checkpoint-id"),
+      settledMainCount: Number(element.getAttribute("data-settled-main-count")),
+      rendererTrusted: element.getAttribute("data-renderer-trusted"),
+    })),
+  ]);
+
+  expect(attributes).toEqual({
+    phase: "interrupted",
+    checkpointId: target.checkpointId,
+    settledMainCount: target.ordinal,
+    rendererTrusted: "true",
+  });
+  expect(state.waitingFor).toBeNull();
+  expect(state.evidence).toEqual(expectedEvidence);
+
+  return {
+    stage: rendered,
+    frontier: {
+      phase: "interrupted",
+      checkpointId: target.checkpointId,
+      settledMainCount: target.ordinal,
+      rendererTrusted: true,
+      waitingFor: null,
+    },
+    evidence: state.evidence,
+  };
+}
+
+async function runInterruptionTrial(
+  page: Page,
+  route: string,
+  trial: InterruptionTrial,
+): Promise<InterruptionCaseObservation> {
+  await page.goto(route);
+  const target = CINEMATIC_CHECKPOINTS[trial.checkpointOrdinal - 1];
+  const prefix = CINEMATIC_CHECKPOINTS.slice(0, target.ordinal - 1);
+  const releaseCheckpoint = prefix.at(-1);
+  if (!releaseCheckpoint) {
+    throw new Error("Interruption trials require a retained predecessor");
+  }
+
+  let previous: SettledCheckpointObservation | undefined;
+  for (const checkpoint of prefix) {
+    await waitForCheckpointGate(page, checkpoint);
+    const current = await observeSettledCheckpoint(page, checkpoint);
+    if (previous) assertRetainedDomIdentity(previous, current);
+    previous = current;
+    if (checkpoint !== releaseCheckpoint) {
+      await acknowledgeCheckpoint(page, checkpoint);
+    }
+  }
+
+  const cueTargetIds =
+    trial.cue === "hold" ? [] : [...(target.cueTargets[trial.cue] ?? [])];
+  if (trial.cue === "hold") {
+    expect(target.holdAfterMs).toBeGreaterThan(0);
+  } else {
+    expect(target.cues).toContain(trial.cue);
+    expect(cueTargetIds.length).toBeGreaterThan(0);
+  }
+  if (trial.category === "token_morph") {
+    expect(cueTargetIds).toEqual([
+      "square-lesson__eq_16",
+      "square-lesson__eq_equal_result",
+    ]);
+  }
+
+  const delayAfterPresentedMs =
+    trial.timing === "hold" ? Math.ceil(target.durationMs / 16) + 50 : 0;
+  const result = await interruptCaptureCheckpoint(
+    page,
+    {
+      generation: 1,
+      sequence: target.ordinal,
+      checkpointId: target.checkpointId,
+      certificateSha256: target.certificateSha256,
+      delayAfterPresentedMs,
+    },
+    releaseCheckpoint,
+  );
+  const expectedEvidence = interruptedEvidenceThrough(target);
+  expect(result.target).toEqual({
+    generation: 1,
+    sequence: target.ordinal,
+    checkpointId: target.checkpointId,
+    certificateSha256: target.certificateSha256,
+  });
+  expect(result.trigger).toBe(
+    trial.timing === "hold"
+      ? "afterFirstCuePresentedDelay"
+      : "firstCuePresented",
+  );
+  expect(result.delayAfterPresentedMs).toBe(delayAfterPresentedMs);
+  expect(result.activeRevision).toBe(target.ordinal);
+  expect(result.requestedAtMs).toBeGreaterThanOrEqual(0);
+  expect(result.settledAtMs).toBeGreaterThanOrEqual(result.requestedAtMs);
+  expect(result.settleMs).toBeGreaterThanOrEqual(0);
+  expect(result.evidenceBefore).toEqual(expectedEvidence.slice(0, -1));
+  expect(result.evidenceAfter).toEqual(expectedEvidence);
+  const targetSettlements = result.evidenceAfter.filter(
+    (event) =>
+      event.sequence === target.ordinal && event.type === "checkpointSettled",
+  );
+  expect(targetSettlements).toEqual([
+    expect.objectContaining({ settlement: "cancelled_to_checkpoint" }),
+  ]);
+  expect(
+    result.evidenceAfter.some((event) => event.sequence > target.ordinal),
+  ).toBe(false);
+  await waitForCaptureEvidence(page, expectedEvidence);
+  await expect(choreographyStage(page)).toHaveAttribute(
+    "data-phase",
+    "interrupted",
+  );
+
+  const settled = await observeSettledCheckpoint(page, target);
+  if (!previous) throw new Error("The interruption prefix was not observed");
+  assertRetainedDomIdentity(previous, settled);
+  expect(settled.transientResidueCount).toBe(0);
+
+  const stableBefore = await interruptedStabilitySnapshot(
+    page,
+    target,
+    expectedEvidence,
+  );
+  await page.waitForTimeout(2_000);
+  const stableAfter = await interruptedStabilitySnapshot(
+    page,
+    target,
+    expectedEvidence,
+  );
+  expect(stableAfter).toEqual(stableBefore);
+
+  return {
+    label: trial.label,
+    category: trial.category,
+    checkpointId: target.checkpointId,
+    sequence: target.ordinal,
+    cue: trial.cue,
+    cueTargetIds,
+    timing: trial.timing,
+    authoredDurationMs: target.durationMs,
+    authoredHoldAfterMs: target.holdAfterMs,
+    trigger: result.trigger,
+    delayAfterPresentedMs,
+    activeRevision: result.activeRevision,
+    requestedAtMs: rounded(result.requestedAtMs),
+    settledAtMs: rounded(result.settledAtMs),
+    settleMs: rounded(result.settleMs),
+    target: settled,
+    evidenceBefore: result.evidenceBefore,
+    evidenceAfter: result.evidenceAfter,
+    staleWindowMs: 2_000,
+    stabilityBefore: stableBefore,
+    stabilityAfter: stableAfter,
+    staleStable: true,
+  };
+}
+
+function assertReplayDomIdentity(
+  previous: LiveChoreographyReplayCheckpointObservation,
+  current: LiveChoreographyReplayCheckpointObservation,
+): void {
+  for (const id of previous.nodeIds) {
+    if (current.domIdentity[id] !== undefined) {
+      expect(
+        current.domIdentity[id],
+        `Replay DOM identity changed for ${id}`,
+      ).toBe(previous.domIdentity[id]);
+    }
+  }
+}
+
+async function runReplayProof(
+  page: Page,
+  route: string,
+  requests: ProviderFreeRequestObservation,
+): Promise<ReplayObservation> {
+  await page.goto(route);
+  const liveCheckpoints = await runStepLesson(page, CINEMATIC_CHECKPOINTS);
+  const liveEvidence = await waitForCaptureEvidence(
+    page,
+    MAIN_CHOREOGRAPHY_EVIDENCE,
+  );
+  const liveFinal = await stageSnapshot(page);
+  const requestsBeforeReplay = requests.liveSceneRequests.length;
+  const replay = await replayAcceptedChoreography(page);
+
+  expect(replay.checkpoints).toHaveLength(CINEMATIC_CHECKPOINTS.length);
+  let previous: LiveChoreographyReplayCheckpointObservation | undefined;
+  for (const [index, replayed] of replay.checkpoints.entries()) {
+    const expected = CINEMATIC_CHECKPOINTS[index];
+    const live = liveCheckpoints[index];
+    const cueTrace = MAIN_CHOREOGRAPHY_EVIDENCE.filter(
+      (event) => event.sequence === expected.ordinal,
+    );
+    expect({
+      ordinal: replayed.ordinal,
+      checkpointId: replayed.checkpointId,
+      certificateSha256: replayed.certificateSha256,
+      caption: replayed.caption,
+      viewport: replayed.viewport,
+      nodeIds: replayed.nodeIds,
+      rendererTrusted: replayed.rendererTrusted,
+      cueTrace: replayed.cueTrace,
+    }).toEqual({
+      ordinal: expected.ordinal,
+      checkpointId: expected.checkpointId,
+      certificateSha256: expected.certificateSha256,
+      caption: live.caption,
+      viewport: expected.resultViewport,
+      nodeIds: live.nodeIds,
+      rendererTrusted: true,
+      cueTrace,
+    });
+    expect(Object.keys(replayed.domIdentity)).toEqual(replayed.nodeIds);
+    expect(new Set(Object.values(replayed.domIdentity)).size).toBe(
+      replayed.nodeIds.length,
+    );
+    if (previous) assertReplayDomIdentity(previous, replayed);
+    previous = replayed;
+  }
+  expect(replay.evidence).toEqual(liveEvidence);
+
+  const replayedFinal = await stageSnapshot(page);
+  const finalCheckpoint = replay.checkpoints.at(-1);
+  if (!finalCheckpoint) throw new Error("Replay exposed no final checkpoint");
+  expect(replayedFinal.caption).toBe(liveFinal.caption);
+  expect(replayedFinal.viewBox).toBe(liveFinal.viewBox);
+  expect(replayedFinal.nodeIds).toEqual(liveFinal.nodeIds);
+  expect(replayedFinal.domIdentity).toEqual(finalCheckpoint.domIdentity);
+  expect(replayedFinal.canonicalSvg).toBe(liveFinal.canonicalSvg);
+  expect(requests.liveSceneRequests).toHaveLength(requestsBeforeReplay);
+  expectProviderFree(requests);
+
+  return {
+    liveCheckpoints,
+    replayedCheckpoints: replay.checkpoints,
+    checkpointIds: replay.checkpoints.map(
+      (checkpoint) => checkpoint.checkpointId,
+    ),
+    certificateSha256s: replay.checkpoints.map(
+      (checkpoint) => checkpoint.certificateSha256,
+    ),
+    liveEvidence,
+    replayEvidence: replay.evidence,
+    finalCanonicalSvgMatches: true,
+    equivalent: true,
+  };
+}
+
 async function responsiveObservation(
   page: Page,
   viewport: { readonly width: number; readonly height: number },
@@ -546,11 +904,50 @@ test.describe("Gate 1.5 live visual choreography", () => {
     });
   }
 
-  test("pauses at the visible corner, answers it, continues, and replays the exact visual state", async ({
+  test("interrupts twenty active checkpoints, proves stale-window stability, and replays every frontier", async ({
     page,
   }, testInfo) => {
-    testInfo.setTimeout(150_000);
-    const requests = observeProviderFreeRequests(page, ["/labs/live-scene"]);
+    testInfo.setTimeout(240_000);
+    const route = captureUrl("cinematic", "real");
+    const requests = observeProviderFreeRequests(page, [
+      route,
+      "/labs/live-scene",
+    ]);
+    expect(INTERRUPTION_TRIALS).toHaveLength(20);
+    expect(new Set(INTERRUPTION_TRIALS.map((trial) => trial.label)).size).toBe(
+      20,
+    );
+
+    const interruptionCases: InterruptionCaseObservation[] = [];
+    for (const trial of INTERRUPTION_TRIALS) {
+      interruptionCases.push(
+        await test.step(trial.label, () =>
+          runInterruptionTrial(page, route, trial),
+        ),
+      );
+    }
+    for (const category of [
+      "move",
+      "token_morph",
+      "camera_focus",
+      "emphasis",
+      "authored_hold",
+    ] as const) {
+      expect(
+        interruptionCases.filter((trial) => trial.category === category),
+      ).toHaveLength(4);
+    }
+    const interruptionSettleMsSamples = interruptionCases.map(
+      (trial) => trial.settleMs,
+    );
+    const interruptionSettleP95Ms = rounded(
+      percentile(interruptionSettleMsSamples, 0.95),
+    );
+    expect(interruptionSettleMsSamples).toHaveLength(20);
+    expect(interruptionSettleP95Ms).toBeLessThan(150);
+
+    const replay = await runReplayProof(page, route, requests);
+
     await page.goto("/labs/live-scene");
     await page
       .getByTestId("authoring-mode-picker")
@@ -564,37 +961,15 @@ test.describe("Gate 1.5 live visual choreography", () => {
     ).toBeChecked();
 
     const stage = choreographyStage(page);
-    const interruptionSettleMsSamples: number[] = [];
-    let beforeInterrupt: StageSnapshot | null = null;
-
-    for (let run = 0; run < 20; run += 1) {
-      await page.getByRole("button", { name: "Begin the lesson" }).click();
-      await expect(stage).toHaveAttribute(
-        "data-checkpoint-id",
-        "missing_corner",
-      );
-      await expect(stage).toHaveAttribute("data-settled-main-count", "5");
-      await expect(stage).toHaveAttribute("data-phase", "streaming");
-      if (run === 19) beforeInterrupt = await stageSnapshot(page);
-      const interruptionSettleMs = await interruptSettleDuration(page);
-      await expect(stage).toHaveAttribute("data-phase", "interrupted");
-      interruptionSettleMsSamples.push(rounded(interruptionSettleMs));
-      if (run < 19) {
-        await page.getByRole("button", { name: "Reset" }).click();
-        await expect(stage).toHaveAttribute("data-phase", "idle");
-        await expect(stage).toHaveAttribute("data-checkpoint-id", "none");
-        await expect(stage).toHaveAttribute("data-settled-main-count", "0");
-      }
-    }
-
-    const interruptionSettleP95Ms = rounded(
-      percentile(interruptionSettleMsSamples, 0.95),
-    );
-    expect(interruptionSettleMsSamples).toHaveLength(20);
-    expect(interruptionSettleP95Ms).toBeLessThan(150);
-    expect(beforeInterrupt).not.toBeNull();
+    await page.getByRole("button", { name: "Begin the lesson" }).click();
+    await expect(stage).toHaveAttribute("data-checkpoint-id", "missing_corner");
+    await expect(stage).toHaveAttribute("data-settled-main-count", "5");
+    await expect(stage).toHaveAttribute("data-phase", "streaming");
+    const beforeInterrupt = await stageSnapshot(page);
+    await page.getByRole("button", { name: "Stop here and ask" }).click();
+    await expect(stage).toHaveAttribute("data-phase", "interrupted");
     const interrupted = await stageSnapshot(page);
-    expect(interrupted).toEqual(beforeInterrupt as StageSnapshot);
+    expect(interrupted).toEqual(beforeInterrupt);
 
     await page.getByRole("button", { name: "Why is the corner 9?" }).click();
     await expect(stage).toHaveAttribute("data-checkpoint-id", "corner_detail");
@@ -603,7 +978,7 @@ test.describe("Gate 1.5 live visual choreography", () => {
     await expect(stage).toHaveAttribute("data-phase", "completed");
     const cornerDetail = await stageSnapshot(page);
     expect(cornerDetail.caption).toBe(CORNER_DETAIL_CAPTION);
-    expect(cornerDetail.viewBox).toBe("380 380 260 160");
+    expect(cornerDetail.viewBox).toBe("220 220 420 330");
     expect(cornerDetail.nodeIds).toEqual([
       ...CINEMATIC_CHECKPOINTS[4].nodeIds,
       ...CORNER_DETAIL_NODE_IDS,
@@ -637,7 +1012,9 @@ test.describe("Gate 1.5 live visual choreography", () => {
     observations.adaptive = {
       interruptionSettleMsSamples,
       interruptionSettleP95Ms,
+      interruptionCases,
       cornerDetailNodeIds: [...CORNER_DETAIL_NODE_IDS],
+      replay,
       replayEquivalent: true,
       liveSceneRequests: [...requests.liveSceneRequests],
       unexpectedRequests: [...requests.unexpectedRequests],

@@ -12,6 +12,11 @@ import type {
   ViewportPoseV1,
 } from "../src/lib/live-scene";
 import type { ChoreographyEvidenceTraceEvent } from "../src/features/live-scene/choreography-playback";
+import type {
+  LiveChoreographyCaptureInterruptRequest,
+  LiveChoreographyCaptureInterruptResult,
+  LiveChoreographyReplayObservation,
+} from "../src/features/live-scene/live-choreography-demo";
 
 const CAPTURE_BRIDGE_KEY = "__MURMUR_CHOREOGRAPHY_CAPTURE__";
 
@@ -23,6 +28,11 @@ export interface ExpectedChoreographyCheckpoint {
   readonly baseViewport: ViewportPoseV1;
   readonly resultViewport: ViewportPoseV1;
   readonly cues: readonly ChoreographyCueKind[];
+  readonly cueTargets: Readonly<
+    Partial<Record<ChoreographyCueKind, readonly string[]>>
+  >;
+  readonly durationMs: number;
+  readonly holdAfterMs: number;
   readonly nodeIds: readonly string[];
 }
 
@@ -55,6 +65,10 @@ interface CaptureBridge {
     readonly sequence: number;
     readonly checkpointId: CompletingSquareCheckpointId;
   }): void;
+  interruptCheckpoint(
+    value: LiveChoreographyCaptureInterruptRequest,
+  ): Promise<LiveChoreographyCaptureInterruptResult>;
+  replayAccepted(): Promise<LiveChoreographyReplayObservation>;
 }
 
 export interface CaptureBridgeState {
@@ -114,6 +128,16 @@ function expectedCheckpoints(
       cues: Object.freeze(
         event.semantic.choreography.phase.cues.map((cue) => cue.cue),
       ),
+      cueTargets: Object.freeze(
+        Object.fromEntries(
+          event.semantic.choreography.phase.cues.map((cue) => [
+            cue.cue,
+            Object.freeze([...cue.targetIds]),
+          ]),
+        ),
+      ),
+      durationMs: event.semantic.choreography.phase.durationMs,
+      holdAfterMs: event.semantic.choreography.phase.holdAfterMs,
       nodeIds: Object.freeze([...nodeIds]),
     });
   });
@@ -300,6 +324,48 @@ export async function acknowledgeCheckpoint(
     },
     { key: CAPTURE_BRIDGE_KEY, expected: checkpoint },
   );
+}
+
+export async function interruptCaptureCheckpoint(
+  page: Page,
+  request: LiveChoreographyCaptureInterruptRequest,
+  releaseCheckpoint: ExpectedChoreographyCheckpoint,
+): Promise<LiveChoreographyCaptureInterruptResult> {
+  return page.evaluate(
+    async ({ key, target, release }) => {
+      const bridge = (window as typeof window & Record<string, unknown>)[
+        key
+      ] as CaptureBridge | undefined;
+      if (!bridge || bridge.version !== 1 || bridge.pace !== "step") {
+        throw new Error(
+          "The step-gated choreography capture bridge is unavailable",
+        );
+      }
+      const interrupted = bridge.interruptCheckpoint(target);
+      bridge.acknowledgeCheckpoint({
+        generation: 1,
+        sequence: release.ordinal,
+        checkpointId: release.checkpointId,
+      });
+      return interrupted;
+    },
+    { key: CAPTURE_BRIDGE_KEY, target: request, release: releaseCheckpoint },
+  );
+}
+
+export async function replayAcceptedChoreography(
+  page: Page,
+): Promise<LiveChoreographyReplayObservation> {
+  return page.evaluate(async (key) => {
+    const bridge = (window as typeof window & Record<string, unknown>)[key] as
+      CaptureBridge | undefined;
+    if (!bridge || bridge.version !== 1 || bridge.pace !== "step") {
+      throw new Error(
+        "The step-gated choreography capture bridge is unavailable",
+      );
+    }
+    return bridge.replayAccepted();
+  }, CAPTURE_BRIDGE_KEY);
 }
 
 export function assertRetainedDomIdentity(

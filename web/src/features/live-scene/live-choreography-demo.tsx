@@ -31,6 +31,7 @@ import {
   COMPLETING_SQUARE_CHECKPOINT_IDS,
   type ChoreographyLayout,
   type CompletingSquareCheckpointId,
+  type ViewportPoseV1,
 } from "@/lib/live-scene";
 import { cn } from "@/lib/utils";
 
@@ -97,6 +98,53 @@ export type ChoreographyRunnerFactory = (
   path: ChoreographyLessonPath,
 ) => ChoreographySceneStreamRunner;
 
+export interface LiveChoreographyCaptureInterruptRequest {
+  readonly generation: number;
+  readonly sequence: number;
+  readonly checkpointId: CompletingSquareCheckpointId;
+  readonly certificateSha256: string;
+  readonly delayAfterPresentedMs: number;
+}
+
+export interface LiveChoreographyCaptureInterruptResult {
+  readonly target: Omit<
+    LiveChoreographyCaptureInterruptRequest,
+    "delayAfterPresentedMs"
+  >;
+  readonly trigger: "firstCuePresented" | "afterFirstCuePresentedDelay";
+  readonly delayAfterPresentedMs: number;
+  readonly activeRevision: number;
+  readonly requestedAtMs: number;
+  readonly settledAtMs: number;
+  readonly settleMs: number;
+  readonly evidenceBefore: readonly ChoreographyEvidenceTraceEvent[];
+  readonly evidenceAfter: readonly ChoreographyEvidenceTraceEvent[];
+}
+
+export interface LiveChoreographyReplayCheckpointObservation {
+  readonly ordinal: number;
+  readonly checkpointId: CompletingSquareCheckpointId;
+  readonly certificateSha256: string;
+  readonly caption: string;
+  readonly viewport: ViewportPoseV1;
+  readonly nodeIds: readonly string[];
+  readonly domIdentity: Readonly<Record<string, number>>;
+  readonly rendererTrusted: true;
+  readonly cueTrace: readonly ChoreographyEvidenceTraceEvent[];
+}
+
+export interface LiveChoreographyReplayObservation {
+  readonly checkpoints: readonly LiveChoreographyReplayCheckpointObservation[];
+  readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
+}
+
+export interface LiveChoreographyCaptureControl {
+  interruptCheckpoint(
+    request: LiveChoreographyCaptureInterruptRequest,
+  ): Promise<LiveChoreographyCaptureInterruptResult>;
+  replayAccepted(): Promise<LiveChoreographyReplayObservation>;
+}
+
 export interface LiveChoreographyDemoProps {
   readonly backHref?: string;
   readonly sourceLabel?: string;
@@ -111,6 +159,10 @@ export interface LiveChoreographyDemoProps {
   readonly runnerFactory?: ChoreographyRunnerFactory;
   readonly onEvidenceChange?: (
     evidence: readonly ChoreographyEvidenceTraceEvent[],
+  ) => void;
+  /** Installed only by the environment-gated Playwright capture surface. */
+  readonly onCaptureControlChange?: (
+    control: LiveChoreographyCaptureControl | null,
   ) => void;
 }
 
@@ -196,6 +248,7 @@ function ChoreographySession({
   stageOnly = false,
   autoStart = false,
   onEvidenceChange,
+  onCaptureControlChange,
 }: ChoreographySessionProps) {
   const canvasRef = useRef<SVGCanvasHandle>(null);
   const lifecycleRef = useRef<object | null>(null);
@@ -217,6 +270,296 @@ function ChoreographySession({
     runtime.getSnapshot,
   );
 
+  const captureControl = useMemo<LiveChoreographyCaptureControl>(() => {
+    const copyEvidence = (
+      evidence: readonly ChoreographyEvidenceTraceEvent[],
+    ): readonly ChoreographyEvidenceTraceEvent[] =>
+      Object.freeze(evidence.map((event) => Object.freeze({ ...event })));
+
+    const matchesTarget = (
+      event: ChoreographyEvidenceTraceEvent,
+      request: LiveChoreographyCaptureInterruptRequest,
+    ): boolean =>
+      event.generation === request.generation &&
+      event.sequence === request.sequence &&
+      event.checkpointId === request.checkpointId &&
+      event.certificateSha256 === request.certificateSha256;
+
+    return Object.freeze({
+      interruptCheckpoint: (
+        request: LiveChoreographyCaptureInterruptRequest,
+      ): Promise<LiveChoreographyCaptureInterruptResult> =>
+        new Promise((resolve, reject) => {
+          let triggered = false;
+          let requestedAtMs = 0;
+          let activeRevision = 0;
+          let evidenceBefore: readonly ChoreographyEvidenceTraceEvent[] = [];
+          let delay: ReturnType<typeof globalThis.setTimeout> | null = null;
+          let unsubscribe = (): void => undefined;
+          const deadline = globalThis.setTimeout(() => {
+            unsubscribe();
+            if (delay !== null) globalThis.clearTimeout(delay);
+            reject(
+              new Error(
+                `Checkpoint ${request.checkpointId} was not interrupted before the capture deadline`,
+              ),
+            );
+          }, 10_000);
+
+          const fail = (message: string): void => {
+            globalThis.clearTimeout(deadline);
+            if (delay !== null) globalThis.clearTimeout(delay);
+            unsubscribe();
+            reject(new Error(message));
+          };
+
+          const interrupt = (): void => {
+            delay = null;
+            const current = runtime.getSnapshot();
+            const evidence = current.choreography?.evidence ?? [];
+            const alreadySettled = evidence.some(
+              (event) =>
+                matchesTarget(event, request) &&
+                event.type === "checkpointSettled",
+            );
+            if (current.activeRevision === undefined || alreadySettled) {
+              fail(
+                `Checkpoint ${request.checkpointId} was no longer actively rendering`,
+              );
+              return;
+            }
+            if (current.activeRevision !== request.sequence) {
+              fail(
+                `Checkpoint ${request.checkpointId} did not own the active revision`,
+              );
+              return;
+            }
+            triggered = true;
+            activeRevision = current.activeRevision;
+            evidenceBefore = copyEvidence(evidence);
+            requestedAtMs = globalThis.performance.now();
+            if (!runtime.interrupt()) {
+              fail(
+                `Checkpoint ${request.checkpointId} could not be interrupted`,
+              );
+            }
+          };
+
+          const inspect = (): void => {
+            const current = runtime.getSnapshot();
+            const evidence = current.choreography?.evidence ?? [];
+            if (!triggered) {
+              if (current.phase === "failed") {
+                fail(
+                  current.error?.message ??
+                    `Checkpoint ${request.checkpointId} failed before interruption`,
+                );
+                return;
+              }
+              const firstPresented = evidence.some(
+                (event) =>
+                  matchesTarget(event, request) &&
+                  event.type === "firstCuePresented",
+              );
+              const alreadySettled = evidence.some(
+                (event) =>
+                  matchesTarget(event, request) &&
+                  event.type === "checkpointSettled",
+              );
+              const mismatchedTarget = evidence.some(
+                (event) =>
+                  event.generation === request.generation &&
+                  event.sequence === request.sequence &&
+                  (event.checkpointId !== request.checkpointId ||
+                    event.certificateSha256 !== request.certificateSha256),
+              );
+              if (mismatchedTarget) {
+                fail(
+                  `Checkpoint ${request.checkpointId} did not exact-match the active certified checkpoint`,
+                );
+                return;
+              }
+              if (!firstPresented || alreadySettled) return;
+              if (request.delayAfterPresentedMs === 0) {
+                interrupt();
+              } else {
+                if (delay !== null) return;
+                delay = globalThis.setTimeout(
+                  interrupt,
+                  request.delayAfterPresentedMs,
+                );
+              }
+              return;
+            }
+
+            if (current.phase === "failed") {
+              fail(
+                current.error?.message ??
+                  `Checkpoint ${request.checkpointId} failed while interrupting`,
+              );
+              return;
+            }
+            if (current.phase !== "interrupted") return;
+            const settledAtMs = globalThis.performance.now();
+            globalThis.clearTimeout(deadline);
+            unsubscribe();
+            resolve(
+              Object.freeze({
+                target: Object.freeze({
+                  generation: request.generation,
+                  sequence: request.sequence,
+                  checkpointId: request.checkpointId,
+                  certificateSha256: request.certificateSha256,
+                }),
+                trigger:
+                  request.delayAfterPresentedMs === 0
+                    ? "firstCuePresented"
+                    : "afterFirstCuePresentedDelay",
+                delayAfterPresentedMs: request.delayAfterPresentedMs,
+                activeRevision,
+                requestedAtMs,
+                settledAtMs,
+                settleMs: settledAtMs - requestedAtMs,
+                evidenceBefore,
+                evidenceAfter: copyEvidence(
+                  current.choreography?.evidence ?? [],
+                ),
+              }),
+            );
+          };
+
+          unsubscribe = runtime.subscribe(inspect);
+          inspect();
+        }),
+      replayAccepted: async (): Promise<LiveChoreographyReplayObservation> => {
+        const expectedCount =
+          runtime.getSnapshot().choreography?.accepted.length ?? 0;
+        const checkpoints: LiveChoreographyReplayCheckpointObservation[] = [];
+        let observedCount = 0;
+        let observationError: Error | null = null;
+        const observe = (): void => {
+          if (observationError) return;
+          const current = runtime.getSnapshot();
+          if (current.phase !== "replaying" || !current.choreography) return;
+          const records = current.choreography.accepted;
+          if (records.length <= observedCount) return;
+          if (records.length !== observedCount + 1) {
+            observationError = new Error(
+              "Replay skipped a presented checkpoint",
+            );
+            return;
+          }
+          const record = records.at(-1);
+          const viewport = current.choreography.committedViewport;
+          if (!record || !viewport) {
+            observationError = new Error(
+              "Replay did not expose a complete checkpoint frontier",
+            );
+            return;
+          }
+          const stage = globalThis.document.querySelector<HTMLElement>(
+            '[data-testid="live-choreography-stage"]',
+          );
+          const svg = stage?.querySelector("svg");
+          if (!stage || !svg) {
+            observationError = new Error(
+              "Replay checkpoint did not expose its rendered SVG frontier",
+            );
+            return;
+          }
+          interface IdentityRegistry {
+            next: number;
+            readonly tokens: WeakMap<Element, number>;
+          }
+          const owner = globalThis.window as typeof globalThis.window & {
+            __MURMUR_CHOREOGRAPHY_DOM_IDENTITY__?: IdentityRegistry;
+          };
+          const registry = owner.__MURMUR_CHOREOGRAPHY_DOM_IDENTITY__ ?? {
+            next: 1,
+            tokens: new WeakMap<Element, number>(),
+          };
+          owner.__MURMUR_CHOREOGRAPHY_DOM_IDENTITY__ = registry;
+          const nodes = Array.from(
+            svg.querySelectorAll<SVGElement>(":scope > [data-element-id]"),
+          );
+          const nodeIds = current.committedScene.nodes.map((node) => node.id);
+          const renderedNodeIds = nodes.map(
+            (node) => node.dataset.elementId ?? "",
+          );
+          if (
+            nodeIds.length !== renderedNodeIds.length ||
+            nodeIds.some((id, index) => id !== renderedNodeIds[index])
+          ) {
+            observationError = new Error(
+              "Replay logical and rendered checkpoint frontiers diverged",
+            );
+            return;
+          }
+          const domIdentity = Object.fromEntries(
+            nodes.map((node) => {
+              let token = registry.tokens.get(node);
+              if (token === undefined) {
+                token = registry.next;
+                registry.next += 1;
+                registry.tokens.set(node, token);
+              }
+              return [node.dataset.elementId ?? "", token];
+            }),
+          );
+          if (!current.choreography.rendererTrusted) {
+            observationError = new Error(
+              "Replay exposed an untrusted renderer checkpoint",
+            );
+            return;
+          }
+          const cueTrace = current.choreography.evidence.filter(
+            (event) =>
+              event.generation === record.event.generation &&
+              event.sequence === record.event.sequence &&
+              event.checkpointId === record.event.semantic.checkpointId &&
+              event.certificateSha256 === record.presentation.certificateSha256,
+          );
+          checkpoints.push(
+            Object.freeze({
+              ordinal: records.length,
+              checkpointId: record.event.semantic.checkpointId,
+              certificateSha256: record.presentation.certificateSha256,
+              caption: current.choreography.committedCaption,
+              viewport: Object.freeze({ ...viewport }),
+              nodeIds: Object.freeze(nodeIds),
+              domIdentity: Object.freeze(domIdentity),
+              rendererTrusted: true,
+              cueTrace: copyEvidence(cueTrace),
+            }),
+          );
+          observedCount = records.length;
+        };
+        const unsubscribe = runtime.subscribe(observe);
+        try {
+          await runtime.replayAccepted();
+          observe();
+          if (observationError) throw observationError;
+          const current = runtime.getSnapshot();
+          if (
+            current.phase !== "completed" ||
+            !current.choreography?.rendererTrusted ||
+            checkpoints.length !== expectedCount
+          ) {
+            throw new Error(
+              "Replay did not settle every accepted checkpoint on a trusted renderer",
+            );
+          }
+          return Object.freeze({
+            checkpoints: Object.freeze([...checkpoints]),
+            evidence: copyEvidence(current.choreography?.evidence ?? []),
+          });
+        } finally {
+          unsubscribe();
+        }
+      },
+    });
+  }, [runtime]);
+
   useEffect(() => {
     const lifecycle = {};
     lifecycleRef.current = lifecycle;
@@ -234,6 +577,11 @@ function ChoreographySession({
       });
     };
   }, [autoStart, renderer, runtime]);
+
+  useEffect(() => {
+    onCaptureControlChange?.(captureControl);
+    return () => onCaptureControlChange?.(null);
+  }, [captureControl, onCaptureControlChange]);
 
   const choreography = snapshot.choreography;
   useEffect(() => {

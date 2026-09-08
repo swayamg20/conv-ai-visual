@@ -63,6 +63,7 @@ export function ChoreographyCaptureClient({
       playbackRate={options.playbackRate}
       runnerFactory={runnerFactory}
       onEvidenceChange={session.updateEvidence}
+      onCaptureControlChange={session.attachControl}
       stageOnly
       autoStart
     />

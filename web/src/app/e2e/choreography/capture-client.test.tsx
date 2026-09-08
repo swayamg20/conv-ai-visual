@@ -17,6 +17,7 @@ vi.mock("@/features/live-scene/live-choreography-demo", () => ({
 
 import { ChoreographyCaptureClient } from "./capture-client";
 import { CHOREOGRAPHY_CAPTURE_BRIDGE_KEY } from "./capture-runner";
+import type { LiveChoreographyCaptureControl } from "@/features/live-scene/live-choreography-demo";
 
 (
   globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -72,6 +73,7 @@ describe("ChoreographyCaptureClient", () => {
       stageOnly: true,
       autoStart: true,
     });
+    expect(rendered.props?.onCaptureControlChange).toBeTypeOf("function");
     const evidence = {
       type: "cueStarted",
       ordinal: 1,
@@ -87,6 +89,60 @@ describe("ChoreographyCaptureClient", () => {
     ) => void;
     act(() => onEvidenceChange([evidence]));
     expect(bridge?.getState().evidence).toEqual([evidence]);
+
+    const replay = { checkpoints: [], evidence: [] };
+    const captureControl: LiveChoreographyCaptureControl = {
+      interruptCheckpoint: vi.fn(async (request) => ({
+        target: {
+          generation: request.generation,
+          sequence: request.sequence,
+          checkpointId: request.checkpointId,
+          certificateSha256: request.certificateSha256,
+        },
+        trigger: "firstCuePresented" as const,
+        delayAfterPresentedMs: request.delayAfterPresentedMs,
+        activeRevision: request.sequence,
+        requestedAtMs: 10,
+        settledAtMs: 20,
+        settleMs: 10,
+        evidenceBefore: [],
+        evidenceAfter: [],
+      })),
+      replayAccepted: vi.fn(async () => replay),
+    };
+    const onCaptureControlChange = rendered.props?.onCaptureControlChange as (
+      value: typeof captureControl | null,
+    ) => void;
+    act(() => onCaptureControlChange(captureControl));
+    await expect(bridge?.replayAccepted()).resolves.toEqual(replay);
+    expect(captureControl.replayAccepted).toHaveBeenCalledOnce();
+
+    const interruptionTarget = {
+      generation: 1,
+      sequence: 4,
+      checkpointId: "rearrange_halves",
+      certificateSha256: "a".repeat(64),
+      delayAfterPresentedMs: 0,
+    };
+    await expect(
+      bridge?.interruptCheckpoint(interruptionTarget),
+    ).resolves.toMatchObject({
+      target: {
+        generation: interruptionTarget.generation,
+        sequence: interruptionTarget.sequence,
+        checkpointId: interruptionTarget.checkpointId,
+        certificateSha256: interruptionTarget.certificateSha256,
+      },
+      delayAfterPresentedMs: interruptionTarget.delayAfterPresentedMs,
+    });
+    expect(captureControl.interruptCheckpoint).toHaveBeenCalledWith(
+      interruptionTarget,
+    );
+
+    act(() => onCaptureControlChange(null));
+    expect(() => bridge?.replayAccepted()).toThrow(
+      "capture control is unavailable",
+    );
 
     await act(async () => root?.unmount());
     root = null;

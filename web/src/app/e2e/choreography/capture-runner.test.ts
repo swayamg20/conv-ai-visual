@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createSceneState } from "@/lib/live-scene";
 import type {
@@ -169,6 +169,70 @@ describe("step-gated choreography capture runner", () => {
         checkpointId: "problem",
       }),
     ).toThrow("No capture checkpoint");
+  });
+
+  it("validates and delegates the narrow runtime controls without retaining stale owners", async () => {
+    const session = createChoreographyCaptureSession("step");
+    const target = {
+      generation: 1,
+      sequence: 4,
+      checkpointId: "rearrange_halves" as const,
+      certificateSha256: "a".repeat(64),
+      delayAfterPresentedMs: 0,
+    };
+    const interruption = {
+      target: {
+        generation: target.generation,
+        sequence: target.sequence,
+        checkpointId: target.checkpointId,
+        certificateSha256: target.certificateSha256,
+      },
+      trigger: "firstCuePresented" as const,
+      delayAfterPresentedMs: 0,
+      activeRevision: 4,
+      requestedAtMs: 100,
+      settledAtMs: 120,
+      settleMs: 20,
+      evidenceBefore: [],
+      evidenceAfter: [],
+    };
+    const replay = { checkpoints: [], evidence: [] };
+    const control = {
+      interruptCheckpoint: vi.fn(async () => interruption),
+      replayAccepted: vi.fn(async () => replay),
+    };
+    session.attachControl(control);
+
+    expect(() =>
+      session.bridge.interruptCheckpoint({ ...target, extra: true }),
+    ).toThrow("must contain exactly");
+    expect(() =>
+      session.bridge.interruptCheckpoint({
+        ...target,
+        certificateSha256: "not-a-digest",
+      }),
+    ).toThrow("must be a SHA-256 digest");
+    expect(() =>
+      session.bridge.interruptCheckpoint({
+        ...target,
+        delayAfterPresentedMs: 1_001,
+      }),
+    ).toThrow("must be between 0 and 1000");
+
+    await expect(session.bridge.interruptCheckpoint(target)).resolves.toEqual(
+      interruption,
+    );
+    expect(control.interruptCheckpoint).toHaveBeenCalledWith(target);
+    await expect(session.bridge.replayAccepted()).resolves.toEqual(replay);
+    expect(control.replayAccepted).toHaveBeenCalledOnce();
+
+    session.attachControl(null);
+    expect(() => session.bridge.interruptCheckpoint(target)).toThrow(
+      "capture control is unavailable",
+    );
+    expect(() => session.bridge.replayAccepted()).toThrow(
+      "capture control is unavailable",
+    );
   });
 
   it("keeps automatic capture on the ungated runner", async () => {
