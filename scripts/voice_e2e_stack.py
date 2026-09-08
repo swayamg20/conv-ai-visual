@@ -582,6 +582,26 @@ def _worker_state() -> dict[str, object]:
     return {**state, "active_jobs": active_jobs}
 
 
+def _worker_registration_observed(process: ManagedProcess) -> bool:
+    """Return whether the pinned worker logged its registration acknowledgement."""
+    for line in process.tail(max_bytes=64_000).splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("message") != "registered worker":
+            continue
+        worker_id = event.get("id")
+        if (
+            event.get("agent_name") == VOICE_WORKER_NAME
+            and isinstance(worker_id, str)
+            and worker_id.startswith("AW_")
+            and _CONTRACT_ID_PATTERN.fullmatch(worker_id) is not None
+        ):
+            return True
+    return False
+
+
 async def _query_livekit_state(client: Any, room_name: str, dispatch_id: str) -> dict[str, object]:
     from livekit import api
 
@@ -977,7 +997,7 @@ class VoiceE2EStack:
     def _wait_worker(self, worker: ManagedProcess, livekit: ManagedProcess) -> None:
         def ready() -> bool:
             state = _worker_state()
-            return state["active_jobs"] == 0
+            return state["active_jobs"] == 0 and _worker_registration_observed(worker)
 
         _wait_for(
             "registered LiveKit worker health",
