@@ -39,6 +39,7 @@ import type { ChoreographySceneStreamRunner } from "./choreography-model-stream"
 import type { ChoreographyEvidenceTraceEvent } from "./choreography-playback";
 import { createChoreographySceneFixtureRunner } from "./choreography-scene-stream-fixture";
 import type { ChoreographySceneStreamRenderer } from "./choreography-stream-runtime";
+import { orderSceneNodesForSvgPaint } from "./svg-node-reconciler";
 import {
   LIVE_CHOREOGRAPHY_MAIN_CHECKPOINT_COUNT,
   LiveChoreographyStage,
@@ -482,7 +483,9 @@ function ChoreographySession({
           const nodes = Array.from(
             svg.querySelectorAll<SVGElement>(":scope > [data-element-id]"),
           );
-          const nodeIds = current.committedScene.nodes.map((node) => node.id);
+          const nodeIds = orderSceneNodesForSvgPaint(
+            current.committedScene.nodes,
+          ).map((node) => node.id);
           const renderedNodeIds = nodes.map(
             (node) => node.dataset.elementId ?? "",
           );
@@ -594,6 +597,7 @@ function ChoreographySession({
     (record) => record.event.semantic.checkpointId,
   );
   const checkpointId = checkpointIds.at(-1);
+  const visibleCheckpointId = choreography.visibleCheckpointId ?? checkpointId;
   const settledMainCount = mainCheckpointCount(checkpointIds);
   const settledMainCheckpoint = lastMainCheckpoint(checkpointIds);
   const cornerClarified = checkpointIds.includes("corner_detail");
@@ -628,7 +632,7 @@ function ChoreographySession({
     !canAskCorner &&
     !canContinueAfterClarification &&
     !isFinished;
-  const caption = choreography.committedCaption || EMPTY_CAPTION;
+  const caption = choreography.visibleCaption || EMPTY_CAPTION;
 
   const start = useCallback(
     (prompt: string) => {
@@ -666,6 +670,7 @@ function ChoreographySession({
       phase={snapshot.phase}
       layout={layout}
       checkpointId={checkpointId}
+      visibleCheckpointId={visibleCheckpointId}
       settledMainCount={settledMainCount}
       cornerClarified={cornerClarified}
       caption={caption}
@@ -922,8 +927,8 @@ function ChoreographySession({
           {stage}
           <div className="mt-4 flex flex-wrap items-center justify-between gap-3 px-1 text-[11px] text-muted-foreground">
             <p>
-              The board commits only whole presented checkpoints; narration
-              shown on stage is always the last settled caption.
+              The stage introduces each caption with its first visible cue;
+              board state still commits only at a whole checkpoint.
             </p>
             <p className="font-mono">
               {layout} · scene {snapshot.committedScene.revision}

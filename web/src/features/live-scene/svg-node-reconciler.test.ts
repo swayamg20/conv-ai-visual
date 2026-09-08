@@ -13,7 +13,10 @@ import type {
 import { createSceneState } from "@/lib/live-scene";
 import type { SceneNode } from "@/lib/live-scene";
 
-import { createSvgNodeReconciler } from "./svg-node-reconciler";
+import {
+  createSvgNodeReconciler,
+  orderSceneNodesForSvgPaint,
+} from "./svg-node-reconciler";
 
 const SVG_NAMESPACE = "http://www.w3.org/2000/svg";
 const presentation = { enter: "fade", exit: "fade" } as const;
@@ -36,7 +39,11 @@ function renderer(
   calls: string[] = [],
   failOnId?: string,
 ): SVGPrimitiveRenderer {
-  const create = (id: string, kind: string, child: string): SVGElement | null => {
+  const create = (
+    id: string,
+    kind: string,
+    child: string,
+  ): SVGElement | null => {
     calls.push(`${kind}:${id}`);
     if (id === failOnId) return null;
     return group(id, child);
@@ -59,7 +66,11 @@ function renderer(
       return create(operation.id, "latex", "foreignObject") as SVGElement;
     },
     drawLatexToken(operation: LatexTokenOperation) {
-      const element = create(operation.id, "latex_token", "foreignObject") as SVGElement;
+      const element = create(
+        operation.id,
+        "latex_token",
+        "foreignObject",
+      ) as SVGElement;
       const token = element.querySelector("foreignObject");
       token?.setAttribute("x", String(operation.x));
       token?.setAttribute("width", String(operation.width));
@@ -75,14 +86,21 @@ function nodes(): SceneNode[] {
       id: "line",
       kind: "line",
       presentation,
-      points: [[10, 20], [30, 40]],
+      points: [
+        [10, 20],
+        [30, 40],
+      ],
       style: stroke,
     },
     {
       id: "path",
       kind: "path",
       presentation,
-      points: [[10, 20], [30, 40], [50, 20]],
+      points: [
+        [10, 20],
+        [30, 40],
+        [50, 20],
+      ],
       closed: true,
       style: { ...stroke, fill: "transparent" },
     },
@@ -138,10 +156,13 @@ function textNode(id: string, text: string, x = 20): SceneNode {
   };
 }
 
-function harness(options: { renderer?: SVGPrimitiveRenderer; svg?: SVGSVGElement | null } = {}) {
-  const svg = options.svg === undefined
-    ? document.createElementNS(SVG_NAMESPACE, "svg")
-    : options.svg;
+function harness(
+  options: { renderer?: SVGPrimitiveRenderer; svg?: SVGSVGElement | null } = {},
+) {
+  const svg =
+    options.svg === undefined
+      ? document.createElementNS(SVG_NAMESPACE, "svg")
+      : options.svg;
   if (svg) document.body.appendChild(svg);
   const elements = new Map<string, SVGElementData>();
   const invalidate = vi.fn();
@@ -165,7 +186,9 @@ describe("SVG node reconciler", () => {
   it("creates every closed scene-node kind through one narrow surface", () => {
     const calls: string[] = [];
     const { reconciler } = harness({ renderer: renderer(calls) });
-    const created = nodes().map((node) => reconciler.create(node, `dom-${node.id}`));
+    const created = nodes().map((node) =>
+      reconciler.create(node, `dom-${node.id}`),
+    );
 
     expect(created.every(Boolean)).toBe(true);
     expect(calls).toEqual([
@@ -265,7 +288,7 @@ describe("SVG node reconciler", () => {
     expect(path.style.strokeDashoffset).toBe("");
   });
 
-  it("reconciles retained identities, exact attributes, stale cleanup, and scene order", () => {
+  it("reconciles retained identities, exact attributes, stale cleanup, and paint order", () => {
     const { elements, reconciler, svg } = harness();
     if (!svg) throw new Error("missing SVG fixture");
     const first = textNode("first", "First");
@@ -286,17 +309,107 @@ describe("SVG node reconciler", () => {
     reconciler.reconcile(target);
 
     expect([...elements.keys()]).toEqual(["second", "first", "path"]);
-    expect(Array.from(svg.children, (child) => child.getAttribute("data-element-id"))).toEqual([
-      "second",
-      "first",
-      "path",
-    ]);
+    expect(
+      Array.from(svg.children, (child) =>
+        child.getAttribute("data-element-id"),
+      ),
+    ).toEqual(["path", "second", "first"]);
     expect(elements.get("second")?.element).toBe(seeded[2]);
     expect(elements.get("first")?.element).toBe(seeded[0]);
     expect(seeded[1].isConnected).toBe(false);
     expect(seeded[2].querySelector("text")?.textContent).toBe("New second");
     expect(seeded[2].getAttribute("clip-path")).toBeNull();
-    target.nodes.forEach((node) => expect(elements.get(node.id)?.data).toEqual(node));
+    target.nodes.forEach((node) =>
+      expect(elements.get(node.id)?.data).toEqual(node),
+    );
+  });
+
+  it("keeps lexical area labels above opaque geometry during entry and exact replay", () => {
+    const { elements, reconciler, svg } = harness();
+    if (!svg) throw new Error("missing SVG fixture");
+    const labels = [
+      {
+        id: "area_3x",
+        kind: "latex_token",
+        presentation,
+        x: 300,
+        y: 285,
+        width: 50,
+        height: 48,
+        anchor: "middle",
+        latex: "3x",
+        style: { color: "#ffffff", fontSize: 24, opacity: 1 },
+      },
+      {
+        id: "area_x2",
+        kind: "latex_token",
+        presentation,
+        x: 300,
+        y: 285,
+        width: 70,
+        height: 48,
+        anchor: "middle",
+        latex: "x^2",
+        style: { color: "#ffffff", fontSize: 24, opacity: 1 },
+      },
+    ] satisfies SceneNode[];
+    const geometry = {
+      id: "filled_square",
+      kind: "path",
+      presentation,
+      points: [
+        [210, 210],
+        [390, 210],
+        [390, 390],
+        [210, 390],
+      ],
+      closed: true,
+      style: { ...stroke, fill: "#16171c" },
+    } satisfies SceneNode;
+    const lexicalScene = createSceneState({
+      revision: 2,
+      nodes: [...labels, geometry],
+    });
+
+    for (const node of lexicalScene.nodes) {
+      const element = reconciler.create(node) as SVGElement;
+      svg.appendChild(element);
+      reconciler.remember(node, element);
+    }
+
+    expect([...elements.keys()]).toEqual([
+      "area_3x",
+      "area_x2",
+      "filled_square",
+    ]);
+    expect(
+      Array.from(svg.children, (child) =>
+        child.getAttribute("data-element-id"),
+      ),
+    ).toEqual(["filled_square", "area_3x", "area_x2"]);
+    const identities = new Map(
+      [...elements].map(([id, data]) => [id, data.element]),
+    );
+
+    reconciler.reconcile(lexicalScene);
+    reconciler.reconcile(lexicalScene);
+
+    expect(
+      Array.from(svg.children, (child) =>
+        child.getAttribute("data-element-id"),
+      ),
+    ).toEqual(["filled_square", "area_3x", "area_x2"]);
+    identities.forEach((element, id) => {
+      expect(elements.get(id)?.element).toBe(element);
+    });
+    expect(
+      orderSceneNodesForSvgPaint(lexicalScene.nodes).map((node) => node.id),
+    ).toEqual(["filled_square", "area_3x", "area_x2"]);
+    expect(lexicalScene.nodes.map((node) => node.id)).toEqual([
+      "area_3x",
+      "area_x2",
+      "filled_square",
+    ]);
   });
 
   it("does not mutate retained DOM when canonical rendering fails", () => {

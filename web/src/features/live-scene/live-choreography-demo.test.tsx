@@ -9,6 +9,7 @@ import type { PlannedCheckpointChoreography } from "@/lib/live-scene";
 import type {
   ChoreographyExecutorObserver,
   ChoreographyPlayback,
+  ChoreographyPlaybackOutcome,
 } from "./choreography-executor";
 import { createChoreographySceneFixtureRunner } from "./choreography-scene-stream-fixture";
 
@@ -76,6 +77,14 @@ import {
 interface MountedDemo {
   readonly container: HTMLDivElement;
   readonly root: Root;
+}
+
+function deferred<Value>() {
+  let resolve!: (value: Value | PromiseLike<Value>) => void;
+  const promise = new Promise<Value>((resolveValue) => {
+    resolve = resolveValue;
+  });
+  return { promise, resolve };
 }
 
 function immediatePlayback(
@@ -188,6 +197,72 @@ describe("LiveChoreographyDemo", () => {
     expect(canvas.playCheckpointChoreography).toHaveBeenCalledTimes(8);
     expect(invocations).toEqual(["full"]);
 
+    await act(async () => demo.root.unmount());
+  });
+
+  it("introduces the active caption and title at first paint before committing the checkpoint", async () => {
+    const firstCue = deferred<boolean>();
+    const terminal = deferred<ChoreographyPlaybackOutcome>();
+    let observer: ChoreographyExecutorObserver | undefined;
+    let plan: PlannedCheckpointChoreography | undefined;
+    canvas.playCheckpointChoreography.mockImplementationOnce(
+      (nextPlan, nextObserver): ChoreographyPlayback => {
+        plan = nextPlan;
+        observer = nextObserver;
+        return {
+          firstCuePresented: firstCue.promise,
+          finished: terminal.promise,
+          cancel: vi.fn(),
+        };
+      },
+    );
+    const demo = await mount({
+      initialPath: "full",
+      runnerFactory: fixtureFactory([]),
+    });
+
+    await act(async () => {
+      button(demo.container, "Begin the lesson").click();
+      await flushWork();
+    });
+    expect(stage(demo.container).dataset.checkpointId).toBe("none");
+    expect(stage(demo.container).dataset.settledMainCount).toBe("0");
+    expect(demo.container.textContent).toContain(
+      "Can x² + 6x = 7 become one complete square?",
+    );
+
+    if (!plan || !observer) throw new Error("Missing controlled checkpoint");
+    await act(async () => {
+      for (const cue of plan!.choreographyPlan.phase.cues) {
+        observer?.({ type: "cueStarted", cue: cue.cue });
+      }
+      await flushWork();
+    });
+    expect(stage(demo.container).dataset.checkpointId).toBe("none");
+    expect(stage(demo.container).dataset.visibleCheckpointId).toBe("none");
+    expect(demo.container.textContent).toContain(
+      "Can x² + 6x = 7 become one complete square?",
+    );
+
+    await act(async () => {
+      observer?.({ type: "firstCuePresented" });
+      firstCue.resolve(true);
+      await flushWork();
+    });
+
+    expect(stage(demo.container).dataset.checkpointId).toBe("none");
+    expect(stage(demo.container).dataset.visibleCheckpointId).toBe("problem");
+    expect(stage(demo.container).dataset.settledMainCount).toBe("0");
+    expect(demo.container.textContent).toContain(
+      "We will solve x squared plus six x equals seven by turning the left side into an area.",
+    );
+    expect(demo.container.textContent).toContain("cinematic · scene 0");
+
+    await act(async () => {
+      observer?.({ type: "checkpointSettled", settlement: "completed" });
+      terminal.resolve({ status: "completed", firstCuePresented: true });
+      await flushWork(160);
+    });
     await act(async () => demo.root.unmount());
   });
 

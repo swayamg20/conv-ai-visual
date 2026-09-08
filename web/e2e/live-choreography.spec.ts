@@ -10,6 +10,7 @@ import {
   acknowledgeCheckpoint,
   assertRetainedDomIdentity,
   choreographyStage,
+  expectCinematicCaptionContained,
   interruptCaptureCheckpoint,
   observeSettledCheckpoint,
   readCaptureBridgeState,
@@ -874,6 +875,8 @@ test.describe("Gate 1.5 live visual choreography", () => {
       nodeIds: expectedFinal.nodeIds,
     });
     expectProviderFree(requests);
+    await page.setViewportSize({ width: 700, height: 394 });
+    await expectCinematicCaptionContained(page);
     observations.reducedMotion = {
       final,
       equivalentToCinematic: true,

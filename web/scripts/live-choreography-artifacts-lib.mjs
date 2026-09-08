@@ -118,6 +118,21 @@ function fail(location, message) {
   throw new EvidenceError(`${location}: ${message}`);
 }
 
+function svgPaintLayer(kind) {
+  return kind === "text" || kind === "latex" || kind === "latex_token" ? 1 : 0;
+}
+
+function orderNodeIdsForSvgPaint(nodes) {
+  return nodes
+    .map((node, insertionIndex) => ({ ...node, insertionIndex }))
+    .sort(
+      (left, right) =>
+        svgPaintLayer(left.kind) - svgPaintLayer(right.kind) ||
+        left.insertionIndex - right.insertionIndex,
+    )
+    .map((node) => node.id);
+}
+
 function isPlainObject(value) {
   return (
     value !== null &&
@@ -776,7 +791,7 @@ function fixtureCheckpoints(fixture) {
     fail("fixture.events", "must contain exactly eight main checkpoint events");
   }
 
-  const activeIds = [];
+  const activeNodes = new Map();
   const checkpoints = events.map((eventValue, index) => {
     const location = `fixture.events.checkpoint[${index}]`;
     const event = object(eventValue, location);
@@ -835,22 +850,27 @@ function fixtureCheckpoints(fixture) {
         `${location}.patch.operations[${operationIndex}]`,
       );
       if (operation.op === "put") {
+        const node = object(
+          operation.node,
+          `${location}.patch.operations[${operationIndex}].node`,
+        );
         const id = string(
-          object(
-            operation.node,
-            `${location}.patch.operations[${operationIndex}].node`,
-          ).id,
+          node.id,
           `${location}.patch.operations[${operationIndex}].node.id`,
         );
-        if (!activeIds.includes(id)) activeIds.push(id);
+        const kind = string(
+          node.kind,
+          `${location}.patch.operations[${operationIndex}].node.kind`,
+        );
+        activeNodes.set(id, { id, kind });
       } else if (operation.op === "remove") {
         const id = string(
           operation.id,
           `${location}.patch.operations[${operationIndex}].id`,
         );
-        const target = activeIds.indexOf(id);
-        if (target < 0) fail(location, `removes absent node ${id}`);
-        activeIds.splice(target, 1);
+        if (!activeNodes.delete(id)) {
+          fail(location, `removes absent node ${id}`);
+        }
       } else {
         fail(
           `${location}.patch.operations[${operationIndex}].op`,
@@ -858,9 +878,7 @@ function fixtureCheckpoints(fixture) {
         );
       }
     }
-    if (new Set(activeIds).size !== activeIds.length) {
-      fail(location, "materialized node IDs contain duplicates");
-    }
+    const activeIds = orderNodeIdsForSvgPaint([...activeNodes.values()]);
 
     const cues = array(phase.cues, `${location}.phase.cues`).map(
       (cueValue, cueIndex) => {

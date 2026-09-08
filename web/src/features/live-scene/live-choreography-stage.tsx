@@ -30,6 +30,7 @@ interface LiveChoreographyStageProps {
   readonly phase: SceneStreamRuntimePhase;
   readonly layout: ChoreographyLayout;
   readonly checkpointId?: CompletingSquareCheckpointId;
+  readonly visibleCheckpointId?: CompletingSquareCheckpointId;
   readonly settledMainCount: number;
   readonly cornerClarified: boolean;
   readonly caption: string;
@@ -48,14 +49,16 @@ function checkpointLabel(
 }
 
 /**
- * The capture-safe surface: one certified board, one settled caption, and one
- * compact progress rail. It intentionally owns no transport or controls.
+ * The capture-safe surface: one certified board, one cue-synchronous caption,
+ * and one compact progress rail. It intentionally owns no transport or
+ * controls.
  */
 export function LiveChoreographyStage({
   canvasRef,
   phase,
   layout,
   checkpointId,
+  visibleCheckpointId,
   settledMainCount,
   cornerClarified,
   caption,
@@ -81,6 +84,7 @@ export function LiveChoreographyStage({
       data-testid="live-choreography-stage"
       data-phase={phase}
       data-checkpoint-id={checkpointId ?? "none"}
+      data-visible-checkpoint-id={visibleCheckpointId ?? checkpointId ?? "none"}
       data-settled-main-count={boundedMainCount}
       data-corner-clarified={cornerClarified ? "true" : "false"}
       data-layout={layout}
@@ -97,7 +101,7 @@ export function LiveChoreographyStage({
             Completing the square
           </p>
           <p className="mt-1 truncate text-xs font-medium capitalize text-chalk/80 sm:text-sm">
-            {checkpointLabel(checkpointId)}
+            {checkpointLabel(visibleCheckpointId ?? checkpointId)}
           </p>
         </div>
 
@@ -130,12 +134,13 @@ export function LiveChoreographyStage({
       </div>
 
       <div
+        data-testid="live-choreography-board"
         className={cn(
-          "absolute inset-0 transition-opacity duration-150 motion-reduce:transition-none",
+          "absolute inset-x-0 top-0 transition-opacity duration-150 motion-reduce:transition-none",
           !rendererTrusted && "pointer-events-none opacity-0",
           layout === "cinematic"
-            ? "[&>div]:h-full [&>div>svg]:h-full [&>div>svg]:w-full [&>div>svg]:rounded-none [&>div>svg]:border-0"
-            : "flex items-center px-2 pt-14 pb-24 [&>div]:w-full [&>div>svg]:h-auto [&>div>svg]:w-full",
+            ? "bottom-[5.75rem] [&>div]:h-full [&>div>svg]:h-full [&>div>svg]:w-full [&>div>svg]:rounded-none [&>div>svg]:border-0"
+            : "bottom-0 flex items-center px-2 pt-14 pb-24 [&>div]:w-full [&>div>svg]:h-auto [&>div>svg]:w-full",
         )}
       >
         <SVGCanvas
@@ -169,9 +174,21 @@ export function LiveChoreographyStage({
 
       <div
         aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-36 bg-gradient-to-t from-void via-void/88 to-transparent"
+        className={cn(
+          "pointer-events-none absolute inset-x-0 bottom-0 z-10",
+          layout === "cinematic"
+            ? "h-[5.75rem] border-t border-chalk-faint/10 bg-void"
+            : "h-36 bg-gradient-to-t from-void via-void/88 to-transparent",
+        )}
       />
-      <figcaption className="absolute inset-x-0 bottom-0 z-20 px-4 pb-4 sm:px-6 sm:pb-5">
+      <figcaption
+        className={cn(
+          "absolute inset-x-0 bottom-0 z-20 px-4 sm:px-6",
+          layout === "cinematic"
+            ? "flex h-[5.75rem] items-center justify-center py-3"
+            : "pb-4 sm:pb-5",
+        )}
+      >
         <p
           className="mx-auto max-w-4xl text-balance text-center text-sm font-medium leading-relaxed text-chalk sm:text-base"
           aria-live="polite"

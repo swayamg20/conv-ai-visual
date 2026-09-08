@@ -253,7 +253,25 @@ describe("choreography SceneStreamRuntime", () => {
     expect(renderer.rendered).toHaveLength(1);
     expect(renderer.materializeViewport).toHaveBeenCalledTimes(1);
 
-    settlePresented(renderer.rendered[0]);
+    const first = renderer.rendered[0];
+    emitCertifiedCues(first);
+    snapshot = runtime.getSnapshot();
+    expect(snapshot.choreography?.committedCaption).toBe("");
+    expect(snapshot.choreography?.visibleCaption).toBe("");
+    expect(snapshot.choreography?.visibleCheckpointId).toBeUndefined();
+    first.observer?.({ type: "firstCuePresented" });
+    snapshot = runtime.getSnapshot();
+    expect(snapshot.committedScene.revision).toBe(0);
+    expect(snapshot.choreography?.committedCaption).toBe("");
+    expect(snapshot.choreography?.visibleCaption).toBe(
+      MAIN_CHECKPOINTS[0].patch.narration,
+    );
+    expect(snapshot.choreography?.visibleCheckpointId).toBe("problem");
+    first.observer?.({
+      type: "checkpointSettled",
+      settlement: "completed",
+    });
+    first.playback.settle({ status: "completed", firstCuePresented: true });
     await flushMicrotasks();
     snapshot = runtime.getSnapshot();
     expect(snapshot.committedScene.revision).toBe(1);
@@ -328,7 +346,13 @@ describe("choreography SceneStreamRuntime", () => {
     first.observer?.({ type: "firstCuePresented" });
 
     expect(runtime.getSnapshot().committedScene.revision).toBe(0);
-    expect(runtime.getSnapshot().choreography?.visibleCaption).toBe("");
+    expect(runtime.getSnapshot().choreography?.committedCaption).toBe("");
+    expect(runtime.getSnapshot().choreography?.visibleCaption).toBe(
+      MAIN_CHECKPOINTS[0].patch.narration,
+    );
+    expect(runtime.getSnapshot().choreography?.visibleCheckpointId).toBe(
+      "problem",
+    );
     expect(runtime.interrupt()).toBe(true);
     expect(first.playback.cancel).toHaveBeenCalledTimes(1);
 
@@ -361,11 +385,16 @@ describe("choreography SceneStreamRuntime", () => {
   it("quarantines contradictory executor evidence and ignores its stale callbacks", async () => {
     const { runtime, renderer, runner } = createRuntime();
     const run = await startRuntime(runtime, runner);
-    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
-    const first = renderer.rendered[0];
-    emitCertifiedCues(first);
-    first.observer?.({ type: "firstCuePresented" });
-    first.playback.settle({ status: "completed", firstCuePresented: true });
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0], MAIN_CHECKPOINTS[1]);
+    settlePresented(renderer.rendered[0]);
+    await flushMicrotasks();
+    const second = renderer.rendered[1];
+    emitCertifiedCues(second);
+    second.observer?.({ type: "firstCuePresented" });
+    second.playback.settle({
+      status: "completed",
+      firstCuePresented: true,
+    });
     await flushMicrotasks();
 
     const failed = runtime.getSnapshot();
@@ -374,16 +403,22 @@ describe("choreography SceneStreamRuntime", () => {
       code: "renderer_failed",
       retryable: false,
     });
-    expect(failed.committedScene.revision).toBe(0);
-    expect(failed.choreography?.accepted).toHaveLength(0);
-    expect(failed.choreography?.evidence).toEqual([]);
+    expect(failed.committedScene.revision).toBe(1);
+    expect(failed.choreography?.accepted).toHaveLength(1);
+    expect(failed.choreography?.committedCaption).toBe(
+      MAIN_CHECKPOINTS[0].patch.narration,
+    );
+    expect(failed.choreography?.visibleCaption).toBe(
+      MAIN_CHECKPOINTS[0].patch.narration,
+    );
+    expect(failed.choreography?.visibleCheckpointId).toBe("problem");
     expect(() => runtime.start("Try again")).toThrowError(
       expect.objectContaining<Partial<SceneStreamRuntimeError>>({
         code: "runtime_reset_required",
       }),
     );
 
-    first.observer?.({
+    second.observer?.({
       type: "checkpointSettled",
       settlement: "completed",
     });
@@ -949,6 +984,99 @@ describe("choreography SceneStreamRuntime", () => {
       type: "checkpointSettled",
       settlement: "cancelled_to_checkpoint",
     });
+  });
+
+  it("retains only the committed replay prefix when reset cleanup fails", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      const run = await startRuntime(runtime, runner);
+      await acceptMainPrefix(runtime, renderer, run, 2);
+      const replayStart = renderer.rendered.length;
+      const replayPromise = runtime.replayAccepted();
+
+      settlePresented(renderer.rendered[replayStart]);
+      await flushMicrotasks();
+      const active = renderer.rendered[replayStart + 1];
+      emitCertifiedCues(active);
+      active.observer?.({ type: "firstCuePresented" });
+      expect(runtime.getSnapshot().choreography).toMatchObject({
+        accepted: [{ scene: { revision: 1 } }],
+        committedCaption: MAIN_CHECKPOINTS[0].patch.narration,
+        visibleCaption: MAIN_CHECKPOINTS[1].patch.narration,
+        visibleCheckpointId: "area_model",
+      });
+
+      renderer.clear.mockImplementationOnce(() => {
+        throw new Error("clear failed");
+      });
+      runtime.reset();
+      const failed = runtime.getSnapshot();
+      expect(failed).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 1 },
+        error: { code: "renderer_failed", retryable: false },
+        choreography: {
+          accepted: [{ scene: { revision: 1 } }],
+          committedCaption: MAIN_CHECKPOINTS[0].patch.narration,
+          visibleCaption: MAIN_CHECKPOINTS[0].patch.narration,
+          visibleCheckpointId: "problem",
+        },
+      });
+
+      active.playback.settle({
+        status: "cancelled_before_presented",
+        firstCuePresented: false,
+      });
+      await replayPromise;
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("restores the committed replay prefix when active cancellation throws", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      const run = await startRuntime(runtime, runner);
+      await acceptMainPrefix(runtime, renderer, run, 2);
+      const replayStart = renderer.rendered.length;
+      const replayPromise = runtime.replayAccepted();
+
+      settlePresented(renderer.rendered[replayStart]);
+      await flushMicrotasks();
+      const active = renderer.rendered[replayStart + 1];
+      emitCertifiedCues(active);
+      active.observer?.({ type: "firstCuePresented" });
+      active.playback.cancel.mockImplementation(() => {
+        throw new Error("cancel failed");
+      });
+
+      expect(runtime.interrupt()).toBe(true);
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 1 },
+        error: { code: "replay_integrity_failed", retryable: false },
+        choreography: {
+          accepted: [{ scene: { revision: 1 } }],
+          committedCaption: MAIN_CHECKPOINTS[0].patch.narration,
+          visibleCaption: MAIN_CHECKPOINTS[0].patch.narration,
+          visibleCheckpointId: "problem",
+        },
+      });
+
+      active.playback.settle({
+        status: "cancelled_before_presented",
+        firstCuePresented: false,
+      });
+      await replayPromise;
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("supports the real three-generation adaptive path up to the non-pruning nine-checkpoint cap", async () => {

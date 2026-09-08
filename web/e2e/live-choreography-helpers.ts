@@ -9,9 +9,11 @@ import type {
   ChoreographyCueKind,
   ChoreographyLayout,
   CompletingSquareCheckpointId,
+  SceneNode,
   ViewportPoseV1,
 } from "../src/lib/live-scene";
 import type { ChoreographyEvidenceTraceEvent } from "../src/features/live-scene/choreography-playback";
+import { orderSceneNodesForSvgPaint } from "../src/features/live-scene/svg-node-reconciler";
 import type {
   LiveChoreographyCaptureInterruptRequest,
   LiveChoreographyCaptureInterruptResult,
@@ -105,17 +107,15 @@ function viewBox(pose: ViewportPoseV1): string {
 function expectedCheckpoints(
   layout: ChoreographyLayout,
 ): readonly ExpectedChoreographyCheckpoint[] {
-  const nodeIds: string[] = [];
+  const nodes = new Map<string, SceneNode>();
   return checkpointEvents().map((event, index) => {
     for (const operation of event.patch.operations) {
       if (operation.op === "remove") {
-        const nodeIndex = nodeIds.indexOf(operation.id);
-        if (nodeIndex < 0) {
+        if (!nodes.delete(operation.id)) {
           throw new Error(`Fixture removes absent node ${operation.id}`);
         }
-        nodeIds.splice(nodeIndex, 1);
-      } else if (!nodeIds.includes(operation.node.id)) {
-        nodeIds.push(operation.node.id);
+      } else {
+        nodes.set(operation.node.id, operation.node);
       }
     }
     return Object.freeze({
@@ -138,7 +138,9 @@ function expectedCheckpoints(
       ),
       durationMs: event.semantic.choreography.phase.durationMs,
       holdAfterMs: event.semantic.choreography.phase.holdAfterMs,
-      nodeIds: Object.freeze([...nodeIds]),
+      nodeIds: Object.freeze(
+        orderSceneNodesForSvgPaint([...nodes.values()]).map((node) => node.id),
+      ),
     });
   });
 }
@@ -173,6 +175,36 @@ export const MAIN_CHOREOGRAPHY_EVIDENCE = Object.freeze(
 
 export function choreographyStage(page: Page): Locator {
   return page.getByTestId("live-choreography-stage");
+}
+
+export async function expectCinematicCaptionContained(
+  page: Page,
+): Promise<void> {
+  const bounds = await choreographyStage(page).evaluate((element) => {
+    if (element.dataset.layout !== "cinematic") return null;
+    const board = element.querySelector<HTMLElement>(
+      '[data-testid="live-choreography-board"]',
+    );
+    const caption = element.querySelector<HTMLElement>("figcaption");
+    const text = caption?.querySelector<HTMLElement>("p");
+    if (!board || !caption || !text) {
+      throw new Error("The cinematic stage lacks its reserved caption band");
+    }
+    const boardRect = board.getBoundingClientRect();
+    const captionRect = caption.getBoundingClientRect();
+    const textRect = text.getBoundingClientRect();
+    return {
+      boardBottom: boardRect.bottom,
+      captionTop: captionRect.top,
+      captionBottom: captionRect.bottom,
+      textTop: textRect.top,
+      textBottom: textRect.bottom,
+    };
+  });
+  if (!bounds) return;
+  expect(bounds.boardBottom).toBeLessThanOrEqual(bounds.captionTop + 0.5);
+  expect(bounds.textTop).toBeGreaterThanOrEqual(bounds.captionTop - 0.5);
+  expect(bounds.textBottom).toBeLessThanOrEqual(bounds.captionBottom + 0.5);
 }
 
 export async function readCaptureBridgeState(
@@ -231,6 +263,7 @@ export async function observeSettledCheckpoint(
   );
   await expect(stage).toHaveAttribute("data-renderer-trusted", "true");
   await waitForStablePaint(stage);
+  await expectCinematicCaptionContained(page);
 
   const observation = await stage.evaluate((element, checkpoint) => {
     interface IdentityRegistry {

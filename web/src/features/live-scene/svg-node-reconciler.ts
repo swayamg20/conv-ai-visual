@@ -25,9 +25,59 @@ export interface SvgNodeReconciler {
   forget(id: string, expectedElement?: SVGElement): void;
   capture(element: SVGElement): SvgNodeSnapshot;
   restore(snapshot: SvgNodeSnapshot): void;
-  settle(element: SVGElement, node: SceneNode, clearDrawResidue?: boolean): void;
-  /** Materialize exact terminal attributes, identities, and canonical scene order. */
+  settle(
+    element: SVGElement,
+    node: SceneNode,
+    clearDrawResidue?: boolean,
+  ): void;
+  /** Materialize exact terminal attributes and identities in deterministic paint order. */
   reconcile(scene: SceneState): void;
+}
+
+function svgPaintLayer(kind: string): number {
+  switch (kind) {
+    case "text":
+    case "latex":
+    case "latex_token":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Return the deterministic SVG paint order without changing canonical scene
+ * order: geometry first, then every human-readable label.
+ */
+export function orderSceneNodesForSvgPaint(
+  nodes: readonly SceneNode[],
+): readonly SceneNode[] {
+  return Object.freeze(
+    nodes
+      .map((node, index) => ({ node, index }))
+      .sort(
+        (left, right) =>
+          svgPaintLayer(left.node.kind) - svgPaintLayer(right.node.kind) ||
+          left.index - right.index,
+      )
+      .map(({ node }) => node),
+  );
+}
+
+function orderConnectedElementsForSvgPaint(
+  svg: SVGSVGElement,
+  elements: ReadonlyMap<string, SVGElementData>,
+): void {
+  [...elements.values()]
+    .map((data, index) => ({ data, index }))
+    .sort(
+      (left, right) =>
+        svgPaintLayer(left.data.type) - svgPaintLayer(right.data.type) ||
+        left.index - right.index,
+    )
+    .forEach(({ data }) => {
+      if (data.element.parentNode === svg) svg.appendChild(data.element);
+    });
 }
 
 function sceneNodeOperation(
@@ -200,18 +250,25 @@ export function createSvgNodeReconciler(
     if (node.kind === "path") return createPathElement(node, domId);
     const element = renderer.draw({ ...sceneNodeOperation(node), id: domId });
     if (element && node.kind === "text") {
-      element.querySelector("text")?.setAttribute("text-anchor", node.style.anchor);
+      element
+        .querySelector("text")
+        ?.setAttribute("text-anchor", node.style.anchor);
     }
     return element;
   };
 
   const remember = (node: SceneNode, element: SVGElement): void => {
     context.elements.set(node.id, elementData(node, element));
+    const svg = context.getSvg();
+    if (svg) orderConnectedElementsForSvgPaint(svg, context.elements);
     context.invalidate();
   };
 
   const forget = (id: string, expectedElement?: SVGElement): void => {
-    if (!expectedElement || context.elements.get(id)?.element === expectedElement) {
+    if (
+      !expectedElement ||
+      context.elements.get(id)?.element === expectedElement
+    ) {
       context.elements.delete(id);
     }
     context.invalidate();
@@ -250,7 +307,9 @@ export function createSvgNodeReconciler(
     });
     const originalEntries = [...context.elements.entries()];
     const snapshots = originalEntries.map(([, data]) => capture(data.element));
-    const originalElements = new Set(originalEntries.map(([, data]) => data.element));
+    const originalElements = new Set(
+      originalEntries.map(([, data]) => data.element),
+    );
 
     try {
       const targetIds = new Set(targetScene.nodes.map((node) => node.id));
@@ -270,7 +329,12 @@ export function createSvgNodeReconciler(
         settle(element, node, true);
         ordered.push([node.id, elementData(node, element)]);
       });
-      ordered.forEach(([, data]) => svg.appendChild(data.element));
+      const orderedById = new Map(ordered);
+      orderSceneNodesForSvgPaint(targetScene.nodes).forEach((node) => {
+        const data = orderedById.get(node.id);
+        if (!data) throw new Error(`Missing rendered target: ${node.id}`);
+        svg.appendChild(data.element);
+      });
       context.elements.clear();
       ordered.forEach(([id, data]) => context.elements.set(id, data));
       context.invalidate();
@@ -289,5 +353,13 @@ export function createSvgNodeReconciler(
     }
   };
 
-  return Object.freeze({ create, remember, forget, capture, restore, settle, reconcile });
+  return Object.freeze({
+    create,
+    remember,
+    forget,
+    capture,
+    restore,
+    settle,
+    reconcile,
+  });
 }

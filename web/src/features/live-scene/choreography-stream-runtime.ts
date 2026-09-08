@@ -2,6 +2,7 @@ import type { SVGCanvasHandle } from "@/features/canvas/types";
 import {
   createSceneState,
   type ChoreographyLayout,
+  type CompletingSquareCheckpointId,
   type SceneState,
   type ViewportPoseV1,
 } from "@/lib/live-scene";
@@ -98,6 +99,7 @@ export interface ChoreographyRuntimeDetailSnapshot {
   readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
   readonly committedCaption: string;
   readonly visibleCaption: string;
+  readonly visibleCheckpointId?: CompletingSquareCheckpointId;
   /** False means the canvas is quarantined and must not be presented as truth. */
   readonly rendererTrusted: boolean;
   readonly commitFrontier?: AcceptedChoreographyRevision["presentation"];
@@ -265,7 +267,9 @@ export class ChoreographyStreamRuntime {
   private viewportInitialized = false;
   private initializedViewport: ViewportPoseV1 | null = null;
   private committedCaption = "";
+  private committedCheckpointId: CompletingSquareCheckpointId | undefined;
   private visibleCaption = "";
+  private visibleCheckpointId: CompletingSquareCheckpointId | undefined;
   private rendererTrusted = true;
   private narration = "Ready for a visual explanation.";
   private runtimeFailure: ChoreographyRuntimeFailure | undefined;
@@ -429,12 +433,15 @@ export class ChoreographyStreamRuntime {
           this.armInterruptionDeadline(active);
         }
       } catch (error) {
-        this.failRenderer(
-          token,
+        const detail =
           error instanceof Error
             ? error.message
-            : "Checkpoint cancellation failed",
-        );
+            : "Checkpoint cancellation failed";
+        if (active.source === "replay") {
+          this.finishReplayFailure(token, detail, active.replayIndex ?? 0);
+        } else {
+          this.failRenderer(token, detail);
+        }
       }
       return true;
     }
@@ -456,6 +463,9 @@ export class ChoreographyStreamRuntime {
 
   reset(): void {
     this.assertUsable();
+    if (this.currentToken?.kind === "replay") {
+      this.truncateHistory(this.replayPrefixLength);
+    }
     this.invalidateToken(true);
     const active = this.active;
     if (active) active.evidence.closed = true;
@@ -479,6 +489,7 @@ export class ChoreographyStreamRuntime {
       this.provisional = this.committed;
       this.evidence = this.buildEvidence(this.accepted);
       this.sequence = this.lastSequenceForGeneration(this.generation);
+      this.restoreCommittedPresentation();
       this.phase = "failed";
       this.completion = undefined;
       this.runtimeFailure = failure(
@@ -509,7 +520,9 @@ export class ChoreographyStreamRuntime {
     this.viewportInitialized = false;
     this.initializedViewport = null;
     this.committedCaption = "";
+    this.committedCheckpointId = undefined;
     this.visibleCaption = "";
+    this.visibleCheckpointId = undefined;
     this.narration = "Ready for a visual explanation.";
     this.runtimeFailure = undefined;
     this.completion = undefined;
@@ -590,7 +603,9 @@ export class ChoreographyStreamRuntime {
     this.committed = first.base;
     this.provisional = first.base;
     this.committedCaption = "";
+    this.committedCheckpointId = undefined;
     this.visibleCaption = "";
+    this.visibleCheckpointId = undefined;
     this.phase = "replaying";
     this.narration = `Replaying ${replay.records.length} accepted checkpoint${replay.records.length === 1 ? "" : "s"}.`;
     this.runtimeFailure = undefined;
@@ -648,7 +663,9 @@ export class ChoreographyStreamRuntime {
       this.committed = prepared.target;
       this.provisional = prepared.target;
       this.committedCaption = prepared.event.patch.narration;
+      this.committedCheckpointId = prepared.event.semantic.checkpointId;
       this.visibleCaption = this.committedCaption;
+      this.visibleCheckpointId = prepared.event.semantic.checkpointId;
       this.narration = this.visibleCaption;
       this.sequence = prepared.event.sequence;
       this.replayPrefixLength = index + 1;
@@ -969,6 +986,9 @@ export class ChoreographyStreamRuntime {
               this.presentationTiming,
               this.now(),
             );
+            this.visibleCaption = prepared.event.patch.narration;
+            this.visibleCheckpointId = prepared.event.semantic.checkpointId;
+            this.narration = this.visibleCaption;
           }
           this.evidence = evidence.trace;
           this.publish();
@@ -1135,7 +1155,10 @@ export class ChoreographyStreamRuntime {
     this.rendererTrusted = true;
     this.committed = transition.prepared.target;
     this.committedCaption = transition.prepared.event.patch.narration;
+    this.committedCheckpointId =
+      transition.prepared.event.semantic.checkpointId;
     this.visibleCaption = this.committedCaption;
+    this.visibleCheckpointId = transition.prepared.event.semantic.checkpointId;
     this.narration =
       this.streamControl?.terminal === "failed" && this.runtimeFailure
         ? this.runtimeFailure.message
@@ -1210,7 +1233,11 @@ export class ChoreographyStreamRuntime {
         }
         this.committed = transition.prepared.target;
         this.committedCaption = transition.prepared.event.patch.narration;
+        this.committedCheckpointId =
+          transition.prepared.event.semantic.checkpointId;
         this.visibleCaption = this.committedCaption;
+        this.visibleCheckpointId =
+          transition.prepared.event.semantic.checkpointId;
         this.rendererTrusted = true;
       } catch (error) {
         invalid = true;
@@ -1253,6 +1280,7 @@ export class ChoreographyStreamRuntime {
     this.completion = undefined;
 
     if (invalid) {
+      this.restoreCommittedPresentation();
       this.phase = "failed";
       this.runtimeFailure = failure(
         "renderer_failed",
@@ -1357,8 +1385,15 @@ export class ChoreographyStreamRuntime {
       : EMPTY_FRONTIER;
     this.provisional = this.committed;
     this.committedCaption = last?.event.patch.narration ?? "";
+    this.committedCheckpointId = last?.event.semantic.checkpointId;
     this.visibleCaption = this.committedCaption;
+    this.visibleCheckpointId = last?.event.semantic.checkpointId;
     this.evidence = this.buildEvidence(this.accepted);
+  }
+
+  private restoreCommittedPresentation(): void {
+    this.visibleCaption = this.committedCaption;
+    this.visibleCheckpointId = this.committedCheckpointId;
   }
 
   private buildEvidence(
@@ -1549,6 +1584,7 @@ export class ChoreographyStreamRuntime {
     this.provisional = this.committed;
     this.evidence = this.buildEvidence(this.accepted);
     this.sequence = this.lastSequenceForGeneration(this.generation);
+    this.restoreCommittedPresentation();
     const restorationFailure = this.reconcileRenderer(this.committed);
     this.rendererTrusted = restorationFailure === undefined;
     this.phase = "failed";
@@ -1745,6 +1781,9 @@ export class ChoreographyStreamRuntime {
       evidence: this.evidence,
       committedCaption: this.committedCaption,
       visibleCaption: this.visibleCaption,
+      ...(this.visibleCheckpointId
+        ? { visibleCheckpointId: this.visibleCheckpointId }
+        : {}),
       rendererTrusted: this.rendererTrusted,
       ...(visibleAccepted.length > 0
         ? { commitFrontier: visibleAccepted.at(-1)!.presentation }
