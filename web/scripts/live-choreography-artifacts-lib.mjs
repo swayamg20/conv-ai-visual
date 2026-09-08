@@ -2713,27 +2713,32 @@ function collectReportTests(suites, files, tests, location = "report.suites") {
 }
 
 function validatePlaywrightCi(value, source, location) {
+  const coreKeys = ["commitHref", "commitHash", "buildHref"];
+  const pullRequestKeys = ["prHref", "prTitle", "prBaseHash"];
+  const record = object(value, location);
+  const isPullRequest = pullRequestKeys.some((key) =>
+    Object.hasOwn(record, key),
+  );
   const ci = exactKeys(
-    value,
-    ["commitHref", "commitHash", "buildHref"],
+    record,
+    isPullRequest ? [...coreKeys, ...pullRequestKeys] : coreKeys,
     location,
   );
-  literal(ci.commitHash, source.gitCommit, `${location}.commitHash`);
-  let commitUrl;
-  let buildUrl;
-  try {
-    commitUrl = new URL(string(ci.commitHref, `${location}.commitHref`));
-    buildUrl = new URL(string(ci.buildHref, `${location}.buildHref`));
-  } catch {
-    fail(location, "must contain absolute GitHub URLs");
+  const commitHash = gitObjectId(ci.commitHash, `${location}.commitHash`);
+  if (!isPullRequest) {
+    literal(commitHash, source.gitCommit, `${location}.commitHash`);
   }
-  for (const [name, url] of [
-    ["commitHref", commitUrl],
-    ["buildHref", buildUrl],
-  ]) {
+  const githubUrl = (value, name) => {
+    let url;
+    try {
+      url = new URL(string(value, `${location}.${name}`));
+    } catch {
+      fail(`${location}.${name}`, "must be an absolute GitHub URL");
+    }
     if (
       url.protocol !== "https:" ||
       url.hostname !== "github.com" ||
+      url.port !== "" ||
       url.username !== "" ||
       url.password !== "" ||
       url.search !== "" ||
@@ -2741,32 +2746,49 @@ function validatePlaywrightCi(value, source, location) {
     ) {
       fail(`${location}.${name}`, "must be a canonical github.com HTTPS URL");
     }
-  }
-  const escapedCommit = source.gitCommit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return url;
+  };
+  const commitUrl = githubUrl(ci.commitHref, "commitHref");
+  const buildUrl = githubUrl(ci.buildHref, "buildHref");
   const commitMatch = commitUrl.pathname.match(
-    new RegExp(`^/([^/]+)/([^/]+)/commit/${escapedCommit}/?$`),
+    /^\/([^/]+)\/([^/]+)\/commit\/([a-f0-9]{40})\/?$/,
   );
   if (!commitMatch) {
-    fail(
-      `${location}.commitHref`,
-      "must identify the exact report source commit",
-    );
+    fail(`${location}.commitHref`, "must identify the exact CI commit");
   }
-  const [, owner, repository] = commitMatch;
-  if (
-    !new RegExp(`^/${owner}/${repository}/actions/runs/[1-9][0-9]*/?$`).test(
-      buildUrl.pathname,
-    )
-  ) {
+  const [, owner, repository, hrefCommitHash] = commitMatch;
+  literal(hrefCommitHash, commitHash, `${location}.commitHref`);
+  const buildMatch = buildUrl.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)\/?$/,
+  );
+  if (!buildMatch || buildMatch[1] !== owner || buildMatch[2] !== repository) {
     fail(
       `${location}.buildHref`,
       "must identify a workflow run in the same GitHub repository",
     );
   }
-  return {
+  const normalized = {
     commitHref: commitUrl.href.replace(/\/$/, ""),
-    commitHash: ci.commitHash,
+    commitHash,
     buildHref: buildUrl.href.replace(/\/$/, ""),
+  };
+  if (!isPullRequest) return normalized;
+
+  const prHref = githubUrl(ci.prHref, "prHref");
+  const prMatch = prHref.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)\/?$/,
+  );
+  if (!prMatch || prMatch[1] !== owner || prMatch[2] !== repository) {
+    fail(
+      `${location}.prHref`,
+      "must identify a pull request in the same GitHub repository",
+    );
+  }
+  return {
+    ...normalized,
+    prHref: prHref.href.replace(/\/$/, ""),
+    prTitle: string(ci.prTitle, `${location}.prTitle`),
+    prBaseHash: gitObjectId(ci.prBaseHash, `${location}.prBaseHash`),
   };
 }
 
@@ -2821,7 +2843,7 @@ function validateReport(
     playwrightVersion,
     `${location}.config.metadata.environment.playwrightVersion`,
   );
-  const ci = metadata.ci
+  const ci = Object.hasOwn(metadata, "ci")
     ? validatePlaywrightCi(
         metadata.ci,
         source,

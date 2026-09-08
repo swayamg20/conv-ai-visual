@@ -999,3 +999,72 @@ test("Playwright CI metadata binds the report to one commit and repository run",
     /same GitHub repository/,
   );
 });
+
+test("Playwright pull-request metadata preserves the merge and source boundaries", () => {
+  const mergeCommit = "3".repeat(40);
+  const pullRequestCi = {
+    commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${mergeCommit}`,
+    commitHash: mergeCommit,
+    prHref: "https://github.com/swayamg20/conv-ai-visual/pull/32",
+    prTitle: "feat: ship Gate 1.5 live visual choreography",
+    prBaseHash: "4".repeat(40),
+    buildHref:
+      "https://github.com/swayamg20/conv-ai-visual/actions/runs/34276448523",
+  };
+
+  assert.deepEqual(
+    validatePlaywrightCiForTests(pullRequestCi, SOURCE),
+    pullRequestCi,
+  );
+  for (const missingKey of ["prHref", "prTitle", "prBaseHash"]) {
+    const partial = { ...pullRequestCi };
+    delete partial[missingKey];
+    assert.throws(
+      () => validatePlaywrightCiForTests(partial, SOURCE),
+      /must contain exactly keys/,
+    );
+  }
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...pullRequestCi, unexpected: "field" },
+        SOURCE,
+      ),
+    /must contain exactly keys/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...pullRequestCi, prBaseHash: "4".repeat(39) },
+        SOURCE,
+      ),
+    /prBaseHash/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests({ ...pullRequestCi, prTitle: "" }, SOURCE),
+    /prTitle/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        {
+          ...pullRequestCi,
+          commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${"5".repeat(40)}`,
+        },
+        SOURCE,
+      ),
+    /commitHref/,
+  );
+  for (const prHref of [
+    "https://github.com/other/repository/pull/32",
+    "https://github.com/swayamg20/conv-ai-visual/issues/32",
+    "https://github.com:444/swayamg20/conv-ai-visual/pull/32",
+    "https://github.com/swayamg20/conv-ai-visual/pull/32?diff=split",
+  ]) {
+    assert.throws(
+      () => validatePlaywrightCiForTests({ ...pullRequestCi, prHref }, SOURCE),
+      /prHref/,
+    );
+  }
+});
