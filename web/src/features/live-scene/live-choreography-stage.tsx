@@ -30,6 +30,7 @@ interface LiveChoreographyStageProps {
   readonly settledMainCount: number;
   readonly cornerClarified: boolean;
   readonly caption: string;
+  readonly rendererTrusted: boolean;
   readonly reducedMotion?: boolean;
   readonly className?: string;
 }
@@ -54,6 +55,7 @@ export function LiveChoreographyStage({
   settledMainCount,
   cornerClarified,
   caption,
+  rendererTrusted,
   reducedMotion = false,
   className,
 }: LiveChoreographyStageProps) {
@@ -77,6 +79,7 @@ export function LiveChoreographyStage({
       data-settled-main-count={boundedMainCount}
       data-corner-clarified={cornerClarified ? "true" : "false"}
       data-layout={layout}
+      data-renderer-trusted={rendererTrusted ? "true" : "false"}
     >
       <div
         aria-hidden="true"
@@ -123,7 +126,8 @@ export function LiveChoreographyStage({
 
       <div
         className={cn(
-          "absolute inset-0",
+          "absolute inset-0 transition-opacity duration-150 motion-reduce:transition-none",
+          !rendererTrusted && "pointer-events-none opacity-0",
           layout === "cinematic"
             ? "[&>div]:h-full [&>div>svg]:h-full [&>div>svg]:w-full [&>div>svg]:rounded-none [&>div>svg]:border-0"
             : "flex items-center px-2 pt-14 pb-24 [&>div]:w-full [&>div>svg]:h-auto [&>div>svg]:w-full",
@@ -139,6 +143,23 @@ export function LiveChoreographyStage({
           className="h-full w-full"
         />
       </div>
+
+      {!rendererTrusted && (
+        <div
+          className="absolute inset-0 z-30 grid place-items-center bg-void px-6 text-center"
+          role="alert"
+        >
+          <div className="max-w-md rounded-2xl border border-rose-400/30 bg-rose-400/5 px-6 py-5">
+            <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-rose-300">
+              Board quarantined
+            </p>
+            <p className="mt-2 text-sm leading-relaxed text-chalk/80">
+              This visual state could not be verified. Reset the board before
+              continuing.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div
         aria-hidden="true"

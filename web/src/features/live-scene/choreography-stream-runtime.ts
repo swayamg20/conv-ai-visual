@@ -31,6 +31,7 @@ import {
   createAcceptedChoreographyRevision,
   createChoreographyEvidenceTrace,
   createChoreographyFrontier,
+  decodeChoreographyPlaybackOutcome,
   discardUnacceptedChoreographyEvidence,
   evaluateChoreographyPresentation,
   preflightChoreographyReplay,
@@ -97,6 +98,8 @@ export interface ChoreographyRuntimeDetailSnapshot {
   readonly evidence: readonly ChoreographyEvidenceTraceEvent[];
   readonly committedCaption: string;
   readonly visibleCaption: string;
+  /** False means the canvas is quarantined and must not be presented as truth. */
+  readonly rendererTrusted: boolean;
   readonly commitFrontier?: AcceptedChoreographyRevision["presentation"];
 }
 
@@ -137,6 +140,8 @@ export interface ChoreographyStreamRuntimeOptions {
   readonly queueLimit?: number;
   readonly now?: () => number;
 }
+
+const INTERRUPTION_SETTLEMENT_TIMEOUT_MS = 2_000;
 
 export type ChoreographyRuntimeErrorCode =
   "runtime_busy" | "runtime_reset_required" | "invalid_prompt";
@@ -202,6 +207,31 @@ function abortError(error: unknown): boolean {
   );
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function choreographyPlayback(value: unknown): ChoreographyPlayback {
+  if (typeof value !== "object" || value === null) {
+    throw new TypeError("Checkpoint renderer returned no playback handle");
+  }
+  const candidate = value as Partial<ChoreographyPlayback>;
+  if (
+    typeof candidate.cancel !== "function" ||
+    typeof candidate.finished !== "object" ||
+    candidate.finished === null ||
+    typeof candidate.finished.then !== "function" ||
+    typeof candidate.firstCuePresented !== "object" ||
+    candidate.firstCuePresented === null ||
+    typeof candidate.firstCuePresented.then !== "function"
+  ) {
+    throw new TypeError(
+      "Checkpoint renderer returned an invalid playback handle",
+    );
+  }
+  return candidate as ChoreographyPlayback;
+}
+
 /** Owns the V2 transactional lane; the legacy runtime only delegates to it. */
 export class ChoreographyStreamRuntime {
   private readonly renderer: ChoreographySceneStreamRenderer;
@@ -226,12 +256,17 @@ export class ChoreographyStreamRuntime {
   private active: ActiveCheckpoint | null = null;
   private patchIds = new Set<string>();
   private replayPrefixLength = 0;
+  private replayPresented: AcceptedChoreographyRevision[] = [];
+  private interruptionDeadline: ReturnType<
+    typeof globalThis.setTimeout
+  > | null = null;
   private evidence: readonly ChoreographyEvidenceTraceEvent[] =
     createChoreographyEvidenceTrace();
   private viewportInitialized = false;
   private initializedViewport: ViewportPoseV1 | null = null;
   private committedCaption = "";
   private visibleCaption = "";
+  private rendererTrusted = true;
   private narration = "Ready for a visual explanation.";
   private runtimeFailure: ChoreographyRuntimeFailure | undefined;
   private completion: ChoreographyRuntimeCompletion | undefined;
@@ -321,6 +356,7 @@ export class ChoreographyStreamRuntime {
     this.patchIds = new Set();
     this.queue = [];
     this.replayPrefixLength = 0;
+    this.replayPresented = [];
     this.provisional = this.committed;
     this.phase = "connecting";
     this.narration = this.visibleCaption || "Preparing the live board…";
@@ -385,6 +421,13 @@ export class ChoreographyStreamRuntime {
       this.publish();
       try {
         active.playback.cancel();
+        if (
+          this.currentToken === token &&
+          this.pendingInterruptToken === token &&
+          this.active === active
+        ) {
+          this.armInterruptionDeadline(active);
+        }
       } catch (error) {
         this.failRenderer(
           token,
@@ -415,15 +458,43 @@ export class ChoreographyStreamRuntime {
     this.assertUsable();
     this.invalidateToken(true);
     const active = this.active;
+    if (active) active.evidence.closed = true;
     this.active = null;
     this.queue = [];
+    this.replayPresented = [];
     try {
       active?.playback.cancel();
     } catch {
       // Reset remains authoritative even if a broken renderer throws.
     }
-    this.renderer.cancelMotion();
-    this.renderer.clear();
+    const cancellationFailure = this.cancelRendererMotion();
+    let clearFailure: string | undefined;
+    try {
+      this.renderer.clear();
+    } catch (error) {
+      clearFailure = errorMessage(error);
+    }
+    if (cancellationFailure || clearFailure) {
+      this.rendererTrusted = false;
+      this.provisional = this.committed;
+      this.evidence = this.buildEvidence(this.accepted);
+      this.sequence = this.lastSequenceForGeneration(this.generation);
+      this.phase = "failed";
+      this.completion = undefined;
+      this.runtimeFailure = failure(
+        "renderer_failed",
+        "The board could not be cleared safely. Retry reset before starting another lesson.",
+        false,
+      );
+      this.narration = this.runtimeFailure.message;
+      console.warn(
+        "[LiveScene] Choreography reset cleanup failed:",
+        [cancellationFailure, clearFailure].filter(Boolean).join("; "),
+      );
+      this.publish();
+      return;
+    }
+    this.rendererTrusted = true;
     this.phase = "idle";
     this.generation = 0;
     this.attempt = 0;
@@ -433,6 +504,7 @@ export class ChoreographyStreamRuntime {
     this.accepted = [];
     this.patchIds = new Set();
     this.replayPrefixLength = 0;
+    this.replayPresented = [];
     this.evidence = createChoreographyEvidenceTrace();
     this.viewportInitialized = false;
     this.initializedViewport = null;
@@ -462,8 +534,10 @@ export class ChoreographyStreamRuntime {
       replay = preflightChoreographyReplay(originalRecords);
     } catch (error) {
       const prefix = this.longestValidPrefix(originalRecords);
-      this.accepted = originalRecords;
-      this.truncateHistory(prefix.records.length);
+      const restorationFailure = this.restoreReplayPrefix(
+        originalRecords,
+        prefix.records.length,
+      );
       this.sequence = this.lastSequenceForGeneration(this.generation);
       this.phase = "failed";
       this.runtimeFailure = failure(
@@ -474,7 +548,10 @@ export class ChoreographyStreamRuntime {
       this.completion = undefined;
       this.narration =
         "Replay integrity was lost before drawing. Reset or replay the retained prefix.";
-      console.warn("[LiveScene] Choreography replay preflight failed:", error);
+      console.warn(
+        "[LiveScene] Choreography replay preflight failed:",
+        [errorMessage(error), restorationFailure].filter(Boolean).join("; "),
+      );
       this.publish();
       return;
     }
@@ -487,6 +564,7 @@ export class ChoreographyStreamRuntime {
     const token = this.createToken("replay", this.generation);
     this.currentToken = token;
     this.replayPrefixLength = 0;
+    this.replayPresented = [];
     this.evidence = createChoreographyEvidenceTrace();
     const first = replay.checkpoints[0];
 
@@ -506,6 +584,7 @@ export class ChoreographyStreamRuntime {
       );
       return;
     }
+    this.rendererTrusted = true;
     this.viewportInitialized = true;
     this.initializedViewport = first.base.viewport;
     this.committed = first.base;
@@ -525,6 +604,7 @@ export class ChoreographyStreamRuntime {
       if (!transition) return;
       const outcome = await this.playbackOutcome(transition.playback);
       if (this.currentToken !== token || this.active !== transition) return;
+      this.clearInterruptionDeadline();
       if (this.pendingInterruptToken === token) {
         this.finishInterruption(transition, outcome);
         return;
@@ -548,12 +628,13 @@ export class ChoreographyStreamRuntime {
       try {
         // Minting a fresh result proves the live terminal outcome; the stored
         // record remains byte-stable, including an original cancel receipt.
-        createAcceptedChoreographyRevision(prepared, evaluation);
+        const fresh = createAcceptedChoreographyRevision(prepared, evaluation);
         this.evidence = appendChoreographyCheckpointSettled(
           transition.evidence.trace,
           prepared,
-          replay.records[index],
+          fresh,
         );
+        this.replayPresented = [...this.replayPresented, fresh];
       } catch (error) {
         this.finishReplayFailure(
           token,
@@ -563,6 +644,7 @@ export class ChoreographyStreamRuntime {
         return;
       }
       this.active = null;
+      this.rendererTrusted = true;
       this.committed = prepared.target;
       this.provisional = prepared.target;
       this.committedCaption = prepared.event.patch.narration;
@@ -575,7 +657,11 @@ export class ChoreographyStreamRuntime {
 
     if (this.currentToken !== token) return;
     if (
-      !choreographyEvidenceTraceMatchesAccepted(this.evidence, replay.records)
+      this.replayPresented.length !== replay.records.length ||
+      !choreographyEvidenceTraceMatchesAccepted(
+        this.evidence,
+        this.replayPresented,
+      )
     ) {
       this.finishReplayFailure(
         token,
@@ -587,6 +673,7 @@ export class ChoreographyStreamRuntime {
     this.accepted = originalRecords;
     this.currentToken = null;
     this.replayPrefixLength = 0;
+    this.replayPresented = [];
     this.phase = "completed";
     this.narration = this.visibleCaption;
     this.publish();
@@ -596,16 +683,24 @@ export class ChoreographyStreamRuntime {
     if (this.disposed) return;
     this.invalidateToken(true);
     const active = this.active;
+    if (active) active.evidence.closed = true;
     this.active = null;
     this.queue = [];
+    this.replayPresented = [];
     try {
       active?.playback.cancel();
     } catch {
       // Disposal intentionally ignores renderer teardown failures.
     }
-    this.renderer.cancelMotion();
+    const cancellationFailure = this.cancelRendererMotion();
     this.listeners.clear();
     this.disposed = true;
+    if (cancellationFailure) {
+      console.warn(
+        "[LiveScene] Choreography disposal cancellation failed:",
+        cancellationFailure,
+      );
+    }
   }
 
   private acceptEvent(
@@ -687,7 +782,12 @@ export class ChoreographyStreamRuntime {
       this.attempt !== 1 ||
       event.fromAttempt !== 1 ||
       event.toAttempt !== 2 ||
-      event.lastAcceptedRevision !== this.provisional.scene.revision ||
+      this.sequence !== 0 ||
+      this.active !== null ||
+      this.queue.length !== 0 ||
+      this.patchIds.size !== 0 ||
+      !same(this.provisional, this.committed) ||
+      event.lastAcceptedRevision !== this.committed.scene.revision ||
       !this.frontierCoherent(this.provisional)
     ) {
       throw new Error("Repair event does not match the provisional frontier");
@@ -836,18 +936,9 @@ export class ChoreographyStreamRuntime {
     }
     const transition = this.startPlayback(token, prepared, "stream");
     if (!transition) return;
-    void transition.playback.finished
-      .then((outcome) => this.onPlaybackFinished(transition, outcome))
-      .catch((error: unknown) =>
-        this.onPlaybackFinished(transition, {
-          status: "failed",
-          firstCuePresented: false,
-          error:
-            error instanceof Error
-              ? error.message
-              : "Checkpoint playback rejected",
-        }),
-      );
+    void this.playbackOutcome(transition.playback).then((outcome) =>
+      this.onPlaybackFinished(transition, outcome),
+    );
   }
 
   private startPlayback(
@@ -891,9 +982,8 @@ export class ChoreographyStreamRuntime {
 
     try {
       this.bootstrapViewport(prepared);
-      const playback = this.renderer.playCheckpointChoreography(
-        prepared.plan,
-        observer,
+      const playback = choreographyPlayback(
+        this.renderer.playCheckpointChoreography(prepared.plan, observer),
       );
       transition = {
         token,
@@ -946,31 +1036,43 @@ export class ChoreographyStreamRuntime {
     signal: ChoreographyExecutorSignal,
   ): void {
     if (evidence.invalid) throw evidence.invalid;
-    if (signal.type === "cueStarted") {
-      if (evidence.settlement) {
-        throw new Error("A settled checkpoint cannot start another cue");
-      }
-      evidence.trace = appendChoreographyCueStarted(
-        evidence.trace,
-        prepared,
-        signal.cue,
-      );
-      return;
+    switch (signal.type) {
+      case "cueStarted":
+        if (evidence.settlement) {
+          throw new Error("A settled checkpoint cannot start another cue");
+        }
+        evidence.trace = appendChoreographyCueStarted(
+          evidence.trace,
+          prepared,
+          signal.cue,
+        );
+        return;
+      case "firstCuePresented":
+        if (evidence.settlement) {
+          throw new Error("A settled checkpoint cannot present another cue");
+        }
+        evidence.trace = appendChoreographyFirstCuePresented(
+          evidence.trace,
+          prepared,
+        );
+        return;
+      case "checkpointSettled":
+        if (
+          signal.settlement !== "completed" &&
+          signal.settlement !== "cancelled_to_checkpoint"
+        ) {
+          throw new Error(
+            "Checkpoint settlement is outside the closed vocabulary",
+          );
+        }
+        if (evidence.settlement) {
+          throw new Error("Checkpoint settlement signal was emitted twice");
+        }
+        evidence.settlement = signal.settlement;
+        return;
+      default:
+        throw new Error("Executor signal is outside the closed vocabulary");
     }
-    if (signal.type === "firstCuePresented") {
-      if (evidence.settlement) {
-        throw new Error("A settled checkpoint cannot present another cue");
-      }
-      evidence.trace = appendChoreographyFirstCuePresented(
-        evidence.trace,
-        prepared,
-      );
-      return;
-    }
-    if (evidence.settlement) {
-      throw new Error("Checkpoint settlement signal was emitted twice");
-    }
-    evidence.settlement = signal.settlement;
   }
 
   private onPlaybackFinished(
@@ -984,6 +1086,7 @@ export class ChoreographyStreamRuntime {
     ) {
       return;
     }
+    this.clearInterruptionDeadline();
     if (this.pendingInterruptToken === transition.token) {
       this.finishInterruption(transition, outcome);
       return;
@@ -1029,6 +1132,7 @@ export class ChoreographyStreamRuntime {
     }
 
     this.active = null;
+    this.rendererTrusted = true;
     this.committed = transition.prepared.target;
     this.committedCaption = transition.prepared.event.patch.narration;
     this.visibleCaption = this.committedCaption;
@@ -1053,6 +1157,7 @@ export class ChoreographyStreamRuntime {
     ) {
       return;
     }
+    this.clearInterruptionDeadline();
     transition.evidence.closed = true;
     const evaluation = evaluateChoreographyPresentation(
       transition.prepared,
@@ -1061,6 +1166,7 @@ export class ChoreographyStreamRuntime {
     let invalid =
       !this.signalsMatchOutcome(transition, outcome) ||
       evaluation.kind === "invalid";
+    let restorationFailure: string | undefined;
 
     if (!invalid && evaluation.kind === "presented") {
       try {
@@ -1082,7 +1188,7 @@ export class ChoreographyStreamRuntime {
         this.evidence = appendChoreographyCheckpointSettled(
           transition.evidence.trace,
           transition.prepared,
-          stored ?? fresh,
+          fresh,
         );
         if (transition.source === "stream") {
           if (
@@ -1092,12 +1198,20 @@ export class ChoreographyStreamRuntime {
           }
           this.accepted = [...this.accepted, fresh];
         } else {
-          this.replayPrefixLength = (transition.replayIndex ?? -1) + 1;
+          const replayIndex = transition.replayIndex ?? -1;
+          this.replayPresented = [
+            ...this.replayPresented.slice(0, replayIndex),
+            fresh,
+          ];
+          const replayEvidence = this.evidence;
+          this.replayPrefixLength = replayIndex + 1;
           this.truncateHistory(this.replayPrefixLength);
+          this.evidence = replayEvidence;
         }
         this.committed = transition.prepared.target;
         this.committedCaption = transition.prepared.event.patch.narration;
         this.visibleCaption = this.committedCaption;
+        this.rendererTrusted = true;
       } catch (error) {
         invalid = true;
         console.warn("[LiveScene] Interrupted checkpoint failed:", error);
@@ -1105,21 +1219,34 @@ export class ChoreographyStreamRuntime {
     } else if (!invalid) {
       this.discardEvidence(transition, outcome);
       if (transition.source === "replay") {
-        this.truncateHistory(transition.replayIndex ?? 0);
+        const replayIndex = transition.replayIndex ?? 0;
+        const replayEvidence = this.evidence;
+        this.replayPresented = this.replayPresented.slice(0, replayIndex);
+        this.truncateHistory(replayIndex);
+        this.evidence = replayEvidence;
       }
     }
 
     if (invalid) {
       if (transition.source === "replay") {
-        this.truncateHistory(transition.replayIndex ?? 0);
+        const replayIndex = transition.replayIndex ?? 0;
+        this.replayPresented = this.replayPresented.slice(0, replayIndex);
+        restorationFailure = this.restoreReplayPrefix(
+          this.accepted,
+          replayIndex,
+        );
+        this.evidence = this.buildEvidence(this.replayPresented);
       } else {
         this.evidence = this.buildEvidence(this.accepted);
+        restorationFailure = this.reconcileRenderer(this.committed);
+        this.rendererTrusted = restorationFailure === undefined;
       }
     }
     this.active = null;
     this.currentToken = null;
     this.pendingInterruptToken = null;
     this.replayPrefixLength = 0;
+    this.replayPresented = [];
     this.queue = [];
     this.provisional = this.committed;
     this.sequence = this.lastSequenceForGeneration(this.generation);
@@ -1134,6 +1261,10 @@ export class ChoreographyStreamRuntime {
       );
       this.narration =
         "Checkpoint presentation integrity was lost. Reset or replay the retained prefix.";
+      console.warn(
+        "[LiveScene] Interrupted checkpoint integrity failed:",
+        restorationFailure ?? "terminal presentation evidence was invalid",
+      );
     } else {
       this.phase = "interrupted";
       this.runtimeFailure = undefined;
@@ -1276,12 +1407,114 @@ export class ChoreographyStreamRuntime {
   private playbackOutcome(
     playback: ChoreographyPlayback,
   ): Promise<ChoreographyPlaybackOutcome> {
-    return playback.finished.catch((error: unknown) => ({
-      status: "failed" as const,
-      firstCuePresented: false,
-      error:
-        error instanceof Error ? error.message : "Checkpoint playback rejected",
-    }));
+    return Promise.resolve(playback.finished as unknown)
+      .then((outcome) => decodeChoreographyPlaybackOutcome(outcome))
+      .catch((error: unknown) => ({
+        status: "failed" as const,
+        firstCuePresented: false,
+        error: this.playbackFailureMessage(error),
+      }));
+  }
+
+  private playbackFailureMessage(error: unknown): string {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Checkpoint playback rejected or returned an invalid outcome";
+    return [...(message.trim() || "Checkpoint playback failed")]
+      .slice(0, 512)
+      .join("");
+  }
+
+  private cancelRendererMotion(): string | undefined {
+    try {
+      this.renderer.cancelMotion();
+      return undefined;
+    } catch (error) {
+      return errorMessage(error);
+    }
+  }
+
+  private armInterruptionDeadline(transition: ActiveCheckpoint): void {
+    this.clearInterruptionDeadline();
+    this.interruptionDeadline = globalThis.setTimeout(() => {
+      this.interruptionDeadline = null;
+      if (
+        this.currentToken !== transition.token ||
+        this.pendingInterruptToken !== transition.token ||
+        this.active !== transition
+      ) {
+        return;
+      }
+      if (transition.source === "replay") {
+        this.finishReplayFailure(
+          transition.token,
+          "Checkpoint cancellation did not settle before its deadline",
+          transition.replayIndex ?? 0,
+        );
+      } else {
+        this.failRenderer(
+          transition.token,
+          "Checkpoint cancellation did not settle before its deadline",
+        );
+      }
+    }, INTERRUPTION_SETTLEMENT_TIMEOUT_MS);
+  }
+
+  private clearInterruptionDeadline(): void {
+    if (this.interruptionDeadline === null) return;
+    globalThis.clearTimeout(this.interruptionDeadline);
+    this.interruptionDeadline = null;
+  }
+
+  private reconcileRenderer(
+    frontier: ChoreographyFrontier,
+  ): string | undefined {
+    const cancellationFailure = this.cancelRendererMotion();
+    if (cancellationFailure) {
+      return `renderer cancellation failed: ${cancellationFailure}`;
+    }
+    try {
+      this.renderer.clear();
+      if (frontier.scene.revision > 0 || frontier.scene.nodes.length > 0) {
+        this.renderer.materializeScene(frontier.scene);
+      }
+      if (frontier.viewport) {
+        this.renderer.materializeViewport(frontier.viewport);
+      }
+      return undefined;
+    } catch (error) {
+      return `renderer materialization failed: ${errorMessage(error)}`;
+    }
+  }
+
+  /** Keep the logical prefix coherent, then prove or quarantine its canvas. */
+  private restoreReplayPrefix(
+    records: readonly AcceptedChoreographyRevision[],
+    prefixLength: number,
+  ): string | undefined {
+    let retained: readonly AcceptedChoreographyRevision[];
+    let validationFailure: string | undefined;
+    try {
+      retained = preflightChoreographyReplay(
+        records.slice(0, prefixLength),
+      ).records;
+    } catch (error) {
+      retained = [];
+      validationFailure = `retained prefix is invalid: ${errorMessage(error)}`;
+    }
+
+    this.accepted = [...retained];
+    this.truncateHistory(retained.length);
+    const last = retained.at(-1);
+    this.viewportInitialized = last !== undefined;
+    this.initializedViewport = last?.viewport ?? null;
+    const restorationFailure = this.reconcileRenderer(this.committed);
+    this.rendererTrusted = restorationFailure === undefined;
+    return (
+      [validationFailure, restorationFailure].filter(Boolean).join("; ") ||
+      undefined
+    );
   }
 
   private failProtocol(token: RuntimeToken, detail: string): void {
@@ -1303,6 +1536,7 @@ export class ChoreographyStreamRuntime {
 
   private failRenderer(token: RuntimeToken, detail: string): void {
     if (this.currentToken !== token) return;
+    this.clearInterruptionDeadline();
     const control = this.streamControl;
     this.streamControl = null;
     control?.controller.abort();
@@ -1312,10 +1546,11 @@ export class ChoreographyStreamRuntime {
     if (this.active) this.active.evidence.closed = true;
     this.active = null;
     this.queue = [];
-    this.renderer.cancelMotion();
     this.provisional = this.committed;
     this.evidence = this.buildEvidence(this.accepted);
     this.sequence = this.lastSequenceForGeneration(this.generation);
+    const restorationFailure = this.reconcileRenderer(this.committed);
+    this.rendererTrusted = restorationFailure === undefined;
     this.phase = "failed";
     this.completion = undefined;
     this.runtimeFailure = failure(
@@ -1325,7 +1560,10 @@ export class ChoreographyStreamRuntime {
     );
     this.narration =
       "Checkpoint presentation integrity was lost. Reset or replay the retained prefix.";
-    console.warn("[LiveScene] Choreography renderer failure:", detail);
+    console.warn(
+      "[LiveScene] Choreography renderer failure:",
+      restorationFailure ? `${detail}; ${restorationFailure}` : detail,
+    );
     this.publish();
   }
 
@@ -1335,6 +1573,7 @@ export class ChoreographyStreamRuntime {
     acceptedPrefixLength: number,
   ): void {
     if (this.currentToken !== token) return;
+    this.clearInterruptionDeadline();
     const active = this.active;
     this.currentToken = null;
     this.pendingInterruptToken = null;
@@ -1347,8 +1586,18 @@ export class ChoreographyStreamRuntime {
     } catch {
       // The replay is already quarantined.
     }
-    this.renderer.cancelMotion();
-    this.truncateHistory(acceptedPrefixLength);
+    const restorationFailure = this.restoreReplayPrefix(
+      this.accepted,
+      acceptedPrefixLength,
+    );
+    try {
+      this.evidence = this.buildEvidence(
+        this.replayPresented.slice(0, this.accepted.length),
+      );
+    } catch {
+      this.evidence = createChoreographyEvidenceTrace();
+    }
+    this.replayPresented = [];
     this.sequence = this.lastSequenceForGeneration(this.generation);
     this.phase = "failed";
     this.completion = undefined;
@@ -1359,7 +1608,10 @@ export class ChoreographyStreamRuntime {
     );
     this.narration =
       "Replay integrity was lost. Reset or replay the retained prefix.";
-    console.warn("[LiveScene] Choreography replay failure:", detail);
+    console.warn(
+      "[LiveScene] Choreography replay failure:",
+      restorationFailure ? `${detail}; ${restorationFailure}` : detail,
+    );
     this.publish();
   }
 
@@ -1431,6 +1683,7 @@ export class ChoreographyStreamRuntime {
   }
 
   private invalidateToken(abort: boolean): void {
+    this.clearInterruptionDeadline();
     if (abort) this.streamControl?.controller.abort();
     this.currentToken = null;
     this.streamControl = null;
@@ -1492,6 +1745,7 @@ export class ChoreographyStreamRuntime {
       evidence: this.evidence,
       committedCaption: this.committedCaption,
       visibleCaption: this.visibleCaption,
+      rendererTrusted: this.rendererTrusted,
       ...(visibleAccepted.length > 0
         ? { commitFrontier: visibleAccepted.at(-1)!.presentation }
         : {}),

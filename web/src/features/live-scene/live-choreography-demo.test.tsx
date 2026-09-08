@@ -260,4 +260,38 @@ describe("LiveChoreographyDemo", () => {
 
     await act(async () => demo.root.unmount());
   });
+
+  it("hides a renderer state that cannot be reconciled", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const invocations: ChoreographyLessonPath[] = [];
+      canvas.playCheckpointChoreography.mockReturnValueOnce(
+        {} as unknown as ChoreographyPlayback,
+      );
+      canvas.cancelMotion.mockImplementation(() => {
+        throw new Error("renderer cancellation failed");
+      });
+      const demo = await mount({
+        initialPath: "full",
+        runnerFactory: fixtureFactory(invocations),
+      });
+
+      await act(async () => {
+        button(demo.container, "Begin the lesson").click();
+        await flushWork();
+      });
+
+      expect(stage(demo.container).dataset.rendererTrusted).toBe("false");
+      expect(demo.container.textContent).toContain("Board quarantined");
+      expect(demo.container.textContent).toContain(
+        "This visual state could not be verified",
+      );
+
+      await act(async () => demo.root.unmount());
+    } finally {
+      warning.mockRestore();
+    }
+  });
 });

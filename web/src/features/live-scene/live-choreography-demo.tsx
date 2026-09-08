@@ -308,6 +308,7 @@ function ChoreographySession({
       settledMainCount={settledMainCount}
       cornerClarified={cornerClarified}
       caption={caption}
+      rendererTrusted={choreography.rendererTrusted}
       reducedMotion={reducedMotion}
       className={stageOnly ? "h-full w-full rounded-none border-0" : "w-full"}
     />

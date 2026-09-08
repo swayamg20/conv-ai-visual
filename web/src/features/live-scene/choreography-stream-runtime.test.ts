@@ -390,6 +390,142 @@ describe("choreography SceneStreamRuntime", () => {
     expect(runtime.getSnapshot()).toEqual(failed);
   });
 
+  it("rejects an unknown executor signal instead of treating it as settlement", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+    const first = renderer.rendered[0];
+    emitCertifiedCues(first);
+    first.observer?.({ type: "firstCuePresented" });
+
+    expect(() =>
+      (first.observer as ((signal: unknown) => void) | undefined)?.({
+        type: "unknown",
+        settlement: "completed",
+      }),
+    ).toThrow("Executor signal is outside the closed vocabulary");
+
+    first.playback.settle({ status: "completed", firstCuePresented: true });
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      error: { code: "renderer_failed", retryable: false },
+      choreography: { accepted: [], evidence: [] },
+    });
+  });
+
+  it("fails closed when the renderer returns a malformed playback handle", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    renderer.playCheckpointChoreography.mockReturnValueOnce(
+      {} as unknown as ChoreographyPlayback,
+    );
+    const run = await startRuntime(runtime, runner);
+
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      queuedPatchCount: 0,
+      error: { code: "renderer_failed", retryable: false },
+      choreography: { accepted: [], evidence: [] },
+    });
+    expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+  });
+
+  it("fails closed when a valid-looking playback resolves a malformed outcome", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    renderer.playCheckpointChoreography.mockReturnValueOnce({
+      cancel: vi.fn(),
+      firstCuePresented: Promise.resolve(false),
+      finished: Promise.resolve(null),
+    } as unknown as ChoreographyPlayback);
+    const run = await startRuntime(runtime, runner);
+
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      queuedPatchCount: 0,
+      error: { code: "renderer_failed", retryable: false },
+      choreography: { accepted: [], evidence: [] },
+    });
+    expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+  });
+
+  it("finishes renderer quarantine when cancellation cleanup throws", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      renderer.cancelMotion.mockImplementation(() => {
+        throw new Error("cancel cleanup failed");
+      });
+      const run = await startRuntime(runtime, runner);
+      emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+      const first = renderer.rendered[0];
+      emitCertifiedCues(first);
+      first.observer?.({ type: "firstCuePresented" });
+
+      first.playback.settle({ status: "completed", firstCuePresented: true });
+      await flushMicrotasks();
+
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 0 },
+        queuedPatchCount: 0,
+        error: { code: "renderer_failed", retryable: false },
+        choreography: { rendererTrusted: false },
+      });
+      expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+      expect(() => runtime.start("Try again")).toThrowError(
+        expect.objectContaining<Partial<SceneStreamRuntimeError>>({
+          code: "runtime_reset_required",
+        }),
+      );
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("fails closed when interrupted playback misses its settlement deadline", async () => {
+    vi.useFakeTimers();
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      const run = await startRuntime(runtime, runner);
+      emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+
+      expect(runtime.interrupt()).toBe(true);
+      expect(runtime.getSnapshot().phase).toBe("interrupting");
+      await vi.advanceTimersByTimeAsync(2_001);
+
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 0 },
+        queuedPatchCount: 0,
+        error: { code: "renderer_failed", retryable: false },
+        choreography: {
+          accepted: [],
+          evidence: [],
+          rendererTrusted: true,
+        },
+      });
+      expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+      expect(renderer.clear).toHaveBeenCalledTimes(1);
+    } finally {
+      warning.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("validates started, repairing, declined, failed, foreign, and missing terminal lifecycles", async () => {
     const repaired = createRuntime();
     const repairedRun = await startRuntime(repaired.runtime, repaired.runner);
@@ -461,6 +597,33 @@ describe("choreography SceneStreamRuntime", () => {
     expect(missingTerminal.runtime.getSnapshot()).toMatchObject({
       phase: "failed",
       error: { code: "invalid_stream_event", retryable: true },
+    });
+  });
+
+  it("rejects repair after an attempt has emitted a checkpoint", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+    settlePresented(renderer.rendered[0]);
+    await flushMicrotasks();
+
+    emit(
+      run,
+      decodeChoreographySceneStreamEvent({
+        type: "scene_stream_repairing",
+        generation: 1,
+        fromAttempt: 1,
+        toAttempt: 2,
+        lastAcceptedRevision: 1,
+        message: "Repairing after a partial attempt is forbidden.",
+      }),
+    );
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 1 },
+      error: { code: "invalid_stream_event", retryable: true },
+      choreography: { accepted: [{ scene: { revision: 1 } }] },
     });
   });
 
@@ -536,7 +699,7 @@ describe("choreography SceneStreamRuntime", () => {
     },
   );
 
-  it("replays an exact ledger without model work and preserves stored cancellation receipts", async () => {
+  it("preserves stored receipts while recording the fresh replay settlement", async () => {
     const { runtime, renderer, runner } = createRuntime();
     const run = await startRuntime(runtime, runner);
     emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0], MAIN_CHECKPOINTS[1]);
@@ -587,7 +750,7 @@ describe("choreography SceneStreamRuntime", () => {
     );
     expect(replayed.choreography?.evidence.at(-1)).toMatchObject({
       type: "checkpointSettled",
-      settlement: "cancelled_to_checkpoint",
+      settlement: "completed",
     });
     expect(runner.runs).toHaveLength(runnerCalls);
   });
@@ -615,13 +778,21 @@ describe("choreography SceneStreamRuntime", () => {
     };
     await runtime.replayAccepted();
 
-    expect({
-      play: renderer.playCheckpointChoreography.mock.calls.length,
-      cancel: renderer.cancelMotion.mock.calls.length,
-      clear: renderer.clear.mock.calls.length,
-      scene: renderer.materializeScene.mock.calls.length,
-      viewport: renderer.materializeViewport.mock.calls.length,
-    }).toEqual(before);
+    expect(renderer.playCheckpointChoreography.mock.calls.length).toBe(
+      before.play,
+    );
+    expect(renderer.cancelMotion.mock.calls.length).toBe(before.cancel + 1);
+    expect(renderer.clear.mock.calls.length).toBe(before.clear + 1);
+    expect(renderer.materializeScene.mock.calls.length).toBe(before.scene + 1);
+    expect(renderer.materializeViewport.mock.calls.length).toBe(
+      before.viewport + 1,
+    );
+    expect(renderer.materializeScene).toHaveBeenLastCalledWith(
+      accepted[0].scene,
+    );
+    expect(renderer.materializeViewport).toHaveBeenLastCalledWith(
+      accepted[0].viewport,
+    );
     expect(runtime.getSnapshot()).toMatchObject({
       phase: "failed",
       committedScene: { revision: 1 },
@@ -633,6 +804,74 @@ describe("choreography SceneStreamRuntime", () => {
         code: "runtime_reset_required",
       }),
     );
+  });
+
+  it("quarantines malformed replay outcomes and restores the exact retained prefix", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    await acceptMainPrefix(runtime, renderer, run, 1);
+    renderer.playCheckpointChoreography.mockReturnValueOnce({
+      cancel: vi.fn(),
+      firstCuePresented: Promise.resolve(false),
+      finished: Promise.resolve(null),
+    } as unknown as ChoreographyPlayback);
+    const clearsBeforeReplay = renderer.clear.mock.calls.length;
+
+    await runtime.replayAccepted();
+
+    expect(renderer.clear.mock.calls.length).toBe(clearsBeforeReplay + 2);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      queuedPatchCount: 0,
+      error: { code: "replay_integrity_failed", retryable: false },
+      choreography: { accepted: [], evidence: [] },
+    });
+    expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+  });
+
+  it("finishes replay quarantine when restoration cancellation throws", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      const run = await startRuntime(runtime, runner);
+      await acceptMainPrefix(runtime, renderer, run, 1);
+      renderer.playCheckpointChoreography.mockReturnValueOnce(
+        {} as unknown as ChoreographyPlayback,
+      );
+      renderer.cancelMotion
+        .mockImplementationOnce(() => undefined)
+        .mockImplementation(() => {
+          throw new Error("restore cancellation failed");
+        });
+
+      await runtime.replayAccepted();
+
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 0 },
+        queuedPatchCount: 0,
+        error: { code: "replay_integrity_failed", retryable: false },
+        choreography: {
+          accepted: [],
+          evidence: [],
+          rendererTrusted: false,
+        },
+      });
+      expect(
+        runtime.getSnapshot().choreography?.commitFrontier,
+      ).toBeUndefined();
+      expect(runtime.getSnapshot().activeRevision).toBeUndefined();
+      expect(() => runtime.start("Try again")).toThrowError(
+        expect.objectContaining<Partial<SceneStreamRuntimeError>>({
+          code: "runtime_reset_required",
+        }),
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("truncates replay at the exact terminal interruption boundary", async () => {
@@ -649,7 +888,9 @@ describe("choreography SceneStreamRuntime", () => {
     );
     const beforeReplayIndex = beforePaint.renderer.rendered.length;
     const beforeReplay = beforePaint.runtime.replayAccepted();
-    const beforePlayback = beforePaint.renderer.rendered[beforeReplayIndex];
+    settlePresented(beforePaint.renderer.rendered[beforeReplayIndex]);
+    await flushMicrotasks();
+    const beforePlayback = beforePaint.renderer.rendered[beforeReplayIndex + 1];
     beforePaint.runtime.interrupt();
     beforePlayback.playback.settle({
       status: "cancelled_before_presented",
@@ -658,8 +899,8 @@ describe("choreography SceneStreamRuntime", () => {
     await beforeReplay;
     expect(beforePaint.runtime.getSnapshot()).toMatchObject({
       phase: "interrupted",
-      committedScene: { revision: 0 },
-      choreography: { accepted: [], evidence: [] },
+      committedScene: { revision: 1 },
+      choreography: { accepted: [{ scene: { revision: 1 } }] },
     });
 
     const afterPaint = createRuntime();
@@ -675,7 +916,9 @@ describe("choreography SceneStreamRuntime", () => {
     );
     const afterReplayIndex = afterPaint.renderer.rendered.length;
     const afterReplay = afterPaint.runtime.replayAccepted();
-    const afterPlayback = afterPaint.renderer.rendered[afterReplayIndex];
+    settlePresented(afterPaint.renderer.rendered[afterReplayIndex]);
+    await flushMicrotasks();
+    const afterPlayback = afterPaint.renderer.rendered[afterReplayIndex + 1];
     emitCertifiedCues(afterPlayback);
     afterPlayback.observer?.({ type: "firstCuePresented" });
     afterPaint.runtime.interrupt();
@@ -691,13 +934,21 @@ describe("choreography SceneStreamRuntime", () => {
 
     expect(afterPaint.runtime.getSnapshot()).toMatchObject({
       phase: "interrupted",
-      committedScene: { revision: 1 },
-      choreography: { accepted: [storedFirst] },
+      committedScene: { revision: 2 },
+      choreography: {
+        accepted: [storedFirst, { scene: { revision: 2 } }],
+      },
     });
     expect(
-      afterPaint.runtime.getSnapshot().choreography?.accepted[0].presentation
+      afterPaint.runtime.getSnapshot().choreography?.accepted[1].presentation
         .settlement,
     ).toBe("completed");
+    expect(
+      afterPaint.runtime.getSnapshot().choreography?.evidence.at(-1),
+    ).toMatchObject({
+      type: "checkpointSettled",
+      settlement: "cancelled_to_checkpoint",
+    });
   });
 
   it("supports the real three-generation adaptive path up to the non-pruning nine-checkpoint cap", async () => {
@@ -780,6 +1031,10 @@ describe("choreography SceneStreamRuntime", () => {
     const run = await startRuntime(runtime, runner);
     emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
     const playback = renderer.rendered[0];
+    playback.observer?.({
+      type: "cueStarted",
+      cue: playback.plan.choreographyPlan.phase.cues[0].cue,
+    });
     runtime.reset();
     const reset = runtime.getSnapshot();
 
@@ -790,5 +1045,95 @@ describe("choreography SceneStreamRuntime", () => {
     expect(reset.phase).toBe("idle");
     expect(reset.committedScene.revision).toBe(0);
     expect(reset.choreography?.accepted).toEqual([]);
+  });
+
+  it("makes active observer signals inert after dispose", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0]);
+    const playback = renderer.rendered[0];
+    playback.observer?.({
+      type: "cueStarted",
+      cue: playback.plan.choreographyPlan.phase.cues[0].cue,
+    });
+
+    runtime.dispose();
+
+    expect(() => emitCertifiedCues(playback)).not.toThrow();
+    expect(() =>
+      playback.observer?.({
+        type: "checkpointSettled",
+        settlement: "completed",
+      }),
+    ).not.toThrow();
+  });
+
+  it("quarantines reset when cancellation cleanup throws and permits retry", () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer } = createRuntime();
+      renderer.cancelMotion.mockImplementation(() => {
+        throw new Error("cancel cleanup failed");
+      });
+
+      expect(() => runtime.reset()).not.toThrow();
+      expect(renderer.clear).toHaveBeenCalledTimes(1);
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 0 },
+        error: { code: "renderer_failed", retryable: false },
+        choreography: {
+          accepted: [],
+          evidence: [],
+          rendererTrusted: false,
+        },
+      });
+
+      renderer.cancelMotion.mockReset();
+      runtime.reset();
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "idle",
+        choreography: { rendererTrusted: true },
+      });
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("retains the committed frontier when reset cannot clear and permits retry", async () => {
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const { runtime, renderer, runner } = createRuntime();
+      const run = await startRuntime(runtime, runner);
+      await acceptMainPrefix(runtime, renderer, run, 1);
+      renderer.clear.mockImplementationOnce(() => {
+        throw new Error("clear failed");
+      });
+
+      expect(() => runtime.reset()).not.toThrow();
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "failed",
+        committedScene: { revision: 1 },
+        error: { code: "renderer_failed", retryable: false },
+        choreography: {
+          accepted: [{ scene: { revision: 1 } }],
+          rendererTrusted: false,
+        },
+      });
+
+      renderer.clear.mockReset();
+      runtime.reset();
+      expect(runtime.getSnapshot()).toMatchObject({
+        phase: "idle",
+        committedScene: { revision: 0 },
+        choreography: { accepted: [], evidence: [], rendererTrusted: true },
+      });
+    } finally {
+      warning.mockRestore();
+    }
   });
 });

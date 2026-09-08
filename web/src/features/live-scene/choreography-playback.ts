@@ -735,7 +735,10 @@ function createChoreographyPresentationReceipt(
   });
 }
 
-function decodePlaybackOutcome(value: unknown): ChoreographyPlaybackOutcome {
+/** Decode the renderer's terminal value at the runtime trust boundary. */
+export function decodeChoreographyPlaybackOutcome(
+  value: unknown,
+): ChoreographyPlaybackOutcome {
   const input = record(value, "choreography playback outcome");
   exactKeys(
     input,
@@ -783,7 +786,7 @@ export function evaluateChoreographyPresentation(
 ): ChoreographyPresentationEvaluation {
   let outcome: ChoreographyPlaybackOutcome;
   try {
-    outcome = decodePlaybackOutcome(outcomeValue);
+    outcome = decodeChoreographyPlaybackOutcome(outcomeValue);
   } catch {
     return Object.freeze({ kind: "invalid" });
   }
