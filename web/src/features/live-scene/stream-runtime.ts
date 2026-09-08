@@ -6,6 +6,7 @@ import {
   decodeSemanticScenePatchEvent,
   materializeSceneTransition,
   planSceneTransition,
+  type ChoreographyLayout,
   type MotionPlan,
   type SceneState,
   type SemanticScenePatchEvent,
@@ -29,6 +30,16 @@ import type {
   SemanticSceneStreamRequest,
   SemanticSceneStreamRunner,
 } from "./model-stream";
+import type {
+  ChoreographySceneStreamDeclinedEvent,
+  ChoreographySceneStreamRunner,
+} from "./choreography-model-stream";
+import {
+  ChoreographyRuntimeError,
+  ChoreographyStreamRuntime,
+  type ChoreographyRuntimeDetailSnapshot,
+  type ChoreographySceneStreamRenderer,
+} from "./choreography-stream-runtime";
 import {
   beginPresentationInterrupt,
   beginPresentationReplay,
@@ -117,7 +128,9 @@ export interface SceneStreamCompletionMetrics {
 }
 
 export interface SemanticSceneStreamDecline {
-  readonly reasonCode: SemanticSceneDeclineReason;
+  readonly reasonCode:
+    | SemanticSceneDeclineReason
+    | ChoreographySceneStreamDeclinedEvent["reasonCode"];
 }
 
 export interface SceneStreamRuntimeSnapshot {
@@ -136,6 +149,7 @@ export interface SceneStreamRuntimeSnapshot {
   readonly presentationMetrics?: RuntimePresentationMetricsSnapshot;
   readonly decline?: SemanticSceneStreamDecline;
   readonly semantic?: SemanticSceneStreamRuntimeSnapshot;
+  readonly choreography?: ChoreographyRuntimeDetailSnapshot;
 }
 
 export type SceneStreamRenderer = Pick<
@@ -153,11 +167,15 @@ export type SceneStreamRunner = (
   invocation: SceneStreamRunInvocation
 ) => Promise<void>;
 
-interface CommonSceneStreamRuntimeOptions {
-  readonly renderer: SceneStreamRenderer;
+interface SharedSceneStreamRuntimeOptions {
   readonly queueLimit?: number;
-  readonly staggerMs?: number;
   readonly now?: () => number;
+}
+
+interface CommonSceneStreamRuntimeOptions
+  extends SharedSceneStreamRuntimeOptions {
+  readonly renderer: SceneStreamRenderer;
+  readonly staggerMs?: number;
 }
 
 export type SceneStreamRuntimeOptions =
@@ -168,6 +186,12 @@ export type SceneStreamRuntimeOptions =
   | (CommonSceneStreamRuntimeOptions & {
       readonly protocol: "semantic";
       readonly runStream: SemanticSceneStreamRunner;
+    })
+  | (SharedSceneStreamRuntimeOptions & {
+      readonly protocol: "choreography";
+      readonly renderer: ChoreographySceneStreamRenderer;
+      readonly runStream: ChoreographySceneStreamRunner;
+      readonly layout: ChoreographyLayout;
     });
 
 export type SceneStreamRuntimeErrorCode =
@@ -330,7 +354,8 @@ function sameCanonicalValue(left: unknown, right: unknown): boolean {
 
 /** Framework-neutral, single-flight owner for one progressively authored board. */
 export class SceneStreamRuntime {
-  private readonly protocol: "raw" | "semantic";
+  private readonly protocol: "raw" | "semantic" | "choreography";
+  private readonly choreographyRuntime: ChoreographyStreamRuntime | undefined;
   private readonly renderer: SceneStreamRenderer;
   private readonly runRawStream: SceneStreamRunner | undefined;
   private readonly runSemanticStream: SemanticSceneStreamRunner | undefined;
@@ -368,6 +393,28 @@ export class SceneStreamRuntime {
 
   constructor(options: SceneStreamRuntimeOptions) {
     this.protocol = options.protocol ?? "raw";
+    if (options.protocol === "choreography") {
+      this.choreographyRuntime = new ChoreographyStreamRuntime({
+        renderer: options.renderer,
+        runStream: options.runStream,
+        layout: options.layout,
+        ...(options.queueLimit === undefined
+          ? {}
+          : { queueLimit: options.queueLimit }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+      });
+      // These fields are inert because every public lifecycle call delegates.
+      this.renderer = options.renderer as unknown as SceneStreamRenderer;
+      this.runRawStream = undefined;
+      this.runSemanticStream = undefined;
+      this.queueLimit = LIVE_SCENE_MAX_PATCH_QUEUE;
+      this.staggerMs = 0;
+      this.now = options.now ?? (() => globalThis.performance.now());
+      this.snapshot = this.choreographyRuntime.getSnapshot();
+      return;
+    }
+
+    this.choreographyRuntime = undefined;
     this.renderer = options.renderer;
     if (options.protocol === "semantic") {
       this.runSemanticStream = options.runStream;
@@ -394,9 +441,13 @@ export class SceneStreamRuntime {
     this.snapshot = this.buildSnapshot();
   }
 
-  getSnapshot = (): SceneStreamRuntimeSnapshot => this.snapshot;
+  getSnapshot = (): SceneStreamRuntimeSnapshot =>
+    this.choreographyRuntime?.getSnapshot() ?? this.snapshot;
 
   subscribe = (listener: () => void): (() => void) => {
+    if (this.choreographyRuntime) {
+      return this.choreographyRuntime.subscribe(listener);
+    }
     this.assertUsable();
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -404,6 +455,16 @@ export class SceneStreamRuntime {
 
   /** Start a new generation from the exact committed scene. */
   start(promptValue: string): number {
+    if (this.choreographyRuntime) {
+      try {
+        return this.choreographyRuntime.start(promptValue);
+      } catch (error) {
+        if (error instanceof ChoreographyRuntimeError) {
+          throw new SceneStreamRuntimeError(error.code, error.message);
+        }
+        throw error;
+      }
+    }
     this.assertUsable();
     if (
       this.protocol === "semantic" &&
@@ -513,6 +574,9 @@ export class SceneStreamRuntime {
 
   /** Cancel one exact stream token and retain only materially visible work. */
   interrupt(): boolean {
+    if (this.choreographyRuntime) {
+      return this.choreographyRuntime.interrupt();
+    }
     this.assertUsable();
     if (!this.isBusy()) return false;
     if (this.protocol === "semantic") {
@@ -564,6 +628,10 @@ export class SceneStreamRuntime {
 
   /** Clear all semantic and rendered state synchronously. */
   reset(): void {
+    if (this.choreographyRuntime) {
+      this.choreographyRuntime.reset();
+      return;
+    }
     this.assertUsable();
     this.invalidateCurrentToken(true);
     this.queue = [];
@@ -595,6 +663,17 @@ export class SceneStreamRuntime {
 
   /** Replay accepted snapshots through the renderer without invoking the model runner. */
   async replayAccepted(): Promise<void> {
+    if (this.choreographyRuntime) {
+      try {
+        await this.choreographyRuntime.replayAccepted();
+      } catch (error) {
+        if (error instanceof ChoreographyRuntimeError) {
+          throw new SceneStreamRuntimeError(error.code, error.message);
+        }
+        throw error;
+      }
+      return;
+    }
     this.assertUsable();
     if (this.isBusy()) {
       throw new SceneStreamRuntimeError(
@@ -918,6 +997,10 @@ export class SceneStreamRuntime {
   }
 
   dispose(): void {
+    if (this.choreographyRuntime) {
+      this.choreographyRuntime.dispose();
+      return;
+    }
     if (this.disposed) return;
     this.invalidateCurrentToken(true);
     this.active?.playback.cancel();
