@@ -29,6 +29,7 @@ import type {
   TeachingStep,
 } from "@/features/canvas/types";
 import { createSvgMotionExecutor } from "@/features/live-scene/svg-motion-executor";
+import { createSvgNodeReconciler } from "@/features/live-scene/svg-node-reconciler";
 import { useCanvasViewport } from "@/features/canvas/viewport";
 import { getCanvasPalette, GRID_SNAP, renderGrid } from "@/lib/canvas-utils";
 import {
@@ -55,7 +56,16 @@ function sequenceFocus(steps: TeachingStep[]): { x: number; y: number } | null {
 }
 
 export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
-  ({ width = 800, height = 600, className, showGrid = true }, ref) => {
+  (
+    {
+      width = 800,
+      height = 600,
+      className,
+      showGrid = true,
+      viewportInteractionLocked = false,
+    },
+    ref,
+  ) => {
     const svgRef = useRef<SVGSVGElement>(null);
     const roughRef = useRef<RoughSVG | null>(null);
     const elementsRef = useRef<Map<string, SVGElementData>>(new Map());
@@ -65,18 +75,28 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const [, forceRender] = useState(0);
     const paletteRef = useRef(getCanvasPalette());
     const {
+      animateViewport,
       applyViewBox,
+      cancelViewportAnimation,
       handlePointerDown,
       handlePointerMove,
       handlePointerUp,
       isPanning,
+      materializeViewport,
       panRef,
       panTo,
+      readViewport,
+      resetViewport,
       resetZoom,
       zoomIn,
       zoomLevel,
       zoomOut,
-    } = useCanvasViewport({ svgRef, width, height });
+    } = useCanvasViewport({
+      svgRef,
+      width,
+      height,
+      interactionLocked: viewportInteractionLocked,
+    });
 
     useEffect(() => {
       const refreshPalette = () => {
@@ -125,16 +145,23 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       });
     }, [generateId]);
 
-    const sceneMotionExecutor = useMemo(
-      () =>
-        createSvgMotionExecutor({
-          elements: elementsRef.current,
-          getSvg: () => svgRef.current,
-          getRenderer: primitiveRenderer,
-          getHighlightColor: () => paletteRef.current.error,
-          invalidate: () => forceRender((revision) => revision + 1),
-        }),
+    const sceneRendererContext = useMemo(
+      () => ({
+        elements: elementsRef.current,
+        getSvg: () => svgRef.current,
+        getRenderer: primitiveRenderer,
+        getHighlightColor: () => paletteRef.current.error,
+        invalidate: () => forceRender((revision) => revision + 1),
+      }),
       [primitiveRenderer]
+    );
+    const sceneReconciler = useMemo(
+      () => createSvgNodeReconciler(sceneRendererContext),
+      [sceneRendererContext],
+    );
+    const sceneMotionExecutor = useMemo(
+      () => createSvgMotionExecutor(sceneRendererContext),
+      [sceneRendererContext],
     );
 
     useEffect(
@@ -422,6 +449,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const emphasizeElement = sceneMotionExecutor.emphasize;
     const cancelMotion = useCallback(() => {
       sceneMotionExecutor.cancel();
+      cancelViewportAnimation();
       sequenceQueueRef.current.forEach((timeline) => timeline.kill());
       sequenceQueueRef.current.length = 0;
       isPlayingRef.current = false;
@@ -432,7 +460,15 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       if (!svg) return;
       const canvasTargets = [svg, ...Array.from(svg.querySelectorAll("*"))];
       gsap.getTweensOf(canvasTargets).forEach((animation) => animation.kill());
-    }, [sceneMotionExecutor]);
+    }, [cancelViewportAnimation, sceneMotionExecutor]);
+
+    const materializeScene = useCallback(
+      (scene: Parameters<SVGCanvasHandle["materializeScene"]>[0]) => {
+        cancelMotion();
+        sceneReconciler.reconcile(scene);
+      },
+      [cancelMotion, sceneReconciler],
+    );
 
     const clear = useCallback(() => {
       cancelMotion();
@@ -468,6 +504,12 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         createPausedSequence,
         renderFunctionPlot,
         playMotionPlan,
+        readViewport,
+        animateViewport,
+        materializeViewport,
+        resetViewport,
+        cancelViewportAnimation,
+        materializeScene,
         emphasizeElement,
         cancelMotion,
         clear,
@@ -479,16 +521,22 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       }),
       [
         animate,
+        animateViewport,
+        cancelViewportAnimation,
         cancelMotion,
         clear,
         createPausedSequence,
         createSequence,
         emphasizeElement,
+        materializeScene,
+        materializeViewport,
         panTo,
         playMotionPlan,
+        readViewport,
         render,
         renderFunctionPlot,
         renderLatex,
+        resetViewport,
         resetZoom,
         saveAsImage,
         zoomIn,
@@ -511,11 +559,19 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
             border: "1px solid hsl(var(--chalk-faint) / 0.5)",
             borderRadius: "8px",
             background: "hsl(var(--void))",
-            cursor: isPanning ? "grabbing" : "grab",
+            cursor: viewportInteractionLocked
+              ? "default"
+              : isPanning
+                ? "grabbing"
+                : "grab",
             touchAction: "none",
           }}
         />
-        <div className="mt-2 flex items-center justify-end gap-1 opacity-100 transition-opacity sm:absolute sm:top-3 sm:right-3 sm:mt-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+        <div
+          className={`mt-2 items-center justify-end gap-1 opacity-100 transition-opacity sm:absolute sm:top-3 sm:right-3 sm:mt-0 sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100 ${
+            viewportInteractionLocked ? "hidden" : "flex"
+          }`}
+        >
           <button
             onClick={zoomIn}
             className="p-1.5 rounded-md bg-void/80 hover:bg-slate text-chalk-soft hover:text-chalk transition-all text-xs font-mono"

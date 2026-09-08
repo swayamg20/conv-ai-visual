@@ -511,4 +511,117 @@ describe("SVGCanvas", () => {
     document.documentElement.style.removeProperty("--test-highlight");
     await act(async () => root.unmount());
   });
+
+  it("owns exact viewport materialization, cancellation, and reset", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(<SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />);
+    });
+
+    const establishingPose = Object.freeze({
+      v: 1 as const,
+      x: 40,
+      y: 75,
+      width: 720,
+      height: 405,
+    });
+    act(() => canvas.current?.materializeViewport(establishingPose));
+    expect(host.querySelector("svg")?.getAttribute("viewBox")).toBe(
+      "40 75 720 405",
+    );
+    expect(canvas.current?.readViewport()).toEqual(establishingPose);
+    expect(Object.isFrozen(canvas.current?.readViewport())).toBe(true);
+
+    const destination = Object.freeze({
+      v: 1 as const,
+      x: 340,
+      y: 340,
+      width: 220,
+      height: 150,
+    });
+    const playback = canvas.current?.animateViewport(destination, {
+      durationMs: 10_000,
+      easing: "linear",
+    });
+    const cancelled = playback?.cancel();
+    expect(cancelled?.status).toBe("cancelled");
+    expect(cancelled?.pose).toEqual(canvas.current?.readViewport());
+    expect(cancelled?.pose).not.toEqual(destination);
+    await expect(playback?.finished).resolves.toEqual(cancelled);
+
+    act(() => canvas.current?.resetViewport(destination));
+    expect(canvas.current?.readViewport()).toEqual(destination);
+    act(() => canvas.current?.resetViewport());
+    expect(canvas.current?.readViewport()).toEqual({
+      v: 1,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
+    expect(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 700,
+        y: 0,
+        width: 101,
+        height: 100,
+      }),
+    ).toThrow("inside the logical canvas");
+
+    await act(async () => root.unmount());
+  });
+
+  it("locks manual camera controls without blocking certified poses", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas
+          ref={canvas}
+          width={800}
+          height={600}
+          showGrid={false}
+          viewportInteractionLocked
+        />,
+      );
+    });
+
+    act(() => {
+      canvas.current?.zoomIn();
+      canvas.current?.zoomOut();
+      canvas.current?.panTo(400, 300);
+    });
+    expect(canvas.current?.readViewport()).toEqual({
+      v: 1,
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
+    expect(
+      host
+        .querySelector("[title='Zoom in']")
+        ?.parentElement?.classList.contains("hidden"),
+    ).toBe(true);
+
+    const certifiedPose = Object.freeze({
+      v: 1 as const,
+      x: 120,
+      y: 90,
+      width: 560,
+      height: 420,
+    });
+    act(() => canvas.current?.materializeViewport(certifiedPose));
+    expect(canvas.current?.readViewport()).toEqual(certifiedPose);
+
+    await act(async () => root.unmount());
+  });
 });

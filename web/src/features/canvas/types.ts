@@ -1,6 +1,10 @@
 import type { gsap } from "gsap";
 
-import type { MotionPlan } from "@/lib/live-scene";
+import type { MotionPlan, SceneState } from "@/lib/live-scene";
+import type {
+  ChoreographyEasing,
+  ViewportPoseV1,
+} from "@/lib/live-scene/choreography";
 
 export type MotionPlaybackStatus = "completed" | "cancelled" | "failed";
 
@@ -23,6 +27,26 @@ export interface MotionPlayback {
 export interface MotionPlaybackOptions {
   /** Delay between starting adjacent plan steps. */
   staggerMs?: number;
+}
+
+export type ViewportPlaybackStatus = "completed" | "cancelled" | "failed";
+
+export interface ViewportPlaybackOutcome {
+  readonly status: ViewportPlaybackStatus;
+  /** Exact pose materialized when playback settled. */
+  readonly pose: ViewportPoseV1;
+  readonly error?: string;
+}
+
+export interface ViewportPlayback {
+  readonly finished: Promise<ViewportPlaybackOutcome>;
+  /** Stop at the currently rendered pose without substituting the destination. */
+  cancel(): ViewportPlaybackOutcome;
+}
+
+export interface ViewportPlaybackOptions {
+  readonly durationMs: number;
+  readonly easing: ChoreographyEasing;
 }
 
 export interface CanvasOperation {
@@ -145,6 +169,21 @@ export interface SVGCanvasHandle {
   createPausedSequence(sequence: TeachingSequence): gsap.core.Timeline;
   renderFunctionPlot(plot: FunctionPlotData): void;
   playMotionPlan(plan: MotionPlan, options?: MotionPlaybackOptions): MotionPlayback;
+  /** Return the exact viewBox currently rendered, including during a tween. */
+  readViewport(): ViewportPoseV1;
+  /** Animate only through the closed choreography camera vocabulary. */
+  animateViewport(
+    pose: ViewportPoseV1,
+    options: ViewportPlaybackOptions,
+  ): ViewportPlayback;
+  /** Kill camera motion and atomically apply an exact certified pose. */
+  materializeViewport(pose: ViewportPoseV1): void;
+  /** Reset to a supplied certified pose or the complete logical board. */
+  resetViewport(pose?: ViewportPoseV1): void;
+  /** Stop camera motion at its actually rendered pose. */
+  cancelViewportAnimation(): ViewportPlaybackOutcome | null;
+  /** Atomically reconcile the retained SVG to one canonical scene snapshot. */
+  materializeScene(scene: SceneState): void;
   emphasizeElement(id: string, color?: string): void;
   /** Stop queued work and settle each active motion to its canonical terminal state. */
   cancelMotion(): void;
@@ -161,6 +200,8 @@ export interface SVGCanvasProps {
   height?: number;
   className?: string;
   showGrid?: boolean;
+  /** Disable manual pan and zoom for a certified choreography session. */
+  viewportInteractionLocked?: boolean;
 }
 
 export interface CanvasPalette {
