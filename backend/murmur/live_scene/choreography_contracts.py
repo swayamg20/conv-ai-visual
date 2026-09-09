@@ -135,6 +135,13 @@ class RoutedChoreographyBeatV3(LiveSceneContract):
     problem_spec: CompletingSquareProblemSpecV1 = Field(alias="problemSpec")
     route: RoutedChoreographyRouteV2
 
+    @field_validator("v", mode="before")
+    @classmethod
+    def validate_strict_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("v must be a strict integer")
+        return value
+
 
 class _TargetCueV1(LiveSceneContract):
     """Shared canonical target-list validation for closed cue variants."""

@@ -157,6 +157,15 @@ def test_parametric_routed_beat_adds_only_the_bound_problem_spec() -> None:
     assert "presentation" not in RoutedChoreographyBeatV3.model_fields
 
 
+@pytest.mark.parametrize("version", [True, 3.0, "3"])
+def test_parametric_routed_beat_requires_a_strict_integer_version(version: object) -> None:
+    payload = _parametric_beat()
+    payload["v"] = version
+
+    with pytest.raises(ValidationError, match="strict integer"):
+        ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(payload)
+
+
 @pytest.mark.parametrize("stage", list(CompletingSquareStage))
 def test_parametric_routed_beat_reuses_only_the_closed_v2_routes(
     stage: CompletingSquareStage,

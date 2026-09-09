@@ -103,6 +103,13 @@ class CheckpointVerificationReceiptV3(LiveSceneContract):
     ] = Field(alias="obligationCodes")
     verified: Literal[True] = True
 
+    @field_validator("verified", mode="before")
+    @classmethod
+    def validate_strict_verified(cls, value: object) -> object:
+        if type(value) is not bool:
+            raise ValueError("verified must be a strict boolean")
+        return value
+
     @model_validator(mode="after")
     def validate_unique_values(self) -> Self:
         if len(self.operation_targets) != len(set(self.operation_targets)):

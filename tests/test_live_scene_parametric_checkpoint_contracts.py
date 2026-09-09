@@ -419,6 +419,10 @@ def test_v3_receipt_preserves_closed_ordered_claim_budgets() -> None:
         == MAX_PATCH_OPERATIONS
     )
 
+    for non_boolean in (1, 1.0, "true"):
+        with pytest.raises(ValidationError, match="strict boolean"):
+            CheckpointVerificationReceiptV3.model_validate({**payload, "verified": non_boolean})
+
 
 def test_v3_models_reject_noncanonical_versions_unknown_fields_and_bad_digest() -> None:
     payload = _compiled_payload()
@@ -436,6 +440,14 @@ def test_v3_models_reject_noncanonical_versions_unknown_fields_and_bad_digest() 
         assert isinstance(target, dict)
         target["provider"] = "forbidden"
         with pytest.raises(ValidationError, match="Extra inputs"):
+            CompiledCheckpointV3.model_validate(changed)
+
+    for version in (True, 3.0, "3"):
+        changed = deepcopy(payload)
+        beat = changed["beat"]
+        assert isinstance(beat, dict)
+        beat["v"] = version
+        with pytest.raises(ValidationError, match="strict integer"):
             CompiledCheckpointV3.model_validate(changed)
 
     for version in (True, 3.0, "3"):
