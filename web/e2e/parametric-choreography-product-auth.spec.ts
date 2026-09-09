@@ -36,43 +36,15 @@ function firebaseUser(expirationTime: number): object {
 }
 
 async function seedFirebaseBrowserPersistence(page: Page): Promise<void> {
-  await page.goto("/login");
   const expirationTime = Date.now() + 24 * 60 * 60 * 1_000;
   const user = firebaseUser(expirationTime);
-  const seeded = await page.evaluate(
-    async ({ key, value }) => {
+
+  await page.addInitScript(
+    ({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
-      const database = await new Promise<IDBDatabase>((resolve, reject) => {
-        const request = indexedDB.open("firebaseLocalStorageDb", 1);
-        request.onupgradeneeded = () => {
-          if (!request.result.objectStoreNames.contains("firebaseLocalStorage")) {
-            request.result.createObjectStore("firebaseLocalStorage", {
-              keyPath: "fbase_key",
-            });
-          }
-        };
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => resolve(request.result);
-      });
-      await new Promise<void>((resolve, reject) => {
-        const transaction = database.transaction(
-          "firebaseLocalStorage",
-          "readwrite",
-        );
-        transaction.objectStore("firebaseLocalStorage").put({
-          fbase_key: key,
-          value,
-        });
-        transaction.onabort = () => reject(transaction.error);
-        transaction.onerror = () => reject(transaction.error);
-        transaction.oncomplete = () => resolve();
-      });
-      database.close();
-      return localStorage.getItem(key);
     },
     { key: FIREBASE_AUTH_KEY, value: user },
   );
-  expect(JSON.parse(seeded ?? "null")).toEqual(user);
 }
 
 function declinedSse(): string {
