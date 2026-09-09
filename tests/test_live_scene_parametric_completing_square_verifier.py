@@ -592,6 +592,12 @@ def test_visual_contract_rejects_invisible_unmeasured_or_noncanonical_nodes(
             "eq_completed_rhs",
             81.0,
         ),
+        (
+            _problem(1, 2),
+            CompletingSquareCheckpointId.BALANCE_AND_COMPLETE,
+            "eq_completed_rhs",
+            68.0,
+        ),
         (_problem(4, 6), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_lhs", 55.0),
         (_problem(4, 6), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_negative", 55.0),
         (_problem(1, 2), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_negative", 42.0),
@@ -599,7 +605,8 @@ def test_visual_contract_rejects_invisible_unmeasured_or_noncanonical_nodes(
     ],
     ids=[
         "factor",
-        "completed-identity",
+        "two-digit-completed-identity",
+        "one-digit-completed-identity",
         "root-lhs",
         "two-digit-negative-root",
         "one-digit-negative-root",
@@ -638,6 +645,36 @@ def test_visual_contract_rejects_the_old_cropping_equation_height() -> None:
 
     with pytest.raises(ParametricCompletingSquareVerificationError, match="height is too small"):
         _verify(problem, checkpoint, patch=patch, result_scene=result)
+
+
+@pytest.mark.parametrize("problem", PROBLEMS, ids=_problem_id)
+@pytest.mark.parametrize("checkpoint_id", tuple(CompletingSquareCheckpointId))
+def test_every_emitted_token_rejects_canonical_width_minus_one(
+    problem: CompletingSquareProblemSpecV1,
+    checkpoint_id: CompletingSquareCheckpointId,
+) -> None:
+    checkpoint = _blueprint(problem, checkpoint_id)
+    canonical_scene = SceneState(revision=21, nodes=checkpoint.result_nodes)
+    verify_parametric_completing_square_frontier(checkpoint.result_component, canonical_scene)
+
+    for target in checkpoint.result_nodes:
+        if not isinstance(target, LatexTokenSceneNode):
+            continue
+        narrowed = target.model_copy(update={"width": target.width - 1.0})
+        mutated_scene = SceneState(
+            revision=21,
+            nodes=tuple(
+                narrowed if node.id == target.id else node for node in checkpoint.result_nodes
+            ),
+        )
+        with pytest.raises(
+            ParametricCompletingSquareVerificationError,
+            match=rf"{target.id.removeprefix('lesson__')} token width is too small",
+        ):
+            verify_parametric_completing_square_frontier(
+                checkpoint.result_component,
+                mutated_scene,
+            )
 
 
 def test_rectangle_paths_must_follow_perimeter_instead_of_bow_tie_order() -> None:

@@ -8,7 +8,6 @@ mathematical value directly from the problem's primitive ``b`` and ``c``.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from math import isclose, isfinite, isqrt
@@ -505,34 +504,60 @@ def _token(node: SceneNode, *, suffix: str, latex: str) -> LatexTokenSceneNode:
     return node
 
 
-def _visible_glyph_count(latex: str) -> int:
-    visible = re.sub(r"\\text\{([^{}]*)\}", r"\1", latex)
-    visible = visible.replace(r"\times", "x").replace(r"\div", "/").replace(r"\pm", "+")
-    visible = visible.replace("^", "").replace("{", "").replace("}", "")
-    visible = visible.replace("\\", "").replace(" ", "")
-    return max(1, len(visible))
+_FIXED_TOKEN_MINIMUM_WIDTHS: Mapping[str, float] = {
+    "area_half_a": 50.0,
+    "area_half_b": 50.0,
+    "area_x2": 62.0,
+    "corner_area": 48.0,
+    "corner_calc": 190.0,
+    "corner_dim_h": 28.0,
+    "corner_dim_v": 28.0,
+    "dimension_x_left": 28.0,
+    "dimension_x_top": 28.0,
+    "eq_completed_rhs": 128.0,
+    "eq_equal_completed": 29.0,
+    "eq_equal_main": 29.0,
+    "eq_factor": 136.0,
+    "eq_plus_a": 29.0,
+    "eq_plus_b": 29.0,
+    "eq_plus_corner": 29.0,
+    "eq_plus_rhs": 29.0,
+    "eq_square": 42.0,
+    "half_calc": 130.0,
+    "root_equal": 29.0,
+    "root_equal_a": 29.0,
+    "root_equal_b": 29.0,
+    "root_lhs": 92.0,
+    "root_or": 44.0,
+    "root_pm": 60.0,
+    "root_positive": 30.0,
+    "root_x_a": 29.0,
+    "root_x_b": 29.0,
+    "scale_note": 132.0,
+}
+_COEFFICIENT_TOKEN_SUFFIXES = frozenset({"eq_half_a", "eq_half_b", "eq_linear"})
+_DIGIT_TOKEN_SUFFIXES = frozenset({"eq_corner_value", "eq_rhs", "eq_rhs_corner"})
 
 
 def _finite_token_minimum_width(suffix: str, latex: str) -> float:
-    """Independently enforce browser-safe floors for compound V3 tokens."""
+    """Independently enforce the closed browser-safe V3 token vocabulary."""
 
-    if suffix == "eq_factor":
-        return 136.0
-    if suffix == "eq_completed_rhs":
-        return 128.0
-    if suffix == "root_lhs":
-        return 92.0
-    if suffix == "root_pm":
-        return 60.0
-    if suffix == "root_positive":
-        return 30.0
+    fixed = _FIXED_TOKEN_MINIMUM_WIDTHS.get(suffix)
+    if fixed is not None:
+        return fixed
+    if suffix in _COEFFICIENT_TOKEN_SUFFIXES:
+        if latex == "x":
+            return 29.0
+        coefficient = latex.removesuffix("x")
+        if coefficient.isdigit():
+            return 68.0 if len(coefficient) == 2 else 42.0
+    if suffix in _DIGIT_TOKEN_SUFFIXES and latex.isdigit():
+        return 48.0 if len(latex) == 2 else 30.0
     if suffix == "root_negative":
         return 76.0 if len(latex) == 3 else 56.0
-    if suffix == "root_or":
-        return 44.0
-    if suffix == "eq_linear" and len(latex.removesuffix("x")) == 2:
-        return 68.0
-    return 20.0
+    raise ParametricCompletingSquareVerificationError(
+        f"{suffix} is outside the independently measured token-width vocabulary"
+    )
 
 
 def _expected_token_style(
@@ -566,12 +591,7 @@ def _verify_token_visual_contract(
     if actual_style != _expected_token_style(checkpoint_id, suffix):
         _fail(f"{suffix} does not use its canonical visible token style")
 
-    glyph_count = _visible_glyph_count(node.latex)
-    minimum_width = max(
-        20.0,
-        node.style.font_size * (0.28 * glyph_count + 0.45),
-        _finite_token_minimum_width(suffix, node.latex),
-    )
+    minimum_width = _finite_token_minimum_width(suffix, node.latex)
     if node.width < minimum_width - _EPSILON:
         _fail(f"{suffix} token width is too small for its visible mathematical fact")
     if node.width > 240.0 + _EPSILON:

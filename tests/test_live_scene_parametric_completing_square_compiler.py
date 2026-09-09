@@ -408,9 +408,12 @@ def test_every_problem_uses_browser_safe_compound_token_widths() -> None:
         factor_nodes = _node_map(checkpoints[6].result_nodes)
         root_nodes = _node_map(checkpoints[7].result_nodes)
 
-        assert completed_nodes["lesson__eq_completed_rhs"].width == 128.0 > 81.0
+        completed_identity = completed_nodes["lesson__eq_completed_rhs"]
+        assert isinstance(completed_identity, LatexTokenSceneNode)
+        old_completed_width = 68.0 if len(completed_identity.latex) == 5 else 81.0
+        assert completed_identity.width == 128.0 > old_completed_width
         assert factor_nodes["lesson__eq_factor"].width == 136.0 > 94.0
-        assert factor_nodes["lesson__eq_completed_rhs"].width == 128.0 > 81.0
+        assert factor_nodes["lesson__eq_completed_rhs"].width == 128.0 > old_completed_width
         assert root_nodes["lesson__root_lhs"].width == 92.0 > 55.0
         assert root_nodes["lesson__root_pm"].width == 60.0
         assert root_nodes["lesson__root_positive"].width == 30.0
