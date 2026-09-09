@@ -90,6 +90,7 @@ export default defineConfig({
     colorScheme: "dark",
     locale: "en-US",
     timezoneId: "UTC",
+    serviceWorkers: "block",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: suite === "capture" ? "on" : "off",
