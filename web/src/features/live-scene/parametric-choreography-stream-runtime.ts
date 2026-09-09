@@ -905,17 +905,52 @@ export class ParametricChoreographyStreamRuntime {
 
   private failProtocol(token: RuntimeToken, detail: string): void {
     if (this.currentToken !== token) return;
-    this.streamControl?.controller.abort();
-    if (this.streamControl) this.streamControl.terminal = "failed";
+    this.clearInterruptionDeadline();
+    const control = this.streamControl;
+    const active = this.active;
+    control?.controller.abort();
+    if (active) this.player.close(active);
+
+    // A protocol or transport failure invalidates the complete provisional
+    // suffix.  Detach its token before cancellation can settle so no late
+    // playback callback can promote an in-flight checkpoint.
+    this.currentToken = null;
+    this.streamControl = null;
+    this.active = null;
     this.queue = [];
-    this.provisional = this.active?.prepared.target ?? this.committed;
+    this.sequence = 0;
+    this.patchIds = new Set();
+    this.interruptPending = false;
+    this.replayRecovery = null;
+    this.provisional = this.committed;
+
+    let cancellationFailure: string | undefined;
+    try {
+      this.player.cancel(active?.playback);
+    } catch (error) {
+      cancellationFailure = message(error);
+    }
+    const restorationFailure = this.restoreRenderer(this.committed);
+    this.rendererTrusted = restorationFailure === undefined;
+    this.visibleCaption = this.committedCaption;
+    this.visibleCheckpointId =
+      this.accepted.at(-1)?.event.semantic.checkpointId;
+    this.phase = "failed";
     this.runtimeFailure = Object.freeze({
       code: "invalid_stream_event",
-      message: "The stream stopped. The last settled checkpoint is safe.",
-      retryable: true,
+      message: restorationFailure
+        ? "The stream stopped and the last settled checkpoint could not be restored. Reset it."
+        : "The stream stopped. The last settled checkpoint was restored.",
+      retryable: restorationFailure === undefined,
     });
-    console.warn("[LiveScene] Rejected parametric event:", detail);
-    this.settleTerminal();
+    this.narration = this.runtimeFailure.message;
+    console.warn(
+      "[LiveScene] Rejected parametric event:",
+      [detail, cancellationFailure, restorationFailure]
+        .filter((part): part is string => Boolean(part))
+        .join("; "),
+    );
+    this.publish();
   }
 
   private failPlayback(token: RuntimeToken, detail: string): void {

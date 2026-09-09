@@ -23,6 +23,7 @@ import {
   ParametricChoreographyStreamRuntime,
   type ParametricChoreographyCommand,
   type ParametricChoreographyRenderer,
+  type ParametricChoreographyRuntimeSnapshot,
 } from "./parametric-choreography-stream-runtime";
 import {
   createParametricAdaptiveCheckpointFixture,
@@ -175,6 +176,31 @@ function completed(
     totalMs: 24,
     repaired,
   });
+}
+
+function expectCommittedFrontierUnchanged(
+  after: ParametricChoreographyRuntimeSnapshot,
+  before: ParametricChoreographyRuntimeSnapshot,
+): void {
+  expect(after.committedScene).toEqual(before.committedScene);
+  expect(after.provisionalScene).toEqual(before.committedScene);
+  expect(after.committedSemanticScene).toEqual(before.committedSemanticScene);
+  expect(after.provisionalSemanticScene).toEqual(
+    before.committedSemanticScene,
+  );
+  expect(after.committedViewport).toEqual(before.committedViewport);
+  expect(after.provisionalViewport).toEqual(before.committedViewport);
+  expect(after.committedSemanticScene.certificateHeadSha256).toBe(
+    before.committedSemanticScene.certificateHeadSha256,
+  );
+  expect(after.accepted).toEqual(before.accepted);
+  expect(after.accepted.at(-1)?.event.patch.narration).toBe(
+    before.accepted.at(-1)?.event.patch.narration,
+  );
+  expect(after.visibleCheckpointId).toBe(before.visibleCheckpointId);
+  expect(after.sequence).toBe(0);
+  expect(after.queuedCheckpointCount).toBe(0);
+  expect(after.activeRevision).toBeUndefined();
 }
 
 async function acceptPrefix(
@@ -367,13 +393,16 @@ describe("ParametricChoreographyStreamRuntime", () => {
     const duplicateRun = await start(duplicate.runtime, duplicate.runner);
     const checkpoint = createParametricCheckpointFixture(0);
     emit(duplicateRun, started(1, 0), checkpoint, checkpoint);
-    settle(duplicate.renderer.rendered[0]);
+    const active = duplicate.renderer.rendered[0];
+    expect(active.playback.cancel).toHaveBeenCalledOnce();
+    settle(active);
     await flush();
     expect(duplicate.runtime.getSnapshot()).toMatchObject({
       phase: "failed",
-      sequence: 1,
-      committedScene: { revision: 1 },
-      accepted: [{ scene: { revision: 1 } }],
+      sequence: 0,
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+      accepted: [],
     });
   });
 
@@ -390,6 +419,13 @@ describe("ParametricChoreographyStreamRuntime", () => {
     (forged.patch as { patchId: string }).patchId = first.patch.patchId;
     emit(duplicateRun, started(1, 0), first, forged);
     expect(duplicateRun.invocation.signal.aborted).toBe(true);
+    expect(duplicate.renderer.rendered[0].playback.cancel).toHaveBeenCalledOnce();
+    expect(duplicate.runtime.getSnapshot()).toMatchObject({
+      phase: "failed",
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+      accepted: [],
+    });
 
     const limited = createRuntime({ queueLimit: 1 });
     const limitedRun = await start(limited.runtime, limited.runner);
@@ -401,9 +437,13 @@ describe("ParametricChoreographyStreamRuntime", () => {
       createParametricCheckpointFixture(2),
     );
     expect(limitedRun.invocation.signal.aborted).toBe(true);
+    expect(limited.renderer.rendered[0].playback.cancel).toHaveBeenCalledOnce();
     expect(limited.runtime.getSnapshot()).toMatchObject({
-      phase: "completing",
+      phase: "failed",
       queuedCheckpointCount: 0,
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+      accepted: [],
       error: { code: "invalid_stream_event" },
     });
   });
@@ -610,6 +650,38 @@ describe("ParametricChoreographyStreamRuntime", () => {
     });
   });
 
+  it("rolls back active provisional work when the transport fails", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    await acceptPrefix(runtime, renderer, runner, 1);
+    const before = runtime.getSnapshot();
+    const run = await start(runtime, runner);
+    emit(run, started(2, 1), createParametricCheckpointFixture(1, 2, 1));
+    const active = renderer.rendered[1];
+
+    run.completion.reject(new Error("connection ended mid-checkpoint"));
+    await flush();
+
+    const failed = runtime.getSnapshot();
+    expect(run.invocation.signal.aborted).toBe(true);
+    expect(active.playback.cancel).toHaveBeenCalledOnce();
+    expect(failed).toMatchObject({
+      phase: "failed",
+      rendererTrusted: true,
+      error: { code: "invalid_stream_event", retryable: true },
+    });
+    expectCommittedFrontierUnchanged(failed, before);
+    expect(renderer.materializeScene).toHaveBeenLastCalledWith(
+      before.committedScene,
+    );
+    expect(renderer.materializeViewport).toHaveBeenLastCalledWith(
+      before.committedViewport,
+    );
+
+    settle(active);
+    await flush();
+    expectCommittedFrontierUnchanged(runtime.getSnapshot(), before);
+  });
+
   it("restores the last accepted renderer frontier after playback failure", async () => {
     const { runtime, renderer, runner } = createRuntime();
     await acceptPrefix(runtime, renderer, runner, 1);
@@ -729,35 +801,45 @@ describe("ParametricChoreographyStreamRuntime", () => {
     expect(runtime.getSnapshot().accepted).toHaveLength(2);
   });
 
-  it("rejects a failed terminal after a checkpoint and settles only the visible active one", async () => {
+  it("rejects a failed terminal after a checkpoint without committing active work", async () => {
     const { runtime, renderer, runner } = createRuntime();
+    await acceptPrefix(runtime, renderer, runner, 1);
+    const before = runtime.getSnapshot();
     const run = await start(runtime, runner);
-    emit(run, started(1, 0), createParametricCheckpointFixture(0));
+    emit(run, started(2, 1), createParametricCheckpointFixture(1, 2, 1));
+    const active = renderer.rendered[1];
     emit(
       run,
       decodeParametricChoreographySceneStreamEventV3({
         type: "parametric_choreography_scene_stream_failed",
-        generation: 1,
+        generation: 2,
         attempt: 1,
         code: "choreography_integrity_error",
         message: "Invalid suffix.",
-        lastAcceptedRevision: 1,
+        lastAcceptedRevision: 2,
         retryable: false,
       }),
     );
 
     expect(run.invocation.signal.aborted).toBe(true);
-    expect(runtime.getSnapshot().phase).toBe("completing");
-    settle(renderer.rendered[0]);
-    await flush();
-
-    expect(runtime.getSnapshot()).toMatchObject({
+    expect(active.playback.cancel).toHaveBeenCalledOnce();
+    const failed = runtime.getSnapshot();
+    expect(failed).toMatchObject({
       phase: "failed",
-      committedScene: { revision: 1 },
-      provisionalScene: { revision: 1 },
-      accepted: [{ scene: { revision: 1 } }],
+      rendererTrusted: true,
       error: { code: "invalid_stream_event", retryable: true },
     });
+    expectCommittedFrontierUnchanged(failed, before);
+    expect(renderer.materializeScene).toHaveBeenLastCalledWith(
+      before.committedScene,
+    );
+    expect(renderer.materializeViewport).toHaveBeenLastCalledWith(
+      before.committedViewport,
+    );
+
+    settle(active);
+    await flush();
+    expectCommittedFrontierUnchanged(runtime.getSnapshot(), before);
   });
 
   it("locks compact viewport selection across the accepted frontier", async () => {
