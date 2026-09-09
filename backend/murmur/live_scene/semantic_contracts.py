@@ -16,7 +16,10 @@ from typing import Annotated, Literal, Self, TypeAlias
 from pydantic import Field, StringConstraints, TypeAdapter, model_validator
 
 from murmur.live_scene.choreography_contracts import CompletingSquareStage
-from murmur.live_scene.completing_square_contracts import CompletingSquareState
+from murmur.live_scene.completing_square_contracts import (
+    CompletingSquareState,
+    ParametricCompletingSquareStateV1,
+)
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
     MAX_ACCEPTED_PATCHES,
@@ -263,7 +266,7 @@ class PythagoreanAreaIdentityState(LiveSceneContract):
 
 
 SemanticComponentState: TypeAlias = Annotated[
-    PythagoreanAreaIdentityState | CompletingSquareState,
+    PythagoreanAreaIdentityState | CompletingSquareState | ParametricCompletingSquareStateV1,
     Field(discriminator="kind"),
 ]
 

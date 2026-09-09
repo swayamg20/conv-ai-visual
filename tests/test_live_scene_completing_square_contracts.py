@@ -8,6 +8,7 @@ from murmur.live_scene.completing_square_contracts import (
     CompletingSquareCheckpointId,
     CompletingSquareMainCheckpoint,
     CompletingSquareState,
+    ParametricCompletingSquareStateV1,
     checkpoint_prefix,
     checkpoints_through,
     introduction_stage_for,
@@ -38,6 +39,37 @@ def _state(
         "lastMainCheckpoint": last_checkpoint,
         "cornerClarified": corner_clarified,
     }
+
+
+def _problem(*, half_coefficient: int = 4, square_root_magnitude: int = 6) -> dict[str, int]:
+    return {
+        "v": 1,
+        "linearCoefficient": 2 * half_coefficient,
+        "rightHandSide": square_root_magnitude**2 - half_coefficient**2,
+    }
+
+
+def _parametric_state(
+    last_checkpoint: CompletingSquareMainCheckpoint | str | None = None,
+    *,
+    corner_clarified: bool = False,
+    problem: dict[str, int] | None = None,
+) -> dict[str, object]:
+    return {
+        "kind": "completing_square_parametric",
+        "id": "parametric-lesson",
+        "problemSpec": _problem() if problem is None else problem,
+        "lastMainCheckpoint": last_checkpoint,
+        "cornerClarified": corner_clarified,
+    }
+
+
+def _all_supported_problems() -> tuple[dict[str, int], ...]:
+    return tuple(
+        _problem(half_coefficient=half_coefficient, square_root_magnitude=square_root_magnitude)
+        for half_coefficient in range(1, 9)
+        for square_root_magnitude in range(half_coefficient + 1, 10)
+    )
 
 
 def test_main_checkpoint_order_and_full_identity_are_closed_and_exact() -> None:
@@ -153,6 +185,56 @@ def test_every_unclarified_main_frontier_is_a_valid_immutable_state(
         state.corner_clarified = True
 
 
+@pytest.mark.parametrize("problem", _all_supported_problems())
+@pytest.mark.parametrize(
+    ("last_checkpoint", "corner_clarified"),
+    [
+        (None, False),
+        *((checkpoint, False) for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER),
+        *(
+            (checkpoint, True)
+            for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER[
+                COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER.index(
+                    CompletingSquareMainCheckpoint.MISSING_CORNER
+                ) :
+            ]
+        ),
+    ],
+)
+def test_parametric_state_accepts_every_problem_and_valid_frontier(
+    problem: dict[str, int],
+    last_checkpoint: CompletingSquareMainCheckpoint | None,
+    corner_clarified: bool,
+) -> None:
+    payload = _parametric_state(
+        last_checkpoint,
+        corner_clarified=corner_clarified,
+        problem=problem,
+    )
+
+    state = ParametricCompletingSquareStateV1.model_validate(payload)
+
+    assert state.model_dump(mode="json", by_alias=True) == payload
+    assert state.last_main_checkpoint is last_checkpoint
+    assert state.corner_clarified is corner_clarified
+    assert set(ParametricCompletingSquareStateV1.model_fields) == {
+        "kind",
+        "id",
+        "problem_spec",
+        "last_main_checkpoint",
+        "corner_clarified",
+    }
+
+
+def test_parametric_state_and_nested_problem_are_immutable() -> None:
+    state = ParametricCompletingSquareStateV1.model_validate(_parametric_state())
+
+    with pytest.raises(ValidationError, match="frozen"):
+        state.corner_clarified = True
+    with pytest.raises(ValidationError, match="frozen"):
+        state.problem_spec.linear_coefficient = 6
+
+
 @pytest.mark.parametrize(
     "last_checkpoint",
     COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER[
@@ -186,6 +268,11 @@ def test_clarification_before_missing_corner_is_not_a_valid_state(
 ) -> None:
     with pytest.raises(ValidationError, match="at or after missing_corner"):
         CompletingSquareState.model_validate(_state(last_checkpoint, corner_clarified=True))
+
+    with pytest.raises(ValidationError, match="at or after missing_corner"):
+        ParametricCompletingSquareStateV1.model_validate(
+            _parametric_state(last_checkpoint, corner_clarified=True)
+        )
 
 
 def test_state_validity_does_not_encode_service_only_transition_history() -> None:
@@ -232,3 +319,55 @@ def test_state_rejects_extra_or_missing_exact_keys() -> None:
     del missing["id"]
     with pytest.raises(ValidationError, match="Field required"):
         CompletingSquareState.model_validate(missing)
+
+
+def test_legacy_state_wire_is_exact_and_cannot_smuggle_a_problem_spec() -> None:
+    payload = _state(CompletingSquareMainCheckpoint.MISSING_CORNER, corner_clarified=True)
+    state = CompletingSquareState.model_validate(payload)
+
+    assert state.model_dump(mode="json", by_alias=True) == payload
+    assert set(CompletingSquareState.model_fields) == {
+        "kind",
+        "id",
+        "last_main_checkpoint",
+        "corner_clarified",
+    }
+
+    payload["problemSpec"] = _problem()
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        CompletingSquareState.model_validate(payload)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("kind", "completing_square", "literal_error"),
+        ("id", "c" * 33, "at most 32 characters"),
+        ("lastMainCheckpoint", "corner_detail", "enum"),
+        ("cornerClarified", "true", "bool_type"),
+        ("problemSpec", None, "model_type"),
+    ],
+)
+def test_parametric_state_rejects_wrong_or_unbound_fields(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = _parametric_state()
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match=message):
+        ParametricCompletingSquareStateV1.model_validate(payload)
+
+
+def test_parametric_state_requires_exact_keys() -> None:
+    extra = _parametric_state()
+    extra["revision"] = 1
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ParametricCompletingSquareStateV1.model_validate(extra)
+
+    for field in ("id", "problemSpec"):
+        missing = _parametric_state()
+        del missing[field]
+        with pytest.raises(ValidationError, match="Field required"):
+            ParametricCompletingSquareStateV1.model_validate(missing)

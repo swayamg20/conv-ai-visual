@@ -18,6 +18,9 @@ from murmur.live_scene.choreography_contracts import (
     ChoreographyComponentId,
     CompletingSquareStage,
 )
+from murmur.live_scene.completing_square_problem_contracts import (
+    CompletingSquareProblemSpecV1,
+)
 from murmur.live_scene.contracts import LiveSceneContract
 
 
@@ -131,6 +134,27 @@ class CompletingSquareState(LiveSceneContract):
 
     kind: Literal["completing_square"] = "completing_square"
     id: ChoreographyComponentId
+    last_main_checkpoint: CompletingSquareMainCheckpoint | None = Field(
+        default=None,
+        alias="lastMainCheckpoint",
+    )
+    corner_clarified: bool = Field(default=False, strict=True, alias="cornerClarified")
+
+    @model_validator(mode="after")
+    def validate_clarification_frontier(self) -> Self:
+        if self.corner_clarified:
+            prefix = checkpoint_prefix(self.last_main_checkpoint)
+            if CompletingSquareMainCheckpoint.MISSING_CORNER not in prefix:
+                raise ValueError("cornerClarified requires a frontier at or after missing_corner")
+        return self
+
+
+class ParametricCompletingSquareStateV1(LiveSceneContract):
+    """Problem-bound semantic frontier for one parametric lesson component."""
+
+    kind: Literal["completing_square_parametric"] = "completing_square_parametric"
+    id: ChoreographyComponentId
+    problem_spec: CompletingSquareProblemSpecV1 = Field(alias="problemSpec")
     last_main_checkpoint: CompletingSquareMainCheckpoint | None = Field(
         default=None,
         alias="lastMainCheckpoint",
