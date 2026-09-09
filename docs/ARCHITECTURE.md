@@ -132,23 +132,25 @@ The canonical TypeScript contract lives in `web/src/features/canvas/types.ts`. C
 
 ### Verified live-scene flow
 
-The authenticated `/canvas/generate` surface uses a separate semantic live-scene path:
+The authenticated `/canvas/generate` surface uses the versioned choreography path:
 
 ```text
 browser + Firebase bearer
-  -> POST /api/live-scenes/semantic/stream
+  -> POST /api/live-scenes/choreography/stream
   -> trusted-user admission
-  -> start / continue / abstain routing
-  -> server-owned teaching beat
-  -> deterministic compile + verification
-  -> semantic SSE atom
-  -> browser presentation barrier
-  -> paired low-level + semantic frontier
+  -> V2 / V3 protocol discriminator
+  -> V3 problem binding
+  -> zero-provider Visual Reflex or model-routed Director
+  -> deterministic compile + independent verification
+  -> certificate chain + complete-suffix preflight
+  -> strict V3 checkpoint SSE decoder
+  -> browser post-paint barrier
+  -> paired low-level + semantic checkpoint frontier
 ```
 
-The first bounded turn builds the right triangle and its three side squares through the area identity. A later supported “why are those areas equal?” turn continues the same component into a server-owned altitude-projection dissection: the altitude partitions the `c²` square into regions independently verified to have areas `a²` and `b²`. The model chooses only the terminal semantic stage; it never authors geometry, labels, equations, styles, or patch operations.
+The product page supports a closed family of 36 monic completing-square equations. Reflex handles the primary teach, continue, and corner-clarification controls without a model call. Director may select only a closed action and stage; it never authors coefficients, derived mathematics, geometry, labels, narration, timing, viewport poses, node identifiers, or integrity evidence. The older Pythagorean semantic endpoint remains a compatibility surface, but it no longer powers `/canvas/generate`.
 
-The browser advances the frontier only after an atom is presented, so interruption and replay retain the exact visible prefix. Browser-observed presentation metrics begin at submit and settle only after the post-paint barrier; provider timing remains a separate server measurement. That frontier and those measurements are ephemeral and held in memory by the mounted browser runtime; they are not server-persisted proof across refreshes, devices, or sessions. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
+The browser advances the frontier only after a checkpoint is presented, so interruption and replay retain the exact visible prefix. Browser-observed presentation metrics begin at submit and settle only after the post-paint barrier; provider timing remains a separate server measurement. That frontier and those measurements are ephemeral and held in memory by the mounted browser runtime; they are not server-persisted proof across refreshes, devices, or sessions. Replay preflights and redraws accepted checkpoints without another network request. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
 
 ## Extension rules
 

@@ -42,13 +42,13 @@ FIREBASE_PROJECT_ID=your-firebase-project-id
 
 Use `OPENAI_API_KEY` with `LLM_PROVIDER=openai`, or `GEMINI_API_KEY` with `LLM_PROVIDER=gemini`.
 
-The authenticated verified visual lesson at `/canvas/generate` is deliberately default-off. To enable its current Pythagorean slice, set:
+The authenticated verified visual lesson at `/canvas/generate` is deliberately default-off. To enable the live equation studio, set:
 
 ```dotenv
 MURMUR_SCENE_ENABLED=true
 ```
 
-Scene authoring inherits `LLM_PROVIDER` and that provider's model and credentials by default. To select a separate supported provider or model, also set `MURMUR_SCENE_LLM_PROVIDER` and `MURMUR_SCENE_LLM_MODEL` with the matching server-side provider credentials. The current slice builds the Pythagorean area identity, then accepts a follow-up that extends the same board into a verified altitude-dissection proof. Keep the flag off when live scene-provider calls are not intended; unsupported lesson requests decline without changing the visible frontier.
+The primary completing-square controls use the deterministic Visual Reflex and support 36 bounded `x² + bx = c` equations without a provider dispatch. The optional Director inherits `LLM_PROVIDER` and that provider's model and credentials by default. To select a separate supported provider or model, set `MURMUR_SCENE_LLM_PROVIDER` and `MURMUR_SCENE_LLM_MODEL` with the matching server-side provider credentials. Enabling scene authoring still requires those credentials because the Director surface is available. Unsupported equations or teaching requests decline without changing the visible frontier.
 
 For voice, also set:
 
