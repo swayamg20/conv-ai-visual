@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "codex/gate15-*"
+      - "codex/gate16-*"
   pull_request:
   workflow_dispatch:
 
