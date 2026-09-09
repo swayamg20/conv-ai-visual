@@ -266,6 +266,12 @@ function ParametricLesson({
     lastMode === "reflex"
       ? "Visual Reflex · zero model routing"
       : "Director · model routed";
+  const retainedCaption = snapshot.accepted.at(-1)?.event.patch.narration;
+  const stageCaption =
+    (snapshot.phase === "declined" || snapshot.phase === "failed") &&
+    retainedCaption
+      ? retainedCaption
+      : snapshot.narration;
 
   return (
     <div className="min-h-screen overflow-x-hidden bg-background">
@@ -494,7 +500,7 @@ function ParametricLesson({
             settledMainCount={settledMainCount}
             cornerClarified={component?.cornerClarified ?? false}
             cornerClarificationLabel={cornerLabel}
-            caption={snapshot.narration}
+            caption={stageCaption}
             rendererTrusted={snapshot.rendererTrusted}
             reducedMotion={reducedMotion}
             playbackRate={playbackRate}

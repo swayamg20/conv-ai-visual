@@ -291,6 +291,66 @@ describe("LiveParametricChoreography", () => {
     await act(async () => mounted.root.unmount());
   });
 
+  it("keeps the last accepted teaching caption when a continuation is declined", async () => {
+    let invocationCount = 0;
+    const runStream: ParametricChoreographySceneStreamRunner = async (
+      invocation,
+    ) => {
+      invocationCount += 1;
+      if (invocationCount === 1) {
+        for (const event of createParametricLifecycleFixture(
+          5,
+          invocation.request.generation,
+        )) {
+          invocation.onEvent(event);
+        }
+        return;
+      }
+      invocation.onEvent(
+        decodeParametricChoreographySceneStreamEventV3({
+          type: "scene_stream_started",
+          generation: invocation.request.generation,
+          attempt: 1,
+          baseRevision: 5,
+        }),
+      );
+      invocation.onEvent(
+        decodeParametricChoreographySceneStreamEventV3({
+          type: "parametric_choreography_scene_stream_declined",
+          generation: invocation.request.generation,
+          attempt: 1,
+          finalRevision: 5,
+          reasonCode: "unsupported_intent",
+          message: "That question does not change the board.",
+        }),
+      );
+    };
+    const mounted = await mount({ runStream });
+
+    await act(async () => {
+      button(mounted.container, "Teach this equation").click();
+      await flushWork();
+    });
+    const acceptedCaption =
+      "The almost-square is missing one corner whose side lengths are both three.";
+    expect(stage(mounted.container).textContent).toContain(acceptedCaption);
+
+    await act(async () => {
+      button(mounted.container, "Why is the corner 9?").click();
+      await flushWork();
+    });
+
+    expect(stage(mounted.container).dataset.phase).toBe("declined");
+    expect(stage(mounted.container).textContent).toContain(acceptedCaption);
+    expect(stage(mounted.container).textContent).not.toContain(
+      "That question does not change the board.",
+    );
+    expect(mounted.container.textContent).toContain(
+      "That question does not change the board.",
+    );
+    await act(async () => mounted.root.unmount());
+  });
+
   it("refreshes product auth and fails before fetch when the user is signed out", async () => {
     const fetchImpl = vi
       .fn<typeof fetch>()
