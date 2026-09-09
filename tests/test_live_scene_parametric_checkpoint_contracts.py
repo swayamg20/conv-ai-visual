@@ -485,7 +485,12 @@ def test_v3_models_reject_noncanonical_versions_unknown_fields_and_bad_digest() 
         ("receipt_component", "receipt componentId"),
         ("receipt_problem", "receipt problemSpecSha256"),
         ("receipt_checkpoint", "receipt checkpointId"),
+        ("receipt_targets", "receipt operationTargets"),
         ("presentation_checkpoint", "presentation checkpointId"),
+        ("certificate_beat", "certificate beatId"),
+        ("certificate_component", "certificate componentId"),
+        ("certificate_checkpoint", "certificate checkpointId"),
+        ("certificate_presentation", "certificate presentationCheckpoint"),
         ("beat_hash", "routedBeatSha256"),
         ("certificate_problem", "certificate problemSpecSha256"),
         ("patch_hash", "patchSha256"),
@@ -533,8 +538,31 @@ def test_compiled_checkpoint_v3_rejects_mutated_bindings(
             CheckpointVerificationReceiptV3.model_validate(receipt)
         )
         _reissue(payload)
+    elif mutation == "receipt_targets":
+        receipt["operationTargets"] = ["lesson__other"]
+        body["receiptSha256"] = checkpoint_receipt_v3_sha256(
+            CheckpointVerificationReceiptV3.model_validate(receipt)
+        )
+        _reissue(payload)
     elif mutation == "presentation_checkpoint":
         presentation["checkpointId"] = "area_model"
+    elif mutation == "certificate_beat":
+        body["beatId"] = "other-beat"
+        _reissue(payload)
+    elif mutation == "certificate_component":
+        body["componentId"] = "other"
+        _reissue(payload)
+    elif mutation == "certificate_checkpoint":
+        body["checkpointId"] = "area_model"
+        body_presentation = body["presentationCheckpoint"]
+        assert isinstance(body_presentation, dict)
+        body_presentation["checkpointId"] = "area_model"
+        _reissue(payload)
+    elif mutation == "certificate_presentation":
+        body_presentation = body["presentationCheckpoint"]
+        assert isinstance(body_presentation, dict)
+        body_presentation["checkpointNarration"] = "Changed narration."
+        _reissue(payload)
     elif mutation == "beat_hash":
         body["routedBeatSha256"] = "0" * 64
         _reissue(payload)
@@ -553,6 +581,27 @@ def test_compiled_checkpoint_v3_rejects_mutated_bindings(
 
     with pytest.raises(ValidationError, match=message):
         CompiledCheckpointV3.model_validate(payload)
+
+
+def test_v3_certificate_body_requires_one_revision_and_matching_presentation() -> None:
+    payload = _compiled_payload()
+    certificate = payload["certificate"]
+    assert isinstance(certificate, dict)
+    body = certificate["body"]
+    assert isinstance(body, dict)
+
+    invalid_revision = deepcopy(body)
+    invalid_revision["baseRevision"] = 1
+    invalid_revision["resultRevision"] = 1
+    with pytest.raises(ValidationError, match="one greater"):
+        CheckpointCompilerCertificateBodyV3.model_validate(invalid_revision)
+
+    mismatched_presentation = deepcopy(body)
+    presentation = mismatched_presentation["presentationCheckpoint"]
+    assert isinstance(presentation, dict)
+    presentation["checkpointId"] = "area_model"
+    with pytest.raises(ValidationError, match="presentation checkpointId"):
+        CheckpointCompilerCertificateBodyV3.model_validate(mismatched_presentation)
 
 
 def test_v3_rejects_a_reissued_receipt_transplanted_from_another_problem() -> None:
