@@ -120,8 +120,8 @@ _RESULT_VIEWPORTS = {
     CompletingSquareCheckpointId.SPLIT_LINEAR_TERM: _INITIAL_VIEWPORTS,
     CompletingSquareCheckpointId.REARRANGE_HALVES: _INITIAL_VIEWPORTS,
     CompletingSquareCheckpointId.MISSING_CORNER: (
-        (360.0, 370.0, 320.0, 190.0),
-        (335.0, 345.0, 370.0, 225.0),
+        (283.0, 370.0, 328.0, 190.0),
+        (262.0, 345.0, 370.0, 225.0),
     ),
     CompletingSquareCheckpointId.CORNER_DETAIL: (
         (350.0, 360.0, 360.0, 210.0),
@@ -227,10 +227,33 @@ def _token(
 
 
 def _token_width(latex: str) -> float:
-    """Return a bounded authored width for the finite token vocabulary."""
+    """Return a browser-safe authored width for the finite token vocabulary.
 
-    visible = latex.replace(r"\pm", "±").replace("^", "")
-    return float(max(28, min(170, 16 + 13 * len(visible))))
+    KaTeX layout is not proportional to the source-string length: grouped
+    superscripts and delimiters are wider than their character count suggests,
+    while ``\\text{or}`` is much narrower.  Keep those closed syntax classes
+    explicit so the dense balance row stays within its compact viewport.
+    """
+
+    if latex == r"\text{or}":
+        return 44.0
+    if latex.startswith("(x+") and latex.endswith(")^2"):
+        return 136.0
+    if "=" in latex and latex.endswith("^2"):
+        return 128.0
+    if latex.startswith("x+") and latex.removeprefix("x+").isdigit():
+        return 92.0
+    if latex.startswith(r"\pm ") and latex.removeprefix(r"\pm ").isdigit():
+        return 60.0
+    if latex.startswith("-") and latex.removeprefix("-").isdigit():
+        return 76.0 if len(latex) == 3 else 56.0
+    if latex.endswith("x") and latex.removesuffix("x").isdigit():
+        return 68.0 if len(latex.removesuffix("x")) == 2 else 42.0
+    if latex.isdigit():
+        return 48.0 if len(latex) == 2 else 30.0
+
+    visible = latex.replace("^", "")
+    return float(max(29, min(170, 16 + 13 * len(visible))))
 
 
 def _linear_term(coefficient: int) -> str:
@@ -263,6 +286,7 @@ def _equation_row(
             center,
             y,
             width,
+            height=48.0,
             style=_AMBER_EQUATION_STYLE if highlighted else _EQUATION_STYLE,
         )
         nodes[node.id] = node
@@ -380,7 +404,7 @@ def _solution_tokens(component_id: str, problem: CompletingSquareProblemSpecV1) 
             ("root_equal", "=", False),
             ("root_pm", rf"\pm {magnitude}", True),
         ),
-        y=108.0,
+        y=88.0,
         gap=14.0,
     )
     nodes.update(
@@ -395,7 +419,7 @@ def _solution_tokens(component_id: str, problem: CompletingSquareProblemSpecV1) 
                 ("root_equal_b", "=", False),
                 ("root_negative", str(problem.negative_root), True),
             ),
-            y=156.0,
+            y=144.0,
             gap=12.0,
         )
     )
@@ -599,7 +623,7 @@ def _desired_nodes(
     elif index == 5:
         nodes = _completed_equation(component_id, problem)
     else:
-        nodes = _factored_equation(component_id, problem, y=52.0 if index == 7 else 90.0)
+        nodes = _factored_equation(component_id, problem, y=32.0 if index == 7 else 90.0)
         if index == 7:
             nodes.update(_solution_tokens(component_id, problem))
 

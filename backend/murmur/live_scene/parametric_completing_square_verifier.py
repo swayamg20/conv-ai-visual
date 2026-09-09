@@ -513,6 +513,28 @@ def _visible_glyph_count(latex: str) -> int:
     return max(1, len(visible))
 
 
+def _finite_token_minimum_width(suffix: str, latex: str) -> float:
+    """Independently enforce browser-safe floors for compound V3 tokens."""
+
+    if suffix == "eq_factor":
+        return 136.0
+    if suffix == "eq_completed_rhs":
+        return 128.0
+    if suffix == "root_lhs":
+        return 92.0
+    if suffix == "root_pm":
+        return 60.0
+    if suffix == "root_positive":
+        return 30.0
+    if suffix == "root_negative":
+        return 76.0 if len(latex) == 3 else 56.0
+    if suffix == "root_or":
+        return 44.0
+    if suffix == "eq_linear" and len(latex.removesuffix("x")) == 2:
+        return 68.0
+    return 20.0
+
+
 def _expected_token_style(
     checkpoint_id: CompletingSquareCheckpointId,
     suffix: str,
@@ -545,12 +567,17 @@ def _verify_token_visual_contract(
         _fail(f"{suffix} does not use its canonical visible token style")
 
     glyph_count = _visible_glyph_count(node.latex)
-    minimum_width = max(20.0, node.style.font_size * (0.28 * glyph_count + 0.45))
+    minimum_width = max(
+        20.0,
+        node.style.font_size * (0.28 * glyph_count + 0.45),
+        _finite_token_minimum_width(suffix, node.latex),
+    )
     if node.width < minimum_width - _EPSILON:
         _fail(f"{suffix} token width is too small for its visible mathematical fact")
     if node.width > 240.0 + _EPSILON:
         _fail(f"{suffix} token width exceeds the closed visual budget")
-    if node.height < node.style.font_size - _EPSILON:
+    minimum_height = 48.0 if node.style.font_size == 30.0 else node.style.font_size
+    if node.height < minimum_height - _EPSILON:
         _fail(f"{suffix} token height is too small for its font")
     if node.height > 2.5 * node.style.font_size + _EPSILON:
         _fail(f"{suffix} token height exceeds the closed visual budget")
@@ -1379,7 +1406,11 @@ def _viewport_subject_suffixes(
             | _DIMENSION_VIEWPORT_SUFFIXES
         )
     if checkpoint_id is CompletingSquareCheckpointId.MISSING_CORNER:
-        return _CORNER_VIEWPORT_SUFFIXES | {"corner_dim_h", "corner_dim_v"}
+        return _CORNER_VIEWPORT_SUFFIXES | {
+            "area_half_a",
+            "corner_dim_h",
+            "corner_dim_v",
+        }
     if checkpoint_id is CompletingSquareCheckpointId.CORNER_DETAIL:
         return _CORNER_VIEWPORT_SUFFIXES | {"corner_dim_h", "corner_dim_v", "corner_calc"}
     if checkpoint_id is CompletingSquareCheckpointId.BALANCE_AND_COMPLETE:

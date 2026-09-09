@@ -582,6 +582,64 @@ def test_visual_contract_rejects_invisible_unmeasured_or_noncanonical_nodes(
         _verify(problem, checkpoint, patch=patch, result_scene=result)
 
 
+@pytest.mark.parametrize(
+    ("problem", "checkpoint_id", "suffix", "old_width"),
+    [
+        (_problem(4, 6), CompletingSquareCheckpointId.FACTOR_SQUARE, "eq_factor", 94.0),
+        (
+            _problem(4, 6),
+            CompletingSquareCheckpointId.BALANCE_AND_COMPLETE,
+            "eq_completed_rhs",
+            81.0,
+        ),
+        (_problem(4, 6), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_lhs", 55.0),
+        (_problem(4, 6), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_negative", 55.0),
+        (_problem(1, 2), CompletingSquareCheckpointId.SOLVE_ROOTS, "root_negative", 42.0),
+        (_problem(8, 9), CompletingSquareCheckpointId.PROBLEM, "eq_linear", 55.0),
+    ],
+    ids=[
+        "factor",
+        "completed-identity",
+        "root-lhs",
+        "two-digit-negative-root",
+        "one-digit-negative-root",
+        "two-digit-linear-term",
+    ],
+)
+def test_visual_contract_rejects_the_old_cropping_widths(
+    problem: CompletingSquareProblemSpecV1,
+    checkpoint_id: CompletingSquareCheckpointId,
+    suffix: str,
+    old_width: float,
+) -> None:
+    checkpoint = _blueprint(problem, checkpoint_id)
+    node = _result_node(checkpoint, suffix)
+    assert isinstance(node, LatexTokenSceneNode)
+    assert node.width > old_width
+    for rejected_width in (old_width, node.width - 1.0):
+        patch, result = _replace_result_put(
+            checkpoint,
+            node.model_copy(update={"width": rejected_width}),
+        )
+        with pytest.raises(
+            ParametricCompletingSquareVerificationError,
+            match="width is too small",
+        ):
+            _verify(problem, checkpoint, patch=patch, result_scene=result)
+
+
+def test_visual_contract_rejects_the_old_cropping_equation_height() -> None:
+    problem = _problem(4, 6)
+    checkpoint = _blueprint(problem, CompletingSquareCheckpointId.FACTOR_SQUARE)
+    factor = _result_node(checkpoint, "eq_factor")
+    assert isinstance(factor, LatexTokenSceneNode)
+    assert factor.height == 48.0 > 42.0
+    patch, result = _replace_result_put(checkpoint, factor.model_copy(update={"height": 42.0}))
+
+    with pytest.raises(ParametricCompletingSquareVerificationError, match="height is too small"):
+        _verify(problem, checkpoint, patch=patch, result_scene=result)
+
+
 def test_rectangle_paths_must_follow_perimeter_instead_of_bow_tie_order() -> None:
     problem = _problem(4, 6)
     checkpoint = _blueprint(problem, CompletingSquareCheckpointId.AREA_MODEL)
@@ -769,6 +827,22 @@ def test_each_viewport_side_and_layout_contains_non_focus_checkpoint_facts(
     with pytest.raises(
         ParametricCompletingSquareVerificationError,
         match=rf"{scene_side} viewport subject 'lesson__eq_rhs'.*clipped by {layout}",
+    ):
+        _verify(problem, checkpoint, presentation=presentation)
+
+
+def test_missing_corner_viewport_requires_the_contextual_horizontal_strip_label() -> None:
+    problem = _problem(4, 6)
+    checkpoint = _blueprint(problem, CompletingSquareCheckpointId.MISSING_CORNER)
+    old_right_shifted = ViewportPoseV1(x=360.0, y=370.0, width=320.0, height=190.0)
+    viewports = checkpoint.presentation.result_viewports.model_copy(
+        update={"cinematic": old_right_shifted}
+    )
+    presentation = checkpoint.presentation.model_copy(update={"result_viewports": viewports})
+
+    with pytest.raises(
+        ParametricCompletingSquareVerificationError,
+        match=r"area_half_a.*clipped by cinematic",
     ):
         _verify(problem, checkpoint, presentation=presentation)
 

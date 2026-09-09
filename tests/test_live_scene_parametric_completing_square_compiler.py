@@ -396,6 +396,53 @@ def test_boundary_problems_keep_exact_math_inside_the_same_symbolic_geometry(
     assert actual_paths == reference_paths
 
 
+def test_every_problem_uses_browser_safe_compound_token_widths() -> None:
+    """The old source-length widths cropped real KaTeX in the V3 browser."""
+
+    for _, _, linear_coefficient, right_hand_side in SUPPORTED_CASES:
+        checkpoints = compile_parametric_checkpoint_blueprints(
+            _advance_beat(_problem(linear_coefficient, right_hand_side))
+        ).checkpoints
+        problem_nodes = _node_map(checkpoints[0].result_nodes)
+        completed_nodes = _node_map(checkpoints[5].result_nodes)
+        factor_nodes = _node_map(checkpoints[6].result_nodes)
+        root_nodes = _node_map(checkpoints[7].result_nodes)
+
+        assert completed_nodes["lesson__eq_completed_rhs"].width == 128.0 > 81.0
+        assert factor_nodes["lesson__eq_factor"].width == 136.0 > 94.0
+        assert factor_nodes["lesson__eq_completed_rhs"].width == 128.0 > 81.0
+        assert root_nodes["lesson__root_lhs"].width == 92.0 > 55.0
+        assert root_nodes["lesson__root_pm"].width == 60.0
+        assert root_nodes["lesson__root_positive"].width == 30.0
+        assert root_nodes["lesson__root_or"].width == 44.0 < 133.0
+
+        negative = root_nodes["lesson__root_negative"]
+        assert isinstance(negative, LatexTokenSceneNode)
+        old_negative_width = 55.0 if len(negative.latex) == 3 else 42.0
+        assert negative.width == (76.0 if len(negative.latex) == 3 else 56.0)
+        assert negative.width > old_negative_width
+
+        linear = problem_nodes["lesson__eq_linear"]
+        assert isinstance(linear, LatexTokenSceneNode)
+        if linear_coefficient >= 10:
+            assert linear.width == 68.0 > 55.0
+
+        for checkpoint in checkpoints:
+            for node in checkpoint.result_nodes:
+                if isinstance(node, LatexTokenSceneNode) and node.style.font_size == 30.0:
+                    assert node.height == 48.0 > 42.0
+
+        completed_row = tuple(
+            node
+            for node in completed_nodes.values()
+            if isinstance(node, LatexTokenSceneNode) and node.y == 90.0
+        )
+        row_left = min(_node_bounds(node)[0] for node in completed_row)
+        row_right = max(_node_bounds(node)[2] for node in completed_row)
+        assert row_left >= 72.0
+        assert row_right <= 728.0
+
+
 def test_unit_half_coefficient_is_rendered_as_x_not_one_x() -> None:
     problem = _problem(2, 80)
     checkpoints = compile_parametric_checkpoint_blueprints(_advance_beat(problem)).checkpoints
@@ -577,6 +624,21 @@ def test_main_timing_is_47_seconds_and_viewport_targets_are_safe_for_all_problem
                     assert top >= viewport.y + 12.0
                     assert node_right <= right - 12.0
                     assert node_bottom <= bottom - 12.0
+
+
+def test_missing_corner_camera_keeps_the_horizontal_strip_as_context() -> None:
+    checkpoint = compile_parametric_checkpoint_blueprints(
+        _advance_beat(_problem(8, 20))
+    ).checkpoints[4]
+    viewports = checkpoint.presentation.result_viewports
+    assert (viewports.cinematic.x, viewports.cinematic.width) == (283.0, 328.0)
+    assert (viewports.compact.x, viewports.compact.width) == (262.0, 370.0)
+
+    strip_label = _node_map(checkpoint.result_nodes)["lesson__area_half_a"]
+    left, _, right, _ = _node_bounds(strip_label)
+    for viewport in (viewports.cinematic, viewports.compact):
+        assert left >= viewport.x + 12.0
+        assert right <= viewport.x + viewport.width - 12.0
 
 
 def test_compilation_is_byte_deterministic_and_imports_no_entropy_source() -> None:
