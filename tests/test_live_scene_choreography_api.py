@@ -17,6 +17,13 @@ from murmur.live_scene.choreography_service_contracts import (
     ChoreographySceneStreamEvent,
 )
 from murmur.live_scene.contracts import SceneStreamStartedEvent
+from murmur.live_scene.parametric_choreography_requests import (
+    ParametricChoreographyRequestV3,
+)
+from murmur.live_scene.parametric_choreography_service_contracts import (
+    ParametricChoreographySceneStreamDeclinedEventV3,
+    ParametricChoreographySceneStreamEventV3,
+)
 from murmur.live_scene.semantic_contracts import VisualActAbstainReason
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
 
@@ -36,6 +43,18 @@ def _request_body() -> dict[str, object]:
     }
 
 
+def _parametric_request_body() -> dict[str, object]:
+    return {
+        "protocol": "parametric_choreography_v3",
+        "problemText": "x² + 8x = 20",
+        "generation": 12,
+        "baseScene": {"revision": 0, "nodes": []},
+        "baseSemanticScene": {"revision": 0, "components": []},
+        "routingMode": "reflex",
+        "requestedRoute": {"intent": "advance", "targetStage": "setup"},
+    }
+
+
 def _events() -> tuple[ChoreographySceneStreamEvent, ...]:
     return (
         SceneStreamStartedEvent(generation=11, attempt=1, base_revision=0),
@@ -49,9 +68,23 @@ def _events() -> tuple[ChoreographySceneStreamEvent, ...]:
     )
 
 
+def _parametric_events() -> tuple[ParametricChoreographySceneStreamEventV3, ...]:
+    return (
+        SceneStreamStartedEvent(generation=12, attempt=1, base_revision=0),
+        ParametricChoreographySceneStreamDeclinedEventV3(
+            generation=12,
+            attempt=1,
+            final_revision=0,
+            reason_code=VisualActAbstainReason.UNSUPPORTED_INTENT,
+            message="No supported parametric choreography is available.",
+        ),
+    )
+
+
 class FakeChoreographyService:
     def __init__(self) -> None:
         self.requests: list[SemanticLiveSceneRequest] = []
+        self.parametric_requests: list[ParametricChoreographyRequestV3] = []
         self.semantic_calls = 0
 
     async def stream_routed_choreography_events(
@@ -60,6 +93,14 @@ class FakeChoreographyService:
     ) -> AsyncIterator[ChoreographySceneStreamEvent]:
         self.requests.append(request)
         for event in _events():
+            yield event
+
+    async def stream_parametric_choreography_events(
+        self,
+        request: ParametricChoreographyRequestV3,
+    ) -> AsyncIterator[ParametricChoreographySceneStreamEventV3]:
+        self.parametric_requests.append(request)
+        for event in _parametric_events():
             yield event
 
     async def stream_routed_semantic_events(self, _request: object) -> AsyncIterator[object]:
@@ -123,6 +164,25 @@ def test_product_choreography_stream_requires_authentication() -> None:
 
     assert response.status_code == 401
     assert service.requests == []
+    assert service.parametric_requests == []
+    assert admission.identities == []
+
+
+def test_product_parametric_choreography_stream_requires_authentication() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_parametric_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert service.requests == []
+    assert service.parametric_requests == []
     assert admission.identities == []
 
 
@@ -150,6 +210,69 @@ def test_product_choreography_stream_uses_distinct_service_path() -> None:
     assert len(service.requests) == 1
     assert service.requests[0].model_dump(mode="json", by_alias=True) == _request_body()
     assert admission.identities == [AUTHENTICATED_USER["id"]]
+
+
+def test_product_parametric_choreography_uses_v3_service_and_encoder() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, authenticated=True, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_parametric_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert [event["type"] for event in _payloads(response.text)] == [
+        "scene_stream_started",
+        "parametric_choreography_scene_stream_declined",
+    ]
+    assert service.requests == []
+    assert len(service.parametric_requests) == 1
+    assert (
+        service.parametric_requests[0].model_dump(mode="json", by_alias=True)
+        == _parametric_request_body()
+    )
+    assert admission.identities == [AUTHENTICATED_USER["id"]]
+
+
+def test_missing_protocol_remains_the_exact_v2_request() -> None:
+    service = FakeChoreographyService()
+    client = _client(service, authenticated=True)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert len(service.requests) == 1
+    assert service.parametric_requests == []
+    assert service.requests[0].model_dump(mode="json", by_alias=True) == _request_body()
+
+
+def test_unknown_protocol_is_not_reinterpreted_as_v2() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, authenticated=True, admission=admission)
+    body = _parametric_request_body()
+    body["protocol"] = "parametric_choreography_v999"
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=body,
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 422
+    assert service.requests == []
+    assert service.parametric_requests == []
+    assert admission.identities == []
 
 
 def test_choreography_lab_is_hidden_without_server_guards(monkeypatch) -> None:
@@ -188,6 +311,30 @@ def test_choreography_lab_streams_only_on_guarded_loopback(monkeypatch) -> None:
         "scene_stream_started",
         "choreography_scene_stream_declined",
     ]
+    assert admission.identities == [live_scenes._DEVELOPMENT_SCENE_LAB_IDENTITY]
+
+
+def test_choreography_lab_dispatches_parametric_v3_on_guarded_loopback(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/lab/choreography/stream",
+            json=_parametric_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert [event["type"] for event in _payloads(response.text)] == [
+        "scene_stream_started",
+        "parametric_choreography_scene_stream_declined",
+    ]
+    assert service.requests == []
+    assert len(service.parametric_requests) == 1
     assert admission.identities == [live_scenes._DEVELOPMENT_SCENE_LAB_IDENTITY]
 
 

@@ -37,8 +37,8 @@ import { cn } from "@/lib/utils";
 
 import type { ChoreographySceneStreamRunner } from "./choreography-model-stream";
 import type { ChoreographyEvidenceTraceEvent } from "./choreography-playback";
+import { ChoreographyCanvasBridge } from "./choreography-canvas-bridge";
 import { createChoreographySceneFixtureRunner } from "./choreography-scene-stream-fixture";
-import type { ChoreographySceneStreamRenderer } from "./choreography-stream-runtime";
 import { orderSceneNodesForSvgPaint } from "./svg-node-reconciler";
 import {
   LIVE_CHOREOGRAPHY_MAIN_CHECKPOINT_COUNT,
@@ -171,41 +171,6 @@ const fixtureRunnerFactory: ChoreographyRunnerFactory = (path) =>
   createChoreographySceneFixtureRunner({
     mode: path === "full" ? "main" : "adaptive",
   });
-
-class ChoreographyCanvasBridge implements ChoreographySceneStreamRenderer {
-  private handle: SVGCanvasHandle | null = null;
-
-  readonly attach = (handle: SVGCanvasHandle | null): void => {
-    this.handle = handle;
-  };
-
-  playCheckpointChoreography: ChoreographySceneStreamRenderer["playCheckpointChoreography"] =
-    (plan, observer) => {
-      if (!this.handle) throw new Error("The visual stage is not ready yet.");
-      return this.handle.playCheckpointChoreography(plan, observer);
-    };
-
-  materializeScene: ChoreographySceneStreamRenderer["materializeScene"] = (
-    scene,
-  ) => {
-    if (!this.handle) throw new Error("The visual stage is not ready yet.");
-    this.handle.materializeScene(scene);
-  };
-
-  materializeViewport: ChoreographySceneStreamRenderer["materializeViewport"] =
-    (pose) => {
-      if (!this.handle) throw new Error("The visual stage is not ready yet.");
-      this.handle.materializeViewport(pose);
-    };
-
-  cancelMotion = (): void => {
-    this.handle?.cancelMotion();
-  };
-
-  clear = (): void => {
-    this.handle?.clear();
-  };
-}
 
 function mainCheckpointCount(
   checkpointIds: readonly CompletingSquareCheckpointId[],

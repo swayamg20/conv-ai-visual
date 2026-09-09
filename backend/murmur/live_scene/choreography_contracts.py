@@ -14,6 +14,9 @@ from typing import Annotated, Literal, Self, TypeAlias
 
 from pydantic import Field, StringConstraints, TypeAdapter, field_validator, model_validator
 
+from murmur.live_scene.completing_square_problem_contracts import (
+    CompletingSquareProblemSpecV1,
+)
 from murmur.live_scene.contracts import (
     LIVE_SCENE_BOARD_HEIGHT,
     LIVE_SCENE_BOARD_WIDTH,
@@ -24,6 +27,7 @@ from murmur.live_scene.contracts import (
 from murmur.live_scene.semantic_integrity import canonical_sha256
 
 ROUTED_CHOREOGRAPHY_BEAT_VERSION = 2
+ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION = 3
 CHOREOGRAPHY_PLAN_VERSION = 1
 PRESENTATION_CHECKPOINT_VERSION = 1
 VIEWPORT_POSE_VERSION = 1
@@ -39,6 +43,7 @@ MAX_CHOREOGRAPHY_HOLD_AFTER_MS = 9_000
 MAX_CHOREOGRAPHY_PLAN_MS = 12_000
 
 ROUTED_CHOREOGRAPHY_BEAT_HASH_DOMAIN = "murmur:routed-choreography-beat:v2"
+ROUTED_CHOREOGRAPHY_BEAT_V3_HASH_DOMAIN = "murmur:routed-choreography-beat:v3"
 CHOREOGRAPHY_PLAN_HASH_DOMAIN = "murmur:choreography-plan:v1"
 PRESENTATION_CHECKPOINT_HASH_DOMAIN = "murmur:presentation-checkpoint:v1"
 
@@ -115,6 +120,27 @@ class RoutedChoreographyBeatV2(LiveSceneContract):
     )
     component_id: ChoreographyComponentId = Field(alias="componentId")
     route: RoutedChoreographyRouteV2
+
+
+class RoutedChoreographyBeatV3(LiveSceneContract):
+    """Problem-bound routed input to the parametric choreography compiler."""
+
+    v: Literal[ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION] = ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION
+    beat_id: ChoreographyId = Field(alias="beatId")
+    component_kind: Literal["completing_square_parametric"] = Field(
+        default="completing_square_parametric",
+        alias="componentKind",
+    )
+    component_id: ChoreographyComponentId = Field(alias="componentId")
+    problem_spec: CompletingSquareProblemSpecV1 = Field(alias="problemSpec")
+    route: RoutedChoreographyRouteV2
+
+    @field_validator("v", mode="before")
+    @classmethod
+    def validate_strict_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("v must be a strict integer")
+        return value
 
 
 class _TargetCueV1(LiveSceneContract):
@@ -252,6 +278,7 @@ class PresentationCheckpointV1(LiveSceneContract):
 
 
 ROUTED_CHOREOGRAPHY_BEAT_V2_ADAPTER = TypeAdapter(RoutedChoreographyBeatV2)
+ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER = TypeAdapter(RoutedChoreographyBeatV3)
 CHOREOGRAPHY_CUE_V1_ADAPTER = TypeAdapter(ChoreographyCueV1)
 
 
@@ -261,6 +288,15 @@ def routed_choreography_beat_sha256(beat: RoutedChoreographyBeatV2) -> str:
     return canonical_sha256(
         beat.model_dump(mode="json", by_alias=True),
         domain=ROUTED_CHOREOGRAPHY_BEAT_HASH_DOMAIN,
+    )
+
+
+def routed_choreography_beat_v3_sha256(beat: RoutedChoreographyBeatV3) -> str:
+    """Hash the complete problem-bound compiler input in the V3 domain."""
+
+    return canonical_sha256(
+        beat.model_dump(mode="json", by_alias=True),
+        domain=ROUTED_CHOREOGRAPHY_BEAT_V3_HASH_DOMAIN,
     )
 
 

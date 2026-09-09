@@ -7,6 +7,7 @@ from murmur.live_scene.completing_square_contracts import (
     COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER,
     CompletingSquareMainCheckpoint,
     CompletingSquareState,
+    ParametricCompletingSquareStateV1,
 )
 from murmur.live_scene.contracts import (
     LIVE_SCENE_SCHEMA_VERSION,
@@ -120,6 +121,29 @@ def _completing_component(
         id=component_id,
         last_main_checkpoint=last_checkpoint,
         corner_clarified=corner_clarified,
+    )
+
+
+def _parametric_completing_component(
+    last_checkpoint: CompletingSquareMainCheckpoint | None,
+    *,
+    component_id: str = "parametric-lesson",
+    corner_clarified: bool = False,
+    linear_coefficient: int = 8,
+    right_hand_side: int = 20,
+) -> ParametricCompletingSquareStateV1:
+    return ParametricCompletingSquareStateV1.model_validate(
+        {
+            "kind": "completing_square_parametric",
+            "id": component_id,
+            "problemSpec": {
+                "v": 1,
+                "linearCoefficient": linear_coefficient,
+                "rightHandSide": right_hand_side,
+            },
+            "lastMainCheckpoint": last_checkpoint,
+            "cornerClarified": corner_clarified,
+        }
     )
 
 
@@ -374,6 +398,63 @@ def test_semantic_scene_round_trips_every_valid_completing_square_frontier(
         scene.components[0].corner_clarified = not corner_clarified
 
 
+@pytest.mark.parametrize(
+    ("last_checkpoint", "corner_clarified"),
+    [
+        (None, False),
+        *((checkpoint, False) for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER),
+        *(
+            (checkpoint, True)
+            for checkpoint in COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER[
+                COMPLETING_SQUARE_MAIN_CHECKPOINT_ORDER.index(
+                    CompletingSquareMainCheckpoint.MISSING_CORNER
+                ) :
+            ]
+        ),
+    ],
+)
+def test_semantic_scene_round_trips_every_parametric_frontier(
+    last_checkpoint: CompletingSquareMainCheckpoint | None,
+    corner_clarified: bool,
+) -> None:
+    component = _parametric_completing_component(
+        last_checkpoint,
+        corner_clarified=corner_clarified,
+    )
+    payload = {
+        "revision": 4,
+        "components": [component.model_dump(mode="json", by_alias=True)],
+    }
+
+    scene = SemanticSceneState.model_validate(payload)
+
+    assert scene.model_dump(mode="json", by_alias=True) == payload
+    assert scene.components == (component,)
+    assert isinstance(scene.components[0], ParametricCompletingSquareStateV1)
+
+
+def test_parametric_semantic_scene_digest_binds_the_problem_spec() -> None:
+    first = SemanticSceneState(
+        revision=1,
+        components=(_parametric_completing_component(CompletingSquareMainCheckpoint.PROBLEM),),
+    )
+    second = SemanticSceneState(
+        revision=1,
+        components=(
+            _parametric_completing_component(
+                CompletingSquareMainCheckpoint.PROBLEM,
+                linear_coefficient=6,
+                right_hand_side=7,
+            ),
+        ),
+    )
+
+    assert semantic_scene_sha256(first) == semantic_scene_sha256(
+        SemanticSceneState.model_validate(first.model_dump(mode="json", by_alias=True))
+    )
+    assert semantic_scene_sha256(first) != semantic_scene_sha256(second)
+
+
 def test_semantic_scene_accepts_mixed_kinds_and_rejects_cross_kind_duplicate_ids() -> None:
     pythagorean = _component(
         roles_through(PythagoreanStage.TRIANGLE),
@@ -397,6 +478,36 @@ def test_semantic_scene_accepts_mixed_kinds_and_rejects_cross_kind_duplicate_ids
     )
     with pytest.raises(ValidationError, match="semantic component ids must be unique"):
         SemanticSceneState(revision=2, components=(pythagorean, duplicate))
+
+
+def test_semantic_scene_accepts_all_three_component_kinds_together() -> None:
+    pythagorean = _component(roles_through(PythagoreanStage.TRIANGLE))
+    legacy = _completing_component(
+        CompletingSquareMainCheckpoint.AREA_MODEL,
+        component_id="legacy-lesson",
+    )
+    parametric = _parametric_completing_component(
+        CompletingSquareMainCheckpoint.MISSING_CORNER,
+        corner_clarified=True,
+    )
+
+    scene = SemanticSceneState(
+        revision=4,
+        components=(pythagorean, legacy, parametric),
+    )
+
+    assert tuple(type(component) for component in scene.components) == (
+        PythagoreanAreaIdentityState,
+        CompletingSquareState,
+        ParametricCompletingSquareStateV1,
+    )
+
+    duplicate = _parametric_completing_component(
+        CompletingSquareMainCheckpoint.PROBLEM,
+        component_id=legacy.id,
+    )
+    with pytest.raises(ValidationError, match="semantic component ids must be unique"):
+        SemanticSceneState(revision=4, components=(legacy, duplicate))
 
 
 def test_semantic_scene_component_union_rejects_missing_or_unknown_kind() -> None:
@@ -639,6 +750,22 @@ def test_legacy_compiled_beat_rejects_target_ids_owned_by_the_other_kind() -> No
         )
 
 
+def test_legacy_compiled_beat_rejects_target_ids_owned_by_parametric_kind() -> None:
+    beat = TeachingBeatDraft.model_validate(_beat(PythagoreanStage.TRIANGLE))
+    parametric = _parametric_completing_component(
+        CompletingSquareMainCheckpoint.PROBLEM,
+        component_id="area-identity",
+    )
+
+    with pytest.raises(ValidationError, match="non-Pythagorean component in baseScene"):
+        CompiledTeachingBeat(
+            beat=beat,
+            base_scene=SemanticSceneState(revision=1, components=(parametric,)),
+            result_scene=SemanticSceneState(revision=1, components=(parametric,)),
+            atoms=(),
+        )
+
+
 def test_compiled_beat_preserves_unrelated_components_exactly() -> None:
     unrelated = _component(roles_through(PythagoreanStage.TRIANGLE), component_id="other")
     target = _component(roles_through(PythagoreanStage.TRIANGLE))
@@ -669,6 +796,25 @@ def test_legacy_compiled_beat_preserves_an_unrelated_completing_square_component
     unrelated = _completing_component(
         CompletingSquareMainCheckpoint.MISSING_CORNER,
         component_id="square-lesson",
+        corner_clarified=True,
+    )
+    target_roles = roles_through(PythagoreanStage.TRIANGLE)
+    target = _component(target_roles)
+
+    compiled = CompiledTeachingBeat(
+        beat=TeachingBeatDraft.model_validate(_beat(PythagoreanStage.TRIANGLE)),
+        base_scene=SemanticSceneState(revision=4, components=(unrelated,)),
+        result_scene=SemanticSceneState(revision=5, components=(unrelated, target)),
+        atoms=(_atom(PythagoreanRole.TRIANGLE),),
+    )
+
+    assert compiled.result_scene.components[0] == unrelated
+
+
+def test_legacy_compiled_beat_preserves_an_unrelated_parametric_component() -> None:
+    unrelated = _parametric_completing_component(
+        CompletingSquareMainCheckpoint.MISSING_CORNER,
+        component_id="parametric-lesson",
         corner_clarified=True,
     )
     target_roles = roles_through(PythagoreanStage.TRIANGLE)

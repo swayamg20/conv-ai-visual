@@ -13,6 +13,9 @@ from murmur.live_scene.choreography_contracts import (
     MIN_CHOREOGRAPHY_PHASE_MS,
     PRESENTATION_CHECKPOINT_VERSION,
     ROUTED_CHOREOGRAPHY_BEAT_V2_ADAPTER,
+    ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER,
+    ROUTED_CHOREOGRAPHY_BEAT_V3_HASH_DOMAIN,
+    ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION,
     ROUTED_CHOREOGRAPHY_BEAT_VERSION,
     AdvanceChoreographyRouteV2,
     ChoreographyEasing,
@@ -21,11 +24,14 @@ from murmur.live_scene.choreography_contracts import (
     CompletingSquareStage,
     PresentationCheckpointV1,
     RoutedChoreographyBeatV2,
+    RoutedChoreographyBeatV3,
     ViewportPoseV1,
     choreography_plan_sha256,
     presentation_checkpoint_sha256,
     routed_choreography_beat_sha256,
+    routed_choreography_beat_v3_sha256,
 )
+from murmur.live_scene.semantic_integrity import canonical_sha256
 from pydantic import ValidationError
 
 
@@ -48,6 +54,23 @@ def _clarification_beat() -> dict[str, object]:
         "componentKind": "completing_square",
         "componentId": "square-lesson",
         "route": {"intent": "clarify_corner"},
+    }
+
+
+def _parametric_beat(
+    stage: CompletingSquareStage | str = CompletingSquareStage.SOLVE,
+) -> dict[str, object]:
+    return {
+        "v": ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION,
+        "beatId": "beat-parametric-solve",
+        "componentKind": "completing_square_parametric",
+        "componentId": "parametric-lesson",
+        "problemSpec": {
+            "v": 1,
+            "linearCoefficient": 8,
+            "rightHandSide": 20,
+        },
+        "route": {"intent": "advance", "targetStage": stage},
     }
 
 
@@ -110,6 +133,74 @@ def test_routed_beat_is_a_small_closed_server_owned_surface() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         beat.component_id = "another-component"
+
+
+def test_parametric_routed_beat_adds_only_the_bound_problem_spec() -> None:
+    assert set(RoutedChoreographyBeatV3.model_fields) == {
+        "v",
+        "beat_id",
+        "component_kind",
+        "component_id",
+        "problem_spec",
+        "route",
+    }
+
+    payload = _parametric_beat()
+    beat = ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(payload)
+
+    assert beat.model_dump(mode="json", by_alias=True) == payload
+    assert beat.problem_spec.half_coefficient == 4
+    assert beat.problem_spec.corner_value == 16
+    assert beat.problem_spec.completed_right_hand_side == 36
+    assert beat.route.target_stage is CompletingSquareStage.SOLVE
+    assert "narration" not in RoutedChoreographyBeatV3.model_fields
+    assert "presentation" not in RoutedChoreographyBeatV3.model_fields
+
+
+@pytest.mark.parametrize("version", [True, 3.0, "3"])
+def test_parametric_routed_beat_requires_a_strict_integer_version(version: object) -> None:
+    payload = _parametric_beat()
+    payload["v"] = version
+
+    with pytest.raises(ValidationError, match="strict integer"):
+        ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(payload)
+
+
+@pytest.mark.parametrize("stage", list(CompletingSquareStage))
+def test_parametric_routed_beat_reuses_only_the_closed_v2_routes(
+    stage: CompletingSquareStage,
+) -> None:
+    advance = _parametric_beat(stage)
+    decoded = ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(advance)
+    assert decoded.route.target_stage is stage
+
+    clarification = _parametric_beat()
+    clarification["route"] = {"intent": "clarify_corner"}
+    decoded = ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(clarification)
+    assert isinstance(decoded.route, ClarifyCornerRouteV2)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("v", ROUTED_CHOREOGRAPHY_BEAT_VERSION),
+        ("componentKind", "completing_square"),
+        ("problemSpec", None),
+    ],
+)
+def test_parametric_routed_beat_rejects_v2_or_unbound_identity(
+    field: str,
+    value: object,
+) -> None:
+    payload = _parametric_beat()
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER.validate_python(payload)
+
+    legacy = _advance_beat()
+    legacy["problemSpec"] = _parametric_beat()["problemSpec"]
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        ROUTED_CHOREOGRAPHY_BEAT_V2_ADAPTER.validate_python(legacy)
 
 
 @pytest.mark.parametrize("stage", list(CompletingSquareStage))
@@ -453,3 +544,27 @@ def test_all_three_contract_hashes_are_canonical_stable_and_domain_separated() -
     assert presentation_checkpoint_sha256(
         PresentationCheckpointV1.model_validate(changed_checkpoint)
     ) != presentation_checkpoint_sha256(checkpoint)
+
+
+def test_parametric_beat_hash_is_canonical_problem_bound_and_v3_domain_separated() -> None:
+    payload = _parametric_beat()
+    reordered = dict(reversed(tuple(payload.items())))
+    beat = RoutedChoreographyBeatV3.model_validate(payload)
+
+    digest = routed_choreography_beat_v3_sha256(beat)
+
+    assert digest == routed_choreography_beat_v3_sha256(
+        RoutedChoreographyBeatV3.model_validate(reordered)
+    )
+    assert digest == canonical_sha256(payload, domain=ROUTED_CHOREOGRAPHY_BEAT_V3_HASH_DOMAIN)
+    assert digest == "e4acdaef610dedd80d155cd12e4dd5bdb64c74b717c7d634b940effc10cbc6c5"
+    assert digest != canonical_sha256(payload, domain="murmur:routed-choreography-beat:v2")
+
+    changed = deepcopy(payload)
+    problem_spec = changed["problemSpec"]
+    assert isinstance(problem_spec, dict)
+    problem_spec.update(linearCoefficient=6, rightHandSide=7)
+    assert (
+        routed_choreography_beat_v3_sha256(RoutedChoreographyBeatV3.model_validate(changed))
+        != digest
+    )

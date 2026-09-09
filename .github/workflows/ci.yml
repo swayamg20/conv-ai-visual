@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - "codex/gate15-*"
+      - "codex/gate16-*"
   pull_request:
   workflow_dispatch:
 
@@ -181,6 +182,48 @@ jobs:
         with:
           name: live-choreography-${{ github.run_id }}-${{ github.run_attempt }}
           path: var/live-choreography/
+          if-no-files-found: error
+          retention-days: 7
+
+  parametric_choreography:
+    name: Provider-free parametric choreography proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run accelerated parametric choreography proof
+        run: npm run e2e:parametric-choreography
+
+      - name: Capture real-speed parametric choreography proof
+        run: npm run e2e:parametric-choreography:capture
+
+      - name: Run authenticated product-request smoke
+        run: npm run e2e:parametric-choreography:product-smoke
+
+      - name: Upload parametric choreography proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: parametric-choreography-${{ github.run_id }}-${{ github.run_attempt }}
+          path: var/parametric-choreography-e2e/
           if-no-files-found: error
           retention-days: 7
 

@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { LiveModelScene } from "@/features/live-scene/live-model-scene";
+import { LiveParametricChoreography } from "@/features/live-scene/live-parametric-choreography";
 
 export const metadata: Metadata = {
   title: "Verified visual lesson · Murmur",
@@ -8,5 +8,5 @@ export const metadata: Metadata = {
 };
 
 export default function GenerateCanvasPage() {
-  return <LiveModelScene />;
+  return <LiveParametricChoreography />;
 }

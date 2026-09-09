@@ -8,6 +8,10 @@ import {
   decodeCompiledCheckpointV2,
   type CompiledCheckpointV2,
 } from "./checkpoint";
+import {
+  decodeCompiledCheckpointV3,
+  type CompiledCheckpointV3,
+} from "./parametric-checkpoint";
 import { applyLiveScenePatch, LiveSceneProtocolError } from "./patch";
 import { createSceneState } from "./state";
 import type { MotionPlan, SceneState } from "./types";
@@ -20,6 +24,11 @@ export interface CheckpointChoreographyInput {
   readonly layout: ChoreographyLayout;
   readonly currentViewport: ViewportPoseV1;
   readonly previousCertificateSha256: string | null;
+}
+
+export interface ParametricCheckpointChoreographyInput
+  extends Omit<CheckpointChoreographyInput, "checkpoint"> {
+  readonly checkpoint: CompiledCheckpointV3;
 }
 
 export interface PlannedCheckpointChoreography {
@@ -73,14 +82,13 @@ function sortedStepIds(plan: MotionPlan, type: MotionPlan["steps"][number]["type
  * Join one certified checkpoint to exact accepted scene, camera, and chain state.
  * Backend hashes remain opaque; this planner validates only cleartext bindings.
  */
-export function planCheckpointChoreography({
-  checkpoint: checkpointValue,
+function planDecodedCheckpointChoreography({
+  checkpoint,
   currentScene: currentSceneValue,
   layout,
   currentViewport: currentViewportValue,
   previousCertificateSha256,
-}: CheckpointChoreographyInput): PlannedCheckpointChoreography {
-  const checkpoint = decodeCompiledCheckpointV2(checkpointValue);
+}: CheckpointChoreographyInput | ParametricCheckpointChoreographyInput): PlannedCheckpointChoreography {
   const currentScene = createSceneState(currentSceneValue);
   if (layout !== "cinematic" && layout !== "compact") {
     return fail("layout must be cinematic or compact");
@@ -164,6 +172,27 @@ export function planCheckpointChoreography({
     baseViewport,
     resultViewport: checkpoint.presentation.resultViewports[layout],
     choreographyPlan: checkpoint.choreography,
+  });
+}
+
+export function planCheckpointChoreography({
+  checkpoint,
+  ...input
+}: CheckpointChoreographyInput): PlannedCheckpointChoreography {
+  return planDecodedCheckpointChoreography({
+    ...input,
+    checkpoint: decodeCompiledCheckpointV2(checkpoint),
+  });
+}
+
+/** Plan V3 through the same renderer-safe transition checks as V2. */
+export function planParametricCheckpointChoreography({
+  checkpoint,
+  ...input
+}: ParametricCheckpointChoreographyInput): PlannedCheckpointChoreography {
+  return planDecodedCheckpointChoreography({
+    ...input,
+    checkpoint: decodeCompiledCheckpointV3(checkpoint),
   });
 }
 

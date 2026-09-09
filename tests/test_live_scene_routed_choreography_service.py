@@ -34,6 +34,10 @@ from murmur.live_scene.completing_square_contracts import (
     CompletingSquareCheckpointId,
     CompletingSquareMainCheckpoint,
     CompletingSquareState,
+    ParametricCompletingSquareStateV1,
+)
+from murmur.live_scene.completing_square_problem_contracts import (
+    CompletingSquareProblemSpecV1,
 )
 from murmur.live_scene.completing_square_verifier import (
     verify_completing_square_checkpoint,
@@ -48,6 +52,10 @@ from murmur.live_scene.contracts import (
     SceneStreamFailedEvent,
     SceneStreamRepairingEvent,
     ShapeStyle,
+)
+from murmur.live_scene.parametric_choreography_requests import (
+    PARAMETRIC_CHOREOGRAPHY_PROTOCOL,
+    ParametricChoreographyReflexRequestV3,
 )
 from murmur.live_scene.semantic_contracts import SemanticSceneState
 from murmur.live_scene.semantic_service_contracts import (
@@ -625,6 +633,60 @@ async def test_semantic_low_level_mismatch_fails_before_provider_dispatch() -> N
         retryable=False,
         revision=scene.revision,
     )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_rejects_parametric_component_before_provider_dispatch() -> None:
+    component = ParametricCompletingSquareStateV1(
+        id="square-lesson",
+        problem_spec=CompletingSquareProblemSpecV1(
+            linear_coefficient=8,
+            right_hand_side=20,
+        ),
+    )
+    semantic_scene = SemanticSceneState(revision=0, components=(component,))
+    client = _Client([])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(semantic_scene=semantic_scene),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="semantic_base_mismatch",
+        retryable=False,
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_scene_service_delegates_v3_reflex_without_provider_dispatch() -> None:
+    client = _Client([])
+    request = ParametricChoreographyReflexRequestV3(
+        protocol=PARAMETRIC_CHOREOGRAPHY_PROTOCOL,
+        problem_text="x² + 8x = 20",
+        generation=19,
+        base_scene=SceneState(revision=0),
+        base_semantic_scene=SemanticSceneState(revision=0),
+        routing_mode="reflex",
+        requested_route=AdvanceChoreographyRouteV2(target_stage=CompletingSquareStage.SETUP),
+    )
+
+    events = [
+        event
+        async for event in service_module.SceneAuthoringService(
+            client
+        ).stream_parametric_choreography_events(request)
+    ]
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "parametric_choreography_scene_checkpoint",
+        "parametric_choreography_scene_checkpoint",
+        "scene_stream_completed",
+    ]
     assert client.calls == []
 
 

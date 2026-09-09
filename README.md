@@ -14,7 +14,7 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 - Database-backed tools, including web search and canvas updates
 - Four-layer memory: short-term context, episodic summaries, Mem0 semantic memory, and an explicit user profile
 - A deterministic Scene Description Language (SDL) compiler and a Rough.js/GSAP SVG renderer
-- An authenticated `/canvas/generate` lesson that streams compiler-verified Pythagorean visual atoms, adapts a follow-up into an altitude-dissection proof, and resumes from its in-memory presented frontier
+- An authenticated `/canvas/generate` equation studio for 36 bounded completing-square problems, with compiler-verified checkpoint choreography, exact interruption and continuation, a zero-provider Visual Reflex path, an optional model-routed Director, and zero-network replay
 - User-scoped logs, latency metrics, session history, and mastery data
 
 ## Runtime flow

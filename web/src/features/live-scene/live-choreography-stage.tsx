@@ -25,7 +25,7 @@ const MAIN_CHECKPOINTS = COMPLETING_SQUARE_CHECKPOINT_IDS.filter(
 
 export const LIVE_CHOREOGRAPHY_MAIN_CHECKPOINT_COUNT = MAIN_CHECKPOINTS.length;
 
-interface LiveChoreographyStageProps {
+export interface LiveChoreographyStageProps {
   readonly canvasRef: RefObject<SVGCanvasHandle | null>;
   readonly phase: SceneStreamRuntimePhase;
   readonly layout: ChoreographyLayout;
@@ -33,6 +33,7 @@ interface LiveChoreographyStageProps {
   readonly visibleCheckpointId?: CompletingSquareCheckpointId;
   readonly settledMainCount: number;
   readonly cornerClarified: boolean;
+  readonly cornerClarificationLabel?: string;
   readonly caption: string;
   readonly rendererTrusted: boolean;
   readonly reducedMotion?: boolean;
@@ -61,6 +62,7 @@ export function LiveChoreographyStage({
   visibleCheckpointId,
   settledMainCount,
   cornerClarified,
+  cornerClarificationLabel = "3 × 3 corner understood",
   caption,
   rendererTrusted,
   reducedMotion = false,
@@ -127,7 +129,7 @@ export function LiveChoreographyStage({
           </div>
           {cornerClarified && (
             <p className="mt-2 text-right font-mono text-[8px] uppercase tracking-[0.18em] text-sage">
-              3 × 3 corner understood
+              {cornerClarificationLabel}
             </p>
           )}
         </div>
