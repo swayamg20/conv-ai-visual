@@ -30,6 +30,15 @@ from murmur.live_scene.choreography_service_contracts import (
 from murmur.live_scene.choreography_wire import (
     encode_choreography_scene_stream_event,
 )
+from murmur.live_scene.parametric_choreography_requests import (
+    ChoreographyLiveSceneRequest,
+)
+from murmur.live_scene.parametric_choreography_service_contracts import (
+    ParametricChoreographySceneStreamEventV3,
+)
+from murmur.live_scene.parametric_choreography_wire import (
+    encode_parametric_choreography_scene_stream_event,
+)
 from murmur.live_scene.semantic_service_contracts import (
     SemanticLiveSceneRequest,
     SemanticSceneStreamEvent,
@@ -112,6 +121,18 @@ async def _encode_choreography_scene_events(
         await close_async_resource(events)
 
 
+async def _encode_parametric_choreography_scene_events(
+    events: AsyncIterator[ParametricChoreographySceneStreamEventV3],
+) -> AsyncIterator[str]:
+    """Encode exact V3 records and release every owned upstream resource."""
+
+    try:
+        async for event in events:
+            yield encode_parametric_choreography_scene_stream_event(event)
+    finally:
+        await close_async_resource(events)
+
+
 async def _stream_semantic_scene(
     body: SemanticLiveSceneRequest,
     *,
@@ -138,21 +159,28 @@ async def _stream_semantic_scene(
 
 
 async def _stream_choreography_scene(
-    body: SemanticLiveSceneRequest,
+    body: ChoreographyLiveSceneRequest,
     *,
     admission_identity: str,
     admission: SceneAuthoringAdmission,
     scene_service: SceneAuthoringService,
 ) -> StreamingResponse:
-    """Acquire paid capacity and stream routed, preflighted V2 checkpoints."""
+    """Acquire paid capacity and dispatch one exact choreography protocol."""
 
     try:
         lease = await admission.acquire(admission_identity)
     except SceneAdmissionError as exc:
         raise ApiError(429, str(exc)) from None
-    events = scene_service.stream_routed_choreography_events(body)
+    if isinstance(body, SemanticLiveSceneRequest):
+        encoded_events = _encode_choreography_scene_events(
+            scene_service.stream_routed_choreography_events(body)
+        )
+    else:
+        encoded_events = _encode_parametric_choreography_scene_events(
+            scene_service.stream_parametric_choreography_events(body)
+        )
     return _OwnedStreamingResponse(
-        _encode_choreography_scene_events(events),
+        encoded_events,
         admission_lease=lease,
         media_type="text/event-stream",
         headers={
@@ -205,7 +233,7 @@ async def stream_semantic_live_scene(
 
 @router.post("/choreography/stream")
 async def stream_choreography_live_scene(
-    body: SemanticLiveSceneRequest,
+    body: ChoreographyLiveSceneRequest,
     user: CurrentUserDependency,
     admission: SceneAuthoringAdmissionDependency,
     scene_service: SceneAuthoringServiceDependency,
@@ -272,7 +300,7 @@ async def stream_development_semantic_live_scene(
     dependencies=[Depends(_require_development_scene_lab)],
 )
 async def stream_development_choreography_live_scene(
-    body: SemanticLiveSceneRequest,
+    body: ChoreographyLiveSceneRequest,
     admission: SceneAuthoringAdmissionDependency,
     scene_service: SceneAuthoringServiceDependency,
 ) -> StreamingResponse:
