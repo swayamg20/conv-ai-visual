@@ -721,8 +721,6 @@ class ParametricChoreographyService:
             if self._client_factory is None:
                 raise RuntimeError("no Director client is configured")
             client = self._client_factory()
-        if not callable(getattr(client, "stream", None)):
-            raise TypeError("Director client must provide stream()")
         return client
 
     async def stream_events(
@@ -829,12 +827,14 @@ class ParametricChoreographyService:
             else:
                 try:
                     client = self._resolve_client()
+                    owns_client = self._client is None
+                    if not callable(getattr(client, "stream", None)):
+                        raise TypeError("Director client must provide stream()")
                 except asyncio.CancelledError:
                     raise
                 except Exception:
                     yield lifecycle.failed(ParametricChoreographyFailureCode.PROVIDER_ERROR)
                     return
-                owns_client = self._client is None
                 routing: ParametricChoreographyDirectorResult | None = None
                 try:
                     engine = ParametricChoreographyDirectorEngine(

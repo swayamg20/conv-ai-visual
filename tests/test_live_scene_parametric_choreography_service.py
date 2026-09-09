@@ -228,6 +228,14 @@ class _Client:
         self.close_calls += 1
 
 
+class _MalformedClient:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
 class _Counters:
     def __init__(self, client: _Client) -> None:
         self.client = client
@@ -1048,6 +1056,19 @@ async def test_factory_failure_maps_to_provider_error_after_validation() -> None
     assert failed.retryable is True
     assert factory_calls == 1
     assert "credential" not in failed.model_dump_json(by_alias=True)
+
+
+@pytest.mark.asyncio
+async def test_malformed_factory_client_is_closed_after_validation_failure() -> None:
+    client = _MalformedClient()
+
+    events = await _collect(
+        ParametricChoreographyService(client_factory=lambda: client),  # type: ignore[arg-type]
+        _director_request(),
+    )
+
+    _failure(events, ParametricChoreographyFailureCode.PROVIDER_ERROR)
+    assert client.close_calls == 1
 
 
 @pytest.mark.asyncio
