@@ -132,18 +132,18 @@ def _equation_candidate_count(problem_text: str, square_tokens: list[re.Match[st
     return count
 
 
-def parse_completing_square_problem(problem_text: str) -> CompletingSquareProblemBinding:
+def parse_completing_square_problem(problem_text: str | None) -> CompletingSquareProblemBinding:
     """Extract exactly one supported canonical equation from ``problem_text``.
 
     Accepted notation is ``x² + bx = c`` or ``x^2 + bx = c`` with optional
     horizontal whitespace.  Surrounding instructional prose is allowed.
     """
 
-    if (
-        not isinstance(problem_text, str)
-        or not problem_text
-        or len(problem_text) > MAX_COMPLETING_SQUARE_PROBLEM_TEXT_CHARS
-    ):
+    if problem_text is None:
+        return CompletingSquareProblemBinding(CompletingSquareProblemStatus.ABSENT)
+    if not isinstance(problem_text, str):
+        return CompletingSquareProblemBinding(CompletingSquareProblemStatus.MALFORMED)
+    if not problem_text or len(problem_text) > MAX_COMPLETING_SQUARE_PROBLEM_TEXT_CHARS:
         return CompletingSquareProblemBinding(CompletingSquareProblemStatus.MALFORMED)
 
     square_tokens = list(_SQUARED_VARIABLE_PATTERN.finditer(problem_text))
@@ -181,7 +181,7 @@ def parse_completing_square_problem(problem_text: str) -> CompletingSquareProble
 
 
 def bind_completing_square_problem(
-    problem_text: str,
+    problem_text: str | None,
     *,
     accepted_problem: CompletingSquareProblemSpecV1 | None,
 ) -> CompletingSquareProblemBinding:

@@ -263,10 +263,13 @@ def test_initial_binding_requires_one_supported_problem() -> None:
         accepted_problem=None,
     )
     absent = bind_completing_square_problem("Begin the lesson.", accepted_problem=None)
+    null = bind_completing_square_problem(None, accepted_problem=None)
 
     assert bound.status is CompletingSquareProblemStatus.BOUND
     assert bound.problem == _problem()
     assert absent.status is CompletingSquareProblemStatus.ABSENT
+    assert null.status is CompletingSquareProblemStatus.ABSENT
+    assert null.failure_reason is CompletingSquareProblemFailureReason.REQUIRED
 
 
 def test_continuation_binding_reuses_omitted_or_identical_problem() -> None:
@@ -280,12 +283,14 @@ def test_continuation_binding_reuses_omitted_or_identical_problem() -> None:
         "Continue x^2 + 8x = 20.",
         accepted_problem=accepted,
     )
+    nullable_field = bind_completing_square_problem(None, accepted_problem=accepted)
 
     assert omitted == CompletingSquareProblemBinding(
         CompletingSquareProblemStatus.BOUND,
         accepted,
     )
     assert repeated == omitted
+    assert nullable_field == omitted
 
 
 def test_continuation_binding_rejects_a_different_supported_problem() -> None:
