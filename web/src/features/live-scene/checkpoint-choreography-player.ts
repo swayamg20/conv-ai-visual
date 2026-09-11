@@ -1,5 +1,7 @@
 import type { SVGCanvasHandle } from "@/features/canvas/types";
 import type {
+  ChoreographyCueKindV2,
+  ChoreographyPlan,
   PlannedCheckpointChoreography,
   SceneState,
   ViewportPoseV1,
@@ -23,7 +25,7 @@ export type CheckpointChoreographyRenderer = Pick<
 >;
 
 export interface PlayableCheckpoint {
-  readonly plan: PlannedCheckpointChoreography;
+  readonly plan: PlannedCheckpointChoreography<ChoreographyPlan>;
   readonly base: { readonly viewport: ViewportPoseV1 };
   readonly bootstrappedViewport: boolean;
 }
@@ -90,7 +92,9 @@ export class CheckpointChoreographyPlayer {
       invalid: null,
       closed: false,
     };
-    const observer: ChoreographyExecutorObserver = (signal) => {
+    const observer: ChoreographyExecutorObserver<ChoreographyCueKindV2> = (
+      signal,
+    ) => {
       if (signals.closed) return;
       try {
         this.acceptSignal(prepared, signals, signal);
@@ -104,7 +108,14 @@ export class CheckpointChoreographyPlayer {
     return Object.freeze({
       prepared,
       playback: playbackHandle(
-        this.renderer.playCheckpointChoreography(prepared.plan, observer),
+        // The canvas handle keeps its legacy V1 default; its executor is generic.
+        // Contain the additive V2 widening at this protocol-neutral boundary.
+        (
+          this.renderer.playCheckpointChoreography as unknown as (
+            plan: PlannedCheckpointChoreography<ChoreographyPlan>,
+            observer: ChoreographyExecutorObserver<ChoreographyCueKindV2>,
+          ) => ChoreographyPlayback
+        )(prepared.plan, observer),
       ),
       signals,
     });
@@ -214,7 +225,7 @@ export class CheckpointChoreographyPlayer {
   private acceptSignal(
     prepared: PlayableCheckpoint,
     signals: PlaybackSignals,
-    signal: ChoreographyExecutorSignal,
+    signal: ChoreographyExecutorSignal<ChoreographyCueKindV2>,
   ): void {
     if (signals.invalid) throw signals.invalid;
     if (signals.settlement) {
