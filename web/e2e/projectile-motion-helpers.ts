@@ -206,6 +206,39 @@ export async function waitForProjectileBridge(page: Page): Promise<void> {
   );
 }
 
+export async function firstMeaningfulProjectileVisualAt(
+  page: Page,
+): Promise<number> {
+  const result = await page.waitForFunction(
+    () => {
+      const stage = document.querySelector<HTMLElement>(
+        '[data-testid="projectile-choreography-stage"]',
+      );
+      const visible = Array.from(
+        stage?.querySelectorAll<SVGGraphicsElement>("[data-element-id]") ?? [],
+      ).some((element) => {
+        const bounds = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          bounds.width > 0 &&
+          bounds.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) > 0.02
+        );
+      });
+      return visible ? performance.now() : false;
+    },
+    undefined,
+    { polling: "raf" },
+  );
+  const value = await result.jsonValue();
+  if (value === false) {
+    throw new Error("The projectile board never presented meaningful ink");
+  }
+  return value;
+}
+
 export async function projectileBridgeState(
   page: Page,
 ): Promise<ProjectileE2EBridgeState> {

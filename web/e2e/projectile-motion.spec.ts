@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import { expect, test, type Page } from "@playwright/test";
 
 import primaryFixtureValue from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v20-a45.v1.json";
@@ -10,6 +13,7 @@ import {
   expectProviderFree,
   expectStableElement,
   expectedProjectileBoard,
+  firstMeaningfulProjectileVisualAt,
   fixtureCheckpoints,
   observeProjectileStage,
   observeProviderFreeRequests,
@@ -24,6 +28,7 @@ import {
   waitForActiveTrace,
   waitForProjectileBridge,
 } from "./projectile-motion-helpers";
+import { observeChoreographyExecution } from "./live-choreography-provenance";
 
 const primaryFixture = projectileFixture(primaryFixtureValue);
 const primaryProblem = Object.freeze({
@@ -36,6 +41,8 @@ const retargetProblem = Object.freeze({
   speedMps: 20,
   angleDeg: 60,
 } as const);
+const FIRST_MEANINGFUL_SAMPLE_COUNT = 20;
+const FIRST_MEANINGFUL_THRESHOLD_MS = 300;
 
 async function drawLaunch(page: Page): Promise<void> {
   await page.getByRole("button", { name: "Draw this launch" }).click();
@@ -230,6 +237,93 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
   );
   return value;
 }
+
+function rounded(value: number): number {
+  return Number(value.toFixed(3));
+}
+
+function nearestRankP95(samples: readonly number[]): number {
+  if (samples.length === 0) throw new Error("p95 requires at least one sample");
+  return [...samples].sort((left, right) => left - right)[
+    Math.ceil(samples.length * 0.95) - 1
+  ]!;
+}
+
+test("records twenty fresh click-to-first-ink samples below the local 300 ms p95 boundary", async ({
+  browser,
+  baseURL,
+}, testInfo) => {
+  if (!baseURL)
+    throw new Error("The projectile browser base URL is unavailable");
+  const execution = observeChoreographyExecution(testInfo.config, browser);
+  const samplesMs: number[] = [];
+
+  for (let index = 0; index < FIRST_MEANINGFUL_SAMPLE_COUNT; index += 1) {
+    const context = await browser.newContext({
+      baseURL,
+      viewport: { width: 1_280, height: 720 },
+      screen: { width: 1_280, height: 720 },
+      deviceScaleFactor: 1,
+      colorScheme: "dark",
+      locale: "en-US",
+      timezoneId: "UTC",
+      reducedMotion: "no-preference",
+      serviceWorkers: "block",
+    });
+    const page = await context.newPage();
+    try {
+      await page.goto(
+        "/e2e/projectile-motion?layout=cinematic&motion=real&flow=main&speed=accelerated&proof=none",
+        { waitUntil: "domcontentloaded" },
+      );
+      await waitForProjectileBridge(page);
+      const startedAtMs = await page
+        .getByRole("button", { name: "Draw this launch" })
+        .evaluate((button) => {
+          const startedAt = performance.now();
+          (button as HTMLButtonElement).click();
+          return startedAt;
+        });
+      const firstVisibleAtMs = await firstMeaningfulProjectileVisualAt(page);
+      const sample = rounded(firstVisibleAtMs - startedAtMs);
+      expect(sample).toBeGreaterThanOrEqual(0);
+      samplesMs.push(sample);
+    } finally {
+      await context.close();
+    }
+  }
+
+  const p95Ms = rounded(nearestRankP95(samplesMs));
+  expect(samplesMs).toHaveLength(FIRST_MEANINGFUL_SAMPLE_COUNT);
+  expect(p95Ms).toBeLessThan(FIRST_MEANINGFUL_THRESHOLD_MS);
+  const observationsPath = path.join(
+    path.dirname(testInfo.project.outputDir),
+    "observations.json",
+  );
+  await mkdir(path.dirname(observationsPath), { recursive: true });
+  await writeFile(
+    observationsPath,
+    `${JSON.stringify(
+      {
+        v: 1,
+        gate: "1.7",
+        execution,
+        firstMeaningful: {
+          samplesMs,
+          p95Ms,
+          thresholdExclusiveMs: FIRST_MEANINGFUL_THRESHOLD_MS,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  await testInfo.attach("projectile-motion-first-meaningful-observations", {
+    path: observationsPath,
+    contentType: "application/json",
+  });
+});
 
 test("the certified main flow draws a curved trace with one stable projectile marker and no provider", async ({
   page,
