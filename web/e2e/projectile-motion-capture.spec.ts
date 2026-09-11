@@ -467,7 +467,22 @@ test("captures the complete mute-first 1x projectile proof with recomputable evi
         `[data-element-id="${pathId}"] path`,
       );
       await expect(curve).toHaveCount(1);
-      expect(await curve.getAttribute("d")).toMatch(/[CQ]/);
+      const geometry = await curve.evaluate((element) => {
+        const path = element as SVGPathElement;
+        const totalLength = path.getTotalLength();
+        const start = path.getPointAtLength(0);
+        const midpoint = path.getPointAtLength(totalLength / 2);
+        const end = path.getPointAtLength(totalLength);
+        return {
+          totalLength,
+          twiceTriangleArea: Math.abs(
+            (end.x - start.x) * (midpoint.y - start.y) -
+              (end.y - start.y) * (midpoint.x - start.x),
+          ),
+        };
+      });
+      expect(geometry.totalLength).toBeGreaterThan(0);
+      expect(geometry.twiceTriangleArea).toBeGreaterThan(10);
     }
     pathGeometrySamples = await observePathGeometrySamples(page);
 

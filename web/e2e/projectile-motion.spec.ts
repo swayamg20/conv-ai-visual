@@ -163,8 +163,8 @@ async function stopDuringHold(page: Page): Promise<{
 }
 
 async function stopDuringTransformAndTrace(page: Page): Promise<{
-  readonly beforeWidth: number;
-  readonly interruptedWidth: number;
+  readonly beforeOpacity: number;
+  readonly interruptedOpacity: number;
   readonly traceDashArray: number;
   readonly traceDashOffset: number;
 }> {
@@ -172,17 +172,13 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
     "data-settled-main-count",
     "4",
   );
-  const beforeWidth = Number(
-    await projectileBoard(page)
-      .locator(
-        '[data-element-id="projectile__vertical_state"] foreignObject',
-      )
-      .getAttribute("width"),
-  );
-  expect(beforeWidth).toBeGreaterThan(0);
+  const beforeOpacity = await projectileBoard(page)
+    .locator('[data-element-id="projectile__vertical_state"]')
+    .evaluate((element) => Number(getComputedStyle(element).opacity));
+  expect(beforeOpacity).toBeGreaterThan(0);
 
   const result = await page.waitForFunction(
-    ({ initialWidth }) => {
+    ({ initialOpacity }) => {
       const stage = document.querySelector<HTMLElement>(
         '[data-testid="projectile-choreography-stage"]',
       );
@@ -192,17 +188,14 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       const trace = stage?.querySelector<SVGGElement>(
         '[data-element-id="projectile__trajectory_descent"]',
       );
-      const transformedForeignObject = transformed?.querySelector(
-        "foreignObject",
-      );
       const tracePath = trace?.querySelector("path");
       const stop = Array.from(document.querySelectorAll("button")).find(
         (candidate) =>
           candidate.textContent?.trim() === "Stop at this moment" &&
           !candidate.disabled,
       );
-      const currentWidth = Number(
-        transformedForeignObject?.getAttribute("width"),
+      const currentOpacity = Number(
+        transformed ? getComputedStyle(transformed).opacity : Number.NaN,
       );
       const traceDashArray = Number(
         tracePath?.getAttribute("stroke-dasharray"),
@@ -212,9 +205,9 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       );
       if (
         stage?.dataset.visibleCheckpointId !== "trace_descent" ||
-        !Number.isFinite(currentWidth) ||
-        currentWidth <= initialWidth ||
-        currentWidth >= 250 ||
+        !Number.isFinite(currentOpacity) ||
+        currentOpacity <= 0 ||
+        currentOpacity >= initialOpacity - 0.005 ||
         !Number.isFinite(traceDashArray) ||
         !Number.isFinite(traceDashOffset) ||
         traceDashArray <= 0 ||
@@ -226,13 +219,13 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       }
       stop.click();
       return {
-        beforeWidth: initialWidth,
-        interruptedWidth: currentWidth,
+        beforeOpacity: initialOpacity,
+        interruptedOpacity: currentOpacity,
         traceDashArray,
         traceDashOffset,
       };
     },
-    { initialWidth: beforeWidth },
+    { initialOpacity: beforeOpacity },
     { polling: "raf", timeout: 20_000 },
   );
   const value = await result.jsonValue();
@@ -796,8 +789,8 @@ test.describe("interruption phase boundaries", () => {
       "__vertical_state_before_transform__",
     );
     const interrupted = await stopDuringTransformAndTrace(page);
-    expect(interrupted.interruptedWidth).toBeGreaterThan(
-      interrupted.beforeWidth,
+    expect(interrupted.interruptedOpacity).toBeLessThan(
+      interrupted.beforeOpacity,
     );
     expect(interrupted.traceDashOffset).toBeGreaterThan(0);
     expect(interrupted.traceDashOffset).toBeLessThan(
