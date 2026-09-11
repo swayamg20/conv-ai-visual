@@ -14,7 +14,13 @@ from murmur.live_scene.choreography_contracts import (
     TransformCueV1,
     ViewportPoseV1,
 )
-from murmur.live_scene.contracts import LatexTokenSceneNode, PathSceneNode, PutSceneOperation
+from murmur.live_scene.contracts import (
+    LatexTokenSceneNode,
+    PathSceneNode,
+    PutSceneOperation,
+    RemoveSceneOperation,
+    SceneState,
+)
 from murmur.live_scene.projectile_motion_compiler import (
     ProjectileMotionCheckpointBlueprint,
     compile_projectile_motion_checkpoint_blueprints,
@@ -38,6 +44,7 @@ from murmur.live_scene.projectile_motion_verifier import (
     ProjectileMotionVerificationCode,
     ProjectileMotionVerificationError,
     verify_projectile_motion_checkpoint,
+    verify_projectile_motion_frontier,
 )
 
 SUPPORTED_PROBLEMS = tuple(
@@ -153,6 +160,55 @@ def _assert_rejected(
     assert captured.value.code is code
 
 
+def _apply_checkpoint_to_scene(
+    scene: SceneState,
+    checkpoint: ProjectileMotionCheckpointBlueprint,
+) -> SceneState:
+    order = [node.id for node in scene.nodes]
+    nodes = {node.id: node for node in scene.nodes}
+    for operation in checkpoint.patch.operations:
+        if isinstance(operation, PutSceneOperation):
+            if operation.node.id not in nodes:
+                order.append(operation.node.id)
+            nodes[operation.node.id] = operation.node
+        else:
+            assert isinstance(operation, RemoveSceneOperation)
+            del nodes[operation.id]
+            order.remove(operation.id)
+    return SceneState(
+        revision=scene.revision + 1,
+        nodes=tuple(nodes[node_id] for node_id in order),
+    )
+
+
+def _accepted_main_frontiers(
+    problem: ProjectileMotionProblemSpecV1,
+) -> tuple[tuple[ProjectileMotionStateV1, SceneState], ...]:
+    scene = SceneState(revision=0)
+    accepted: list[tuple[ProjectileMotionStateV1, SceneState]] = []
+    for checkpoint in _full_lesson(problem):
+        scene = _apply_checkpoint_to_scene(scene, checkpoint)
+        accepted.append((checkpoint.result_component, scene))
+    return tuple(accepted)
+
+
+def _replace_scene_node(scene: SceneState, node_id: str, replacement) -> SceneState:
+    assert any(node.id == node_id for node in scene.nodes)
+    return scene.model_copy(
+        update={"nodes": tuple(replacement if node.id == node_id else node for node in scene.nodes)}
+    )
+
+
+def _assert_frontier_rejected(
+    component: ProjectileMotionStateV1,
+    scene: SceneState,
+    code: ProjectileMotionVerificationCode,
+) -> None:
+    with pytest.raises(ProjectileMotionVerificationError) as captured:
+        verify_projectile_motion_frontier(component, scene)
+    assert captured.value.code is code
+
+
 def test_verifier_source_has_no_compiler_or_derived_problem_dependency() -> None:
     source = inspect.getsource(projectile_motion_verifier)
     tree = ast.parse(source)
@@ -174,6 +230,213 @@ def test_verifier_source_has_no_compiler_or_derived_problem_dependency() -> None
     assert "flight_time_seconds" not in source
     assert "maximum_height_m" not in source
     assert ".range_m" not in source
+
+
+@pytest.mark.parametrize(
+    "problem", SUPPORTED_PROBLEMS, ids=lambda item: f"{item.speed_mps}@{item.angle_deg}"
+)
+def test_every_committed_main_frontier_uses_patch_history_order_and_verifies(
+    problem: ProjectileMotionProblemSpecV1,
+) -> None:
+    frontiers = _accepted_main_frontiers(problem)
+    assert len(frontiers) == 6
+    saw_nonlexical_order = False
+    for component, scene in frontiers:
+        node_ids = tuple(node.id for node in scene.nodes)
+        saw_nonlexical_order |= node_ids != tuple(sorted(node_ids))
+        assert verify_projectile_motion_frontier(component, scene) is None
+    assert saw_nonlexical_order is True
+
+
+def test_frontier_accepts_out_of_order_clarifications_and_retarget_in_place() -> None:
+    problem = SUPPORTED_PROBLEMS[1]
+    target_problem = SUPPORTED_PROBLEMS[-1]
+    component, scene = _accepted_main_frontiers(problem)[-1]
+    for topic in (
+        ProjectileMotionClarificationTopic.FLIGHT_SYMMETRY,
+        ProjectileMotionClarificationTopic.HORIZONTAL_VELOCITY,
+        ProjectileMotionClarificationTopic.APEX_ACCELERATION,
+    ):
+        checkpoint = compile_projectile_motion_checkpoint_blueprints(
+            _clarify_beat(problem, topic),
+            component,
+        ).checkpoints[0]
+        scene = _apply_checkpoint_to_scene(scene, checkpoint)
+        component = checkpoint.result_component
+        assert scene.nodes[-1].id == f"lesson__clarify_{topic.value}"
+        assert verify_projectile_motion_frontier(component, scene) is None
+
+    retarget = compile_projectile_motion_checkpoint_blueprints(
+        _retarget_beat(problem, target_problem),
+        component,
+    ).checkpoints[0]
+    scene = _apply_checkpoint_to_scene(scene, retarget)
+    component = retarget.result_component
+    assert verify_projectile_motion_frontier(component, scene) is None
+
+
+def test_frontier_rejects_unsettled_or_revision_zero_committed_state() -> None:
+    problem = SUPPORTED_PROBLEMS[1]
+    _assert_frontier_rejected(
+        _state(problem, None),
+        SceneState(revision=1),
+        ProjectileMotionVerificationCode.TRANSITION,
+    )
+    component, scene = _accepted_main_frontiers(problem)[0]
+    _assert_frontier_rejected(
+        component,
+        scene.model_copy(update={"revision": 0}),
+        ProjectileMotionVerificationCode.TRANSITION,
+    )
+    summary_component, summary_scene = _accepted_main_frontiers(problem)[-1]
+    _assert_frontier_rejected(
+        summary_component,
+        summary_scene.model_copy(update={"revision": 5}),
+        ProjectileMotionVerificationCode.TRANSITION,
+    )
+
+
+def test_frontier_rejects_foreign_dirty_reordered_duplicate_and_unsafe_nodes() -> None:
+    component, scene = _accepted_main_frontiers(SUPPORTED_PROBLEMS[1])[3]
+    first = scene.nodes[0]
+
+    foreign = first.model_copy(update={"id": "foreign__ground"})
+    _assert_frontier_rejected(
+        component,
+        scene.model_copy(update={"nodes": (*scene.nodes, foreign)}),
+        ProjectileMotionVerificationCode.STABLE_IDS,
+    )
+
+    dirty = first.model_copy(update={"id": "lesson__dirty"})
+    _assert_frontier_rejected(
+        component,
+        scene.model_copy(update={"nodes": (*scene.nodes, dirty)}),
+        ProjectileMotionVerificationCode.STABLE_IDS,
+    )
+
+    reordered = SceneState(
+        revision=scene.revision,
+        nodes=(scene.nodes[1], scene.nodes[0], *scene.nodes[2:]),
+    )
+    _assert_frontier_rejected(
+        component,
+        reordered,
+        ProjectileMotionVerificationCode.STABLE_IDS,
+    )
+
+    duplicate = SceneState.model_construct(
+        revision=scene.revision,
+        nodes=(*scene.nodes, first),
+    )
+    _assert_frontier_rejected(
+        component,
+        duplicate,
+        ProjectileMotionVerificationCode.BLUEPRINT_CONTRACT,
+    )
+
+    unsafe = first.model_copy(update={"id": "lesson__unsafe!"})
+    unsafe_scene = SceneState.model_construct(
+        revision=scene.revision,
+        nodes=(unsafe, *scene.nodes[1:]),
+    )
+    _assert_frontier_rejected(
+        component,
+        unsafe_scene,
+        ProjectileMotionVerificationCode.BLUEPRINT_CONTRACT,
+    )
+
+
+def test_frontier_rejects_physics_label_layout_style_and_trajectory_mutations() -> None:
+    frontiers = _accepted_main_frontiers(SUPPORTED_PROBLEMS[1])
+
+    setup_component, setup_scene = frontiers[0]
+    resultant = next(node for node in setup_scene.nodes if node.id == "lesson__velocity_resultant")
+    assert isinstance(resultant, PathSceneNode)
+    points = (
+        *resultant.points[:3],
+        (resultant.points[3][0] + 1.0, resultant.points[3][1]),
+        *resultant.points[4:],
+    )
+    _assert_frontier_rejected(
+        setup_component,
+        _replace_scene_node(
+            setup_scene,
+            resultant.id,
+            resultant.model_copy(update={"points": points}),
+        ),
+        ProjectileMotionVerificationCode.PHYSICS_GEOMETRY,
+    )
+    summary_component, summary_scene = frontiers[-1]
+    summary = next(node for node in summary_scene.nodes if node.id == "lesson__summary_values")
+    assert isinstance(summary, LatexTokenSceneNode)
+    _assert_frontier_rejected(
+        summary_component,
+        _replace_scene_node(
+            summary_scene,
+            summary.id,
+            summary.model_copy(update={"latex": summary.latex.replace("R=", "R=999+", 1)}),
+        ),
+        ProjectileMotionVerificationCode.LABEL_FACT,
+    )
+
+    decompose_component, decompose_scene = frontiers[1]
+    equation = next(node for node in decompose_scene.nodes if node.id == "lesson__equation_x")
+    assert isinstance(equation, LatexTokenSceneNode)
+    _assert_frontier_rejected(
+        decompose_component,
+        _replace_scene_node(
+            decompose_scene,
+            equation.id,
+            equation.model_copy(update={"x": equation.x - 1.0}),
+        ),
+        ProjectileMotionVerificationCode.LABEL_LAYOUT,
+    )
+
+    ascent_component, ascent_scene = frontiers[2]
+    ascent = next(node for node in ascent_scene.nodes if node.id == "lesson__trajectory_ascent")
+    assert isinstance(ascent, PathSceneNode)
+    style = ascent.style.model_copy(update={"stroke_width": 3.0})
+    _assert_frontier_rejected(
+        ascent_component,
+        _replace_scene_node(
+            ascent_scene,
+            ascent.id,
+            ascent.model_copy(update={"style": style}),
+        ),
+        ProjectileMotionVerificationCode.VISUAL_STYLE,
+    )
+
+    path_points = list(ascent.points)
+    path_points[16] = (path_points[16][0], path_points[16][1] + 1.0)
+    _assert_frontier_rejected(
+        ascent_component,
+        _replace_scene_node(
+            ascent_scene,
+            ascent.id,
+            ascent.model_copy(update={"points": tuple(path_points)}),
+        ),
+        ProjectileMotionVerificationCode.PHYSICS_GEOMETRY,
+    )
+
+
+def test_frontier_rejects_board_clipping_and_text_collision() -> None:
+    component, scene = _accepted_main_frontiers(SUPPORTED_PROBLEMS[1])[0]
+    ground = next(node for node in scene.nodes if node.id == "lesson__ground")
+    clipped = ground.model_copy(update={"points": ((0.0, ground.points[0][1]), ground.points[1])})
+    _assert_frontier_rejected(
+        component,
+        _replace_scene_node(scene, ground.id, clipped),
+        ProjectileMotionVerificationCode.BOARD_BOUNDS,
+    )
+
+    title = next(node for node in scene.nodes if node.id == "lesson__title")
+    assert isinstance(title, LatexTokenSceneNode)
+    collision = title.model_copy(update={"x": 640.0, "y": 92.0})
+    _assert_frontier_rejected(
+        component,
+        _replace_scene_node(scene, title.id, collision),
+        ProjectileMotionVerificationCode.TEXT_COLLISION,
+    )
 
 
 @pytest.mark.parametrize(

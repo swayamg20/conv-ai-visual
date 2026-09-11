@@ -34,6 +34,7 @@ from murmur.live_scene.contracts import (
     SceneNode,
     ScenePatchDraft,
     ScenePresentation,
+    SceneState,
 )
 from murmur.live_scene.projectile_motion_contracts import (
     PROJECTILE_MOTION_CLARIFICATION_CHECKPOINTS,
@@ -973,6 +974,40 @@ def _verify_snapshot(
         _verify_expected_node(nodes[node_id], expected_node)
 
 
+def _expected_frontier_node_order(
+    state: ProjectileMotionStateV1,
+    physics: _Physics,
+) -> tuple[str, ...]:
+    """Reconstruct accepted order from semantic introduction history.
+
+    Scene patches retain existing positions, remove retired nodes in place, and
+    append newly introduced targets in lexical operation order.  A plain sort
+    of the terminal node set is therefore not the accepted scene order once
+    later checkpoints have appended nodes.
+    """
+
+    if state.last_main_checkpoint is None:
+        return ()
+    terminal_index = PROJECTILE_MOTION_MAIN_CHECKPOINT_ORDER.index(state.last_main_checkpoint)
+    order: list[str] = []
+
+    def reconcile(expected: NodeMap) -> None:
+        expected_ids = set(expected)
+        order[:] = [node_id for node_id in order if node_id in expected_ids]
+        retained = set(order)
+        order.extend(sorted(expected_ids.difference(retained)))
+
+    for checkpoint in PROJECTILE_MOTION_MAIN_CHECKPOINT_ORDER[: terminal_index + 1]:
+        staged = ProjectileMotionStateV1(
+            id=state.id,
+            problem_spec=state.problem_spec,
+            last_main_checkpoint=checkpoint,
+        )
+        reconcile(_expected_nodes(staged, physics))
+    reconcile(_expected_nodes(state, physics))
+    return tuple(order)
+
+
 def _verify_trajectory_physics(
     component_id: str,
     state: ProjectileMotionStateV1,
@@ -1699,6 +1734,87 @@ def _verify_presentation(
         )
 
 
+def verify_projectile_motion_frontier(
+    component: ProjectileMotionStateV1,
+    scene: SceneState,
+) -> None:
+    """Verify one committed semantic frontier against its exact low-level scene.
+
+    This admission boundary accepts no empty placeholder component.  It
+    reconstructs both the terminal nodes and their patch-history order from the
+    semantic frontier, then independently checks the complete visible model.
+    """
+
+    if not isinstance(component, ProjectileMotionStateV1):
+        _fail(
+            ProjectileMotionVerificationCode.BLUEPRINT_CONTRACT,
+            "frontier component must be a ProjectileMotionStateV1 contract",
+        )
+    if not isinstance(scene, SceneState):
+        _fail(
+            ProjectileMotionVerificationCode.BLUEPRINT_CONTRACT,
+            "frontier scene must be a SceneState contract",
+        )
+    try:
+        component = ProjectileMotionStateV1.model_validate(
+            component.model_dump(mode="python", by_alias=True)
+        )
+        scene = SceneState.model_validate(scene.model_dump(mode="python", by_alias=True))
+    except (AttributeError, TypeError, ValueError):
+        raise ProjectileMotionVerificationError(
+            ProjectileMotionVerificationCode.BLUEPRINT_CONTRACT,
+            "frontier inputs do not survive their strict contracts",
+        ) from None
+    if component.last_main_checkpoint is None:
+        _fail(
+            ProjectileMotionVerificationCode.TRANSITION,
+            "service admission requires a settled main checkpoint",
+        )
+    minimum_revision = (
+        PROJECTILE_MOTION_MAIN_CHECKPOINT_ORDER.index(component.last_main_checkpoint)
+        + 1
+        + len(component.clarified_topics)
+    )
+    if scene.revision < minimum_revision:
+        _fail(
+            ProjectileMotionVerificationCode.TRANSITION,
+            "scene revision predates the committed projectile frontier",
+        )
+
+    physics = _derive_physics(component.problem_spec)
+    node_ids = tuple(node.id for node in scene.nodes)
+    if len(node_ids) != len(set(node_ids)):
+        _fail(
+            ProjectileMotionVerificationCode.STABLE_IDS,
+            "frontier node IDs must be unique",
+        )
+    nodes = {node.id: node for node in scene.nodes}
+    prefix = f"{component.id}__"
+    if any(not node_id.startswith(prefix) for node_id in node_ids):
+        _fail(
+            ProjectileMotionVerificationCode.STABLE_IDS,
+            "projectile frontier may not contain foreign component nodes",
+        )
+
+    expected_ids = set(_expected_nodes(component, physics))
+    if set(nodes) != expected_ids:
+        _fail(
+            ProjectileMotionVerificationCode.STABLE_IDS,
+            "frontier has missing or dirty stable node roles",
+        )
+    expected_order = _expected_frontier_node_order(component, physics)
+    if node_ids != expected_order:
+        _fail(
+            ProjectileMotionVerificationCode.STABLE_IDS,
+            "frontier nodes do not preserve deterministic patch-history order",
+        )
+
+    _verify_board_bounds(nodes.values(), label="frontier")
+    _verify_text_collisions(nodes.values(), label="frontier")
+    _verify_snapshot(component, nodes, physics, label="frontier snapshot")
+    _verify_trajectory_physics(component.id, component, nodes, physics)
+
+
 def _read_blueprint(blueprint: object) -> ProjectileMotionCheckpointBlueprintLike:
     required = (
         "checkpoint_id",
@@ -1846,4 +1962,5 @@ __all__ = [
     "ProjectileMotionVerificationCode",
     "ProjectileMotionVerificationError",
     "verify_projectile_motion_checkpoint",
+    "verify_projectile_motion_frontier",
 ]
