@@ -57,6 +57,11 @@ from murmur.live_scene.parametric_choreography_requests import (
     PARAMETRIC_CHOREOGRAPHY_PROTOCOL,
     ParametricChoreographyReflexRequestV3,
 )
+from murmur.live_scene.projectile_motion_requests import (
+    PROJECTILE_CHOREOGRAPHY_PROTOCOL,
+    ProjectileMotionDirectorRequestV1,
+    ProjectileMotionReflexRequestV1,
+)
 from murmur.live_scene.semantic_contracts import SemanticSceneState
 from murmur.live_scene.semantic_service_contracts import (
     SemanticLiveSceneRequest,
@@ -160,6 +165,34 @@ def _request(
         generation=generation,
         base_scene=scene or SceneState(revision=0),
         base_semantic_scene=semantic_scene or SemanticSceneState(revision=0),
+    )
+
+
+def _projectile_reflex_request() -> ProjectileMotionReflexRequestV1:
+    return ProjectileMotionReflexRequestV1.model_validate(
+        {
+            "protocol": PROJECTILE_CHOREOGRAPHY_PROTOCOL,
+            "problemSpec": {"v": 1, "speedMps": 20, "angleDeg": 45},
+            "generation": 23,
+            "baseScene": {"revision": 0, "nodes": []},
+            "baseSemanticScene": {"revision": 0, "components": []},
+            "routingMode": "reflex",
+            "requestedRoute": {"intent": "advance", "targetStage": "setup"},
+        }
+    )
+
+
+def _projectile_director_request() -> ProjectileMotionDirectorRequestV1:
+    return ProjectileMotionDirectorRequestV1.model_validate(
+        {
+            "protocol": PROJECTILE_CHOREOGRAPHY_PROTOCOL,
+            "problemSpec": {"v": 1, "speedMps": 20, "angleDeg": 45},
+            "generation": 24,
+            "baseScene": {"revision": 0, "nodes": []},
+            "baseSemanticScene": {"revision": 0, "components": []},
+            "routingMode": "director",
+            "prompt": "Teach the projectile setup first.",
+        }
     )
 
 
@@ -688,6 +721,70 @@ async def test_scene_service_delegates_v3_reflex_without_provider_dispatch() -> 
         "scene_stream_completed",
     ]
     assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_scene_service_delegates_projectile_reflex_without_resolving_factory() -> None:
+    client = _Client([])
+    factory_calls = 0
+
+    def factory() -> _Client:
+        nonlocal factory_calls
+        factory_calls += 1
+        return client
+
+    events = [
+        event
+        async for event in service_module.SceneAuthoringService(
+            client_factory=factory
+        ).stream_projectile_choreography_events(_projectile_reflex_request())
+    ]
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "projectile_choreography_scene_checkpoint",
+        "scene_stream_completed",
+    ]
+    assert factory_calls == 0
+    assert client.calls == []
+    assert client.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_scene_service_projectile_delegate_preserves_factory_ownership() -> None:
+    client = _Client([[json.dumps({"v": 1, "action": "start", "stage": "setup"})]])
+    factory_calls = 0
+    provider_admission_calls = 0
+
+    def factory() -> _Client:
+        nonlocal factory_calls
+        factory_calls += 1
+        return client
+
+    async def admit_provider() -> None:
+        nonlocal provider_admission_calls
+        provider_admission_calls += 1
+
+    events = [
+        event
+        async for event in service_module.SceneAuthoringService(
+            client_factory=factory,
+            max_tokens=777,
+            before_provider_dispatch=admit_provider,
+        ).stream_projectile_choreography_events(_projectile_director_request())
+    ]
+
+    assert [event.type for event in events] == [
+        "scene_stream_started",
+        "projectile_choreography_scene_checkpoint",
+        "scene_stream_completed",
+    ]
+    assert factory_calls == 1
+    assert provider_admission_calls == 1
+    assert len(client.calls) == 1
+    assert client.calls[0]["temperature"] == 0.0
+    assert client.calls[0]["max_tokens"] == 777
+    assert client.close_calls == 1
 
 
 @pytest.mark.asyncio

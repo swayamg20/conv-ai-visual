@@ -78,6 +78,11 @@ from murmur.live_scene.parametric_choreography_service import (
 from murmur.live_scene.parametric_choreography_service_contracts import (
     ParametricChoreographySceneStreamEventV3,
 )
+from murmur.live_scene.projectile_motion_requests import ProjectileMotionRequestV1
+from murmur.live_scene.projectile_motion_service import ProjectileMotionService
+from murmur.live_scene.projectile_motion_service_contracts import (
+    ProjectileChoreographySceneStreamEventV1,
+)
 from murmur.live_scene.prompt import build_scene_messages, scene_patch_target
 from murmur.live_scene.semantic_compiler import (
     SemanticCompilationError,
@@ -1405,6 +1410,14 @@ class SceneAuthoringService:
             timeout_seconds=timeout_seconds,
             before_provider_dispatch=before_provider_dispatch,
         )
+        self._projectile_motion = ProjectileMotionService(
+            client=client,
+            client_factory=client_factory,
+            clock=clock,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            before_provider_dispatch=before_provider_dispatch,
+        )
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
             DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -2000,6 +2013,14 @@ class SceneAuthoringService:
         """Delegate explicit V3 requests to the focused parametric service."""
 
         return self._parametric_choreography.stream_events(request)
+
+    def stream_projectile_choreography_events(
+        self,
+        request: ProjectileMotionRequestV1,
+    ) -> AsyncIterator[ProjectileChoreographySceneStreamEventV1]:
+        """Delegate exact Gate 1.7 requests to the focused projectile service."""
+
+        return self._projectile_motion.stream_events(request)
 
     async def stream_routed_semantic_events(
         self,

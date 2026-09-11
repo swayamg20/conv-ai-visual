@@ -8,6 +8,11 @@ from murmur.live_scene.parametric_choreography_requests import (
     ParametricChoreographyDirectorRequestV3,
     ParametricChoreographyReflexRequestV3,
 )
+from murmur.live_scene.projectile_motion_requests import (
+    PROJECTILE_CHOREOGRAPHY_PROTOCOL,
+    ProjectileMotionDirectorRequestV1,
+    ProjectileMotionReflexRequestV1,
+)
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
 from pydantic import ValidationError
 
@@ -36,6 +41,26 @@ def _director() -> dict[str, object]:
         "routingMode": "director",
         "prompt": "Explain the idea one meaningful stage at a time.",
     }
+
+
+def _projectile_reflex() -> dict[str, object]:
+    return {
+        "protocol": PROJECTILE_CHOREOGRAPHY_PROTOCOL,
+        "problemSpec": {"v": 1, "speedMps": 20, "angleDeg": 45},
+        "generation": 4,
+        "baseScene": {"revision": 0, "nodes": []},
+        "baseSemanticScene": {"revision": 0, "components": []},
+        "routingMode": "reflex",
+        "requestedRoute": {"intent": "advance", "targetStage": "setup"},
+    }
+
+
+def _projectile_director() -> dict[str, object]:
+    payload = _projectile_reflex()
+    payload["routingMode"] = "director"
+    payload.pop("requestedRoute")
+    payload["prompt"] = "Teach the first projectile checkpoint."
+    return payload
 
 
 def test_reflex_request_has_one_exact_prompt_free_wire_shape() -> None:
@@ -123,6 +148,42 @@ def test_top_level_dispatch_preserves_absent_protocol_v2_and_rejects_unknown() -
     unknown = {**_reflex(), "protocol": "parametric_choreography_v99"}
     with pytest.raises(ValidationError):
         CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER.validate_python(unknown)
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected_type"),
+    [
+        (_projectile_reflex(), ProjectileMotionReflexRequestV1),
+        (_projectile_director(), ProjectileMotionDirectorRequestV1),
+    ],
+)
+def test_top_level_dispatch_accepts_exact_projectile_protocol_modes(
+    payload: dict[str, object],
+    expected_type: type[ProjectileMotionReflexRequestV1 | ProjectileMotionDirectorRequestV1],
+) -> None:
+    decoded = CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER.validate_python(payload)
+
+    assert isinstance(decoded, expected_type)
+    assert decoded.model_dump(mode="json", by_alias=True) == payload
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {**_projectile_reflex(), "protocol": "projectile_choreography_v99"},
+        {key: value for key, value in _projectile_reflex().items() if key != "protocol"},
+        {**_projectile_reflex(), "problemText": "x² + 8x = 20"},
+        {
+            **_reflex(),
+            "problemSpec": {"v": 1, "speedMps": 20, "angleDeg": 45},
+        },
+    ],
+)
+def test_top_level_dispatch_rejects_unknown_missing_and_cross_mixed_protocols(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER.validate_python(payload)
 
 
 def test_lockstep_revisions_and_route_vocabulary_fail_closed() -> None:

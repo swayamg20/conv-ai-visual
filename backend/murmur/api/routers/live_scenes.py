@@ -32,12 +32,24 @@ from murmur.live_scene.choreography_wire import (
 )
 from murmur.live_scene.parametric_choreography_requests import (
     ChoreographyLiveSceneRequest,
+    ParametricChoreographyDirectorRequestV3,
+    ParametricChoreographyReflexRequestV3,
 )
 from murmur.live_scene.parametric_choreography_service_contracts import (
     ParametricChoreographySceneStreamEventV3,
 )
 from murmur.live_scene.parametric_choreography_wire import (
     encode_parametric_choreography_scene_stream_event,
+)
+from murmur.live_scene.projectile_motion_requests import (
+    ProjectileMotionDirectorRequestV1,
+    ProjectileMotionReflexRequestV1,
+)
+from murmur.live_scene.projectile_motion_service_contracts import (
+    ProjectileChoreographySceneStreamEventV1,
+)
+from murmur.live_scene.projectile_motion_wire import (
+    encode_projectile_choreography_scene_stream_event,
 )
 from murmur.live_scene.semantic_service_contracts import (
     SemanticLiveSceneRequest,
@@ -133,6 +145,18 @@ async def _encode_parametric_choreography_scene_events(
         await close_async_resource(events)
 
 
+async def _encode_projectile_choreography_scene_events(
+    events: AsyncIterator[ProjectileChoreographySceneStreamEventV1],
+) -> AsyncIterator[str]:
+    """Encode exact Gate 1.7 records and release every owned upstream resource."""
+
+    try:
+        async for event in events:
+            yield encode_projectile_choreography_scene_stream_event(event)
+    finally:
+        await close_async_resource(events)
+
+
 async def _stream_semantic_scene(
     body: SemanticLiveSceneRequest,
     *,
@@ -175,10 +199,20 @@ async def _stream_choreography_scene(
         encoded_events = _encode_choreography_scene_events(
             scene_service.stream_routed_choreography_events(body)
         )
-    else:
+    elif isinstance(
+        body,
+        (ParametricChoreographyReflexRequestV3, ParametricChoreographyDirectorRequestV3),
+    ):
         encoded_events = _encode_parametric_choreography_scene_events(
             scene_service.stream_parametric_choreography_events(body)
         )
+    elif isinstance(body, (ProjectileMotionReflexRequestV1, ProjectileMotionDirectorRequestV1)):
+        encoded_events = _encode_projectile_choreography_scene_events(
+            scene_service.stream_projectile_choreography_events(body)
+        )
+    else:
+        await lease.aclose()
+        raise TypeError("body must be an exact choreography request")
     return _OwnedStreamingResponse(
         encoded_events,
         admission_lease=lease,
