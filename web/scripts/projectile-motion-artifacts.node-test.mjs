@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ import {
   fixtureCatalogForTests,
   locateFfmpegForTests,
   pathExistsForTests,
+  probeWebmDurationForTests,
   prepareArtifactRoot,
   prepareArtifactRootForTests,
   relevantDirtyStatusForTests,
@@ -589,14 +591,16 @@ test("report validation rejects empty and failed Playwright proofs", () => {
   );
 });
 
-test("media validation decodes a generated WebM from first to near-final frame", async () => {
+test("media validation binds a generated WebM duration and rejects short or tampered media", async () => {
   const temporary = await mkdtemp(
     path.join(tmpdir(), "murmur-projectile-webm-"),
   );
-  const videoPath = path.join(temporary, "generated.webm");
+  const shortVideoPath = path.join(temporary, "short.webm");
+  const videoPath = path.join(temporary, "accepted.webm");
+  const tamperedVideoPath = path.join(temporary, "tampered.webm");
   let browser;
   try {
-    await locateFfmpegForTests();
+    const ffmpeg = await locateFfmpegForTests();
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({
       viewport: { width: 320, height: 180 },
@@ -624,11 +628,49 @@ test("media validation decodes a generated WebM from first to near-final frame",
     `);
     await page.waitForTimeout(1_500);
     await context.close();
-    await video.saveAs(videoPath);
+    await video.saveAs(shortVideoPath);
     await video.delete();
+
+    const shortDurationMs = await probeWebmDurationForTests(shortVideoPath);
+    assert.ok(shortDurationMs < 35_000);
+    await assert.rejects(
+      () => validateWebmForTests(shortVideoPath),
+      /must be 35000-45000ms/,
+    );
+
+    execFileSync(
+      ffmpeg,
+      [
+        "-v",
+        "error",
+        "-itsscale",
+        String(40_000 / shortDurationMs),
+        "-i",
+        shortVideoPath,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-f",
+        "webm",
+        videoPath,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"], timeout: 120_000 },
+    );
     const verified = await validateWebmForTests(videoPath);
     assert.ok(verified.bytes > 4_096);
     assert.match(verified.sha256, /^[a-f0-9]{64}$/);
+    assert.ok(verified.durationMs >= 35_000 && verified.durationMs <= 45_000);
+
+    const acceptedBytes = await readFile(videoPath);
+    await writeFile(
+      tamperedVideoPath,
+      acceptedBytes.subarray(0, Math.floor(acceptedBytes.length / 2)),
+    );
+    await assert.rejects(
+      () => validateWebmForTests(tamperedVideoPath),
+      /complete-looking WebM|complete WebM|duration|decoded near-final frame/,
+    );
   } finally {
     await browser?.close();
     await rm(temporary, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { constants, readFileSync } from "node:fs";
 import {
   access,
@@ -64,6 +64,8 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const GIT_OBJECT_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
+const MIN_RECORDING_DURATION_MS = 35_000;
+const MAX_RECORDING_DURATION_MS = 45_000;
 const EXPECTED_ARTIFACT_PATHS = Object.freeze({
   video: "capture/projectile-motion.webm",
   pageScreenshot: "capture/projectile-motion-page.png",
@@ -1805,19 +1807,40 @@ async function decodeWebm(filePath, location) {
         timeout: 120_000,
         maxBuffer: 64 * 1024 * 1024,
       });
-    run([
-      "-v",
-      "error",
-      "-i",
-      filePath,
-      "-map",
-      "0:v:0",
-      "-c:v",
-      "copy",
-      "-f",
-      "webm",
-      "-",
-    ]);
+    const probe = spawnSync(
+      ffmpeg,
+      [
+        "-v",
+        "error",
+        "-nostats",
+        "-i",
+        filePath,
+        "-map",
+        "0:v:0",
+        "-c:v",
+        "copy",
+        "-progress",
+        "pipe:2",
+        "-f",
+        "webm",
+        "-",
+      ],
+      {
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: 120_000,
+        maxBuffer: 4 * 1024 * 1024,
+      },
+    );
+    if (probe.error) throw probe.error;
+    if (probe.status !== 0) {
+      const error = new Error(`ffmpeg exited with status ${probe.status}`);
+      error.stderr = probe.stderr;
+      throw error;
+    }
+    const durationMs = parseFfmpegProgressDuration(
+      probe.stderr.toString("utf8"),
+      `${location} duration probe`,
+    );
     for (const [frameName, seek] of [
       ["first", []],
       ["near-final", ["-sseof", "-1"]],
@@ -1841,13 +1864,50 @@ async function decodeWebm(filePath, location) {
       );
       pngDimensions(frame, `${location} decoded ${frameName} frame`);
     }
+    return durationMs;
   } catch (error) {
+    if (error instanceof ProjectileMotionEvidenceError) throw error;
     const stderr = error?.stderr?.toString().trim();
     fail(
       location,
       `must decode as a complete WebM video${stderr ? ` (${stderr})` : ""}`,
     );
   }
+}
+
+function parseFfmpegProgressDuration(progress, location) {
+  const lines = progress.trim().split(/\r?\n/);
+  const terminalState = [...lines]
+    .reverse()
+    .find((line) => line.startsWith("progress="));
+  exact(terminalState, "progress=end", `${location}.progress`);
+  const values = lines
+    .filter((line) => line.startsWith("out_time_us="))
+    .map((line) => line.slice("out_time_us=".length));
+  if (values.length === 0 || !/^\d+$/.test(values.at(-1))) {
+    fail(
+      `${location}.out_time_us`,
+      "must contain a terminal integer timestamp",
+    );
+  }
+  const microseconds = Number(values.at(-1));
+  if (!Number.isSafeInteger(microseconds) || microseconds <= 0) {
+    fail(`${location}.out_time_us`, "must be a positive safe integer");
+  }
+  return Math.round(microseconds / 1_000);
+}
+
+function validateRecordingDuration(durationMs, location) {
+  if (
+    durationMs < MIN_RECORDING_DURATION_MS ||
+    durationMs > MAX_RECORDING_DURATION_MS
+  ) {
+    fail(
+      location,
+      `must be ${MIN_RECORDING_DURATION_MS}-${MAX_RECORDING_DURATION_MS}ms; received ${durationMs}ms`,
+    );
+  }
+  return durationMs;
 }
 
 export async function locateFfmpegForTests() {
@@ -1857,8 +1917,15 @@ export async function locateFfmpegForTests() {
 export async function validateWebmForTests(candidate) {
   const bytes = await readRegularFile(candidate, "test WebM");
   assertWebm(bytes, "test WebM");
-  await decodeWebm(candidate, "test WebM");
-  return { bytes: bytes.length, sha256: sha256(bytes) };
+  const durationMs = validateRecordingDuration(
+    await decodeWebm(candidate, "test WebM"),
+    "test WebM duration",
+  );
+  return { bytes: bytes.length, sha256: sha256(bytes), durationMs };
+}
+
+export async function probeWebmDurationForTests(candidate) {
+  return decodeWebm(candidate, "test WebM");
 }
 
 async function verifyObservedArtifacts(
@@ -1887,13 +1954,21 @@ async function verifyObservedArtifacts(
     exact(sha256(bytes), descriptor.sha256, `artifact ${role} digest`);
     if (role === "video") {
       assertWebm(bytes, `artifact ${role}`);
+      let durationMs = observation.timing.visualDurationMs;
       if (!skipVideoDecode) {
-        await decodeWebm(
-          path.join(artifactRoot, ...descriptor.path.split("/")),
-          `artifact ${role}`,
+        durationMs = validateRecordingDuration(
+          await decodeWebm(
+            path.join(artifactRoot, ...descriptor.path.split("/")),
+            `artifact ${role}`,
+          ),
+          `artifact ${role} duration`,
         );
       }
-      verified[role] = { ...descriptor, mediaType: "video/webm" };
+      verified[role] = {
+        ...descriptor,
+        mediaType: "video/webm",
+        durationMs,
+      };
     } else {
       const dimensions = pngDimensions(bytes, `artifact ${role}`);
       exact(dimensions.width, descriptor.width, `artifact ${role} width`);
