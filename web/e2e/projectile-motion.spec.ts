@@ -1,13 +1,17 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { expect, test, type Page } from "@playwright/test";
 
 import primaryFixtureValue from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v20-a45.v1.json";
+import { expectProjectileSvgMatchesScene } from "./projectile-motion-dom-oracle";
 import {
   PROJECTILE_CLARIFICATION_CASES,
   PROJECTILE_MAIN_CHECKPOINTS,
   attachBoardOnlyScreenshot,
+  beginProjectileTraceObservation,
+  endProjectileTraceObservation,
   expectNoHorizontalOverflow,
   expectProjectileTerminal,
   expectProviderFree,
@@ -16,13 +20,16 @@ import {
   firstMeaningfulProjectileVisualAt,
   fixtureCheckpoints,
   observeProjectileStage,
+  observeProjectilePhysicsSamples,
   observeProviderFreeRequests,
   projectileBoard,
   projectileBridgeState,
   projectileFixture,
+  projectileRuntimeObservation,
   projectileStage,
   rememberStableElement,
   selectProjectileProblem,
+  selectProjectileTraceTipSamples,
   stopAtVisibleCheckpoint,
   stopDuringActiveTrace,
   waitForActiveTrace,
@@ -250,6 +257,19 @@ function nearestRankP95(samples: readonly number[]): number {
   ]!;
 }
 
+function semanticDomSha256(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function acceleratedObservationsPath(testInfo: {
+  readonly project: { readonly outputDir: string };
+}): string {
+  return path.join(
+    path.dirname(testInfo.project.outputDir),
+    "observations.json",
+  );
+}
+
 test("records twenty fresh click-to-first-ink samples below the local 300 ms p95 boundary", async ({
   browser,
   baseURL,
@@ -297,10 +317,7 @@ test("records twenty fresh click-to-first-ink samples below the local 300 ms p95
   const p95Ms = rounded(nearestRankP95(samplesMs));
   expect(samplesMs).toHaveLength(FIRST_MEANINGFUL_SAMPLE_COUNT);
   expect(p95Ms).toBeLessThan(FIRST_MEANINGFUL_THRESHOLD_MS);
-  const observationsPath = path.join(
-    path.dirname(testInfo.project.outputDir),
-    "observations.json",
-  );
+  const observationsPath = acceleratedObservationsPath(testInfo);
   await mkdir(path.dirname(observationsPath), { recursive: true });
   await writeFile(
     observationsPath,
@@ -328,7 +345,11 @@ test("records twenty fresh click-to-first-ink samples below the local 300 ms p95
 
 test("the certified main flow draws a curved trace with one stable projectile marker and no provider", async ({
   page,
+  browser,
+  baseURL,
 }, testInfo) => {
+  if (!baseURL)
+    throw new Error("The projectile browser base URL is unavailable");
   const requests = observeProviderFreeRequests(page);
   await page.goto("/e2e/projectile-motion?proof=keyframes");
   await waitForProjectileBridge(page);
@@ -351,6 +372,7 @@ test("the certified main flow draws a curved trace with one stable projectile ma
     ).toHaveAttribute("aria-pressed", String(angle === 45));
   }
 
+  await beginProjectileTraceObservation(page);
   await drawLaunch(page);
   await expect(projectileStage(page)).toHaveAttribute(
     "data-settled-main-count",
@@ -394,6 +416,156 @@ test("the certified main flow draws a curved trace with one stable projectile ma
 
   const expected = expectedProjectileBoard(primaryFixture, "main", "cinematic");
   await expectProjectileTerminal(page, expected);
+  const semanticDom = await expectProjectileSvgMatchesScene(
+    page,
+    primaryFixture.lanes.main.expectedTerminal.scene,
+  );
+  expect(semanticDom.sourceRevision).toBe(expected.revision);
+  expect(semanticDom.paintOrder).toEqual(expected.nodeIds);
+  expect(semanticDom.residueFree).toBe(true);
+  const traceTipSamples = selectProjectileTraceTipSamples(
+    await endProjectileTraceObservation(page),
+  );
+  expect(traceTipSamples).toHaveLength(6);
+  for (const sample of traceTipSamples) {
+    expect(
+      Math.abs(sample.revealedProgress - sample.localProgress),
+    ).toBeLessThanOrEqual(0.035);
+    expect(sample.errorCssPx).toBeLessThanOrEqual(1);
+  }
+  const physicsSamples = await observeProjectilePhysicsSamples(page);
+  expect(physicsSamples).toHaveLength(3);
+  for (const sample of physicsSamples) {
+    expect(sample.errorCssPx).toBeLessThanOrEqual(1);
+  }
+
+  const terminalCheckpoint = fixtureCheckpoints(primaryFixture, "main").at(-1);
+  if (!terminalCheckpoint) {
+    throw new Error("The primary fixture has no terminal checkpoint");
+  }
+  const runtimeBeforeReplay = await projectileRuntimeObservation(page);
+  expect(runtimeBeforeReplay.snapshot).toMatchObject({
+    phase: "completed",
+    committedScene: primaryFixture.lanes.main.expectedTerminal.scene,
+    committedSemanticScene: {
+      revision: terminalCheckpoint.semantic.semanticResultRevision,
+      components: [terminalCheckpoint.semantic.resultComponent],
+      certificateHeadSha256:
+        terminalCheckpoint.semantic.semanticResultCertificateSha256,
+    },
+  });
+  expect(runtimeBeforeReplay.snapshot.accepted).toHaveLength(6);
+  expect(
+    runtimeBeforeReplay.snapshot.accepted.map(
+      ({ event }) => event.semantic.checkpointId,
+    ),
+  ).toEqual(PROJECTILE_MAIN_CHECKPOINTS);
+  expect(
+    runtimeBeforeReplay.snapshot.accepted.map(({ event }) => event),
+  ).toEqual(fixtureCheckpoints(primaryFixture, "main"));
+
+  const bridgeBeforeReplay = await projectileBridgeState(page);
+  const replayProviderRequestsBefore = requests.liveSceneRequests.length;
+  await page.getByRole("button", { name: "Replay" }).click();
+  await expect(projectileStage(page)).toHaveAttribute(
+    "data-phase",
+    "replaying",
+  );
+  await expectProjectileTerminal(page, expected);
+  const replaySemanticDom = await expectProjectileSvgMatchesScene(
+    page,
+    primaryFixture.lanes.main.expectedTerminal.scene,
+  );
+  const runtimeAfterReplay = await projectileRuntimeObservation(page);
+  expect(runtimeAfterReplay.snapshot.committedScene).toEqual(
+    runtimeBeforeReplay.snapshot.committedScene,
+  );
+  expect(runtimeAfterReplay.snapshot.committedSemanticScene).toEqual(
+    runtimeBeforeReplay.snapshot.committedSemanticScene,
+  );
+  expect(runtimeAfterReplay.snapshot.accepted).toEqual(
+    runtimeBeforeReplay.snapshot.accepted,
+  );
+  expect(await projectileBridgeState(page)).toEqual(bridgeBeforeReplay);
+  await expectStableElement(
+    page,
+    "projectile__projectile_marker",
+    "__projectile_marker_identity__",
+  );
+  const replayProviderRequestCount =
+    requests.liveSceneRequests.length - replayProviderRequestsBefore;
+  expect(replayProviderRequestCount).toBe(0);
+
+  const reducedContext = await browser.newContext({
+    baseURL,
+    viewport: { width: 1_280, height: 720 },
+    screen: { width: 1_280, height: 720 },
+    deviceScaleFactor: 1,
+    colorScheme: "dark",
+    locale: "en-US",
+    timezoneId: "UTC",
+    reducedMotion: "reduce",
+    serviceWorkers: "block",
+  });
+  const reducedPage = await reducedContext.newPage();
+  const reducedRequests = observeProviderFreeRequests(reducedPage);
+  let reducedSemanticDom: Awaited<
+    ReturnType<typeof expectProjectileSvgMatchesScene>
+  >;
+  try {
+    await reducedPage.goto(
+      "/e2e/projectile-motion?layout=cinematic&motion=reduced&flow=main&speed=accelerated&proof=none",
+    );
+    await waitForProjectileBridge(reducedPage);
+    await drawLaunch(reducedPage);
+    await expectProjectileTerminal(reducedPage, expected);
+    reducedSemanticDom = await expectProjectileSvgMatchesScene(
+      reducedPage,
+      primaryFixture.lanes.main.expectedTerminal.scene,
+    );
+    const reducedRuntime = await projectileRuntimeObservation(reducedPage);
+    expect(reducedRuntime.snapshot.committedScene).toEqual(
+      runtimeBeforeReplay.snapshot.committedScene,
+    );
+    expect(reducedRuntime.snapshot.committedSemanticScene).toEqual(
+      runtimeBeforeReplay.snapshot.committedSemanticScene,
+    );
+    expect(reducedRuntime.snapshot.accepted).toEqual(
+      runtimeBeforeReplay.snapshot.accepted,
+    );
+    expectProviderFree(reducedRequests);
+  } finally {
+    await reducedContext.close();
+  }
+
+  const animatedSemanticDomSha256 = semanticDomSha256(semanticDom);
+  const reducedMotionSemanticDomSha256 = semanticDomSha256(reducedSemanticDom);
+  const replaySemanticDomSha256 = semanticDomSha256(replaySemanticDom);
+  expect(reducedMotionSemanticDomSha256).toBe(animatedSemanticDomSha256);
+  expect(replaySemanticDomSha256).toBe(animatedSemanticDomSha256);
+  const observationsPath = acceleratedObservationsPath(testInfo);
+  const observations = JSON.parse(
+    await readFile(observationsPath, "utf8"),
+  ) as Record<string, unknown>;
+  observations.motionBoundary = {
+    traceTipSamples,
+    physicsSamples,
+    canonicalTerminal: {
+      animatedSemanticDom: semanticDom,
+      animatedSemanticDomSha256,
+      reducedMotionSemanticDom: reducedSemanticDom,
+      reducedMotionSemanticDomSha256,
+      replaySemanticDom,
+      replaySemanticDomSha256,
+      replayProviderRequestCount,
+      equal: true,
+    },
+  };
+  await writeFile(
+    observationsPath,
+    `${JSON.stringify(observations, null, 2)}\n`,
+    "utf8",
+  );
   await expectStableElement(
     page,
     "projectile__projectile_marker",

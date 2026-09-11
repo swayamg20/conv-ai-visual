@@ -96,6 +96,41 @@ export interface ProjectileRuntimeObservation {
   readonly snapshot: ProjectileChoreographyRuntimeSnapshot;
 }
 
+export interface ProjectileTraceFrameObservation {
+  readonly checkpointId: "trace_ascent" | "trace_descent";
+  readonly pathId:
+    "projectile__trajectory_ascent" | "projectile__trajectory_descent";
+  readonly dashArray: number;
+  readonly dashOffset: number;
+  readonly revealedProgress: number;
+  readonly markerCss: { readonly x: number; readonly y: number };
+  readonly traceTipCss: { readonly x: number; readonly y: number };
+}
+
+export interface ProjectileTraceTipSample {
+  readonly checkpointId: "trace_ascent" | "trace_descent";
+  readonly pathId:
+    "projectile__trajectory_ascent" | "projectile__trajectory_descent";
+  readonly localProgress: 0.25 | 0.5 | 0.75;
+  readonly dashArray: number;
+  readonly dashOffset: number;
+  readonly revealedProgress: number;
+  readonly markerCss: { readonly x: number; readonly y: number };
+  readonly traceTipCss: { readonly x: number; readonly y: number };
+  readonly errorCssPx: number;
+}
+
+export interface ProjectilePhysicsSample {
+  readonly normalizedFlightProgress: 0.25 | 0.5 | 0.75;
+  readonly checkpointId: "trace_ascent" | "trace_descent";
+  readonly pathId:
+    "projectile__trajectory_ascent" | "projectile__trajectory_descent";
+  readonly pathLocalProgress: 0.5 | 1;
+  readonly analyticPointCss: { readonly x: number; readonly y: number };
+  readonly pathPointCss: { readonly x: number; readonly y: number };
+  readonly errorCssPx: number;
+}
+
 export interface ProjectileStageObservation {
   readonly phase: string;
   readonly visibleCheckpointId: string;
@@ -139,7 +174,7 @@ interface ProjectileFixtureLane {
     readonly certificateSha256: string;
     readonly scene: {
       readonly revision: number;
-      readonly nodes: readonly unknown[];
+      readonly nodes: readonly SceneNode[];
     };
     readonly frontier: {
       readonly problemSpec: ProjectileMotionProblemSpecV1;
@@ -195,9 +230,9 @@ export function expectedProjectileBoard(
     caption: checkpoint.patch.narration,
     viewBox: `${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`,
     nodeIds: Object.freeze(
-      orderSceneNodesForSvgPaint(
-        lane.expectedTerminal.scene.nodes as readonly SceneNode[],
-      ).map((node) => node.id),
+      orderSceneNodesForSvgPaint(lane.expectedTerminal.scene.nodes).map(
+        (node) => node.id,
+      ),
     ),
     revision: lane.expectedTerminal.scene.revision,
     certificateHeadSha256: lane.expectedTerminal.certificateSha256,
@@ -278,6 +313,266 @@ export async function projectileRuntimeObservation(
     throw new Error("The projectile runtime observation is unavailable");
   }
   return observation;
+}
+
+const PROJECTILE_TRACE_OBSERVER_KEY =
+  "__MURMUR_PROJECTILE_TRACE_OBSERVER__" as const;
+
+/** Record real painted trace/marker frames without changing logical time. */
+export async function beginProjectileTraceObservation(
+  page: Page,
+): Promise<void> {
+  await page.evaluate((key) => {
+    interface TraceRecorder {
+      frameId: number;
+      readonly frames: ProjectileTraceFrameObservation[];
+    }
+    const owner = window as typeof window & Record<string, unknown>;
+    const prior = owner[key] as TraceRecorder | undefined;
+    if (prior) cancelAnimationFrame(prior.frameId);
+    const recorder: TraceRecorder = { frameId: 0, frames: [] };
+    owner[key] = recorder;
+
+    const recordFrame = () => {
+      const stage = document.querySelector<HTMLElement>(
+        '[data-testid="projectile-choreography-stage"]',
+      );
+      const checkpointId = stage?.dataset.visibleCheckpointId;
+      if (checkpointId === "trace_ascent" || checkpointId === "trace_descent") {
+        const pathId =
+          checkpointId === "trace_ascent"
+            ? "projectile__trajectory_ascent"
+            : "projectile__trajectory_descent";
+        const path = stage?.querySelector<SVGPathElement>(
+          `[data-element-id="${pathId}"] path`,
+        );
+        const marker = stage?.querySelector<SVGGElement>(
+          '[data-element-id="projectile__projectile_marker"]',
+        );
+        const dashArray = Number(path?.getAttribute("stroke-dasharray"));
+        const dashOffset = Number(path?.getAttribute("stroke-dashoffset"));
+        const pathMatrix = path?.getScreenCTM();
+        if (
+          path &&
+          marker &&
+          pathMatrix &&
+          Number.isFinite(dashArray) &&
+          Number.isFinite(dashOffset) &&
+          dashArray > 0 &&
+          dashOffset > 0 &&
+          dashOffset < dashArray
+        ) {
+          const markerBounds = marker.getBoundingClientRect();
+          const revealedLength = Math.min(
+            path.getTotalLength(),
+            Math.max(0, dashArray - dashOffset),
+          );
+          const localTip = path.getPointAtLength(revealedLength);
+          const traceTip = new DOMPoint(localTip.x, localTip.y).matrixTransform(
+            pathMatrix,
+          );
+          recorder.frames.push({
+            checkpointId,
+            pathId,
+            dashArray,
+            dashOffset,
+            revealedProgress: 1 - dashOffset / dashArray,
+            markerCss: {
+              x: markerBounds.left + markerBounds.width / 2,
+              y: markerBounds.top + markerBounds.height / 2,
+            },
+            traceTipCss: { x: traceTip.x, y: traceTip.y },
+          });
+        }
+      }
+      recorder.frameId = requestAnimationFrame(recordFrame);
+    };
+    recorder.frameId = requestAnimationFrame(recordFrame);
+  }, PROJECTILE_TRACE_OBSERVER_KEY);
+}
+
+export async function endProjectileTraceObservation(
+  page: Page,
+): Promise<readonly ProjectileTraceFrameObservation[]> {
+  const frames = await page.evaluate((key) => {
+    interface TraceRecorder {
+      frameId: number;
+      readonly frames: ProjectileTraceFrameObservation[];
+    }
+    const owner = window as typeof window & Record<string, unknown>;
+    const recorder = owner[key] as TraceRecorder | undefined;
+    if (!recorder) throw new Error("The projectile trace observer is missing");
+    cancelAnimationFrame(recorder.frameId);
+    delete owner[key];
+    return recorder.frames;
+  }, PROJECTILE_TRACE_OBSERVER_KEY);
+  if (frames.length === 0) {
+    throw new Error("The projectile trace observer captured no active frames");
+  }
+  return frames;
+}
+
+function roundedEvidence(value: number): number {
+  return Number(value.toFixed(3));
+}
+
+export function selectProjectileTraceTipSamples(
+  frames: readonly ProjectileTraceFrameObservation[],
+): readonly ProjectileTraceTipSample[] {
+  const targets = [0.25, 0.5, 0.75] as const;
+  return (["trace_ascent", "trace_descent"] as const).flatMap((checkpointId) =>
+    targets.map((localProgress) => {
+      const candidates = frames.filter(
+        (frame) => frame.checkpointId === checkpointId,
+      );
+      const closest = candidates.reduce<
+        ProjectileTraceFrameObservation | undefined
+      >(
+        (best, candidate) =>
+          !best ||
+          Math.abs(candidate.revealedProgress - localProgress) <
+            Math.abs(best.revealedProgress - localProgress)
+            ? candidate
+            : best,
+        undefined,
+      );
+      if (!closest) {
+        throw new Error(`No painted ${checkpointId} trace frame was recorded`);
+      }
+      const dashArray = roundedEvidence(closest.dashArray);
+      const dashOffset = roundedEvidence(closest.dashOffset);
+      const markerCss = {
+        x: roundedEvidence(closest.markerCss.x),
+        y: roundedEvidence(closest.markerCss.y),
+      };
+      const traceTipCss = {
+        x: roundedEvidence(closest.traceTipCss.x),
+        y: roundedEvidence(closest.traceTipCss.y),
+      };
+      return {
+        checkpointId,
+        pathId: closest.pathId,
+        localProgress,
+        dashArray,
+        dashOffset,
+        revealedProgress: roundedEvidence(1 - dashOffset / dashArray),
+        markerCss,
+        traceTipCss,
+        errorCssPx: roundedEvidence(
+          Math.hypot(markerCss.x - traceTipCss.x, markerCss.y - traceTipCss.y),
+        ),
+      };
+    }),
+  );
+}
+
+/** Compare final DOM path vertices to an independent normalized parabola. */
+export async function observeProjectilePhysicsSamples(
+  page: Page,
+): Promise<readonly ProjectilePhysicsSample[]> {
+  return page.evaluate(() => {
+    const stable = (value: number): number => Number(value.toFixed(3));
+    const stage = document.querySelector<HTMLElement>(
+      '[data-testid="projectile-choreography-stage"]',
+    );
+    const svg = stage?.querySelector<SVGSVGElement>("svg");
+    const ascent = stage?.querySelector<SVGPathElement>(
+      '[data-element-id="projectile__trajectory_ascent"] path',
+    );
+    const descent = stage?.querySelector<SVGPathElement>(
+      '[data-element-id="projectile__trajectory_descent"] path',
+    );
+    const svgMatrix = svg?.getScreenCTM();
+    if (!svg || !ascent || !descent || !svgMatrix) {
+      throw new Error("The terminal projectile paths are unavailable");
+    }
+    const points = (path: SVGPathElement): readonly [number, number][] => {
+      const values = (path.getAttribute("d") ?? "").match(
+        /-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi,
+      );
+      if (!values || values.length < 4 || values.length % 2 !== 0) {
+        throw new Error("A projectile path has invalid point geometry");
+      }
+      return Array.from(
+        { length: values.length / 2 },
+        (_, index) =>
+          [Number(values[index * 2]), Number(values[index * 2 + 1])] as const,
+      );
+    };
+    const ascentPoints = points(ascent);
+    const descentPoints = points(descent);
+    const first = ascentPoints[0];
+    const apex = ascentPoints.at(-1);
+    const last = descentPoints.at(-1);
+    if (!first || !apex || !last) {
+      throw new Error("A projectile path has no boundary points");
+    }
+    const toCss = (point: readonly [number, number]) => {
+      const css = new DOMPoint(point[0], point[1]).matrixTransform(svgMatrix);
+      return { x: stable(css.x), y: stable(css.y) };
+    };
+    const pointAtTime = (
+      source: readonly (readonly [number, number])[],
+      progress: number,
+    ): readonly [number, number] => {
+      const position = progress * (source.length - 1);
+      const index = Math.min(Math.floor(position), source.length - 2);
+      const local = progress === 1 ? 1 : position - index;
+      const left = source[index];
+      const right = source[index + 1];
+      return [
+        left[0] + (right[0] - left[0]) * local,
+        left[1] + (right[1] - left[1]) * local,
+      ];
+    };
+    const specs = [
+      {
+        normalizedFlightProgress: 0.25 as const,
+        checkpointId: "trace_ascent" as const,
+        pathId: "projectile__trajectory_ascent" as const,
+        pathLocalProgress: 0.5 as const,
+        source: ascentPoints,
+      },
+      {
+        normalizedFlightProgress: 0.5 as const,
+        checkpointId: "trace_ascent" as const,
+        pathId: "projectile__trajectory_ascent" as const,
+        pathLocalProgress: 1 as const,
+        source: ascentPoints,
+      },
+      {
+        normalizedFlightProgress: 0.75 as const,
+        checkpointId: "trace_descent" as const,
+        pathId: "projectile__trajectory_descent" as const,
+        pathLocalProgress: 0.5 as const,
+        source: descentPoints,
+      },
+    ];
+    return specs.map((spec) => {
+      const progress = spec.normalizedFlightProgress;
+      const analyticPointCss = toCss([
+        first[0] + (last[0] - first[0]) * progress,
+        first[1] - 4 * (first[1] - apex[1]) * progress * (1 - progress),
+      ]);
+      const pathPointCss = toCss(
+        pointAtTime(spec.source, spec.pathLocalProgress),
+      );
+      return {
+        normalizedFlightProgress: spec.normalizedFlightProgress,
+        checkpointId: spec.checkpointId,
+        pathId: spec.pathId,
+        pathLocalProgress: spec.pathLocalProgress,
+        analyticPointCss,
+        pathPointCss,
+        errorCssPx: stable(
+          Math.hypot(
+            analyticPointCss.x - pathPointCss.x,
+            analyticPointCss.y - pathPointCss.y,
+          ),
+        ),
+      };
+    });
+  });
 }
 
 export function observeProviderFreeRequests(
