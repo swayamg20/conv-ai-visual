@@ -62,6 +62,7 @@ describe("projectile-motion e2e client session", () => {
     expect(Object.isFrozen(state.calls[0].problemSpec)).toBe(true);
     expect(Object.isFrozen(state.calls[0].clarifiedTopics)).toBe(true);
     expect(session.bridge.getRuntimeObservation()).toBeNull();
+    expect(session.bridge.getRuntimeObservationHistory()).toEqual([]);
 
     const emptyScene = Object.freeze({
       revision: 0,
@@ -94,5 +95,9 @@ describe("projectile-motion e2e client session", () => {
     expect(observation?.observedAtMs).toBeGreaterThanOrEqual(0);
     expect(Object.isFrozen(observation)).toBe(true);
     expect(Object.isFrozen(observation?.snapshot)).toBe(true);
+    const history = session.bridge.getRuntimeObservationHistory();
+    expect(history).toEqual([observation]);
+    expect(Object.isFrozen(history)).toBe(true);
+    expect(Object.isFrozen(history[0])).toBe(true);
   });
 });

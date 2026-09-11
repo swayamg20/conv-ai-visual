@@ -46,6 +46,7 @@ export interface ProjectileMotionE2EBridgeV1 {
     readonly calls: readonly ProjectileMotionFixtureInvocationObservation[];
   };
   getRuntimeObservation(): ProjectileMotionRuntimeObservation | null;
+  getRuntimeObservationHistory(): readonly ProjectileMotionRuntimeObservation[];
 }
 
 export interface ProjectileMotionRuntimeObservation {
@@ -96,6 +97,7 @@ export function createProjectileMotionE2ESession(
   );
   const calls: ProjectileMotionFixtureInvocationObservation[] = [];
   let runtimeObservation: ProjectileMotionRuntimeObservation | null = null;
+  const runtimeObservationHistory: ProjectileMotionRuntimeObservation[] = [];
   const runner: ProjectileChoreographySceneStreamRunner = async (
     invocation,
   ) => {
@@ -111,6 +113,7 @@ export function createProjectileMotionE2ESession(
         observedAtMs: performance.now(),
         snapshot,
       });
+      runtimeObservationHistory.push(runtimeObservation);
     },
     bridge: Object.freeze({
       version: 1 as const,
@@ -120,6 +123,8 @@ export function createProjectileMotionE2ESession(
           calls: Object.freeze([...calls]),
         }),
       getRuntimeObservation: () => runtimeObservation,
+      getRuntimeObservationHistory: () =>
+        Object.freeze([...runtimeObservationHistory]),
     }),
   });
 }
