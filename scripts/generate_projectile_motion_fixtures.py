@@ -55,7 +55,9 @@ FIXTURE_ATTEMPT: Final = 1
 COMPONENT_ID: Final = "projectile"
 PRIMARY_PROBLEM: Final = (20, 45)
 RETARGET_PROBLEM: Final = (20, 60)
+HORIZONTAL_PREFIX_LENGTH: Final = 2
 APEX_PREFIX_LENGTH: Final = 4
+SYMMETRY_PREFIX_LENGTH: Final = 5
 OUTPUT_FILENAMES: Final = {
     (20, 30): "projectile-motion-v20-a30.v1.json",
     PRIMARY_PROBLEM: "projectile-motion-v20-a45.v1.json",
@@ -356,6 +358,32 @@ def _continue_beat(problem: ProjectileMotionProblemSpecV1) -> RoutedProjectileMo
     )
 
 
+def _clarification_lane(
+    *,
+    main: _Lane,
+    problem: ProjectileMotionProblemSpecV1,
+    topic: ProjectileMotionClarificationTopic,
+    prefix_length: int,
+    scenario_id: str,
+) -> _Lane:
+    scene, semantic_scene = _prefix_frontier(main, prefix_length)
+    if _component(semantic_scene) is None:
+        raise RuntimeError("projectile clarification branch has no accepted component")
+    return _compile_lane(
+        scenario_id=scenario_id,
+        generation=2,
+        beat=RoutedProjectileMotionBeatV1(
+            beatId=f"fixture_{problem.speed_mps}_{problem.angle_deg}_clarify_{topic.value}",
+            componentId=COMPONENT_ID,
+            baseProblemSpec=problem,
+            resultProblemSpec=problem,
+            route=ClarifyProjectileMotionRouteV1(topic=topic),
+        ),
+        base_scene=scene,
+        base_semantic_scene=semantic_scene,
+    )
+
+
 def _retarget_beat(
     *,
     beat_id: str,
@@ -410,34 +438,37 @@ def _build_fixture(speed_mps: int, angle_deg: int) -> dict[str, object]:
     lanes: dict[str, object] = {"main": _dump_lane(main)}
 
     if (speed_mps, angle_deg) == PRIMARY_PROBLEM:
-        apex_scene, apex_semantic_scene = _prefix_frontier(main, APEX_PREFIX_LENGTH)
-        apex_component = _component(apex_semantic_scene)
-        if apex_component is None:
-            raise RuntimeError("projectile apex branch has no accepted component")
-        clarify_beat = RoutedProjectileMotionBeatV1(
-            beatId="fixture_20_45_clarify_apex",
-            componentId=COMPONENT_ID,
-            baseProblemSpec=problem,
-            resultProblemSpec=problem,
-            route=ClarifyProjectileMotionRouteV1(
-                topic=ProjectileMotionClarificationTopic.APEX_ACCELERATION
-            ),
+        horizontal_clarification = _clarification_lane(
+            main=main,
+            problem=problem,
+            topic=ProjectileMotionClarificationTopic.HORIZONTAL_VELOCITY,
+            prefix_length=HORIZONTAL_PREFIX_LENGTH,
+            scenario_id="horizontal_velocity_clarification",
         )
-        clarification = _compile_lane(
+        apex_clarification = _clarification_lane(
+            main=main,
+            problem=problem,
+            topic=ProjectileMotionClarificationTopic.APEX_ACCELERATION,
+            prefix_length=APEX_PREFIX_LENGTH,
             scenario_id="apex_acceleration_clarification",
-            generation=2,
-            beat=clarify_beat,
-            base_scene=apex_scene,
-            base_semantic_scene=apex_semantic_scene,
         )
-        lanes["clarifyApex"] = _dump_lane(clarification)
+        symmetry_clarification = _clarification_lane(
+            main=main,
+            problem=problem,
+            topic=ProjectileMotionClarificationTopic.FLIGHT_SYMMETRY,
+            prefix_length=SYMMETRY_PREFIX_LENGTH,
+            scenario_id="flight_symmetry_clarification",
+        )
+        lanes["clarifyHorizontal"] = _dump_lane(horizontal_clarification)
+        lanes["clarifyApex"] = _dump_lane(apex_clarification)
+        lanes["clarifySymmetry"] = _dump_lane(symmetry_clarification)
 
         continuation = _compile_lane(
             scenario_id="continue_after_apex_clarification",
             generation=3,
             beat=_continue_beat(problem),
-            base_scene=clarification.result_scene,
-            base_semantic_scene=clarification.result_semantic_scene,
+            base_scene=apex_clarification.result_scene,
+            base_semantic_scene=apex_clarification.result_semantic_scene,
         )
         lanes["continueAfterClarification"] = _dump_lane(continuation)
 
@@ -450,8 +481,8 @@ def _build_fixture(speed_mps: int, angle_deg: int) -> dict[str, object]:
                 base=problem,
                 target=target,
             ),
-            base_scene=clarification.result_scene,
-            base_semantic_scene=clarification.result_semantic_scene,
+            base_scene=apex_clarification.result_scene,
+            base_semantic_scene=apex_clarification.result_semantic_scene,
         )
         lanes["retargetAtApex"] = _dump_lane(retarget_at_apex)
 

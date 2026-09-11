@@ -481,7 +481,9 @@ def test_each_fixture_is_a_real_six_checkpoint_compiler_lifecycle(
     assert set(fixture["lanes"]) == (
         {
             "main",
+            "clarifyHorizontal",
             "clarifyApex",
+            "clarifySymmetry",
             "continueAfterClarification",
             "retargetAtApex",
             "retargetAfterSummary",
@@ -524,6 +526,57 @@ def test_each_fixture_is_a_real_six_checkpoint_compiler_lifecycle(
     assert trace_cues[0].path_id.endswith("__trajectory_ascent")
     assert trace_cues[1].path_id.endswith("__trajectory_descent")
     assert trace_cues[0].marker_id == trace_cues[1].marker_id
+
+
+@pytest.mark.parametrize(
+    "lane_key,prefix_length,topic,checkpoint_id,scenario_id,last_main_checkpoint",
+    (
+        (
+            "clarifyHorizontal",
+            2,
+            "horizontal_velocity",
+            "horizontal_velocity_detail",
+            "horizontal_velocity_clarification",
+            "decompose_velocity",
+        ),
+        (
+            "clarifySymmetry",
+            5,
+            "flight_symmetry",
+            "flight_symmetry_detail",
+            "flight_symmetry_clarification",
+            "trace_descent",
+        ),
+    ),
+)
+def test_primary_fixture_exposes_each_non_apex_clarification_at_its_prerequisite(
+    lane_key: str,
+    prefix_length: int,
+    topic: str,
+    checkpoint_id: str,
+    scenario_id: str,
+    last_main_checkpoint: str,
+) -> None:
+    fixture = _fixture("projectile-motion-v20-a45.v1.json")
+    main = _decode_lane(fixture["lanes"]["main"])
+    prerequisite_scene, prerequisite_semantic_scene = _materialize_prefix(main, prefix_length)
+
+    payload = fixture["lanes"][lane_key]
+    assert payload["scenarioId"] == scenario_id
+    assert payload["generation"] == 2
+    assert payload["route"] == {"intent": "clarify", "topic": topic}
+    assert payload["checkpointIds"] == [checkpoint_id]
+    clarification = _decode_lane(payload)
+    assert clarification.base_scene == prerequisite_scene
+    assert clarification.base_semantic_scene == prerequisite_semantic_scene
+    result = clarification.result_semantic_scene.components[0]
+    assert isinstance(result, ProjectileMotionStateV1)
+    assert result.last_main_checkpoint.value == last_main_checkpoint
+    assert [candidate.value for candidate in result.clarified_topics] == [topic]
+    assert result.active_clarification.value == topic
+    assert clarification.checkpoints[0].semantic.certificate.body.previous_certificate_sha256 == (
+        prerequisite_semantic_scene.certificate_head_sha256
+    )
 
 
 def test_physics_metadata_proves_complementary_range_and_qualified_extrema() -> None:
