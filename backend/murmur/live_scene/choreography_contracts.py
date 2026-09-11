@@ -1,10 +1,11 @@
-"""Closed server-owned contracts for Gate 1.5 live choreography.
+"""Closed server-owned contracts for verified live choreography.
 
 The routed beat is deliberately smaller than the resulting presentation.  It
 can select only a completing-square stage or the one supported clarification;
 it cannot carry narration, geometry, timing, viewport coordinates, or motion
 properties.  The deterministic compiler owns every richer contract in this
-module.
+module.  Choreography V2 adds only a closed path-trace primitive while leaving
+the Gate 1.5 V1 wire shape and hash domain unchanged.
 """
 
 from __future__ import annotations
@@ -29,14 +30,17 @@ from murmur.live_scene.semantic_integrity import canonical_sha256
 ROUTED_CHOREOGRAPHY_BEAT_VERSION = 2
 ROUTED_CHOREOGRAPHY_BEAT_V3_VERSION = 3
 CHOREOGRAPHY_PLAN_VERSION = 1
+CHOREOGRAPHY_PLAN_V2_VERSION = 2
 PRESENTATION_CHECKPOINT_VERSION = 1
 VIEWPORT_POSE_VERSION = 1
 
 MAX_CHOREOGRAPHY_ID_CHARS = 64
 MAX_CHOREOGRAPHY_COMPONENT_ID_CHARS = 32
 MAX_CHOREOGRAPHY_CUES = 5
+MAX_CHOREOGRAPHY_V2_CUES = 6
 MAX_CHOREOGRAPHY_TARGETS_PER_CUE = 16
 MAX_CHOREOGRAPHY_TARGET_REFERENCES = 32
+MAX_CHOREOGRAPHY_V2_NODE_REFERENCES = 32
 MIN_CHOREOGRAPHY_PHASE_MS = 100
 MAX_CHOREOGRAPHY_PHASE_MS = 6_000
 MAX_CHOREOGRAPHY_HOLD_AFTER_MS = 9_000
@@ -45,6 +49,7 @@ MAX_CHOREOGRAPHY_PLAN_MS = 12_000
 ROUTED_CHOREOGRAPHY_BEAT_HASH_DOMAIN = "murmur:routed-choreography-beat:v2"
 ROUTED_CHOREOGRAPHY_BEAT_V3_HASH_DOMAIN = "murmur:routed-choreography-beat:v3"
 CHOREOGRAPHY_PLAN_HASH_DOMAIN = "murmur:choreography-plan:v1"
+CHOREOGRAPHY_PLAN_V2_HASH_DOMAIN = "murmur:choreography-plan:v2"
 PRESENTATION_CHECKPOINT_HASH_DOMAIN = "murmur:presentation-checkpoint:v1"
 
 ChoreographyId = Annotated[
@@ -184,6 +189,26 @@ ChoreographyCueV1: TypeAlias = Annotated[
 ]
 
 
+class TracePathCueV2(LiveSceneContract):
+    """Reveal one authored path while its distinct marker follows that path."""
+
+    cue: Literal["trace_path"] = "trace_path"
+    path_id: SceneNodeId = Field(alias="pathId")
+    marker_id: SceneNodeId = Field(alias="markerId")
+
+    @model_validator(mode="after")
+    def validate_distinct_trace_nodes(self) -> Self:
+        if self.path_id == self.marker_id:
+            raise ValueError("trace pathId and markerId must identify distinct nodes")
+        return self
+
+
+ChoreographyCueV2: TypeAlias = Annotated[
+    EnterCueV1 | ExitCueV1 | TransformCueV1 | TracePathCueV2 | EmphasizeCueV1 | FocusCueV1,
+    Field(discriminator="cue"),
+]
+
+
 class ChoreographyEasing(StrEnum):
     """Purposeful, non-overshooting curves mapped internally by the renderer."""
 
@@ -195,6 +220,7 @@ class ChoreographyEasing(StrEnum):
 
 
 _CUE_ORDER = ("enter", "exit", "transform", "emphasize", "focus")
+_CUE_V2_ORDER = ("enter", "exit", "transform", "trace_path", "emphasize", "focus")
 
 
 class ChoreographyPhaseV1(LiveSceneContract):
@@ -233,6 +259,69 @@ class ChoreographyPlanV1(LiveSceneContract):
 
     v: Literal[CHOREOGRAPHY_PLAN_VERSION] = CHOREOGRAPHY_PLAN_VERSION
     phase: ChoreographyPhaseV1
+
+    @model_validator(mode="after")
+    def validate_total_duration(self) -> Self:
+        if self.phase.total_ms > MAX_CHOREOGRAPHY_PLAN_MS:
+            raise ValueError("choreography plan exceeds the total duration budget")
+        return self
+
+
+class ChoreographyPhaseV2(LiveSceneContract):
+    """One bounded parallel phase that may include one path trace."""
+
+    cues: Annotated[
+        tuple[ChoreographyCueV2, ...],
+        Field(min_length=1, max_length=MAX_CHOREOGRAPHY_V2_CUES),
+    ]
+    duration_ms: PhaseDurationMs = Field(alias="durationMs")
+    easing: ChoreographyEasing
+    hold_after_ms: HoldAfterMs = Field(default=0, alias="holdAfterMs")
+
+    @model_validator(mode="after")
+    def validate_canonical_cues(self) -> Self:
+        cue_kinds = tuple(cue.cue for cue in self.cues)
+        if len(cue_kinds) != len(set(cue_kinds)):
+            raise ValueError("parallel choreography cue kinds must be unique")
+        if cue_kinds != tuple(sorted(cue_kinds, key=_CUE_V2_ORDER.index)):
+            raise ValueError("parallel choreography cues must use canonical cue order")
+
+        referenced_node_ids: list[str] = []
+        trace: TracePathCueV2 | None = None
+        transform_targets: tuple[str, ...] = ()
+        for cue in self.cues:
+            if isinstance(cue, TracePathCueV2):
+                trace = cue
+                referenced_node_ids.extend((cue.path_id, cue.marker_id))
+            else:
+                referenced_node_ids.extend(cue.target_ids)
+                if isinstance(cue, TransformCueV1):
+                    transform_targets = cue.target_ids
+        if len(referenced_node_ids) > MAX_CHOREOGRAPHY_V2_NODE_REFERENCES:
+            raise ValueError("parallel choreography phase exceeds the node-reference budget")
+        if trace is not None and {trace.path_id, trace.marker_id}.intersection(transform_targets):
+            raise ValueError("trace-owned nodes must be disjoint from transform targetIds")
+        return self
+
+    @property
+    def total_ms(self) -> int:
+        """Return authored visible motion plus its reading hold."""
+
+        return self.duration_ms + self.hold_after_ms
+
+
+class ChoreographyPlanV2(LiveSceneContract):
+    """A V2 checkpoint plan with optional verified path tracing."""
+
+    v: Literal[CHOREOGRAPHY_PLAN_V2_VERSION] = CHOREOGRAPHY_PLAN_V2_VERSION
+    phase: ChoreographyPhaseV2
+
+    @field_validator("v", mode="before")
+    @classmethod
+    def validate_strict_version(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("v must be a strict integer")
+        return value
 
     @model_validator(mode="after")
     def validate_total_duration(self) -> Self:
@@ -280,6 +369,8 @@ class PresentationCheckpointV1(LiveSceneContract):
 ROUTED_CHOREOGRAPHY_BEAT_V2_ADAPTER = TypeAdapter(RoutedChoreographyBeatV2)
 ROUTED_CHOREOGRAPHY_BEAT_V3_ADAPTER = TypeAdapter(RoutedChoreographyBeatV3)
 CHOREOGRAPHY_CUE_V1_ADAPTER = TypeAdapter(ChoreographyCueV1)
+CHOREOGRAPHY_CUE_V2_ADAPTER = TypeAdapter(ChoreographyCueV2)
+CHOREOGRAPHY_PLAN_V2_ADAPTER = TypeAdapter(ChoreographyPlanV2)
 
 
 def routed_choreography_beat_sha256(beat: RoutedChoreographyBeatV2) -> str:
@@ -306,6 +397,15 @@ def choreography_plan_sha256(plan: ChoreographyPlanV1) -> str:
     return canonical_sha256(
         plan.model_dump(mode="json", by_alias=True),
         domain=CHOREOGRAPHY_PLAN_HASH_DOMAIN,
+    )
+
+
+def choreography_plan_v2_sha256(plan: ChoreographyPlanV2) -> str:
+    """Hash an exact V2 cue plan without reinterpreting the V1 domain."""
+
+    return canonical_sha256(
+        plan.model_dump(mode="json", by_alias=True),
+        domain=CHOREOGRAPHY_PLAN_V2_HASH_DOMAIN,
     )
 
 

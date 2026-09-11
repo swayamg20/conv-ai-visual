@@ -32,6 +32,7 @@ from murmur.live_scene.contracts import (
     SceneNodeId,
     ScenePatchDraft,
 )
+from murmur.live_scene.projectile_motion_contracts import ProjectileMotionStateV1
 from murmur.live_scene.semantic_integrity import (
     COMPILER_CERTIFICATE_HASH_DOMAIN,
     SCENE_PATCH_HASH_DOMAIN,
@@ -266,7 +267,10 @@ class PythagoreanAreaIdentityState(LiveSceneContract):
 
 
 SemanticComponentState: TypeAlias = Annotated[
-    PythagoreanAreaIdentityState | CompletingSquareState | ParametricCompletingSquareStateV1,
+    PythagoreanAreaIdentityState
+    | CompletingSquareState
+    | ParametricCompletingSquareStateV1
+    | ProjectileMotionStateV1,
     Field(discriminator="kind"),
 ]
 
