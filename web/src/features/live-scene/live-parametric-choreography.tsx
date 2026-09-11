@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   FastForward,
   MessageCircleQuestion,
+  Orbit,
   Play,
   RotateCcw,
   Sparkles,
@@ -132,8 +133,10 @@ function mainCheckpointCount(
   );
 }
 
-interface ParametricLessonProps
-  extends Omit<LiveParametricChoreographyProps, "layout" | "runStream"> {
+interface ParametricLessonProps extends Omit<
+  LiveParametricChoreographyProps,
+  "layout" | "runStream"
+> {
   readonly layout: ChoreographyLayout;
   readonly runStream: ParametricChoreographySceneStreamRunner;
 }
@@ -149,9 +152,7 @@ function ParametricLesson({
   const lifecycleRef = useRef<object | null>(null);
   const [renderer] = useState(() => new ChoreographyCanvasBridge());
   const [equation, setEquation] = useState(DEFAULT_EQUATION);
-  const [directorPrompt, setDirectorPrompt] = useState(
-    DEFAULT_DIRECTOR_PROMPT,
-  );
+  const [directorPrompt, setDirectorPrompt] = useState(DEFAULT_DIRECTOR_PROMPT);
   const [formError, setFormError] = useState<string | null>(null);
   const [lastMode, setLastMode] = useState<"reflex" | "director">("reflex");
   const runtime = useMemo(
@@ -183,7 +184,9 @@ function ParametricLesson({
     };
   }, [renderer, runtime]);
 
-  const component = currentComponent(snapshot.committedSemanticScene.components);
+  const component = currentComponent(
+    snapshot.committedSemanticScene.components,
+  );
   const values = useMemo(
     () =>
       component
@@ -302,7 +305,17 @@ function ParametricLesson({
               </p>
             </div>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-1.5">
+            <Link
+              href="/canvas/projectile"
+              className="flex min-h-11 items-center gap-2 rounded-xl px-3 text-xs font-medium text-muted-foreground transition-colors duration-200 hover:bg-graphite hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <Orbit className="h-4 w-4 text-sage" />
+              <span className="hidden sm:inline">Projectile lab</span>
+              <span className="sr-only sm:hidden">Open projectile lab</span>
+            </Link>
+            <ThemeToggle />
+          </div>
         </div>
       </header>
 
@@ -345,7 +358,10 @@ function ParametricLesson({
               Reset the board before changing problems.
             </p>
 
-            <div className="mt-3 flex flex-wrap gap-2" aria-label="Example equations">
+            <div
+              className="mt-3 flex flex-wrap gap-2"
+              aria-label="Example equations"
+            >
               {EXAMPLE_EQUATIONS.map((example) => (
                 <button
                   key={example}
@@ -370,7 +386,9 @@ function ParametricLesson({
                   aria-hidden="true"
                   className={cn(
                     "h-2 w-2 shrink-0 rounded-full",
-                    isBusy ? "bg-sage motion-safe:animate-pulse" : "bg-chalk-soft",
+                    isBusy
+                      ? "bg-sage motion-safe:animate-pulse"
+                      : "bg-chalk-soft",
                   )}
                 />
                 <div className="min-w-0">
@@ -378,17 +396,24 @@ function ParametricLesson({
                     {PHASE_LABELS[snapshot.phase]}
                   </p>
                   <p className="truncate font-mono text-[9px] text-muted-foreground">
-                    {settledMainCount}/{LIVE_CHOREOGRAPHY_MAIN_CHECKPOINT_COUNT} chapters · {sourceLabel}
+                    {settledMainCount}/{LIVE_CHOREOGRAPHY_MAIN_CHECKPOINT_COUNT}{" "}
+                    chapters · {sourceLabel}
                   </p>
                 </div>
               </div>
-              {lastMode === "reflex" && <Zap className="h-4 w-4 shrink-0 text-sage" />}
+              {lastMode === "reflex" && (
+                <Zap className="h-4 w-4 shrink-0 text-sage" />
+              )}
             </div>
           </section>
 
           <div className="mt-5 grid grid-cols-2 gap-2">
             {canAdvance && (
-              <Button type="button" onClick={advance} className="col-span-2 min-h-11 gap-2">
+              <Button
+                type="button"
+                onClick={advance}
+                className="col-span-2 min-h-11 gap-2"
+              >
                 {snapshot.accepted.length === 0 ? (
                   <Sparkles className="h-4 w-4" />
                 ) : (
@@ -469,7 +494,9 @@ function ParametricLesson({
             <Button
               type="button"
               variant="outline"
-              disabled={isBusy || needsReset || directorPrompt.trim().length === 0}
+              disabled={
+                isBusy || needsReset || directorPrompt.trim().length === 0
+              }
               onClick={direct}
               className="mt-3 w-full gap-2"
             >
@@ -484,7 +511,10 @@ function ParametricLesson({
             </p>
           )}
           {snapshot.decline && !snapshot.error && (
-            <p className="mt-5 text-xs leading-5 text-muted-foreground" role="status">
+            <p
+              className="mt-5 text-xs leading-5 text-muted-foreground"
+              role="status"
+            >
               {snapshot.narration}
             </p>
           )}
