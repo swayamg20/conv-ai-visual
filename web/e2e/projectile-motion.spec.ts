@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -255,10 +254,6 @@ function nearestRankP95(samples: readonly number[]): number {
   return [...samples].sort((left, right) => left - right)[
     Math.ceil(samples.length * 0.95) - 1
   ]!;
-}
-
-function semanticDomSha256(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function acceleratedObservationsPath(testInfo: {
@@ -538,27 +533,19 @@ test("the certified main flow draws a curved trace with one stable projectile ma
     await reducedContext.close();
   }
 
-  const animatedSemanticDomSha256 = semanticDomSha256(semanticDom);
-  const reducedMotionSemanticDomSha256 = semanticDomSha256(reducedSemanticDom);
-  const replaySemanticDomSha256 = semanticDomSha256(replaySemanticDom);
-  expect(reducedMotionSemanticDomSha256).toBe(animatedSemanticDomSha256);
-  expect(replaySemanticDomSha256).toBe(animatedSemanticDomSha256);
+  expect(reducedSemanticDom).toEqual(semanticDom);
+  expect(replaySemanticDom).toEqual(semanticDom);
   const observationsPath = acceleratedObservationsPath(testInfo);
   const observations = JSON.parse(
     await readFile(observationsPath, "utf8"),
   ) as Record<string, unknown>;
   observations.motionBoundary = {
     traceTipSamples,
-    physicsSamples,
     canonicalTerminal: {
       animatedSemanticDom: semanticDom,
-      animatedSemanticDomSha256,
       reducedMotionSemanticDom: reducedSemanticDom,
-      reducedMotionSemanticDomSha256,
       replaySemanticDom,
-      replaySemanticDomSha256,
       replayProviderRequestCount,
-      equal: true,
     },
   };
   await writeFile(
