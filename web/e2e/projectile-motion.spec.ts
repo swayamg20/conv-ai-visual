@@ -163,8 +163,8 @@ async function stopDuringHold(page: Page): Promise<{
 }
 
 async function stopDuringTransformAndTrace(page: Page): Promise<{
-  readonly beforePath: string;
-  readonly interruptedPath: string;
+  readonly beforeWidth: number;
+  readonly interruptedWidth: number;
   readonly traceDashArray: number;
   readonly traceDashOffset: number;
 }> {
@@ -172,14 +172,17 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
     "data-settled-main-count",
     "4",
   );
-  const beforePath =
-    (await projectileBoard(page)
-      .locator('[data-element-id="projectile__vertical_state"] path')
-      .getAttribute("d")) ?? "";
-  expect(beforePath).not.toBe("");
+  const beforeWidth = Number(
+    await projectileBoard(page)
+      .locator(
+        '[data-element-id="projectile__vertical_state"] foreignObject',
+      )
+      .getAttribute("width"),
+  );
+  expect(beforeWidth).toBeGreaterThan(0);
 
   const result = await page.waitForFunction(
-    ({ initialPath }) => {
+    ({ initialWidth }) => {
       const stage = document.querySelector<HTMLElement>(
         '[data-testid="projectile-choreography-stage"]',
       );
@@ -189,14 +192,18 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       const trace = stage?.querySelector<SVGGElement>(
         '[data-element-id="projectile__trajectory_descent"]',
       );
-      const transformedPath = transformed?.querySelector("path");
+      const transformedForeignObject = transformed?.querySelector(
+        "foreignObject",
+      );
       const tracePath = trace?.querySelector("path");
       const stop = Array.from(document.querySelectorAll("button")).find(
         (candidate) =>
           candidate.textContent?.trim() === "Stop at this moment" &&
           !candidate.disabled,
       );
-      const currentPath = transformedPath?.getAttribute("d") ?? "";
+      const currentWidth = Number(
+        transformedForeignObject?.getAttribute("width"),
+      );
       const traceDashArray = Number(
         tracePath?.getAttribute("stroke-dasharray"),
       );
@@ -205,8 +212,9 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       );
       if (
         stage?.dataset.visibleCheckpointId !== "trace_descent" ||
-        !currentPath ||
-        currentPath === initialPath ||
+        !Number.isFinite(currentWidth) ||
+        currentWidth <= initialWidth ||
+        currentWidth >= 250 ||
         !Number.isFinite(traceDashArray) ||
         !Number.isFinite(traceDashOffset) ||
         traceDashArray <= 0 ||
@@ -218,13 +226,13 @@ async function stopDuringTransformAndTrace(page: Page): Promise<{
       }
       stop.click();
       return {
-        beforePath: initialPath,
-        interruptedPath: currentPath,
+        beforeWidth: initialWidth,
+        interruptedWidth: currentWidth,
         traceDashArray,
         traceDashOffset,
       };
     },
-    { initialPath: beforePath },
+    { initialWidth: beforeWidth },
     { polling: "raf", timeout: 20_000 },
   );
   const value = await result.jsonValue();
@@ -374,7 +382,22 @@ test("the certified main flow draws a curved trace with one stable projectile ma
     '[data-element-id="projectile__trajectory_ascent"] path',
   );
   await expect(curvePath).toHaveCount(1);
-  expect(await curvePath.getAttribute("d")).toMatch(/[CQ]/);
+  const curveGeometry = await curvePath.evaluate((element) => {
+    const path = element as SVGPathElement;
+    const totalLength = path.getTotalLength();
+    const start = path.getPointAtLength(0);
+    const midpoint = path.getPointAtLength(totalLength / 2);
+    const end = path.getPointAtLength(totalLength);
+    return {
+      totalLength,
+      twiceTriangleArea: Math.abs(
+        (end.x - start.x) * (midpoint.y - start.y) -
+          (end.y - start.y) * (midpoint.x - start.x),
+      ),
+    };
+  });
+  expect(curveGeometry.totalLength).toBeGreaterThan(0);
+  expect(curveGeometry.twiceTriangleArea).toBeGreaterThan(10);
 
   const expected = expectedProjectileBoard(primaryFixture, "main", "cinematic");
   await expectProjectileTerminal(page, expected);
@@ -773,7 +796,9 @@ test.describe("interruption phase boundaries", () => {
       "__vertical_state_before_transform__",
     );
     const interrupted = await stopDuringTransformAndTrace(page);
-    expect(interrupted.interruptedPath).not.toBe(interrupted.beforePath);
+    expect(interrupted.interruptedWidth).toBeGreaterThan(
+      interrupted.beforeWidth,
+    );
     expect(interrupted.traceDashOffset).toBeGreaterThan(0);
     expect(interrupted.traceDashOffset).toBeLessThan(
       interrupted.traceDashArray,
@@ -829,14 +854,16 @@ test.describe("interruption phase boundaries", () => {
 test("closed query controls reject invalid values and UI selection cannot mutate the accepted board", async ({
   page,
 }) => {
-  const invalid = await page.goto(
+  const invalidPage = await page.context().newPage();
+  const invalid = await invalidPage.goto(
     "/e2e/projectile-motion?layout=wide&speed=turbo",
   );
   expect(invalid?.status()).toBe(404);
-  const repeated = await page.goto(
+  const repeated = await invalidPage.goto(
     "/e2e/projectile-motion?layout=compact&layout=cinematic",
   );
   expect(repeated?.status()).toBe(404);
+  await invalidPage.close();
 
   const requests = observeProviderFreeRequests(page);
   await page.goto("/e2e/projectile-motion?motion=reduced");
