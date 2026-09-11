@@ -15,6 +15,8 @@ import {
   createSceneState,
   planSceneTransition,
   type ChoreographyCueV1,
+  type ChoreographyCueV2,
+  type ChoreographyPlanV2,
   type LatexTokenSceneNode,
   type LineSceneNode,
   type MotionStep,
@@ -22,6 +24,7 @@ import {
   type PlannedCheckpointChoreography,
   type RectSceneNode,
   type SceneNode,
+  type ScenePoint,
   type SceneState,
   type TextSceneNode,
   type ViewportPoseV1,
@@ -241,6 +244,36 @@ function pathNode(
   };
 }
 
+function tracePathNode(
+  id: string,
+  points: readonly ScenePoint[],
+): PathSceneNode {
+  return {
+    id,
+    kind: "path",
+    points,
+    closed: false,
+    presentation: { enter: "draw", exit: "fade" },
+    style: { ...stroke, fill: "none" },
+  };
+}
+
+function markerNode(id: string, x: number, y: number): PathSceneNode {
+  return {
+    id,
+    kind: "path",
+    points: [
+      [x - 4, y - 4],
+      [x + 4, y - 4],
+      [x + 4, y + 4],
+      [x - 4, y + 4],
+    ],
+    closed: true,
+    presentation: { enter: "fade", exit: "fade" },
+    style: { ...stroke, fill: "#f59e0b" },
+  };
+}
+
 function lineNode(id: string, offset: number): LineSceneNode {
   return {
     id,
@@ -335,6 +368,53 @@ function planned(
         cues: Object.freeze(cues),
         durationMs: options.durationMs ?? 1_000,
         easing: "linear",
+        holdAfterMs: options.holdAfterMs ?? 0,
+      }),
+    }),
+  });
+}
+
+function tracePlanned(
+  base: SceneState,
+  target: SceneState,
+  pathId: string,
+  markerId: string,
+  options: {
+    readonly durationMs?: number;
+    readonly holdAfterMs?: number;
+    readonly includeMarkerTransform?: boolean;
+  } = {},
+): PlannedCheckpointChoreography<ChoreographyPlanV2> {
+  const motionPlan = planSceneTransition(base, target);
+  const ids = (type: MotionStep["type"]) =>
+    motionPlan.steps
+      .filter((step) => step.type === type)
+      .map((step) => step.id)
+      .sort();
+  const transformIds = ids("update").filter(
+    (id) => options.includeMarkerTransform || id !== markerId,
+  );
+  const cues: ChoreographyCueV2[] = [];
+  const enterIds = ids("enter");
+  const exitIds = ids("remove");
+  if (enterIds.length) cues.push({ cue: "enter", targetIds: enterIds });
+  if (exitIds.length) cues.push({ cue: "exit", targetIds: exitIds });
+  if (transformIds.length) {
+    cues.push({ cue: "transform", targetIds: transformIds });
+  }
+  cues.push({ cue: "trace_path", pathId, markerId });
+  cues.push({ cue: "focus", targetIds: [markerId, pathId].sort() });
+  return Object.freeze({
+    targetScene: target,
+    motionPlan,
+    baseViewport: BASE_VIEWPORT,
+    resultViewport: RESULT_VIEWPORT,
+    choreographyPlan: Object.freeze({
+      v: 2,
+      phase: Object.freeze({
+        cues: Object.freeze(cues),
+        durationMs: options.durationMs ?? 1_000,
+        easing: "ease_out_quart",
         holdAfterMs: options.holdAfterMs ?? 0,
       }),
     }),
@@ -440,6 +520,18 @@ function numericAttribute(element: Element, name: string): number {
     throw new Error(`Expected finite ${name} on ${element.tagName}`);
   }
   return value;
+}
+
+function elementTranslation(element: SVGElement): readonly [number, number] {
+  const transform = element.getAttribute("transform");
+  if (!transform) return [0, 0];
+  const pattern =
+    /^translate\((-?\d*\.?\d+(?:e[-+]?\d+)?) (-?\d*\.?\d+(?:e[-+]?\d+)?)\)$/i;
+  const match = pattern.exec(transform);
+  if (!match) {
+    throw new Error(`Expected a translate transform, received ${transform}`);
+  }
+  return [Number(match[1]), Number(match[2])];
 }
 
 function pathCoordinates(element: SVGElement): number[] {
@@ -612,6 +704,215 @@ describe("checkpoint choreography executor", () => {
           playbackRate: playbackRate as unknown as ChoreographyPlaybackRate,
         }),
       ).toThrow("playbackRate must be exactly 1 or 16");
+    },
+  );
+
+  it.each([
+    [0.25, [5, 50]],
+    [0.5, [10, 0]],
+    [0.75, [20, 50]],
+  ] as const)(
+    "reveals a curved trace and moves its entering marker by uniform sample-time at %s",
+    async (sample, expectedPoint) => {
+      const trajectory = tracePathNode("trajectory", [
+        [0, 100],
+        [10, 0],
+        [30, 100],
+      ]);
+      const marker = markerNode("marker", 30, 100);
+      const base = scene(0, []);
+      const target = scene(1, [trajectory, marker]);
+      const setup = harness({ barrier: () => Promise.resolve() });
+      setup.seed(base);
+      const timelineSpy = vi.spyOn(gsap, "timeline");
+      const playback = setup.executor.play(
+        tracePlanned(base, target, "trajectory", "marker"),
+      );
+      const timeline = capturedTimeline(timelineSpy).pause();
+      timeline.time(sample, false);
+
+      const pathElement = setup.elements.get("trajectory")?.element;
+      const markerElement = setup.elements.get("marker")?.element;
+      if (!pathElement || !markerElement) {
+        throw new Error("Missing rendered trace participants");
+      }
+      const [translationX, translationY] = elementTranslation(markerElement);
+      expect(30 + translationX).toBeCloseTo(expectedPoint[0]);
+      expect(100 + translationY).toBeCloseTo(expectedPoint[1]);
+      expect(
+        setup.svg.querySelectorAll("[data-element-id='trajectory']"),
+      ).toHaveLength(1);
+      expect(
+        setup.svg.querySelectorAll("[data-element-id='marker']"),
+      ).toHaveLength(1);
+
+      const path = pathElement.querySelector("path");
+      const firstLength = Math.hypot(10, 100);
+      const secondLength = Math.hypot(20, 100);
+      const totalLength = firstLength + secondLength;
+      const revealedLength =
+        sample <= 0.5
+          ? firstLength * sample * 2
+          : firstLength + secondLength * (sample - 0.5) * 2;
+      expect(Number(path?.getAttribute("stroke-dasharray"))).toBeCloseTo(
+        totalLength,
+      );
+      expect(Number(path?.getAttribute("stroke-dashoffset"))).toBeCloseTo(
+        totalLength - revealedLength,
+      );
+
+      playback.cancel();
+      await expect(playback.finished).resolves.toEqual({
+        status: "cancelled_before_presented",
+        firstCuePresented: false,
+      });
+      expect([...setup.elements.keys()]).toEqual([]);
+      expectClean(setup.svg);
+    },
+  );
+
+  it("keeps a retained marker identity while trace and normal transforms remain disjoint", async () => {
+    const trajectory = tracePathNode("trajectory_descent", [
+      [0, 100],
+      [10, 0],
+      [20, 100],
+    ]);
+    const baseMarker = markerNode("marker", 0, 100);
+    const targetMarker = markerNode("marker", 20, 100);
+    const base = scene(5, [baseMarker, pathNode("velocity", 0)]);
+    const target = scene(6, [
+      targetMarker,
+      pathNode("velocity", 100),
+      trajectory,
+    ]);
+    const setup = harness({ barrier: () => Promise.resolve() });
+    setup.seed(base);
+    const markerIdentity = setup.elements.get("marker")?.element;
+    const timelineSpy = vi.spyOn(gsap, "timeline");
+    const playback = setup.executor.play(
+      tracePlanned(base, target, "trajectory_descent", "marker"),
+    );
+    const timeline = capturedTimeline(timelineSpy).pause();
+    timeline.time(0.5, false);
+
+    const renderedMarker = setup.elements.get("marker")?.element;
+    expect(renderedMarker).toBe(markerIdentity);
+    expect(elementTranslation(renderedMarker!)[0]).toBeCloseTo(10);
+    expect(elementTranslation(renderedMarker!)[1]).toBeCloseTo(-100);
+    expect(pathCoordinates(renderedMarker!)).toEqual(
+      baseMarker.points.flatMap((point) => [...point]),
+    );
+    const traceIdentity = setup.elements.get("trajectory_descent")?.element;
+
+    await expect(playback.firstCuePresented).resolves.toBe(true);
+    playback.cancel();
+    await expect(playback.finished).resolves.toEqual({
+      status: "cancelled_to_checkpoint",
+      firstCuePresented: true,
+    });
+    expect(setup.elements.get("marker")?.element).toBe(markerIdentity);
+    expect(setup.elements.get("trajectory_descent")?.element).toBe(
+      traceIdentity,
+    );
+    expect(setup.elements.get("marker")?.data).toEqual(targetMarker);
+    expect(setup.elements.get("velocity")?.data).toEqual(target.nodes[1]);
+    expect(setup.readViewport()).toEqual(RESULT_VIEWPORT);
+    expectClean(setup.svg);
+  });
+
+  it("materializes a V2 trace exactly under reduced motion", async () => {
+    const trajectory = tracePathNode("trajectory", [
+      [0, 100],
+      [10, 0],
+      [20, 100],
+    ]);
+    const marker = markerNode("marker", 20, 100);
+    const base = scene(9, []);
+    const target = scene(10, [trajectory, marker]);
+    const setup = harness({
+      reducedMotion: true,
+      barrier: () => Promise.resolve(),
+    });
+    setup.seed(base);
+    const cues: string[] = [];
+    const playback = setup.executor.play(
+      tracePlanned(base, target, "trajectory", "marker"),
+      (signal) => {
+        if (signal.type === "cueStarted") cues.push(signal.cue);
+      },
+    );
+
+    await expect(playback.finished).resolves.toEqual({
+      status: "completed",
+      firstCuePresented: true,
+    });
+    expect(cues).toEqual(["enter", "trace_path", "focus"]);
+    expect(setup.elements.get("trajectory")?.data).toEqual(trajectory);
+    expect(setup.elements.get("marker")?.data).toEqual(marker);
+    expect(setup.readViewport()).toEqual(RESULT_VIEWPORT);
+    expectClean(setup.svg);
+  });
+
+  it("keeps ordinary V2 phases compatible when no path trace is authored", async () => {
+    const base = scene(10, [pathNode("velocity", 0)]);
+    const target = scene(11, [pathNode("velocity", 100)]);
+    const v1 = planned(base, target);
+    const plan: PlannedCheckpointChoreography<ChoreographyPlanV2> = {
+      ...v1,
+      choreographyPlan: { ...v1.choreographyPlan, v: 2 },
+    };
+    const setup = harness({
+      reducedMotion: true,
+      barrier: () => Promise.resolve(),
+    });
+    setup.seed(base);
+    const cues: string[] = [];
+
+    const playback = setup.executor.play(plan, (signal) => {
+      if (signal.type === "cueStarted") cues.push(signal.cue);
+    });
+
+    await expect(playback.finished).resolves.toEqual({
+      status: "completed",
+      firstCuePresented: true,
+    });
+    expect(cues).toEqual(["transform", "focus"]);
+    expect(setup.elements.get("velocity")?.data).toEqual(target.nodes[0]);
+    expect(setup.readViewport()).toEqual(RESULT_VIEWPORT);
+    expectClean(setup.svg);
+  });
+
+  it.each([false, true])(
+    "fails before presentation when a trace marker overlaps normal transform ownership (reduced=%s)",
+    async (reducedMotion) => {
+      const trajectory = tracePathNode("trajectory", [
+        [0, 100],
+        [10, 0],
+        [20, 100],
+      ]);
+      const baseMarker = markerNode("marker", 0, 100);
+      const base = scene(12, [baseMarker]);
+      const target = scene(13, [markerNode("marker", 20, 100), trajectory]);
+      const setup = harness({
+        reducedMotion,
+        barrier: () => Promise.resolve(),
+      });
+      setup.seed(base);
+      const playback = setup.executor.play(
+        tracePlanned(base, target, "trajectory", "marker", {
+          includeMarkerTransform: true,
+        }),
+      );
+
+      await expect(playback.finished).resolves.toEqual({
+        status: "failed",
+        firstCuePresented: false,
+        error: "Trace-owned nodes overlap normal transform targets",
+      });
+      expect(setup.elements.get("marker")?.data).toEqual(baseMarker);
+      expect(setup.elements.has("trajectory")).toBe(false);
+      expect(setup.readViewport()).toEqual(BASE_VIEWPORT);
+      expectClean(setup.svg);
     },
   );
 

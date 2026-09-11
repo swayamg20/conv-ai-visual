@@ -1,6 +1,7 @@
 import {
   decodeViewportPoseV1,
   type ChoreographyCueKind,
+  type ChoreographyPlan,
   type ChoreographyPlanV1,
   type ViewportPoseV1,
 } from "./choreography";
@@ -31,12 +32,14 @@ export interface ParametricCheckpointChoreographyInput
   readonly checkpoint: CompiledCheckpointV3;
 }
 
-export interface PlannedCheckpointChoreography {
+export interface PlannedCheckpointChoreography<
+  Plan extends ChoreographyPlan = ChoreographyPlanV1,
+> {
   readonly targetScene: SceneState;
   readonly motionPlan: MotionPlan;
   readonly baseViewport: ViewportPoseV1;
   readonly resultViewport: ViewportPoseV1;
-  readonly choreographyPlan: ChoreographyPlanV1;
+  readonly choreographyPlan: Plan;
 }
 
 function fail(

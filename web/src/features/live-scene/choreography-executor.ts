@@ -7,13 +7,19 @@ import type {
 import {
   createSceneState,
   type ChoreographyCueKind,
+  type ChoreographyCueKindV2,
+  type ChoreographyPlan,
+  type ChoreographyPlanV2,
   type PlannedCheckpointChoreography,
   type SceneNode,
   type SceneState,
   type ViewportPoseV1,
 } from "@/lib/live-scene";
 
-import { appendChoreographyPhaseTweens } from "./choreography-timeline";
+import {
+  appendChoreographyPhaseTweens,
+  validateChoreographyPhaseMotion,
+} from "./choreography-timeline";
 import {
   createSvgNodeReconciler,
   type SvgNodeReconcilerContext,
@@ -39,10 +45,17 @@ export interface ChoreographyPlayback {
   cancel(): void;
 }
 
-export type ChoreographyExecutorSignal =
+type CueKindForPlan<Plan extends ChoreographyPlan> =
+  Plan extends ChoreographyPlanV2
+    ? ChoreographyCueKindV2
+    : ChoreographyCueKind;
+
+export type ChoreographyExecutorSignal<
+  Cue extends ChoreographyCueKindV2 = ChoreographyCueKind,
+> =
   | {
       readonly type: "cueStarted";
-      readonly cue: ChoreographyCueKind;
+      readonly cue: Cue;
     }
   | { readonly type: "firstCuePresented" }
   | {
@@ -51,8 +64,10 @@ export type ChoreographyExecutorSignal =
     };
 
 /** Receives only closed choreography vocabulary, never model-authored text or IDs. */
-export type ChoreographyExecutorObserver = (
-  signal: ChoreographyExecutorSignal,
+export type ChoreographyExecutorObserver<
+  Cue extends ChoreographyCueKindV2 = ChoreographyCueKind,
+> = (
+  signal: ChoreographyExecutorSignal<Cue>,
 ) => void;
 
 export type ChoreographyPresentationBarrier = () => Promise<void>;
@@ -71,9 +86,9 @@ export interface ChoreographyExecutorContext extends SvgNodeReconcilerContext {
 }
 
 export interface ChoreographyExecutor {
-  play(
-    plan: PlannedCheckpointChoreography,
-    observer?: ChoreographyExecutorObserver,
+  play<Plan extends ChoreographyPlan>(
+    plan: PlannedCheckpointChoreography<Plan>,
+    observer?: ChoreographyExecutorObserver<CueKindForPlan<Plan>>,
   ): ChoreographyPlayback;
   cancel(): void;
   dispose(): void;
@@ -132,7 +147,7 @@ function sameNode(left: SceneNode, right: SceneNode): boolean {
 }
 
 function expectedBaseNodes(
-  plan: PlannedCheckpointChoreography,
+  plan: PlannedCheckpointChoreography<ChoreographyPlan>,
 ): Map<string, SceneNode> {
   const expected = new Map(
     plan.targetScene.nodes.map((node) => [node.id, node]),
@@ -147,7 +162,7 @@ function expectedBaseNodes(
 
 function validateAndReadBaseScene(
   context: ChoreographyExecutorContext,
-  plan: PlannedCheckpointChoreography,
+  plan: PlannedCheckpointChoreography<ChoreographyPlan>,
 ): SceneState {
   const svg = context.getSvg();
   if (!svg) throw new Error("The SVG canvas is unavailable");
@@ -230,9 +245,9 @@ export function createChoreographyExecutor(
   let active: ChoreographyPlayback | null = null;
   let disposed = false;
 
-  const play = (
-    plan: PlannedCheckpointChoreography,
-    observer?: ChoreographyExecutorObserver,
+  const play = <Plan extends ChoreographyPlan>(
+    plan: PlannedCheckpointChoreography<Plan>,
+    observer?: ChoreographyExecutorObserver<CueKindForPlan<Plan>>,
   ): ChoreographyPlayback => {
     if (disposed) throw new Error("The choreography executor is disposed");
     if (active) throw new Error("A checkpoint choreography is already active");
@@ -410,6 +425,7 @@ export function createChoreographyExecutor(
 
     try {
       baseScene = validateAndReadBaseScene(context, plan);
+      validateChoreographyPhaseMotion(plan);
       const phase = plan.choreographyPlan.phase;
       const duration = options.reducedMotion
         ? 0
@@ -417,7 +433,10 @@ export function createChoreographyExecutor(
       const holdDuration = phase.holdAfterMs / 1_000 / playbackRate;
       const emitCueStarts = () => {
         for (const cue of phase.cues) {
-          observer?.({ type: "cueStarted", cue: cue.cue });
+          observer?.({
+            type: "cueStarted",
+            cue: cue.cue as CueKindForPlan<Plan>,
+          });
         }
       };
 
