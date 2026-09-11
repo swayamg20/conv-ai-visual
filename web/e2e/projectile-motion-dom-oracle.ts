@@ -8,6 +8,7 @@ import {
 
 const STAGE = "projectile-choreography-stage";
 const LINE_TOLERANCE = 0.05;
+const PATH_RELATIVE_TOLERANCE = Number.EPSILON;
 type Point = readonly [number, number];
 type ProjectileNode = Extract<
   SceneNode,
@@ -130,14 +131,17 @@ export async function inspectProjectileSvgAgainstScene(
           code: MismatchCode,
           nodeId: string | null,
           passes: boolean,
+          field: string = code,
+          expected: string = "match",
+          actual: string = "mismatch",
         ) => {
           if (!passes)
             mismatches.push({
               code,
               nodeId,
-              field: code,
-              expected: "match",
-              actual: "mismatch",
+              field,
+              expected,
+              actual,
             });
         };
         const numeric = (value: string | null) => {
@@ -156,6 +160,10 @@ export async function inspectProjectileSvgAgainstScene(
         const round = (value: number) => Number(value.toFixed(6));
         const distance = (left: Point, right: Point) =>
           Math.hypot(left[0] - right[0], left[1] - right[1]);
+        const samePathCoordinate = (left: number, right: number) =>
+          Math.abs(left - right) <=
+          input.pathRelativeTolerance *
+            Math.max(1, Math.abs(left), Math.abs(right));
         const oneSvgChild = (
           group: Element,
           tag: string,
@@ -272,10 +280,37 @@ export async function inspectProjectileSvgAgainstScene(
             if (!path) continue;
             const parsed = parsePath(path.getAttribute("d"));
             const geometry = parsed ?? { points: [], closed: false };
+            let maxCoordinateDelta = 0;
+            let firstCoordinateMismatch: string | null = null;
+            let coordinatesMatch =
+              parsed !== null && parsed.points.length === node.points.length;
+            if (parsed && parsed.points.length === node.points.length) {
+              parsed.points.forEach((point, index) => {
+                const expectedPoint = node.points[index];
+                ([0, 1] as const).forEach((axis) => {
+                  const delta = Math.abs(point[axis] - expectedPoint[axis]);
+                  maxCoordinateDelta = Math.max(maxCoordinateDelta, delta);
+                  if (
+                    !samePathCoordinate(point[axis], expectedPoint[axis]) &&
+                    firstCoordinateMismatch === null
+                  ) {
+                    firstCoordinateMismatch = `${index}.${axis === 0 ? "x" : "y"}: expected ${expectedPoint[axis]}, observed ${point[axis]}`;
+                  }
+                });
+              });
+              coordinatesMatch = firstCoordinateMismatch === null;
+            }
+            const geometryMatches =
+              coordinatesMatch && parsed?.closed === node.closed;
             check(
               "path_geometry",
               node.id,
-              same({ points: node.points, closed: node.closed }, geometry),
+              geometryMatches,
+              "points",
+              `${node.points.length} points; closed=${node.closed}; scaled tolerance=${input.pathRelativeTolerance}`,
+              parsed
+                ? `${parsed.points.length} points; closed=${parsed.closed}; max delta=${maxCoordinateDelta}; first mismatch=${firstCoordinateMismatch ?? "none"}`
+                : "unparseable M/L/Z path",
             );
             const paint = {
               fill: path.getAttribute("fill") ?? "",
@@ -301,7 +336,12 @@ export async function inspectProjectileSvgAgainstScene(
             signatures.push({
               kind: "path",
               id: node.id,
-              ...geometry,
+              // Browser-side numeric serialization can land one ULP from the
+              // Node-loaded fixture. Normalize only after the scaled-epsilon
+              // geometry check so Replay signatures remain platform-stable.
+              ...(geometryMatches
+                ? { points: node.points, closed: node.closed }
+                : geometry),
               ...paint,
               opacity,
             });
@@ -566,6 +606,7 @@ export async function inspectProjectileSvgAgainstScene(
         nodes,
         paintOrder: expectedProjectilePaintOrder(nodes),
         lineTolerance: LINE_TOLERANCE,
+        pathRelativeTolerance: PATH_RELATIVE_TOLERANCE,
       },
     );
 }
