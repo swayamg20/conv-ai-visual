@@ -827,11 +827,64 @@ def _viewports_for_state(state: ProjectileMotionStateV1) -> LayoutViewportMapV1:
     return _viewports_for_checkpoint(ProjectileMotionCheckpointId(state.last_main_checkpoint.value))
 
 
+def _retarget_focus_suffixes(state: ProjectileMotionStateV1) -> tuple[str, ...]:
+    """Keep an in-place parameter morph focused inside its settled camera."""
+
+    if state.active_clarification is not None:
+        checkpoint_id = PROJECTILE_MOTION_CLARIFICATION_CHECKPOINTS[state.active_clarification]
+    elif state.last_main_checkpoint is not None:
+        checkpoint_id = ProjectileMotionCheckpointId(state.last_main_checkpoint.value)
+    else:  # Retarget compilation rejects an empty frontier before cue authoring.
+        raise ProjectileMotionCompilationError(
+            "a retarget cue requires a settled projectile frontier"
+        )
+
+    return {
+        ProjectileMotionCheckpointId.SETUP: ("givens", "velocity_resultant"),
+        ProjectileMotionCheckpointId.DECOMPOSE_VELOCITY: (
+            "velocity_horizontal",
+            "velocity_vertical",
+        ),
+        ProjectileMotionCheckpointId.TRACE_ASCENT: (
+            "projectile_marker",
+            "trajectory_ascent",
+        ),
+        ProjectileMotionCheckpointId.APEX_STATE: (
+            "acceleration",
+            "apex_velocity",
+            "projectile_marker",
+        ),
+        ProjectileMotionCheckpointId.TRACE_DESCENT: (
+            "projectile_marker",
+            "trajectory_descent",
+        ),
+        ProjectileMotionCheckpointId.SUMMARY: (
+            "range_dimension",
+            "summary_values",
+        ),
+        ProjectileMotionCheckpointId.HORIZONTAL_VELOCITY_DETAIL: (
+            "clarify_horizontal_velocity",
+            "velocity_horizontal",
+        ),
+        ProjectileMotionCheckpointId.APEX_ACCELERATION_DETAIL: (
+            "acceleration",
+            "clarify_apex_acceleration",
+        ),
+        ProjectileMotionCheckpointId.FLIGHT_SYMMETRY_DETAIL: (
+            "clarify_flight_symmetry",
+            "trajectory_ascent",
+            "trajectory_descent",
+        ),
+        ProjectileMotionCheckpointId.PARAMETERS_RETARGETED: (),
+    }[checkpoint_id]
+
+
 def _cue_plan(
     component_id: str,
     checkpoint_id: ProjectileMotionCheckpointId,
     patch: ScenePatchDraft,
     base_nodes: tuple[SceneNode, ...],
+    result_component: ProjectileMotionStateV1,
 ) -> ChoreographyPlanV2:
     base_by_id = {node.id: node for node in base_nodes}
     enter = sorted(
@@ -924,10 +977,8 @@ def _cue_plan(
             "trajectory_ascent",
             "trajectory_descent",
         ),
-        ProjectileMotionCheckpointId.PARAMETERS_RETARGETED: (
-            "givens",
-            "projectile_marker",
-            "velocity_resultant",
+        ProjectileMotionCheckpointId.PARAMETERS_RETARGETED: _retarget_focus_suffixes(
+            result_component
         ),
     }[checkpoint_id]
 
@@ -990,7 +1041,13 @@ def _checkpoint(
         base_nodes=base_nodes,
         result_nodes=result_nodes,
         patch=patch,
-        choreography=_cue_plan(result_component.id, checkpoint_id, patch, base_nodes),
+        choreography=_cue_plan(
+            result_component.id,
+            checkpoint_id,
+            patch,
+            base_nodes,
+            result_component,
+        ),
         presentation=PresentationCheckpointV1(
             checkpoint_id=checkpoint_id.value,
             checkpoint_narration=patch.narration,
