@@ -157,7 +157,9 @@ test("the authenticated product sends the exact fresh Firebase bearer and projec
     page.getByRole("heading", { name: "Projectile motion studio" }),
   ).toBeVisible();
   const stage = page.getByTestId("projectile-choreography-stage");
-  const canvas = stage.getByTestId("live-choreography-board").locator("svg");
+  const canvas = stage
+    .getByTestId("live-choreography-board")
+    .locator(":scope > div > svg");
   const initialViewBox = await canvas.getAttribute("viewBox");
   await expect(stage.locator("[data-element-id]")).toHaveCount(0);
 
