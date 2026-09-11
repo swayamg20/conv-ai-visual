@@ -336,7 +336,7 @@ export async function inspectProjectileSvgAgainstScene(
             signatures.push({
               kind: "path",
               id: node.id,
-              // Browser-side numeric serialization can land one ULP from the
+              // Cross-loader numeric serialization can land one ULP from the
               // Node-loaded fixture. Normalize only after the scaled-epsilon
               // geometry check so Replay signatures remain platform-stable.
               ...(geometryMatches
