@@ -15,6 +15,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { inflateSync } from "node:zlib";
 
 const SCRIPT_ROOT = path.dirname(fileURLToPath(import.meta.url));
@@ -60,12 +61,45 @@ const EXPECTED_CHECKPOINT_IDS = Object.freeze([
   "trace_descent",
   "summary",
 ]);
+const INTERRUPTION_CATEGORIES = Object.freeze([
+  "path_trace",
+  "marker_motion",
+  "vector_morph",
+  "focus",
+  "equation_morph",
+  "hold",
+]);
+const INTERRUPTION_REPETITIONS_PER_CATEGORY = 4;
+const INTERRUPTION_SAMPLE_COUNT =
+  INTERRUPTION_CATEGORIES.length * INTERRUPTION_REPETITIONS_PER_CATEGORY;
+const INTERRUPTION_SPECS = Object.freeze({
+  path_trace: Object.freeze({ checkpointId: "trace_ascent", mainIndex: 2 }),
+  marker_motion: Object.freeze({ checkpointId: "trace_ascent", mainIndex: 2 }),
+  vector_morph: Object.freeze({ checkpointId: "parameters_retargeted" }),
+  focus: Object.freeze({ checkpointId: "trace_ascent", mainIndex: 2 }),
+  equation_morph: Object.freeze({
+    checkpointId: "trace_descent",
+    mainIndex: 4,
+  }),
+  hold: Object.freeze({ checkpointId: "setup", mainIndex: 0 }),
+});
+const TRACE_TIP_SPECS = Object.freeze(
+  ["ascent", "descent"].flatMap((segment) =>
+    [0.25, 0.5, 0.75].map((progress) => [
+      `trace_${segment}`,
+      `projectile__trajectory_${segment}`,
+      progress,
+    ]),
+  ),
+);
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const GIT_OBJECT_PATTERN = /^[a-f0-9]{40}$/;
 const MAX_JSON_BYTES = 32 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
 const MIN_RECORDING_DURATION_MS = 35_000;
 const MAX_RECORDING_DURATION_MS = 45_000;
+const MAX_RECORDING_SHORTFALL_MS = 50;
+const MAX_RECORDING_OVERHANG_MS = 5_000;
 const EXPECTED_ARTIFACT_PATHS = Object.freeze({
   video: "capture/projectile-motion.webm",
   pageScreenshot: "capture/projectile-motion-page.png",
@@ -141,6 +175,71 @@ function exact(value, expected, location) {
     fail(location, `must equal ${JSON.stringify(expected)}`);
   }
   return value;
+}
+
+function sameValue(actual, expected, location) {
+  if (!isDeepStrictEqual(actual, expected)) {
+    fail(location, "must exactly match fixture-derived evidence");
+  }
+}
+
+function sameFixtureValue(actual, expected, location) {
+  if (Array.isArray(expected)) {
+    const actualEntries = array(actual, location, expected.length);
+    expected.forEach((entry, index) =>
+      sameFixtureValue(actualEntries[index], entry, `${location}[${index}]`),
+    );
+    return;
+  }
+  if (expected !== null && typeof expected === "object") {
+    const actualRecord = exactKeys(actual, Object.keys(expected), location);
+    for (const [key, expectedValue] of Object.entries(expected)) {
+      if (expected.kind === "path" && key === "points") {
+        const actualPoints = array(
+          actualRecord.points,
+          `${location}.points`,
+          expectedValue.length,
+        );
+        expectedValue.forEach((expectedPoint, pointIndex) => {
+          const actualPoint = array(
+            actualPoints[pointIndex],
+            `${location}.points[${pointIndex}]`,
+            2,
+          );
+          expectedPoint.forEach((expectedCoordinate, coordinateIndex) => {
+            const coordinateLocation = `${location}.points[${pointIndex}][${coordinateIndex}]`;
+            const actualCoordinate = finiteNumber(
+              actualPoint[coordinateIndex],
+              coordinateLocation,
+            );
+            const tolerance =
+              Number.EPSILON *
+              Math.max(
+                1,
+                Math.abs(actualCoordinate),
+                Math.abs(expectedCoordinate),
+              );
+            if (Math.abs(actualCoordinate - expectedCoordinate) > tolerance) {
+              fail(
+                coordinateLocation,
+                `must be within scaled Number.EPSILON (${tolerance}) of the fixture coordinate`,
+              );
+            }
+          });
+        });
+      } else {
+        sameFixtureValue(
+          actualRecord[key],
+          expectedValue,
+          `${location}.${key}`,
+        );
+      }
+    }
+    return;
+  }
+  if (!isDeepStrictEqual(actual, expected)) {
+    fail(location, "must exactly match fixture-derived evidence");
+  }
 }
 
 function array(value, location, length) {
@@ -531,6 +630,126 @@ async function loadFixtureCatalog() {
   return fixtures;
 }
 
+function loadRawPrimaryFixture(primaryFixture) {
+  const absolute = path.join(REPOSITORY_ROOT, primaryFixture.path);
+  const bytes = readFileSync(absolute);
+  exact(sha256(bytes), primaryFixture.sha256, "raw primary fixture digest");
+  const fixture = plainObject(
+    parseJson(bytes, "raw primary fixture"),
+    "raw primary fixture",
+  );
+  exact(
+    fixture.fixtureId,
+    primaryFixture.fixtureId,
+    "raw primary fixture.fixtureId",
+  );
+  return fixture;
+}
+
+function fixtureCheckpointEvents(lane, location) {
+  return array(lane.events, `${location}.events`).filter(
+    (event) => event.type === "projectile_choreography_scene_checkpoint",
+  );
+}
+
+function applyFixtureEvent(scene, event, location) {
+  exact(event.baseRevision, scene.revision, `${location}.baseRevision`);
+  const nodes = [...scene.nodes];
+  const positions = new Map(nodes.map((node, index) => [node.id, index]));
+  const removed = new Set();
+  for (const operation of event.patch.operations) {
+    if (operation.op === "remove") {
+      removed.add(operation.id);
+      continue;
+    }
+    const index = positions.get(operation.node.id);
+    if (index === undefined) {
+      positions.set(operation.node.id, nodes.length);
+      nodes.push(operation.node);
+    } else {
+      nodes[index] = operation.node;
+    }
+  }
+  return {
+    revision: event.resultRevision,
+    nodes: nodes.filter((node) => !removed.has(node.id)),
+  };
+}
+
+function semanticSceneForEvent(event) {
+  return {
+    certificateHeadSha256: event.semantic.semanticResultCertificateSha256,
+    components: [event.semantic.resultComponent],
+    revision: event.semantic.semanticResultRevision,
+  };
+}
+
+function materializeFixtureEvents(events, location) {
+  let scene = { revision: 0, nodes: [] };
+  return events.map((event, index) => {
+    scene = applyFixtureEvent(scene, event, `${location}[${index}]`);
+    return {
+      event,
+      scene,
+      semanticScene: semanticSceneForEvent(event),
+    };
+  });
+}
+
+function fixtureTruth(primaryFixture) {
+  const fixture = loadRawPrimaryFixture(primaryFixture);
+  const lanes = plainObject(fixture.lanes, "raw primary fixture.lanes");
+  const mainLane = plainObject(lanes.main, "raw primary fixture.lanes.main");
+  const main = materializeFixtureEvents(
+    fixtureCheckpointEvents(mainLane, "raw primary fixture.lanes.main"),
+    "raw primary fixture main checkpoints",
+  );
+  sameValue(
+    main.at(-1).scene,
+    mainLane.expectedTerminal.scene,
+    "raw primary fixture main terminal scene",
+  );
+  sameValue(
+    main.at(-1).semanticScene,
+    mainLane.expectedTerminal.semanticScene,
+    "raw primary fixture main terminal semantic scene",
+  );
+
+  const vectorLaneNames = [
+    "clarifyApex",
+    "continueAfterClarification",
+    "retargetAfterSummary",
+  ];
+  const vectorEvents = [
+    ...main.slice(0, 4).map(({ event }) => event),
+    ...vectorLaneNames.flatMap((name) =>
+      fixtureCheckpointEvents(
+        plainObject(lanes[name], `raw primary fixture.lanes.${name}`),
+        `raw primary fixture.lanes.${name}`,
+      ),
+    ),
+  ];
+  const vector = materializeFixtureEvents(
+    vectorEvents,
+    "raw primary fixture vector journey",
+  );
+  const retargetLane = plainObject(
+    lanes.retargetAfterSummary,
+    "raw primary fixture.lanes.retargetAfterSummary",
+  );
+  sameValue(
+    vector.at(-1).scene,
+    retargetLane.expectedTerminal.scene,
+    "raw primary fixture retarget terminal scene",
+  );
+  sameValue(
+    vector.at(-1).semanticScene,
+    retargetLane.expectedTerminal.semanticScene,
+    "raw primary fixture retarget terminal semantic scene",
+  );
+  return { main, vector };
+}
+
 function validateFixtureSource(value, primaryFixture, location) {
   const source = exactKeys(
     value,
@@ -665,7 +884,191 @@ function validateBridgeCall(value, index, location) {
   };
 }
 
+function parsePathData(pathD, location) {
+  const values = [];
+  const token = /([MLZ])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)/g;
+  let end = 0;
+  for (const match of pathD.matchAll(token)) {
+    if (!/^[\s,]*$/.test(pathD.slice(end, match.index))) {
+      fail(location, "must contain only M/L/Z commands and finite coordinates");
+    }
+    values.push(match[1] ?? Number(match[2]));
+    end = (match.index ?? 0) + match[0].length;
+  }
+  if (!/^[\s,]*$/.test(pathD.slice(end))) {
+    fail(location, "must contain only M/L/Z commands and finite coordinates");
+  }
+  const points = [];
+  let index = 0;
+  while (index < values.length && values[index] !== "Z") {
+    const command = values[index];
+    const x = values[index + 1];
+    const y = values[index + 2];
+    if (
+      command !== (index === 0 ? "M" : "L") ||
+      typeof x !== "number" ||
+      !Number.isFinite(x) ||
+      typeof y !== "number" ||
+      !Number.isFinite(y)
+    ) {
+      fail(location, "must begin with M and continue with L vertices");
+    }
+    points.push([x, y]);
+    index += 3;
+  }
+  const closed = values[index] === "Z";
+  if ((closed ? index + 1 : index) !== values.length || points.length < 2) {
+    fail(location, "must be one complete M/L path with an optional terminal Z");
+  }
+  return { points, closed };
+}
+
+function parsePolylinePath(pathD, location) {
+  const parsed = parsePathData(pathD, location);
+  if (parsed.closed || parsed.points.length !== 33) {
+    fail(location, "must contain the verified 33-point polyline");
+  }
+  return parsed.points;
+}
+
+function polylineMetrics(points) {
+  const segments = points.slice(1).map((point, index) => ({
+    start: points[index],
+    end: point,
+    length: Math.hypot(
+      point[0] - points[index][0],
+      point[1] - points[index][1],
+    ),
+  }));
+  const totalLength = segments.reduce(
+    (total, segment) => total + segment.length,
+    0,
+  );
+  const pointAt = (fraction) => {
+    let remaining = totalLength * fraction;
+    for (const segment of segments) {
+      if (remaining <= segment.length) {
+        const progress = segment.length === 0 ? 0 : remaining / segment.length;
+        return [
+          segment.start[0] + (segment.end[0] - segment.start[0]) * progress,
+          segment.start[1] + (segment.end[1] - segment.start[1]) * progress,
+        ];
+      }
+      remaining -= segment.length;
+    }
+    return points.at(-1);
+  };
+  return { totalLength, pointAt };
+}
+
+function approximate(actual, expected, location, tolerance = 0.01) {
+  if (Math.abs(actual - expected) > tolerance) {
+    fail(
+      location,
+      `must be within ${tolerance} of fixture-derived ${expected}`,
+    );
+  }
+}
+
+function fixturePathNode(record, id, location) {
+  const node = record.scene.nodes.find((candidate) => candidate.id === id);
+  if (node?.kind !== "path") fail(location, `fixture path ${id} is missing`);
+  return node;
+}
+
+function validateFixturePathData(value, node, location) {
+  const parsed = parsePathData(nonEmptyString(value, location), location);
+  sameFixtureValue(
+    { kind: "path", ...parsed },
+    { kind: "path", points: node.points, closed: node.closed },
+    location,
+  );
+  return parsed;
+}
+
+function strictInterpolationProgress(before, active, target, location) {
+  if (before.length !== active.length || active.length !== target.length) {
+    fail(location, "must preserve the fixture endpoint dimensions");
+  }
+  let progress;
+  for (let index = 0; index < before.length; index += 1) {
+    const delta = target[index] - before[index];
+    if (Math.abs(delta) <= Number.EPSILON) {
+      approximate(active[index], before[index], `${location}[${index}]`, 0.003);
+      continue;
+    }
+    const candidate = (active[index] - before[index]) / delta;
+    if (!(candidate > 0 && candidate < 1)) {
+      fail(`${location}[${index}]`, "must be strictly between both endpoints");
+    }
+    if (progress === undefined) progress = candidate;
+    else approximate(candidate, progress, `${location}[${index}]`, 0.003);
+  }
+  if (progress === undefined) fail(location, "fixture endpoints must differ");
+  return progress;
+}
+
+function parseViewBox(value, location) {
+  const text = nonEmptyString(value, location);
+  const entries = text.split(" ");
+  if (entries.length !== 4 || entries.some((entry) => entry.length === 0)) {
+    fail(location, "must be a canonical four-number viewBox");
+  }
+  const values = entries.map((entry, index) =>
+    finiteNumber(Number(entry), `${location}[${index}]`),
+  );
+  exact(text, values.join(" "), location);
+  return values;
+}
+
+function viewportString(viewport) {
+  return `${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`;
+}
+
+function parseTranslation(value, location) {
+  const text = nonEmptyString(value, location);
+  const match = text.match(
+    /^translate\(\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*[ ,]\s*([-+]?\d*\.?\d+(?:e[-+]?\d+)?)\s*\)$/i,
+  );
+  if (!match)
+    fail(location, "must be a two-coordinate translate(...) transform");
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+function pointOnPolyline(points, point) {
+  let offset = 0;
+  let nearest = { distance: Number.POSITIVE_INFINITY, offset: 0 };
+  for (let index = 1; index < points.length; index += 1) {
+    const [startX, startY] = points[index - 1];
+    const [endX, endY] = points[index];
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const lengthSquared = dx * dx + dy * dy;
+    const ratio =
+      lengthSquared === 0
+        ? 0
+        : Math.max(
+            0,
+            Math.min(
+              1,
+              ((point.x - startX) * dx + (point.y - startY) * dy) /
+                lengthSquared,
+            ),
+          );
+    const projectedX = startX + ratio * dx;
+    const projectedY = startY + ratio * dy;
+    const segmentLength = Math.sqrt(lengthSquared);
+    const distance = Math.hypot(point.x - projectedX, point.y - projectedY);
+    if (distance < nearest.distance) {
+      nearest = { distance, offset: offset + ratio * segmentLength };
+    }
+    offset += segmentLength;
+  }
+  return nearest;
+}
+
 function validateRuntimeEvidence(value, primaryFixture, location) {
+  const truth = fixtureTruth(primaryFixture);
   const runtime = exactKeys(
     value,
     [
@@ -826,16 +1229,34 @@ function validateRuntimeEvidence(value, primaryFixture, location) {
       geometry.pathD,
       `${location}.pathGeometrySamples[${index}].pathD`,
     );
-    if (!/[CQ]/.test(pathD)) {
+    const points = parsePolylinePath(
+      pathD,
+      `${location}.pathGeometrySamples[${index}].pathD`,
+    );
+    const fixturePath = truth.main
+      .at(-1)
+      .scene.nodes.find(({ id }) => id === geometry.pathId);
+    if (fixturePath?.kind !== "path") {
       fail(
-        `${location}.pathGeometrySamples[${index}].pathD`,
-        "must contain a curved quadratic or cubic segment",
+        `${location}.pathGeometrySamples[${index}]`,
+        "fixture path is missing",
       );
     }
+    sameFixtureValue(
+      { kind: "path", points },
+      { kind: "path", points: fixturePath.points },
+      `${location}.pathGeometrySamples[${index}].pathD vertices`,
+    );
+    const metrics = polylineMetrics(points);
     const totalLength = finiteNumber(
       geometry.totalLength,
       `${location}.pathGeometrySamples[${index}].totalLength`,
       { minimum: 0.001 },
+    );
+    approximate(
+      totalLength,
+      metrics.totalLength,
+      `${location}.pathGeometrySamples[${index}].totalLength`,
     );
     const samples = array(
       geometry.samples,
@@ -865,6 +1286,17 @@ function validateRuntimeEvidence(value, primaryFixture, location) {
         `translate(${x} ${y})`,
         `${location}.pathGeometrySamples[${index}].samples[${sampleIndex}].markerTransform`,
       );
+      const fixturePoint = metrics.pointAt(sample.fraction);
+      approximate(
+        x,
+        fixturePoint[0],
+        `${location}.pathGeometrySamples[${index}].samples[${sampleIndex}].x`,
+      );
+      approximate(
+        y,
+        fixturePoint[1],
+        `${location}.pathGeometrySamples[${index}].samples[${sampleIndex}].y`,
+      );
       return {
         fraction: sample.fraction,
         x,
@@ -872,12 +1304,14 @@ function validateRuntimeEvidence(value, primaryFixture, location) {
         markerTransform: sample.markerTransform,
       };
     });
-    const first = samples[0];
-    const last = samples.at(-1);
-    if (first.x === last.x && first.y === last.y) {
+    const [first, middle, last] = [points[0], points[16], points[32]];
+    const twiceArea =
+      (middle[0] - first[0]) * (last[1] - first[1]) -
+      (middle[1] - first[1]) * (last[0] - first[0]);
+    if (Math.abs(twiceArea) < 0.001) {
       fail(
-        `${location}.pathGeometrySamples[${index}].samples`,
-        "must span distinct path endpoints",
+        `${location}.pathGeometrySamples[${index}].pathD`,
+        "fixture path must be non-collinear",
       );
     }
     return { pathId: geometry.pathId, pathD, totalLength, samples };
@@ -1161,10 +1595,788 @@ function validateFirstMeaningfulEvidence(value, location) {
   return { samplesMs, p95Ms, thresholdExclusiveMs: 300 };
 }
 
-function validateAcceleratedObservation(value, location) {
+function roundedEvidenceNumber(value, location, minimum) {
+  const result = finiteNumber(
+    value,
+    location,
+    minimum === undefined ? {} : { minimum },
+  );
+  if (Number(result.toFixed(3)) !== result) {
+    fail(location, "must be rounded to at most three decimal places");
+  }
+  return result;
+}
+
+function validateCssPoint(value, location) {
+  const point = exactKeys(value, ["x", "y"], location);
+  roundedEvidenceNumber(point.x, location + ".x");
+  roundedEvidenceNumber(point.y, location + ".y");
+  return point;
+}
+
+function validateDistance(left, right, reported, location) {
+  const errorCssPx = roundedEvidenceNumber(reported, location, 0);
+  const expected = Math.hypot(left.x - right.x, left.y - right.y);
+  if (Math.abs(errorCssPx - expected) > 0.003) {
+    fail(location, "must equal the independently recomputed distance");
+  }
+  if (errorCssPx > 1) {
+    fail(location, "must be at most one CSS pixel");
+  }
+}
+
+function validateTraceTipSamples(value, location) {
+  return array(value, location, TRACE_TIP_SPECS.length).map((entry, index) => {
+    const itemLocation = location + "[" + index + "]";
+    const sample = exactKeys(
+      entry,
+      [
+        "checkpointId",
+        "pathId",
+        "localProgress",
+        "dashArray",
+        "dashOffset",
+        "revealedProgress",
+        "markerCss",
+        "traceTipCss",
+        "errorCssPx",
+      ],
+      itemLocation,
+    );
+    ["checkpointId", "pathId", "localProgress"].forEach((key, part) =>
+      exact(
+        sample[key],
+        TRACE_TIP_SPECS[index][part],
+        itemLocation + "." + key,
+      ),
+    );
+    const dashArray = roundedEvidenceNumber(
+      sample.dashArray,
+      itemLocation + ".dashArray",
+      Number.EPSILON,
+    );
+    const dashOffset = roundedEvidenceNumber(
+      sample.dashOffset,
+      itemLocation + ".dashOffset",
+      0,
+    );
+    if (dashOffset > dashArray) {
+      fail(itemLocation + ".dashOffset", "must not exceed dashArray");
+    }
+    const revealedProgress = roundedEvidenceNumber(
+      sample.revealedProgress,
+      itemLocation + ".revealedProgress",
+      0,
+    );
+    if (Math.abs(revealedProgress - (1 - dashOffset / dashArray)) > 0.003) {
+      fail(
+        itemLocation + ".revealedProgress",
+        "must equal the independently recomputed dash progress",
+      );
+    }
+    if (Math.abs(revealedProgress - TRACE_TIP_SPECS[index][2]) > 0.035) {
+      fail(
+        itemLocation + ".revealedProgress",
+        "must be within 0.035 of the requested local progress",
+      );
+    }
+    validateDistance(
+      validateCssPoint(sample.markerCss, itemLocation + ".markerCss"),
+      validateCssPoint(sample.traceTipCss, itemLocation + ".traceTipCss"),
+      sample.errorCssPx,
+      itemLocation + ".errorCssPx",
+    );
+    return sample;
+  });
+}
+
+function fixtureNodeSignature(node) {
+  if (node.kind === "line") {
+    return {
+      kind: "line",
+      id: node.id,
+      points: node.points.map(([x, y]) => [
+        Number(x.toFixed(6)),
+        Number(y.toFixed(6)),
+      ]),
+      stroke: node.style.stroke,
+      strokeWidth: node.style.strokeWidth,
+      opacity: node.style.opacity,
+    };
+  }
+  if (node.kind === "path") {
+    return {
+      kind: "path",
+      id: node.id,
+      points: node.points,
+      closed: node.closed,
+      fill: node.style.fill,
+      stroke: node.style.stroke,
+      strokeWidth: node.style.strokeWidth,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      opacity: node.style.opacity,
+    };
+  }
+  if (node.kind === "latex_token") {
+    return {
+      kind: "latex_token",
+      id: node.id,
+      x: node.x,
+      y: node.y,
+      width: node.width,
+      height: node.height,
+      anchor: node.anchor,
+      latex: node.latex,
+      color: node.style.color,
+      fontSize: node.style.fontSize,
+      opacity: node.style.opacity,
+    };
+  }
+  fail("raw primary fixture node", `unsupported kind ${node.kind}`);
+}
+
+function expectedSemanticDom(record) {
+  const viewport = record.event.semantic.presentation.resultViewports.cinematic;
+  const labels = new Set(["text", "latex", "latex_token"]);
+  return {
+    sourceRevision: record.scene.revision,
+    viewBox: `${viewport.x} ${viewport.y} ${viewport.width} ${viewport.height}`,
+    paintOrder: [
+      ...record.scene.nodes.filter((node) => !labels.has(node.kind)),
+      ...record.scene.nodes.filter((node) => labels.has(node.kind)),
+    ].map(({ id }) => id),
+    nodes: record.scene.nodes.map(fixtureNodeSignature),
+    residueFree: true,
+  };
+}
+
+function validateSemanticDomSignature(value, record, location) {
+  const signature = exactKeys(
+    value,
+    ["sourceRevision", "viewBox", "paintOrder", "nodes", "residueFree"],
+    location,
+  );
+  sameFixtureValue(signature, expectedSemanticDom(record), location);
+  return signature;
+}
+
+function validateCanonicalTerminal(value, truth, location) {
+  const terminal = exactKeys(
+    value,
+    [
+      "animatedSemanticDom",
+      "reducedMotionSemanticDom",
+      "replaySemanticDom",
+      "replayProviderRequestCount",
+    ],
+    location,
+  );
+  const semanticDoms = ["animated", "reducedMotion", "replay"].map((name) =>
+    validateSemanticDomSignature(
+      terminal[name + "SemanticDom"],
+      truth.main.at(-1),
+      `${location}.${name}SemanticDom`,
+    ),
+  );
+  for (const signature of semanticDoms.slice(1)) {
+    sameValue(signature, semanticDoms[0], `${location} terminal semantic DOM`);
+  }
+  exact(
+    terminal.replayProviderRequestCount,
+    0,
+    `${location}.replayProviderRequestCount`,
+  );
+  return terminal;
+}
+
+function validateAcceptedPrefix(value, expected, location) {
+  return array(value, location, expected.length).map((entry, index) => {
+    const itemLocation = `${location}[${index}]`;
+    const accepted = exactKeys(
+      entry,
+      ["event", "scene", "semanticScene", "viewport", "layout", "presentation"],
+      itemLocation,
+    );
+    const fixture = expected[index];
+    sameFixtureValue(
+      accepted.event,
+      fixture.event,
+      `${itemLocation}.event fixture body`,
+    );
+    sameFixtureValue(accepted.scene, fixture.scene, `${itemLocation}.scene`);
+    sameValue(
+      accepted.semanticScene,
+      fixture.semanticScene,
+      `${itemLocation}.semanticScene`,
+    );
+    exact(accepted.layout, "cinematic", `${itemLocation}.layout`);
+    sameValue(
+      accepted.viewport,
+      fixture.event.semantic.presentation.resultViewports.cinematic,
+      `${itemLocation}.viewport`,
+    );
+    const presentation = exactKeys(
+      accepted.presentation,
+      [
+        "type",
+        "checkpointId",
+        "certificateSha256",
+        "sceneRevision",
+        "semanticRevision",
+        "layout",
+        "resultViewport",
+        "settlement",
+      ],
+      `${itemLocation}.presentation`,
+    );
+    exact(
+      presentation.type,
+      "projectile_choreography_checkpoint_presented",
+      `${itemLocation}.presentation.type`,
+    );
+    exact(
+      presentation.checkpointId,
+      fixture.event.semantic.checkpointId,
+      `${itemLocation}.presentation.checkpointId`,
+    );
+    exact(
+      presentation.certificateSha256,
+      fixture.event.semantic.semanticResultCertificateSha256,
+      `${itemLocation}.presentation.certificateSha256`,
+    );
+    exact(
+      presentation.sceneRevision,
+      fixture.scene.revision,
+      `${itemLocation}.presentation.sceneRevision`,
+    );
+    exact(
+      presentation.semanticRevision,
+      fixture.semanticScene.revision,
+      `${itemLocation}.presentation.semanticRevision`,
+    );
+    exact(
+      presentation.layout,
+      "cinematic",
+      `${itemLocation}.presentation.layout`,
+    );
+    sameValue(
+      presentation.resultViewport,
+      accepted.viewport,
+      `${itemLocation}.presentation.resultViewport`,
+    );
+    exact(
+      presentation.settlement,
+      fixture.settlement,
+      `${itemLocation}.presentation.settlement`,
+    );
+    return accepted;
+  });
+}
+
+function expectedAcceptedRecords(records, cancelledIndex, continuationStart) {
+  return records.map((record, index) => ({
+    ...record,
+    event:
+      continuationStart !== undefined && index >= continuationStart
+        ? {
+            ...record.event,
+            generation: 2,
+            sequence: index - continuationStart + 1,
+          }
+        : record.event,
+    settlement:
+      index === cancelledIndex ? "cancelled_to_checkpoint" : "completed",
+  }));
+}
+
+function validateInterruptionPayload(value, frontier, expected, location) {
+  const payload = exactKeys(
+    value,
+    [
+      "semanticDomProjection",
+      "caption",
+      "phase",
+      "generation",
+      "visibleCheckpointId",
+      "committedScene",
+      "committedSemanticScene",
+      "accepted",
+    ],
+    location,
+  );
+  validateSemanticDomSignature(
+    payload.semanticDomProjection,
+    expected.record,
+    `${location}.semanticDomProjection`,
+  );
+  exact(
+    payload.caption,
+    expected.record.event.patch.narration,
+    `${location}.caption`,
+  );
+  exact(payload.phase, frontier.phase, `${location}.phase`);
+  exact(payload.generation, frontier.generation, `${location}.generation`);
+  exact(
+    payload.visibleCheckpointId,
+    frontier.checkpointId,
+    `${location}.visibleCheckpointId`,
+  );
+  sameFixtureValue(
+    payload.committedScene,
+    expected.record.scene,
+    `${location}.committedScene`,
+  );
+  sameValue(
+    payload.committedSemanticScene,
+    expected.record.semanticScene,
+    `${location}.committedSemanticScene`,
+  );
+  validateAcceptedPrefix(
+    payload.accepted,
+    expected.prefix,
+    `${location}.accepted`,
+  );
+  return payload;
+}
+
+function validateInterruptionFrontier(value, expected, location) {
+  const frontier = exactKeys(
+    value,
+    [
+      "generation",
+      "phase",
+      "checkpointId",
+      "revision",
+      "certificateHeadSha256",
+      "payload",
+    ],
+    location,
+  );
+  exact(frontier.generation, expected.generation, `${location}.generation`);
+  exact(frontier.phase, expected.phase, `${location}.phase`);
+  exact(
+    frontier.checkpointId,
+    expected.record.event.semantic.checkpointId,
+    `${location}.checkpointId`,
+  );
+  exact(
+    frontier.revision,
+    expected.record.scene.revision,
+    `${location}.revision`,
+  );
+  exact(
+    frontier.certificateHeadSha256,
+    expected.record.semanticScene.certificateHeadSha256,
+    `${location}.certificateHeadSha256`,
+  );
+  validateInterruptionPayload(
+    frontier.payload,
+    frontier,
+    expected,
+    `${location}.payload`,
+  );
+  return frontier;
+}
+
+function expectedInterruptionFrontier(truth, category, terminal = false) {
+  if (category === "vector_morph") {
+    const prefix = expectedAcceptedRecords(
+      truth.vector,
+      truth.vector.length - 1,
+    );
+    return {
+      record: prefix.at(-1),
+      prefix,
+      generation: 4,
+      phase: "interrupted",
+    };
+  }
+  const mainIndex = INTERRUPTION_SPECS[category].mainIndex;
+  if (terminal) {
+    const prefix = expectedAcceptedRecords(
+      truth.main,
+      mainIndex,
+      mainIndex + 1,
+    );
+    return {
+      record: prefix.at(-1),
+      prefix,
+      generation: 2,
+      phase: "completed",
+    };
+  }
+  const prefix = expectedAcceptedRecords(
+    truth.main.slice(0, mainIndex + 1),
+    mainIndex,
+  );
+  return {
+    record: prefix.at(-1),
+    prefix,
+    generation: 1,
+    phase: "interrupted",
+  };
+}
+
+function validateActiveSurface(value, category, truth, location) {
+  const surface = plainObject(value, location);
+  exact(surface.kind, category, `${location}.kind`);
+  exact(
+    surface.checkpointId,
+    INTERRUPTION_SPECS[category].checkpointId,
+    `${location}.checkpointId`,
+  );
+  const schemas = {
+    path_trace: ["kind", "checkpointId", "targetId", "dashArray", "dashOffset"],
+    marker_motion: [
+      "kind",
+      "checkpointId",
+      "targetId",
+      "firstTransform",
+      "secondTransform",
+      "firstPoint",
+      "secondPoint",
+      "displacementSvgUnits",
+    ],
+    vector_morph: [
+      "kind",
+      "checkpointId",
+      "targetId",
+      "beforePathD",
+      "firstActivePathD",
+      "secondActivePathD",
+      "targetPathD",
+    ],
+    focus: [
+      "kind",
+      "checkpointId",
+      "targetId",
+      "beforeViewBox",
+      "activeViewBox",
+      "targetViewBox",
+    ],
+    equation_morph: ["kind", "checkpointId", "targetId", "opacity"],
+    hold: [
+      "kind",
+      "checkpointId",
+      "targetId",
+      "dashArray",
+      "dashOffset",
+      "settledMainCount",
+    ],
+  };
+  exactKeys(surface, schemas[category], location);
+  const targets = {
+    path_trace: "projectile__trajectory_ascent",
+    marker_motion: "projectile__projectile_marker",
+    vector_morph: "projectile__velocity_resultant",
+    focus: "live-choreography-board",
+    equation_morph: "projectile__vertical_state",
+    hold: "projectile__velocity_resultant",
+  };
+  exact(surface.targetId, targets[category], `${location}.targetId`);
+  if (category === "path_trace" || category === "hold") {
+    const arrayValue = roundedEvidenceNumber(
+      surface.dashArray,
+      `${location}.dashArray`,
+      Number.EPSILON,
+    );
+    const offset = roundedEvidenceNumber(
+      surface.dashOffset,
+      `${location}.dashOffset`,
+      0,
+    );
+    if (category === "path_trace" && !(offset > 0 && offset < arrayValue)) {
+      fail(`${location}.dashOffset`, "must prove an active partial trace");
+    }
+    if (category === "hold") {
+      if (offset > 0.003)
+        fail(`${location}.dashOffset`, "must prove the trace is settled");
+      exact(surface.settledMainCount, 0, `${location}.settledMainCount`);
+    }
+  } else if (category === "marker_motion") {
+    const firstPoint = validateCssPoint(
+      surface.firstPoint,
+      `${location}.firstPoint`,
+    );
+    const secondPoint = validateCssPoint(
+      surface.secondPoint,
+      `${location}.secondPoint`,
+    );
+    for (const [name, point] of [
+      ["first", firstPoint],
+      ["second", secondPoint],
+    ]) {
+      const transform = parseTranslation(
+        surface[`${name}Transform`],
+        `${location}.${name}Transform`,
+      );
+      approximate(transform.x, point.x, `${location}.${name}Point.x`, 0.001);
+      approximate(transform.y, point.y, `${location}.${name}Point.y`, 0.001);
+    }
+    const displacement = roundedEvidenceNumber(
+      surface.displacementSvgUnits,
+      `${location}.displacementSvgUnits`,
+      0,
+    );
+    approximate(
+      displacement,
+      Math.hypot(secondPoint.x - firstPoint.x, secondPoint.y - firstPoint.y),
+      `${location}.displacementSvgUnits`,
+      0.003,
+    );
+    if (displacement <= 0.01) {
+      fail(`${location}.displacementSvgUnits`, "must exceed 0.01 SVG units");
+    }
+    const originNode = fixturePathNode(
+      truth.main[1],
+      "projectile__projectile_marker",
+      location,
+    );
+    const xs = originNode.points.map(([x]) => x);
+    const ys = originNode.points.map(([, y]) => y);
+    const origin = {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    };
+    const trajectory = fixturePathNode(
+      truth.main[2],
+      "projectile__trajectory_ascent",
+      location,
+    );
+    const projections = [firstPoint, secondPoint].map((point, index) => {
+      const projected = pointOnPolyline(trajectory.points, {
+        x: origin.x + point.x,
+        y: origin.y + point.y,
+      });
+      if (projected.distance > 0.01) {
+        fail(
+          `${location}.${index === 0 ? "firstPoint" : "secondPoint"}`,
+          "must place the marker on the fixture trajectory",
+        );
+      }
+      return projected;
+    });
+    if (projections[1].offset <= projections[0].offset) {
+      fail(location, "second marker sample must advance along the trajectory");
+    }
+  } else if (category === "vector_morph") {
+    const id = "projectile__velocity_resultant";
+    const before = validateFixturePathData(
+      surface.beforePathD,
+      fixturePathNode(truth.vector.at(-2), id, location),
+      `${location}.beforePathD`,
+    );
+    const target = validateFixturePathData(
+      surface.targetPathD,
+      fixturePathNode(truth.vector.at(-1), id, location),
+      `${location}.targetPathD`,
+    );
+    const active = ["firstActivePathD", "secondActivePathD"].map((key) => {
+      const parsed = parsePathData(
+        nonEmptyString(surface[key], `${location}.${key}`),
+        `${location}.${key}`,
+      );
+      exact(parsed.closed, before.closed, `${location}.${key} closure`);
+      array(parsed.points, `${location}.${key} points`, before.points.length);
+      return parsed.points.flat();
+    });
+    const beforeValues = before.points.flat();
+    const targetValues = target.points.flat();
+    const firstProgress = strictInterpolationProgress(
+      beforeValues,
+      active[0],
+      targetValues,
+      `${location}.firstActivePathD`,
+    );
+    const secondProgress = strictInterpolationProgress(
+      beforeValues,
+      active[1],
+      targetValues,
+      `${location}.secondActivePathD`,
+    );
+    if (secondProgress <= firstProgress) {
+      fail(location, "active vector samples must be distinct and ordered");
+    }
+  } else if (category === "focus") {
+    const checkpoint = truth.main[2].event.semantic.presentation;
+    const before = viewportString(checkpoint.baseViewports.cinematic);
+    const target = viewportString(checkpoint.resultViewports.cinematic);
+    exact(surface.beforeViewBox, before, `${location}.beforeViewBox`);
+    exact(surface.targetViewBox, target, `${location}.targetViewBox`);
+    strictInterpolationProgress(
+      parseViewBox(before, `${location}.beforeViewBox`),
+      parseViewBox(surface.activeViewBox, `${location}.activeViewBox`),
+      parseViewBox(target, `${location}.targetViewBox`),
+      `${location}.activeViewBox`,
+    );
+  } else {
+    const opacity = roundedEvidenceNumber(
+      surface.opacity,
+      `${location}.opacity`,
+      0,
+    );
+    if (opacity <= 0 || opacity >= 1)
+      fail(`${location}.opacity`, "must prove an active equation morph");
+  }
+  return surface;
+}
+
+function validateInterruptionEvidence(value, truth, location) {
+  const evidence = exactKeys(
+    value,
+    [
+      "categories",
+      "repetitionsPerCategory",
+      "staleWindowMs",
+      "thresholdExclusiveMs",
+      "p95Ms",
+      "trials",
+    ],
+    location,
+  );
+  assertSameArray(
+    uniqueStringArray(
+      evidence.categories,
+      location + ".categories",
+      INTERRUPTION_CATEGORIES.length,
+    ),
+    INTERRUPTION_CATEGORIES,
+    location + ".categories",
+  );
+  exact(
+    evidence.repetitionsPerCategory,
+    INTERRUPTION_REPETITIONS_PER_CATEGORY,
+    location + ".repetitionsPerCategory",
+  );
+  exact(evidence.staleWindowMs, 2_000, location + ".staleWindowMs");
+  exact(evidence.thresholdExclusiveMs, 150, location + ".thresholdExclusiveMs");
+
+  const settleSamples = [];
+  array(
+    evidence.trials,
+    location + ".trials",
+    INTERRUPTION_SAMPLE_COUNT,
+  ).forEach((entry, index) => {
+    const itemLocation = location + ".trials[" + index + "]";
+    const trial = exactKeys(
+      entry,
+      [
+        "ordinal",
+        "category",
+        "requestedAtMs",
+        "settledAtMs",
+        "staleObservedAtMs",
+        "staleDomMutationCount",
+        "staleRuntimePublicationCount",
+        "activeSurface",
+        "immediate",
+        "afterStaleWindow",
+        "terminal",
+      ],
+      itemLocation,
+    );
+    exact(trial.ordinal, index + 1, itemLocation + ".ordinal");
+    const expectedCategory =
+      INTERRUPTION_CATEGORIES[
+        Math.floor(index / INTERRUPTION_REPETITIONS_PER_CATEGORY)
+      ];
+    exact(trial.category, expectedCategory, itemLocation + ".category");
+    const requestedAtMs = roundedEvidenceNumber(
+      trial.requestedAtMs,
+      `${itemLocation}.requestedAtMs`,
+      0,
+    );
+    const settledAtMs = roundedEvidenceNumber(
+      trial.settledAtMs,
+      `${itemLocation}.settledAtMs`,
+      requestedAtMs,
+    );
+    settleSamples.push(Number((settledAtMs - requestedAtMs).toFixed(3)));
+    const staleObservedAtMs = roundedEvidenceNumber(
+      trial.staleObservedAtMs,
+      `${itemLocation}.staleObservedAtMs`,
+      settledAtMs,
+    );
+    if (staleObservedAtMs - settledAtMs < evidence.staleWindowMs) {
+      fail(
+        `${itemLocation}.staleObservedAtMs`,
+        "must observe at least 2000ms after settlement",
+      );
+    }
+    exact(
+      trial.staleDomMutationCount,
+      0,
+      `${itemLocation}.staleDomMutationCount`,
+    );
+    exact(
+      trial.staleRuntimePublicationCount,
+      0,
+      `${itemLocation}.staleRuntimePublicationCount`,
+    );
+    validateActiveSurface(
+      trial.activeSurface,
+      trial.category,
+      truth,
+      `${itemLocation}.activeSurface`,
+    );
+    const interruptedExpected = expectedInterruptionFrontier(
+      truth,
+      trial.category,
+    );
+    const immediate = validateInterruptionFrontier(
+      trial.immediate,
+      interruptedExpected,
+      `${itemLocation}.immediate`,
+    );
+    const after = validateInterruptionFrontier(
+      trial.afterStaleWindow,
+      interruptedExpected,
+      `${itemLocation}.afterStaleWindow`,
+    );
+    sameValue(after, immediate, itemLocation + " stale-window frontier");
+    const terminal = validateInterruptionFrontier(
+      trial.terminal,
+      expectedInterruptionFrontier(truth, trial.category, true),
+      `${itemLocation}.terminal`,
+    );
+    if (trial.category === "vector_morph") {
+      sameValue(terminal, immediate, itemLocation + " vector-morph terminal");
+    }
+  });
+  const ordered = settleSamples.sort((left, right) => left - right);
+  const p95Ms = ordered[Math.ceil(ordered.length * 0.95) - 1];
+  exact(evidence.p95Ms, p95Ms, location + ".p95Ms");
+  if (p95Ms >= 150) fail(location + ".p95Ms", "must be below 150ms");
+  return evidence;
+}
+
+function validateMotionBoundaryEvidence(value, truth, location) {
+  const evidence = exactKeys(
+    value,
+    ["traceTipSamples", "canonicalTerminal", "interruption"],
+    location,
+  );
+  validateTraceTipSamples(
+    evidence.traceTipSamples,
+    location + ".traceTipSamples",
+  );
+  validateCanonicalTerminal(
+    evidence.canonicalTerminal,
+    truth,
+    location + ".canonicalTerminal",
+  );
+  validateInterruptionEvidence(
+    evidence.interruption,
+    truth,
+    location + ".interruption",
+  );
+  return evidence;
+}
+function validateAcceleratedObservation(value, primaryFixture, location) {
   const root = exactKeys(
     value,
-    ["v", "gate", "execution", "firstMeaningful"],
+    ["v", "gate", "execution", "firstMeaningful", "motionBoundary"],
     location,
   );
   exact(root.v, 1, `${location}.v`);
@@ -1177,7 +2389,20 @@ function validateAcceleratedObservation(value, location) {
       root.firstMeaningful,
       `${location}.firstMeaningful`,
     ),
+    motionBoundary: validateMotionBoundaryEvidence(
+      root.motionBoundary,
+      fixtureTruth(primaryFixture),
+      `${location}.motionBoundary`,
+    ),
   };
+}
+
+export function validateAcceleratedObservationForTests(value, primaryFixture) {
+  return validateAcceleratedObservation(
+    value,
+    primaryFixture,
+    "accelerated observations",
+  );
 }
 
 export function validateCaptureObservationForTests(value, primaryFixture) {
@@ -1910,6 +3135,29 @@ function validateRecordingDuration(durationMs, location) {
   return durationMs;
 }
 
+function validateRecordingTiming(
+  durationMs,
+  captureVisualDurationMs,
+  location,
+) {
+  const captureTimingDeltaMs = durationMs - captureVisualDurationMs;
+  if (
+    captureTimingDeltaMs < -MAX_RECORDING_SHORTFALL_MS ||
+    captureTimingDeltaMs > MAX_RECORDING_OVERHANG_MS
+  ) {
+    fail(
+      location,
+      `must be no more than ${MAX_RECORDING_SHORTFALL_MS}ms shorter or ${MAX_RECORDING_OVERHANG_MS}ms longer than capture visual timing; received ${captureTimingDeltaMs}ms delta`,
+    );
+  }
+  return {
+    durationMs,
+    captureTimingDeltaMs,
+    maximumShortfallMs: MAX_RECORDING_SHORTFALL_MS,
+    maximumOverhangMs: MAX_RECORDING_OVERHANG_MS,
+  };
+}
+
 export async function locateFfmpegForTests() {
   return locateFfmpeg();
 }
@@ -1926,6 +3174,19 @@ export async function validateWebmForTests(candidate) {
 
 export async function probeWebmDurationForTests(candidate) {
   return decodeWebm(candidate, "test WebM");
+}
+
+export function validateRecordingTimingForTests(
+  durationMs,
+  captureVisualDurationMs,
+) {
+  return validateRecordingTiming(
+    validateRecordingDuration(durationMs, "test WebM duration"),
+    finiteNumber(captureVisualDurationMs, "test capture visual duration", {
+      minimum: 0,
+    }),
+    "test WebM capture timing",
+  );
 }
 
 async function verifyObservedArtifacts(
@@ -1967,7 +3228,11 @@ async function verifyObservedArtifacts(
       verified[role] = {
         ...descriptor,
         mediaType: "video/webm",
-        durationMs,
+        ...validateRecordingTiming(
+          durationMs,
+          observation.timing.visualDurationMs,
+          `artifact ${role} capture timing`,
+        ),
       };
     } else {
       const dimensions = pngDimensions(bytes, `artifact ${role}`);
@@ -2045,6 +3310,7 @@ async function buildManifestInternal(artifactRoot, provenance, options = {}) {
   );
   const acceleratedObservations = validateAcceleratedObservation(
     parseJson(acceleratedObservationsBytes, "accelerated observations"),
+    primaryFixture,
     "accelerated observations",
   );
   const observationsPath = path.join(artifactRoot, "capture/observations.json");
@@ -2177,6 +3443,7 @@ async function buildManifestInternal(artifactRoot, provenance, options = {}) {
         },
       },
       firstMeaningful: acceleratedObservations.firstMeaningful,
+      motionBoundary: acceleratedObservations.motionBoundary,
       runtime: {
         ...observations.runtime,
         recordSha256: sha256(Buffer.from(canonicalJson(observations.runtime))),
