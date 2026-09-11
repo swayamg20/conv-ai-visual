@@ -720,6 +720,34 @@ def materialize_projectile_motion_nodes(state: ProjectileMotionStateV1) -> tuple
     return tuple(nodes[node_id] for node_id in sorted(nodes))
 
 
+def materialize_projectile_motion_scene_nodes(
+    state: ProjectileMotionStateV1,
+) -> tuple[SceneNode, ...]:
+    """Reconstruct the canonical patch-history order of a settled scene.
+
+    Blueprint snapshots stay lexically sorted so verification is order-neutral.
+    A real ``SceneState`` retains existing node positions and appends newly
+    introduced nodes in patch-target order. Certificate hashes bind that paint
+    order, so continuation admission uses this distinct materializer.
+    """
+
+    desired = _desired_nodes(state)
+    order: list[str] = []
+    for checkpoint in projectile_motion_checkpoint_prefix(state.last_main_checkpoint):
+        checkpoint_state = ProjectileMotionStateV1(
+            id=state.id,
+            problem_spec=state.problem_spec,
+            last_main_checkpoint=checkpoint,
+        )
+        checkpoint_nodes = _desired_nodes(checkpoint_state)
+        order = [node_id for node_id in order if node_id in checkpoint_nodes]
+        order.extend(node_id for node_id in sorted(checkpoint_nodes) if node_id not in order)
+
+    order = [node_id for node_id in order if node_id in desired]
+    order.extend(node_id for node_id in sorted(desired) if node_id not in order)
+    return tuple(desired[node_id] for node_id in order)
+
+
 def _patch(
     component_id: str,
     checkpoint_id: ProjectileMotionCheckpointId,
@@ -1197,7 +1225,10 @@ def materialize_projectile_motion_scene(
 ) -> SceneState:
     """Convenience boundary for tests and later service realization checks."""
 
-    return SceneState(revision=revision, nodes=materialize_projectile_motion_nodes(state))
+    return SceneState(
+        revision=revision,
+        nodes=materialize_projectile_motion_scene_nodes(state),
+    )
 
 
 __all__ = [
@@ -1207,4 +1238,5 @@ __all__ = [
     "compile_projectile_motion_checkpoint_blueprints",
     "materialize_projectile_motion_nodes",
     "materialize_projectile_motion_scene",
+    "materialize_projectile_motion_scene_nodes",
 ]

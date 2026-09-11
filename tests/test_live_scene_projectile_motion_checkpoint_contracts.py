@@ -26,7 +26,9 @@ from murmur.live_scene.projectile_motion_checkpoint_contracts import (
     projectile_motion_checkpoint_certificate_sha256,
     projectile_motion_checkpoint_receipt_sha256,
 )
-from murmur.live_scene.projectile_motion_compiler import materialize_projectile_motion_nodes
+from murmur.live_scene.projectile_motion_compiler import (
+    materialize_projectile_motion_scene_nodes,
+)
 from murmur.live_scene.projectile_motion_contracts import (
     AdvanceProjectileMotionRouteV1,
     ClarifyProjectileMotionRouteV1,
@@ -98,7 +100,7 @@ def _continued_checkpoint(
         beat,
         base_scene=SceneState(
             revision=8,
-            nodes=materialize_projectile_motion_nodes(component),
+            nodes=materialize_projectile_motion_scene_nodes(component),
         ),
         base_semantic_scene=SemanticSceneState(
             revision=8,

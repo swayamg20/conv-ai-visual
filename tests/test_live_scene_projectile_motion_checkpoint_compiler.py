@@ -18,7 +18,10 @@ from murmur.live_scene.projectile_motion_checkpoint_contracts import (
     ProjectileMotionCheckpointCompilerCertificateV1,
     projectile_motion_checkpoint_certificate_sha256,
 )
-from murmur.live_scene.projectile_motion_compiler import materialize_projectile_motion_nodes
+from murmur.live_scene.projectile_motion_compiler import (
+    materialize_projectile_motion_nodes,
+    materialize_projectile_motion_scene_nodes,
+)
 from murmur.live_scene.projectile_motion_contracts import (
     PROJECTILE_MOTION_CLARIFICATION_ORDER,
     PROJECTILE_MOTION_CLARIFICATION_PREREQUISITES,
@@ -89,7 +92,10 @@ def _base(
         )
     component = _state(problem, frontier, topics=topics, active=active)
     return (
-        SceneState(revision=revision, nodes=materialize_projectile_motion_nodes(component)),
+        SceneState(
+            revision=revision,
+            nodes=materialize_projectile_motion_scene_nodes(component),
+        ),
         SemanticSceneState(
             revision=revision,
             components=(component,),
@@ -562,6 +568,26 @@ def test_revision_drift_dirty_namespace_foreign_kind_and_cross_problem_fail() ->
                 nodes=materialize_projectile_motion_nodes(other),
             ),
             base_semantic_scene=SemanticSceneState(revision=1, components=(other,)),
+        )
+
+
+def test_continuation_rejects_reordered_svg_paint_state_under_an_unchanged_head() -> None:
+    problem = SUPPORTED_PROBLEMS[1]
+    frontier = ProjectileMotionMainCheckpoint.APEX_STATE
+    base_scene, base_semantic_scene = _base(problem, frontier)
+    assert tuple(node.id for node in base_scene.nodes) != tuple(
+        sorted(node.id for node in base_scene.nodes)
+    )
+    reordered = SceneState(
+        revision=base_scene.revision,
+        nodes=tuple(reversed(base_scene.nodes)),
+    )
+
+    with pytest.raises(ProjectileMotionCheckpointCompilationError, match="paint order"):
+        compile_projectile_motion_checkpoint_beat(
+            _advance_beat(problem, frontier),
+            base_scene=reordered,
+            base_semantic_scene=base_semantic_scene,
         )
 
 

@@ -41,7 +41,7 @@ from murmur.live_scene.projectile_motion_checkpoint_contracts import (
 from murmur.live_scene.projectile_motion_compiler import (
     ProjectileMotionCheckpointBlueprint,
     compile_projectile_motion_checkpoint_blueprints,
-    materialize_projectile_motion_nodes,
+    materialize_projectile_motion_scene_nodes,
 )
 from murmur.live_scene.projectile_motion_contracts import (
     AdvanceProjectileMotionRouteV1,
@@ -129,11 +129,12 @@ def _validate_base_realization(
         id=beat.component_id,
         problem_spec=beat.result_problem_spec,
     )
-    expected = {node.id: node for node in materialize_projectile_motion_nodes(accepted)}
-    actual = _owned_node_map(beat.component_id, scene.nodes)
+    expected = materialize_projectile_motion_scene_nodes(accepted)
+    prefix = f"{beat.component_id}__"
+    actual = tuple(node for node in scene.nodes if node.id.startswith(prefix))
     if actual != expected:
         raise ProjectileMotionCheckpointCompilationError(
-            "base low-level scene does not match the projectile semantic frontier"
+            "base low-level scene or paint order does not match the projectile semantic frontier"
         )
     return accepted
 
