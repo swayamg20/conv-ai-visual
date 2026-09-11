@@ -136,6 +136,7 @@ interface ExpectedAcceptedFrontier {
   readonly semanticScene: RuntimeSnapshot["committedSemanticScene"];
   readonly checkpointId: AcceptedCheckpoint["event"]["semantic"]["checkpointId"];
   readonly caption: string;
+  readonly maximumReceivedSequence: number;
 }
 
 interface InterruptionPayload {
@@ -151,6 +152,8 @@ interface InterruptionPayload {
 
 interface InterruptionFrontier {
   readonly generation: number;
+  readonly attempt: number;
+  readonly sequence: number;
   readonly phase: RuntimeSnapshot["phase"];
   readonly checkpointId: string;
   readonly revision: number;
@@ -442,8 +445,17 @@ function fixtureMismatch(
   const expectedRecord = expected as Record<string, unknown>;
   const actualKeys = Object.keys(actualRecord);
   const expectedKeys = Object.keys(expectedRecord);
-  if (JSON.stringify(actualKeys) !== JSON.stringify(expectedKeys)) {
-    return `${location}: object keys/order differ`;
+  // The generator writes sorted JSON keys while browser decoders reconstruct
+  // contract order. Object order is not data; array order (including SVG paint
+  // order) remains exact in the branch above.
+  const missingKeys = expectedKeys.filter(
+    (key) => !Object.prototype.hasOwnProperty.call(actualRecord, key),
+  );
+  const unexpectedKeys = actualKeys.filter(
+    (key) => !Object.prototype.hasOwnProperty.call(expectedRecord, key),
+  );
+  if (missingKeys.length > 0 || unexpectedKeys.length > 0) {
+    return `${location}: object keys differ (missing: ${missingKeys.join(", ") || "none"}; unexpected: ${unexpectedKeys.join(", ") || "none"})`;
   }
   for (const key of expectedKeys) {
     const mismatch = fixtureMismatch(
@@ -521,6 +533,7 @@ function rewriteCheckpointGeneration(
 function expectedAcceptedFrontier(
   events: readonly ProjectileChoreographySceneCheckpointEventV1[],
   settlements: readonly Settlement[],
+  maximumReceivedSequence?: number,
 ): ExpectedAcceptedFrontier {
   if (events.length === 0 || events.length !== settlements.length) {
     throw new Error("Expected projectile events and settlements must align");
@@ -555,27 +568,35 @@ function expectedAcceptedFrontier(
   });
   const terminal = records.at(-1);
   if (!terminal) throw new Error("Expected projectile frontier is empty");
+  const maximumSequence = maximumReceivedSequence ?? terminal.event.sequence;
+  if (maximumSequence < terminal.event.sequence) {
+    throw new Error("Expected projectile receive frontier precedes acceptance");
+  }
   return {
     records,
     scene: terminal.scene,
     semanticScene: terminal.semanticScene,
     checkpointId: terminal.event.semantic.checkpointId,
     caption: terminal.event.patch.narration,
+    maximumReceivedSequence: maximumSequence,
   };
 }
 
 function expectedInterruptedMainFrontier(
   prefixCount: number,
 ): ExpectedAcceptedFrontier {
-  const events = fixtureCheckpoints(primaryFixture, "main").slice(
-    0,
-    prefixCount,
-  );
+  const main = fixtureCheckpoints(primaryFixture, "main");
+  const events = main.slice(0, prefixCount);
+  const terminalStreamEvent = main.at(-1);
+  if (!terminalStreamEvent) {
+    throw new Error("The primary fixture has no main checkpoint stream");
+  }
   return expectedAcceptedFrontier(
     events,
     events.map((_, index) =>
       index === events.length - 1 ? "cancelled_to_checkpoint" : "completed",
     ),
+    terminalStreamEvent.sequence,
   );
 }
 
@@ -673,7 +694,12 @@ async function expectExactRuntimeFrontier(
   const terminalRecord = expected.records.at(-1);
   if (!terminalRecord) throw new Error("The expected frontier is empty");
   expect(snapshot.attempt).toBe(terminalRecord.event.attempt);
-  expect(snapshot.sequence).toBe(terminalRecord.event.sequence);
+  expect(snapshot.sequence).toBeGreaterThanOrEqual(
+    terminalRecord.event.sequence,
+  );
+  expect(snapshot.sequence).toBeLessThanOrEqual(
+    expected.maximumReceivedSequence,
+  );
   expectFixtureExact(
     snapshot.committedViewport,
     terminalRecord.viewport,
@@ -734,6 +760,8 @@ async function interruptionFrontier(
   };
   return {
     generation: observation.snapshot.generation,
+    attempt: observation.snapshot.attempt,
+    sequence: observation.snapshot.sequence,
     phase: observation.snapshot.phase,
     checkpointId: observation.snapshot.visibleCheckpointId ?? "",
     revision: observation.snapshot.committedScene.revision,

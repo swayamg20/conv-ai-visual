@@ -1945,6 +1945,8 @@ function validateInterruptionFrontier(value, expected, location) {
     value,
     [
       "generation",
+      "attempt",
+      "sequence",
       "phase",
       "checkpointId",
       "revision",
@@ -1954,6 +1956,14 @@ function validateInterruptionFrontier(value, expected, location) {
     location,
   );
   exact(frontier.generation, expected.generation, `${location}.generation`);
+  exact(frontier.attempt, expected.attempt, `${location}.attempt`);
+  const sequence = finiteNumber(frontier.sequence, `${location}.sequence`, {
+    integer: true,
+    minimum: expected.minimumSequence,
+  });
+  if (sequence > expected.maximumSequence) {
+    fail(`${location}.sequence`, `must not exceed ${expected.maximumSequence}`);
+  }
   exact(frontier.phase, expected.phase, `${location}.phase`);
   exact(
     frontier.checkpointId,
@@ -1989,6 +1999,9 @@ function expectedInterruptionFrontier(truth, category, terminal = false) {
       record: prefix.at(-1),
       prefix,
       generation: 4,
+      attempt: prefix.at(-1).event.attempt,
+      minimumSequence: prefix.at(-1).event.sequence,
+      maximumSequence: prefix.at(-1).event.sequence,
       phase: "interrupted",
     };
   }
@@ -2003,6 +2016,9 @@ function expectedInterruptionFrontier(truth, category, terminal = false) {
       record: prefix.at(-1),
       prefix,
       generation: 2,
+      attempt: prefix.at(-1).event.attempt,
+      minimumSequence: prefix.at(-1).event.sequence,
+      maximumSequence: prefix.at(-1).event.sequence,
       phase: "completed",
     };
   }
@@ -2014,6 +2030,9 @@ function expectedInterruptionFrontier(truth, category, terminal = false) {
     record: prefix.at(-1),
     prefix,
     generation: 1,
+    attempt: prefix.at(-1).event.attempt,
+    minimumSequence: prefix.at(-1).event.sequence,
+    maximumSequence: truth.main.at(-1).event.sequence,
     phase: "interrupted",
   };
 }

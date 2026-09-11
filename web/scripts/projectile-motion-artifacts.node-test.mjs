@@ -498,6 +498,13 @@ function acceleratedObservation(primaryFixture) {
     const checkpointId = record.event.semantic.checkpointId;
     const certificateHeadSha256 =
       record.event.semantic.semanticResultCertificateSha256;
+    const accepted = acceptedPrefix(prefix, cancelledIndex, continuationStart);
+    const acceptedTerminal = accepted.at(-1);
+    assert.ok(acceptedTerminal);
+    const sequence =
+      phase === "interrupted" && generation === 1
+        ? records.main.at(-1).event.sequence
+        : acceptedTerminal.event.sequence;
     const payload = {
       semanticDomProjection: semanticDom(record),
       caption: record.event.patch.narration,
@@ -506,10 +513,12 @@ function acceleratedObservation(primaryFixture) {
       visibleCheckpointId: checkpointId,
       committedScene: structuredClone(record.scene),
       committedSemanticScene: structuredClone(record.semanticScene),
-      accepted: acceptedPrefix(prefix, cancelledIndex, continuationStart),
+      accepted,
     };
     return {
       generation,
+      attempt: acceptedTerminal.event.attempt,
+      sequence,
       phase,
       checkpointId,
       revision: record.scene.revision,
@@ -673,6 +682,7 @@ function acceleratedObservation(primaryFixture) {
         "interrupted",
         prefix.length - 1,
       );
+      if (category === "hold") immediate.sequence = 4;
       const terminal = isVector
         ? structuredClone(immediate)
         : frontier(
@@ -1030,6 +1040,10 @@ test("accelerated evidence binds motion geometry, terminal parity, and 24 interr
   assert.equal(validated.motionBoundary.traceTipSamples.length, 6);
   assert.equal(validated.motionBoundary.interruption.trials.length, 24);
   assert.equal(validated.motionBoundary.interruption.p95Ms, 43);
+  assert.equal(
+    validated.motionBoundary.interruption.trials[20].immediate.sequence,
+    4,
+  );
   const retargetGuide =
     observation.motionBoundary.interruption.trials[8].immediate.payload.semanticDomProjection.nodes.find(
       ({ id }) => id === "projectile__apex_guide",
@@ -1129,6 +1143,36 @@ test("accelerated evidence binds motion geometry, terminal parity, and 24 interr
           "f".repeat(64);
       },
       /certificateHeadSha256/,
+    ],
+    [
+      (value) => {
+        value.motionBoundary.interruption.trials[0].immediate.attempt = 2;
+      },
+      /attempt/,
+    ],
+    [
+      (value) => {
+        value.motionBoundary.interruption.trials[0].immediate.sequence = 2;
+      },
+      /sequence/,
+    ],
+    [
+      (value) => {
+        value.motionBoundary.interruption.trials[0].immediate.sequence = 7;
+      },
+      /must not exceed 6/,
+    ],
+    [
+      (value) => {
+        value.motionBoundary.interruption.trials[0].terminal.sequence += 1;
+      },
+      /sequence/,
+    ],
+    [
+      (value) => {
+        value.motionBoundary.interruption.trials[8].immediate.sequence = 2;
+      },
+      /must not exceed 1/,
     ],
     [
       (value) => {
