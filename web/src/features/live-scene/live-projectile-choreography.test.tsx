@@ -22,6 +22,7 @@ import {
   LiveProjectileChoreography,
   runAuthenticatedProjectileChoreographyStream,
 } from "./live-projectile-choreography";
+import type { ProjectileChoreographyRuntimeSnapshot } from "./projectile-choreography-stream-runtime";
 import type {
   ProjectileChoreographySceneStreamRunInvocation,
   ProjectileChoreographySceneStreamRunner,
@@ -316,6 +317,26 @@ describe("LiveProjectileChoreography", () => {
     expect(stage(mounted.container).dataset.visibleCheckpointId).toBe(
       "summary",
     );
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("publishes the final committed runtime snapshot to an E2E observer", async () => {
+    const runtimeSnapshots: ProjectileChoreographyRuntimeSnapshot[] = [];
+    const mounted = await mount({
+      runStream: async (invocation) => emitFixture(invocation),
+      onRuntimeSnapshot: (snapshot) => runtimeSnapshots.push(snapshot),
+    });
+
+    await act(async () => {
+      button(mounted.container, "Draw this launch").click();
+      await flushWork();
+    });
+
+    const finalRuntimeSnapshot = runtimeSnapshots.at(-1);
+    expect(finalRuntimeSnapshot?.phase).toBe("completed");
+    expect(finalRuntimeSnapshot?.committedScene.revision).toBe(6);
+    expect(finalRuntimeSnapshot?.committedSemanticScene.revision).toBe(6);
+    expect(finalRuntimeSnapshot?.accepted).toHaveLength(6);
     await act(async () => mounted.root.unmount());
   });
 

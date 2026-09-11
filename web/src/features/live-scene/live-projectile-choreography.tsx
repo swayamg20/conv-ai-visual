@@ -55,6 +55,7 @@ import {
   ProjectileChoreographyStreamRuntime,
   type ProjectileChoreographyCommand,
   type ProjectileChoreographyRuntimePhase,
+  type ProjectileChoreographyRuntimeSnapshot,
 } from "./projectile-choreography-stream-runtime";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -127,6 +128,10 @@ export interface LiveProjectileChoreographyProps {
   readonly reducedMotion?: boolean;
   readonly playbackRate?: ChoreographyPlaybackRate;
   readonly runStream?: ProjectileChoreographySceneStreamRunner;
+  /** Provider-free E2E observer; production callers leave this unset. */
+  readonly onRuntimeSnapshot?: (
+    snapshot: ProjectileChoreographyRuntimeSnapshot,
+  ) => void;
 }
 
 export const runAuthenticatedProjectileChoreographyStream =
@@ -203,6 +208,7 @@ function ProjectileLesson({
   reducedMotion = false,
   playbackRate = 1,
   runStream,
+  onRuntimeSnapshot,
 }: ProjectileLessonProps) {
   const canvasRef = useRef<SVGCanvasHandle>(null);
   const lifecycleRef = useRef<object | null>(null);
@@ -226,6 +232,12 @@ function ProjectileLesson({
     runtime.getSnapshot,
     runtime.getSnapshot,
   );
+
+  useEffect(() => {
+    if (!onRuntimeSnapshot) return;
+    onRuntimeSnapshot(runtime.getSnapshot());
+    return runtime.subscribe(() => onRuntimeSnapshot(runtime.getSnapshot()));
+  }, [onRuntimeSnapshot, runtime]);
 
   useEffect(() => {
     const lifecycle = {};

@@ -6,6 +6,7 @@ import {
   PROJECTILE_CHOREOGRAPHY_PROTOCOL,
   decodeProjectileMotionRequestV1,
 } from "@/lib/live-scene/projectile-choreography-request";
+import type { ProjectileChoreographyRuntimeSnapshot } from "@/features/live-scene/projectile-choreography-stream-runtime";
 
 import { createProjectileMotionE2ESession } from "./client";
 
@@ -60,5 +61,38 @@ describe("projectile-motion e2e client session", () => {
     expect(Object.isFrozen(state.calls[0])).toBe(true);
     expect(Object.isFrozen(state.calls[0].problemSpec)).toBe(true);
     expect(Object.isFrozen(state.calls[0].clarifiedTopics)).toBe(true);
+    expect(session.bridge.getRuntimeObservation()).toBeNull();
+
+    const emptyScene = Object.freeze({
+      revision: 0,
+      nodes: Object.freeze([]),
+    });
+    const emptySemanticScene = Object.freeze({
+      revision: 0,
+      components: Object.freeze([]),
+    });
+    const runtimeSnapshot: ProjectileChoreographyRuntimeSnapshot =
+      Object.freeze({
+        phase: "idle",
+        generation: 0,
+        attempt: 1,
+        sequence: 0,
+        committedScene: emptyScene,
+        provisionalScene: emptyScene,
+        committedSemanticScene: emptySemanticScene,
+        provisionalSemanticScene: emptySemanticScene,
+        committedViewport: null,
+        provisionalViewport: null,
+        accepted: Object.freeze([]),
+        queuedCheckpointCount: 0,
+        narration: "Ready for a live projectile lesson.",
+        rendererTrusted: true,
+      });
+    session.observeRuntimeSnapshot(runtimeSnapshot);
+    const observation = session.bridge.getRuntimeObservation();
+    expect(observation?.snapshot).toBe(runtimeSnapshot);
+    expect(observation?.observedAtMs).toBeGreaterThanOrEqual(0);
+    expect(Object.isFrozen(observation)).toBe(true);
+    expect(Object.isFrozen(observation?.snapshot)).toBe(true);
   });
 });

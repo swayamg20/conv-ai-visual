@@ -6,6 +6,7 @@ import {
   LiveProjectileChoreography,
   type LiveProjectileChoreographyProps,
 } from "@/features/live-scene/live-projectile-choreography";
+import type { ProjectileChoreographyRuntimeSnapshot } from "@/features/live-scene/projectile-choreography-stream-runtime";
 import {
   createProjectileChoreographyFixtureRunner,
   type ProjectileChoreographyFixtureMode,
@@ -44,11 +45,20 @@ export interface ProjectileMotionE2EBridgeV1 {
     readonly runnerCallCount: number;
     readonly calls: readonly ProjectileMotionFixtureInvocationObservation[];
   };
+  getRuntimeObservation(): ProjectileMotionRuntimeObservation | null;
+}
+
+export interface ProjectileMotionRuntimeObservation {
+  readonly observedAtMs: number;
+  readonly snapshot: ProjectileChoreographyRuntimeSnapshot;
 }
 
 interface ProjectileMotionE2ESession {
   readonly runner: ProjectileChoreographySceneStreamRunner;
   readonly bridge: ProjectileMotionE2EBridgeV1;
+  readonly observeRuntimeSnapshot: (
+    snapshot: ProjectileChoreographyRuntimeSnapshot,
+  ) => void;
 }
 
 function observeInvocation(
@@ -85,6 +95,7 @@ export function createProjectileMotionE2ESession(
     keyframeProof ? { mode, eventDelayMs: 1_200 } : { mode },
   );
   const calls: ProjectileMotionFixtureInvocationObservation[] = [];
+  let runtimeObservation: ProjectileMotionRuntimeObservation | null = null;
   const runner: ProjectileChoreographySceneStreamRunner = async (
     invocation,
   ) => {
@@ -93,6 +104,14 @@ export function createProjectileMotionE2ESession(
   };
   return Object.freeze({
     runner,
+    observeRuntimeSnapshot: (
+      snapshot: ProjectileChoreographyRuntimeSnapshot,
+    ) => {
+      runtimeObservation = Object.freeze({
+        observedAtMs: performance.now(),
+        snapshot,
+      });
+    },
     bridge: Object.freeze({
       version: 1 as const,
       getState: () =>
@@ -100,6 +119,7 @@ export function createProjectileMotionE2ESession(
           runnerCallCount: calls.length,
           calls: Object.freeze([...calls]),
         }),
+      getRuntimeObservation: () => runtimeObservation,
     }),
   });
 }
@@ -137,6 +157,7 @@ export function ProjectileMotionE2EClient({
       reducedMotion={reducedMotion}
       playbackRate={playbackRate}
       runStream={session.runner}
+      onRuntimeSnapshot={session.observeRuntimeSnapshot}
     />
   );
 }

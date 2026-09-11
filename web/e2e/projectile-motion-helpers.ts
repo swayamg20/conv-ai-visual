@@ -19,6 +19,7 @@ import type {
   ProjectileMotionRouteV1,
 } from "../src/lib/live-scene/projectile-motion";
 import { orderSceneNodesForSvgPaint } from "../src/features/live-scene/svg-node-reconciler";
+import type { ProjectileChoreographyRuntimeSnapshot } from "../src/features/live-scene/projectile-choreography-stream-runtime";
 import type { SceneNode } from "../src/lib/live-scene";
 
 export const PROJECTILE_MOTION_E2E_BRIDGE_KEY =
@@ -88,6 +89,11 @@ export interface ProjectileRunnerCallObservation {
 export interface ProjectileE2EBridgeState {
   readonly runnerCallCount: number;
   readonly calls: readonly ProjectileRunnerCallObservation[];
+}
+
+export interface ProjectileRuntimeObservation {
+  readonly observedAtMs: number;
+  readonly snapshot: ProjectileChoreographyRuntimeSnapshot;
 }
 
 export interface ProjectileStageObservation {
@@ -251,6 +257,27 @@ export async function projectileBridgeState(
     }
     return bridge.getState();
   }, PROJECTILE_MOTION_E2E_BRIDGE_KEY);
+}
+
+export async function projectileRuntimeObservation(
+  page: Page,
+): Promise<ProjectileRuntimeObservation> {
+  const observation = await page.evaluate((key) => {
+    const bridge = (window as typeof window & Record<string, unknown>)[key] as
+      | {
+          readonly version: number;
+          getRuntimeObservation(): ProjectileRuntimeObservation | null;
+        }
+      | undefined;
+    if (!bridge || bridge.version !== 1) {
+      throw new Error("The projectile-motion e2e bridge is unavailable");
+    }
+    return bridge.getRuntimeObservation();
+  }, PROJECTILE_MOTION_E2E_BRIDGE_KEY);
+  if (!observation) {
+    throw new Error("The projectile runtime observation is unavailable");
+  }
+  return observation;
 }
 
 export function observeProviderFreeRequests(
