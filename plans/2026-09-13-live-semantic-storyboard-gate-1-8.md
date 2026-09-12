@@ -1,0 +1,156 @@
+# Build a live model-authored semantic storyboard
+
+## Purpose / Big Picture
+
+Gate 1.8 proves the central product thesis that was still deliberately absent from Gate 1.7: a live language model can compose the order of a visual explanation while trusted code continues to own mathematical truth, geometry, presentation quality, interruption, and replay. A learner opens a storyboard studio, asks why two same-speed projectiles launched at 30 degrees and 60 degrees can land at the same range even though one rises higher, and immediately sees a deterministic visual anchor. One bounded provider stream then emits a short semantic program. Each complete semantic record becomes exactly one independently verified, visibly progressive checkpoint as soon as it is accepted.
+
+The learner can request a different order, such as tracing the higher arc first or showing the range equation before motion, and the visible checkpoint order must change. The learner can interrupt after any accepted beat, ask a follow-up such as "Why are the ranges equal?", and continue from the exact living-board frontier without a wipe, repeated accepted content, or replaced stable objects. Replay is local and makes no model request.
+
+This is not a universal animation language or a Manim replacement. It is a bounded falsification test for semantic composition. The first protocol is truthfully named `projectile_comparison_storyboard_v1`; later work may extract a shared cross-domain grammar only after a second domain proves which concepts are genuinely common.
+
+In this plan, a **semantic storyboard** is the ordered list of atomic model-selected teaching beats. A **beat** is one `reveal`, `trace`, or `relate` record. An **anchor** is one server-authored, provider-free checkpoint that establishes the paired launch frame. A **frontier** is the exact accepted low-level scene, paired semantic state, certificate head, viewport, layout, and ordered beat ledger. A **catalog** is the server-owned closed vocabulary of concepts, trajectories, claims, valid evidence, and dependencies that the model may reference. An **accepted prefix** is the useful sequence of verified model beats retained when a later provider record is invalid, times out, or exceeds capacity.
+
+## Progress
+
+- [x] 2026-09-13 00:49 IST: Created clean worktree `/Users/swayam.gupta/Documents/GitHub/conv-ai-visual-gate18-live-semantic-storyboard` on `codex/gate18-live-semantic-storyboard` from merged Gate 1.7 main commit `01acc4683c2420c580ebb77283ab2a2292e0b3a4`; the unrelated voice worktree remains untouched.
+- [x] 2026-09-13 00:59 IST: Audited Gate 1.7 backend, browser runtime, renderer, provider, lab, fixture, artifact, and CI seams. Locked a two-generation Reflex/Director interaction, an atomic four-record model vocabulary, an explicit no-hidden-macro proof, and provider-free qualification before any paid request.
+- [ ] Add strict paired-problem, catalog, model-record, ordered-frontier, request, routed-beat, hash-domain, and parser contracts without changing any Gate 1.5 through Gate 1.7 wire behavior.
+- [ ] Implement one deterministic anchor and one-record-to-one-checkpoint compiler, independent verifier, receipt, certificate, and mutation suite.
+- [ ] Implement the progressive single-call Director service, accepted-prefix lifecycle, strict SSE wire, existing endpoint dispatch, and deterministic fixture generation.
+- [ ] Add strict browser contracts, the storyboard domain adapter, two-generation session controller, open frontier indicator, OS reduced-motion detection, and guarded lab surface.
+- [ ] Qualify distinct semantic programs, every interruption surface, continuation, abstention, failure recovery, Replay, responsive layout, reduced motion, and authenticated product behavior.
+- [ ] Add a separate Gate 1.8 artifact lifecycle and CI job, run every earlier gate, inspect normal-speed evidence, and record the exact pushed-head results.
+- [ ] After fresh explicit spend approval, run the bounded live-model corpus and authenticated live subset; obtain product-owner visual acceptance before merge, then require merged-main CI.
+
+## Surprises & Discoveries
+
+- The generic certified browser runtime intentionally accepts `failed` or `declined` only before the first checkpoint of one generation. Combining an immediate Reflex checkpoint and fallible Director output into one generation would either weaken that invariant or require buffering the whole model response. Gate 1.8 therefore uses a provider-free anchor generation followed by a Director continuation generation from the committed anchor.
+- The existing `CertifiedChoreographyStage` assumes a predetermined checkpoint total. A model-authored program has a bounded capacity but no honest promised length, so Gate 1.8 needs an additive open-frontier presentation mode rather than a fake progress denominator.
+- Gate 1.7 already supplies the required low-level visual grammar: stable SVG objects, draw/fade/scale entrances, same-ID transforms and cross-fades, emphasis, camera focus, curved path tracing, atomic interruption settlement, and retained-DOM Replay. Gate 1.8 does not need a renderer rewrite or a new choreography version unless a concrete accepted storyboard proves V2 insufficient.
+- Progressive model authoring creates a new valid terminal: a later malformed or timed-out record can follow an already verified prefix. That prefix is a product result, so the new wire must distinguish normal model completion from sanitized accepted-prefix completion without representing an unsafe tail as accepted or rolling back already presented checkpoints.
+
+## Decision Log
+
+- Decision: Name the protocol `projectile_comparison_storyboard_v1`, not `semantic_storyboard_v1`. Rationale: the catalog, verifier, and visual atoms are intentionally projectile-specific; a generic name would claim an abstraction that one domain cannot prove. Date/author: 2026-09-13, Codex with Swam Gupta as product owner.
+- Decision: A paired problem contains one supported speed and exactly two distinct, ascending angles from 30, 45, and 60 degrees. Rationale: all nine same-speed angle pairs across the existing three speeds remain deterministic, while 30/45 supplies a required inequality control against the 30/60 complementary-angle case. Gravity remains server-owned at 10 metres per second squared with zero launch height and no drag. Date/author: 2026-09-13, Codex.
+- Decision: The model vocabulary has exactly four variants: `reveal` with one concept ID, `trace` with one trajectory ID, `relate` with one claim ID and bounded evidence IDs, and `abstain` with one reason code. Rationale: atomic nouns let the model choose content and order without exposing representation or hiding a whole lesson behind a macro. Date/author: 2026-09-13, Codex.
+- Decision: One user turn opens at most one provider stream, which may emit at most five NDJSON records. Each accepted non-abstain record creates exactly one revision, checkpoint, verifier receipt, and compiler certificate. Rationale: this preserves incremental time-to-visual while making semantic authorship directly observable and testable. Date/author: 2026-09-13, Codex.
+- Decision: Missing prerequisites never expand implicitly. The current record fails; the service may retain an already accepted prefix but cannot synthesize a hidden formula, trace, claim, or future suffix. Rationale: automatic prerequisite expansion would recreate the fixed stage-to-suffix architecture under a new name. Date/author: 2026-09-13, Codex.
+- Decision: A fresh interaction is two generations coordinated by the browser: Reflex emits and completes one certified anchor without resolving a provider; Director then starts from that exact committed frontier. Rationale: model delay or failure must not hide the immediate response or weaken the generic runtime's atomic failure boundary. Date/author: 2026-09-13, Codex.
+- Decision: An empty provider stream is invalid. `abstain` must be the sole record, is held until clean end-of-stream, produces no checkpoint, and becomes a typed declined terminal. An abstain after a visual beat is invalid. Rationale: silence, truncation, and intentional refusal must not be conflated. Date/author: 2026-09-13, Codex.
+- Decision: The server owns problem values, physics, displayed copy, formula strings, coordinates, layout, viewports, node and checkpoint IDs, timing, easing, presentation cues, hashes, receipts, and certificates. The model owns only semantic selection, evidence selection, ordering, and explicit abstention. Date/author: 2026-09-13, Codex.
+- Decision: Begin with a guarded `/labs/storyboard` surface and promote the accepted grammar to authenticated `/canvas/storyboard` only after provider-free visual qualification. Rationale: an experimental provider path must not become a product contract before its safety and explanatory value are demonstrated. Date/author: 2026-09-13, Codex.
+- Decision: Paid evaluation requires a new explicit dollar ceiling after provider-free qualification passes on a pushed SHA. Rationale: prior Azure approvals were bounded experiments for earlier gates and are not reusable authorization. Date/author: 2026-09-13, Codex.
+
+## Outcomes & Retrospective
+
+Implementation has started. This section will record the exact feature SHA, program and catalog digests, test counts, fixture and artifact hashes, Reflex and model-visible latency percentiles, interruption measurements, accepted-prefix behavior, live-model corpus result and cost ceiling, visual evidence, product-owner verdict, merge commit, merged-main CI, remaining limitations, and the decision for the next gate. Until those facts exist, Gate 1.8 is not represented as shipped.
+
+## Context and Orientation
+
+Gate 1.7 is merged at `01acc4683c2420c580ebb77283ab2a2292e0b3a4`. Its closed projectile contracts, routing, compiler, verifier, checkpoint certificates, service, and wire live in `backend/murmur/live_scene/projectile_motion_*.py`. They prove correct physics and a continuous single-projectile visual model, but their Director chooses only a stage or clarification and the compiler expands that choice into a predetermined checkpoint suffix. Those files and their serialized fixtures remain sealed.
+
+The shared backend endpoint is `POST /api/live-scenes/choreography/stream` in `backend/murmur/api/routers/live_scenes.py`. It authenticates the Firebase bearer and acquires admission before selecting a strict protocol arm. Its loopback-only lab counterpart is available only in non-production when `MURMUR_SCENE_LAB=1` and the socket peer is loopback. `backend/murmur/live_scene/service.py` owns the injected provider-client factory and delegates to focused domain services. Gate 1.8 adds one exact request-union arm, encoder, dispatch arm, and delegate; missing protocol and all V1/V3/projectile behavior remain unchanged.
+
+The provider interface already exposes an injected asynchronous text stream and process-only configuration. `backend/murmur/api/application.py`, `backend/murmur/live_scene/provider.py`, and the LLM adapters need no new provider-specific behavior. The new Director consumes one client stream, incrementally parses strict NDJSON, closes the stream and factory-owned client exactly once, and never exposes provider text through errors, logs, repair messages, or artifacts.
+
+The browser's reusable lifecycle is `web/src/features/live-scene/certified-choreography-stream-runtime.ts`. It owns generation tokens, cancellation, queue bounds, provisional and committed frontiers, post-paint acceptance, stale suppression, restoration, and zero-network Replay. `checkpoint-choreography-player.ts`, `choreography-canvas-bridge.ts`, `svg-node-reconciler.ts`, and `web/src/components/svg-canvas.tsx` own visible settlement and stable DOM identity. `choreography-executor.ts` and `choreography-path-trace.ts` already execute the additive V2 visual cues required here.
+
+The current product stage is `web/src/features/live-scene/certified-choreography-stage.tsx`. Its fixed progress rail must gain an additive discriminated mode: prior gates continue passing `{kind: "bounded", settledCount, totalCount}`, while storyboard uses `{kind: "open", settledCount, status, recentLabels}`. No previous DOM contract or progress semantics may change.
+
+The first closed catalog includes trajectories for the lower and higher angles; range formula and complementary-angle concepts; equal-range, unequal-range, higher-apex, and longer-flight claims; explicit evidence combinations; dependencies; captions; and semantic effect manifests. The catalog may describe valid choices to the model, but the browser never trusts it from the model. The ordered semantic program hash binds the catalog version, paired problem, and canonical accepted records while excluding prompt wording, provider identity, timestamps, and request IDs.
+
+## Plan of Work
+
+First, add the closed backend language. `semantic_storyboard_contracts.py` will define `PairedProjectileComparisonSpecV1`, the catalog IDs, the four strict model-record variants, `ProjectileStoryboardStateV1`, the dedicated semantic scene, ordered program hashing, and exact applicability/dependency rules. `semantic_storyboard_requests.py` will define disjoint fresh Reflex and prompt-only Director bodies under `projectile_comparison_storyboard_v1`. `semantic_storyboard_director.py` will build the provider-neutral prompt and parse bounded multi-record NDJSON across arbitrary UTF-8 chunks. `semantic_storyboard_routing.py` will bind each accepted draft to one server-owned ordinal, checkpoint ID, component ID, problem, current certificate frontier, and semantic effect closure. No prompt reaches a compiler.
+
+Add focused tests beside this milestone. They will reject unknown keys and IDs, coercions, non-finite values, duplicate JSON keys, invalid UTF-8, oversized and incomplete frames, empty streams, six records, a record after abstention, cross-protocol bodies, unsupported physics, duplicate effects, missing evidence, invalid claim applicability, and every compound token such as `full_lesson` or `compare_everything`. Parser errors contain only fixed internal messages. Commit and push this complete contract boundary before starting visual compilation.
+
+Next, implement one anchor and atomic beat realization. `semantic_storyboard_compiler.py` will accept exactly one routed action and return one blueprint, never a tuple or suffix. It will compute the paired trajectories, shared or distinct range endpoints, equations, labels, stable IDs, captions, viewports, and a short purposeful V2 choreography in the existing warm blackboard language. Amber marks the new idea, sage marks established relationships, lavender marks comparison annotation, and the fixed grid and axes do not move. Entrances predominantly use 400-to-800-millisecond ease-out motion; exits are shorter; no UI feedback waits on the model.
+
+`semantic_storyboard_verifier.py` will independently recompute both projectiles and every claim from primitive speed and angles without importing the compiler or Gate 1.7 compiler helpers. It will prove exact semantic effect closure, dependency visibility, formula and claim truth, path samples, shared or unequal endpoints, apex ordering, board bounds, collision-free browser-safe frames, stable identity, cue ownership, timing, camera containment, and ordered paint state. `semantic_storyboard_checkpoint_contracts.py` and `semantic_storyboard_checkpoint_compiler.py` will bind the base and result low-level scenes, paired semantic frontier, model record, routed beat, catalog, problem, patch, choreography, presentation, receipt, previous head, and ordered program hash. Mutation tests will change each independent fact, geometry, presentation, state, and integrity field and require rejection before publication.
+
+Then implement the service and wire. `semantic_storyboard_service.py` will resolve no client for Reflex and emit one anchor checkpoint. For Director it will make exactly one admitted provider call, parse complete records incrementally, route/compile/verify/certify one record at a time, wire-roundtrip the event before yielding it, and evolve the accepted frontier. Clean provider stop after one or more beats emits `model_stop`; a malformed tail, timeout, or capacity boundary after a verified prefix emits a sanitized `accepted_prefix` completion; the failing candidate never mutates the prefix. Failure before the first beat leaves the Director generation unchanged. A sole clean abstention yields a decline. No second repair request is part of Gate 1.8.
+
+`semantic_storyboard_service_contracts.py` and `semantic_storyboard_wire.py` will define distinct events and strict encoders. `backend/murmur/live_scene/parametric_choreography_requests.py` receives only the new request-union arm. `backend/murmur/live_scene/service.py` composes and delegates to the focused service. `backend/murmur/api/routers/live_scenes.py` selects and encodes the exact protocol. Tests will prove authentication and admission occur before provider resolution, Reflex is zero-provider, cancellation/timeout/cleanup ownership is exact, older dispatch remains byte-stable, and new/old decoders reject one another.
+
+Generate provider-free fixtures with `scripts/generate_semantic_storyboard_fixtures.py`. Fixtures must enter through the real model NDJSON parser and service, not begin as precompiled patches. Include the anchor; at least six materially different programs; all three angle pairs; a 30/45 inequality control; continuation from every prefix; sole abstention; accepted-prefix truncation; and deterministic regeneration. At least two fixture stories with different length, order, and IDs must traverse the same browser runtime so hard-coded stage order cannot pass accidentally.
+
+On the browser, add strict paired state, request, and stream decoders under `web/src/lib/live-scene/semantic-storyboard*.ts`. Add focused playback, model transport, domain adapter, session controller, and fixture runner under `web/src/features/live-scene/semantic-storyboard*.ts`. The session controller presents the Reflex anchor generation first and starts Director only after that exact checkpoint is committed. Follow-ups start Director directly from the current frontier. The existing certified runtime remains the only playback lifecycle owner.
+
+Add `useCertifiedPresentationPreferences` to mount-lock cinematic/compact layout and the real `prefers-reduced-motion` preference, while allowing explicit E2E overrides. Add the open progress mode to `CertifiedChoreographyStage` without changing prior bounded rendering. `LiveSemanticStoryboard` provides one prompt, one primary Make it visible or Continue action, Stop, Replay, and Reset. It shows certified beat labels rather than predefined lesson stages. Start at guarded `/labs/storyboard`; after provider-free visual acceptance, mount the same component at authenticated `/canvas/storyboard` with a fresh bearer and no browser-visible provider selector or secret.
+
+Qualify the browser provider-free before adding the artifact job. The first falsifying test compares "trace the low arc first" against "trace the high arc first" and requires different ordered program hashes and visible trace order. Further cases require formula-first versus paths-only, equal-range-only versus higher-arc-only, single versus dual trace, exact continuation, and no mutation for wind, unequal height, unsupported angles, injected SVG, or ambiguous improvement requests. Stop at provider wait, partial record, draw, trace, marker movement, equation/relationship morph, camera focus, hold, post-paint barrier, and Replay. Four trials per active visual surface must retain the exact accepted frontier, publish and mutate nothing for two seconds afterward, and settle below 150 milliseconds p95. A below-75-millisecond result is recorded as a stretch, not a hidden renderer requirement.
+
+Create a dedicated E2E route, Playwright config, DOM oracle, artifact scripts, manifest validator, and `semantic_storyboard` CI job only after the UI contract is stable. Measure submit-to-anchor paint, provider dispatch-to-first byte, dispatch-to-complete record, record-to-verification, verified event-to-visible paint, post-paint acceptance, inter-record gaps, stop-to-frontier, and total authored/decoded duration separately. Reflex paint cannot be reported as model latency. Capture desktop, 375 by 812, 320 by 568, actual OS reduced motion, checkpoint contact sheets, board-only terminals, and a decoded normal-speed video.
+
+Finally, after the provider-free artifact passes on an exact pushed SHA and Swam Gupta approves a fresh cost ceiling, add `scripts/manual/probe_semantic_storyboard.py`. Run a deterministic twenty-prompt corpus twice with pre-dispatch conservative cost reservation, zero SDK retries, at most forty calls, no repair calls, and a calibration stop. Score exact required/forbidden actions and partial orders without an LLM judge. Then run a smaller authenticated browser subset through the production transport, inspect the visual artifacts, obtain product-owner acceptance, review the complete diff, merge, and verify the merge commit's main CI separately.
+
+## Concrete Steps
+
+Work only in:
+
+    cd /Users/swayam.gupta/Documents/GitHub/conv-ai-visual-gate18-live-semantic-storyboard
+
+At each milestone, run the focused backend tests and quality checks, update this plan, commit only the coherent milestone, and push:
+
+    uv run pytest -q tests/test_live_scene_semantic_storyboard_*.py
+    uv run ruff check backend/murmur/live_scene tests scripts
+    uv run ruff format --check backend/murmur/live_scene tests scripts
+    git diff --check
+    git status --short
+    git add -- <explicit milestone paths>
+    git commit -m "<meaningful milestone message>"
+    git push -u origin codex/gate18-live-semantic-storyboard
+
+For browser milestones, install from the lockfile once and run the focused tests plus static checks:
+
+    cd web
+    npm ci
+    npm test
+    npm run lint
+    npx tsc --noEmit
+    npm run build
+
+The final provider-free browser lifecycle will expose dedicated scripts analogous to Gate 1.7:
+
+    cd web
+    npm run test:semantic-storyboard-artifacts
+    npm run prepare:semantic-storyboard-artifacts
+    npm run e2e:semantic-storyboard
+    npm run e2e:semantic-storyboard:capture
+    npm run e2e:semantic-storyboard:product-smoke
+    npm run finalize:semantic-storyboard-artifacts
+    npm run validate:semantic-storyboard-artifacts
+
+Before paid evaluation, prove the checked-out commit equals its remote and keep credentials process-only:
+
+    git fetch origin codex/gate18-live-semantic-storyboard
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/codex/gate18-live-semantic-storyboard)"
+    git status --porcelain
+
+The paid command and exact acknowledgement will be added only after its guard tests pass and the product owner supplies a fresh budget. Never write provider credentials, raw rejected model output, hidden reasoning, or private error bodies to the repository or artifact directory.
+
+For release qualification, run the complete backend and frontend suites, every Gate 1.4 through Gate 1.8 browser job, formatting, lint, type-check, build, artifact finalization/validation, and `git diff --check`. Record exact counts, timings, digests, commit SHA, CI run, product-owner verdict, merge SHA, and merged-main CI here.
+
+## Validation and Acceptance
+
+The language boundary passes when all nine same-speed pairs validate canonically; every record has exact fields and a closed ID; at most five records are accepted; an abstention is sole and mutation-free; empty, malformed, oversized, cross-protocol, representation-bearing, or compound-macro output fails safely; and exceptions, logs, repair text, and artifacts contain no rejected provider payload. The same canonical records compile identically regardless of prompt wording or provider identity.
+
+The semantic-authorship boundary passes when one anchor plus N accepted model beats produces one plus N revisions and checkpoints, with exactly N model-authored certificates; deleting one beat removes only its declared effect; swapping two legal beats changes the program hash and visible order; at least six materially different programs use the same service/compiler/runtime; no prompt-specific server branch exists; no target expands to a checkpoint suffix; and missing prerequisites never auto-materialize.
+
+The truth boundary passes when the independent verifier rejects mutations to speed, angles, range, height, flight time, velocity, complementary-angle identity, equality/inequality applicability, evidence dependencies, trajectory samples, apex or endpoint geometry, labels, equations, paint order, cue targets, timing, viewport, effect closure, base/result revisions, stable IDs, catalog/problem/program hashes, receipts, or certificate chain. The verifier dependency graph contains no storyboard compiler import.
+
+The service boundary passes when Reflex resolves zero providers; each Director turn performs at most one admitted provider call; complete records are published incrementally; a failed candidate cannot alter an accepted prefix; normal, accepted-prefix, abstained, failed, timed-out, capacity, cancelled, and disconnected paths close the stream and owned client exactly once; stale generations publish nothing; and authentication, admission, problem/frontier verification, and capacity rejection happen before paid dispatch.
+
+The browser boundary passes when the certified anchor becomes visibly meaningful below 300 milliseconds p95 across twenty fresh contexts; the first model-composed visual is measured separately and remains below 2,000 milliseconds p95 including cold samples; verified-event-to-visible paint remains below 250 milliseconds p95; inter-beat gaps stay below one second p95; no unexplained authored hold exceeds 1.2 seconds; and the canonical full comparison lasts 30 to 45 seconds at normal speed. If the chosen deployment misses the model-visible target, the gate fails and model selection or planning strategy becomes a separate experiment.
+
+Interruption passes when all required trials settle below 150 milliseconds p95, no DOM or runtime publication occurs for the following two seconds, at most the currently painting complete checkpoint becomes accepted, all future model records are discarded, and follow-up starts from the exact accepted low-level scene, semantic ledger, program hash, viewport, layout, certificate head, and stable DOM objects. Replay brackets zero requests and reconstructs that exact prefix after normal completion, interruption, abstention, and recoverable failure.
+
+Visual acceptance passes when the 30/60 board communicates both trajectories, equal landing range, the higher 60-degree arc, and the mathematical reason with captions hidden; requested ordering is visible rather than cosmetic; motion guides attention without bounce, elastic easing, decorative movement, or background drift; actual OS reduced motion reaches the identical terminal mathematical and semantic state; and desktop, 375 by 812, and 320 by 568 layouts retain all controls, labels, formulas, and canvas content without clipping or horizontal overflow.
+
+The paid corpus passes only with forty of forty safe canonical terminals, zero forbidden mutation, at least 38 of 40 first-attempt-valid streams, at least 36 of 40 complete deterministic semantic rubrics, both repetitions of ordering contrasts and critical follow-ups correct, and every unsupported or ambiguous request abstaining without mutation. The exact cost, attempts, provider latency, semantic programs, rubric results, and artifact provenance must remain within the newly authorized ceiling.
+
+Gate 1.8 automatically fails if an unsupported request mutates the board, one semantic record introduces undeclared lesson content, a prompt-specific macro or branch exists, the verifier accepts a physics/dependency/integrity mutation, Replay reaches the network, late provider output mutates a settled frontier, a follow-up replaces accepted stable objects, Reflex timing is presented as model timing, an artifact does not match the pushed SHA, or a Gate 1.5 through Gate 1.7 fixture digest changes without an explicit versioned migration.
+
+Gate 1.8 is ready for product-owner review only after the exact pushed SHA passes its separate provider-free CI/artifact lifecycle and the authorized live corpus. It is ready to merge only after Swam Gupta can type the comparison request, receive a genuinely model-composed verified sequence, interrupt it, ask why the ranges are equal, continue on the same living board, Replay locally, and accept the board-only visual evidence as fast, original, continuous, and understandable. It is delivered only after the merge commit's main CI is green.
