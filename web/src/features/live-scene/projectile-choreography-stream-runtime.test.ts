@@ -885,6 +885,83 @@ describe("ProjectileChoreographyStreamRuntime", () => {
     expect(runtime.getSnapshot()).toBe(afterReplay);
   });
 
+  it("reserves the full solve suffix before dispatch when 16 checkpoints are retained", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    await acceptStream(
+      runtime,
+      renderer,
+      runner,
+      REFLEX,
+      mainSuffix().slice(0, 4),
+    );
+
+    for (let index = 0; index < 12; index += 1) {
+      const currentProblem = currentComponent(
+        runtime.getSnapshot(),
+      ).problemSpec;
+      const targetProblem =
+        currentProblem.speedMps === 20 ? problem(30, 60) : problem();
+      const retarget = sidecarEvent({
+        snapshot: runtime.getSnapshot(),
+        generation: index + 2,
+        action: "retarget",
+        targetProblem,
+      });
+      await acceptStream(
+        runtime,
+        renderer,
+        runner,
+        {
+          routingMode: "reflex",
+          problemSpec: currentProblem,
+          requestedRoute: {
+            intent: "retarget",
+            targetProblemSpec: targetProblem,
+          },
+        },
+        [retarget],
+      );
+    }
+
+    const before = runtime.getSnapshot();
+    expect(before.accepted).toHaveLength(16);
+    expect(currentComponent(before).lastMainCheckpoint).toBe("apex_state");
+    const networkCalls = runner.runs.length;
+    const solve = {
+      routingMode: "reflex",
+      problemSpec: currentComponent(before).problemSpec,
+      requestedRoute: { intent: "advance", targetStage: "solve" },
+    } satisfies ProjectileChoreographyCommand;
+
+    expect(() => runtime.start(solve)).toThrowError(
+      expect.objectContaining({
+        code: "runtime_reset_required",
+        message:
+          "Reset the projectile board before continuing; its certified checkpoint history is full.",
+      }),
+    );
+    await flush();
+    expect(runner.runs).toHaveLength(networkCalls);
+    expect(runtime.getSnapshot()).toBe(before);
+
+    expect(() =>
+      runtime.start({
+        routingMode: "director",
+        problemSpec: currentComponent(before).problemSpec,
+        prompt: "Finish the accepted projectile derivation.",
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "runtime_reset_required",
+        message:
+          "Reset the projectile board before continuing; its certified checkpoint history is full.",
+      }),
+    );
+    await flush();
+    expect(runner.runs).toHaveLength(networkCalls);
+    expect(runtime.getSnapshot()).toBe(before);
+  });
+
   it("surfaces closed decline/failure messages without algebra-specific copy", async () => {
     const declined = createRuntime();
     const declineRun = await start(declined.runtime, declined.runner);

@@ -10,10 +10,12 @@ import {
   type ProjectileChoreographySceneCheckpointEventV1,
   type ProjectileChoreographySceneStreamEventV1,
 } from "@/lib/live-scene/projectile-choreography-stream";
-import type {
-  ProjectileMotionCheckpointId,
-  ProjectileMotionProblemSpecV1,
-  ProjectileMotionRouteV1,
+import {
+  projectileMotionCheckpointPrefix,
+  projectileMotionCheckpointsThrough,
+  type ProjectileMotionCheckpointId,
+  type ProjectileMotionProblemSpecV1,
+  type ProjectileMotionRouteV1,
 } from "@/lib/live-scene/projectile-motion";
 
 import {
@@ -115,6 +117,30 @@ function createRequest(
           routingMode: "director",
           prompt: command.prompt,
         },
+  );
+}
+
+function requiredCheckpointCapacity(
+  command: ProjectileChoreographyCommand,
+  semanticScene: ProjectileSemanticSceneState,
+): number {
+  const currentMainPrefixLength = projectileMotionCheckpointPrefix(
+    semanticScene.components[0]?.lastMainCheckpoint ?? null,
+  ).length;
+
+  if (command.routingMode === "director") {
+    return Math.max(
+      1,
+      projectileMotionCheckpointsThrough("solve").length -
+        currentMainPrefixLength,
+    );
+  }
+  if (command.requestedRoute.intent !== "advance") return 1;
+
+  return Math.max(
+    0,
+    projectileMotionCheckpointsThrough(command.requestedRoute.targetStage)
+      .length - currentMainPrefixLength,
   );
 }
 
@@ -285,8 +311,13 @@ export class ProjectileChoreographyStreamRuntime extends CertifiedChoreographySt
   }
 
   override start(command: ProjectileChoreographyCommand): number {
+    const snapshot = this.getSnapshot();
+    const requiredCapacity = requiredCheckpointCapacity(
+      command,
+      snapshot.committedSemanticScene,
+    );
     if (
-      this.getSnapshot().accepted.length >=
+      snapshot.accepted.length + requiredCapacity >
       MAX_RETAINED_PROJECTILE_CHOREOGRAPHY_CHECKPOINTS
     ) {
       throw new ProjectileChoreographyRuntimeError(
