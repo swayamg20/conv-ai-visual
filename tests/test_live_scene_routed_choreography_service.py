@@ -57,6 +57,7 @@ from murmur.live_scene.parametric_choreography_requests import (
     PARAMETRIC_CHOREOGRAPHY_PROTOCOL,
     ParametricChoreographyReflexRequestV3,
 )
+from murmur.live_scene.projectile_motion_contracts import ProjectileMotionStateV1
 from murmur.live_scene.projectile_motion_requests import (
     PROJECTILE_CHOREOGRAPHY_PROTOCOL,
     ProjectileMotionDirectorRequestV1,
@@ -677,6 +678,30 @@ async def test_v2_rejects_parametric_component_before_provider_dispatch() -> Non
             linear_coefficient=8,
             right_hand_side=20,
         ),
+    )
+    semantic_scene = SemanticSceneState(revision=0, components=(component,))
+    client = _Client([])
+
+    events = await _collect(
+        service_module.SceneAuthoringService(client),
+        _request(semantic_scene=semantic_scene),
+    )
+
+    _zero_checkpoint_failure(
+        events,
+        code="semantic_base_mismatch",
+        retryable=False,
+    )
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_v2_rejects_projectile_component_before_provider_dispatch() -> None:
+    component = ProjectileMotionStateV1.model_validate(
+        {
+            "id": "projectile-lesson",
+            "problemSpec": {"speedMps": 20, "angleDeg": 45},
+        }
     )
     semantic_scene = SemanticSceneState(revision=0, components=(component,))
     client = _Client([])

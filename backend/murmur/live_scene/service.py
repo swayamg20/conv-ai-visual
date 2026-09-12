@@ -46,7 +46,6 @@ from murmur.live_scene.completing_square_contracts import (
     CompletingSquareCheckpointId,
     CompletingSquareMainCheckpoint,
     CompletingSquareState,
-    ParametricCompletingSquareStateV1,
 )
 from murmur.live_scene.completing_square_verifier import (
     CompletingSquareVerificationError,
@@ -731,11 +730,11 @@ def _validate_choreography_base(
     if scene.revision != semantic_scene.revision:
         raise _SemanticBaseError("semantic_base: low-level and semantic revisions differ")
     if any(
-        isinstance(component, ParametricCompletingSquareStateV1)
+        not isinstance(component, PythagoreanAreaIdentityState | CompletingSquareState)
         for component in semantic_scene.components
     ):
         raise _SemanticBaseError(
-            "semantic_base: V2 choreography cannot consume a parametric component"
+            "semantic_base: V2 choreography cannot consume this component kind"
         )
 
     has_committed_frontier = any(
