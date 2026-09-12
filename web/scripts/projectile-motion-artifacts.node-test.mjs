@@ -1059,6 +1059,24 @@ test("accelerated evidence binds motion geometry, terminal parity, and 24 interr
     ]),
   );
 
+  const browserLineEvidence = structuredClone(observation);
+  const browserLinePoints = rawRetargetGuide.points.map(([x, y]) => [
+    Number(Math.fround(x).toFixed(6)),
+    Number(Math.fround(y).toFixed(6)),
+  ]);
+  for (const frontier of ["immediate", "afterStaleWindow", "terminal"]) {
+    const browserRetargetGuide =
+      browserLineEvidence.motionBoundary.interruption.trials[8][
+        frontier
+      ].payload.semanticDomProjection.nodes.find(
+        ({ id }) => id === "projectile__apex_guide",
+      );
+    browserRetargetGuide.points = structuredClone(browserLinePoints);
+  }
+  assert.doesNotThrow(() =>
+    validateAcceleratedObservationForTests(browserLineEvidence, primaryFixture),
+  );
+
   const oneUlpBrowserEvidence = structuredClone(observation);
   shiftFixturePathCoordinates(oneUlpBrowserEvidence);
   assert.doesNotThrow(() =>
@@ -1230,6 +1248,26 @@ test("accelerated evidence binds motion geometry, terminal parity, and 24 interr
         surface.activeViewBox = parts.join(" ");
       },
       /activeViewBox/,
+    ],
+    [
+      (value) => {
+        const guide =
+          value.motionBoundary.interruption.trials[8].immediate.payload.semanticDomProjection.nodes.find(
+            ({ id }) => id === "projectile__apex_guide",
+          );
+        guide.points[0][0] = Number((guide.points[0][0] + 0.000001).toFixed(6));
+      },
+      /nearest Float32 representation/,
+    ],
+    [
+      (value) => {
+        const guide =
+          value.motionBoundary.interruption.trials[8].immediate.payload.semanticDomProjection.nodes.find(
+            ({ id }) => id === "projectile__apex_guide",
+          );
+        guide.points.reverse();
+      },
+      /nearest Float32 representation/,
     ],
     [
       (value) => shiftFixturePathCoordinates(value, 4),

@@ -183,18 +183,29 @@ function sameValue(actual, expected, location) {
   }
 }
 
-function sameFixtureValue(actual, expected, location) {
+function sameFixtureValue(
+  actual,
+  expected,
+  location,
+  { allowSemanticLineQuantization = false } = {},
+) {
   if (Array.isArray(expected)) {
     const actualEntries = array(actual, location, expected.length);
     expected.forEach((entry, index) =>
-      sameFixtureValue(actualEntries[index], entry, `${location}[${index}]`),
+      sameFixtureValue(actualEntries[index], entry, `${location}[${index}]`, {
+        allowSemanticLineQuantization,
+      }),
     );
     return;
   }
   if (expected !== null && typeof expected === "object") {
     const actualRecord = exactKeys(actual, Object.keys(expected), location);
     for (const [key, expectedValue] of Object.entries(expected)) {
-      if (expected.kind === "path" && key === "points") {
+      if (
+        key === "points" &&
+        (expected.kind === "path" ||
+          (allowSemanticLineQuantization && expected.kind === "line"))
+      ) {
         const actualPoints = array(
           actualRecord.points,
           `${location}.points`,
@@ -212,17 +223,29 @@ function sameFixtureValue(actual, expected, location) {
               actualPoint[coordinateIndex],
               coordinateLocation,
             );
-            const tolerance =
+            const scaledEpsilon =
               Number.EPSILON *
               Math.max(
                 1,
                 Math.abs(actualCoordinate),
                 Math.abs(expectedCoordinate),
               );
-            if (Math.abs(actualCoordinate - expectedCoordinate) > tolerance) {
+            const isSemanticLine = expected.kind === "line";
+            const tolerance = isSemanticLine
+              ? 0.5e-6 + scaledEpsilon
+              : scaledEpsilon;
+            const distance = isSemanticLine
+              ? Math.min(
+                  Math.abs(actualCoordinate - expectedCoordinate),
+                  Math.abs(actualCoordinate - Math.fround(expectedCoordinate)),
+                )
+              : Math.abs(actualCoordinate - expectedCoordinate);
+            if (distance > tolerance) {
               fail(
                 coordinateLocation,
-                `must be within scaled Number.EPSILON (${tolerance}) of the fixture coordinate`,
+                isSemanticLine
+                  ? `must be within ${tolerance} of the fixture coordinate or its nearest Float32 representation`
+                  : `must be within scaled Number.EPSILON (${tolerance}) of the fixture coordinate`,
               );
             }
           });
@@ -232,6 +255,7 @@ function sameFixtureValue(actual, expected, location) {
           actualRecord[key],
           expectedValue,
           `${location}.${key}`,
+          { allowSemanticLineQuantization },
         );
       }
     }
@@ -1695,10 +1719,7 @@ function fixtureNodeSignature(node) {
     return {
       kind: "line",
       id: node.id,
-      points: node.points.map(([x, y]) => [
-        Number(x.toFixed(6)),
-        Number(y.toFixed(6)),
-      ]),
+      points: node.points,
       stroke: node.style.stroke,
       strokeWidth: node.style.strokeWidth,
       opacity: node.style.opacity,
@@ -1757,7 +1778,9 @@ function validateSemanticDomSignature(value, record, location) {
     ["sourceRevision", "viewBox", "paintOrder", "nodes", "residueFree"],
     location,
   );
-  sameFixtureValue(signature, expectedSemanticDom(record), location);
+  sameFixtureValue(signature, expectedSemanticDom(record), location, {
+    allowSemanticLineQuantization: true,
+  });
   return signature;
 }
 
