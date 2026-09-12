@@ -22,6 +22,7 @@ from murmur.live_scene.semantic_storyboard_contracts import (
     StoryboardClaimId,
     TraceStoryboardRecordV1,
     paired_projectile_comparison_sha256,
+    semantic_storyboard_frontier_sha256,
     semantic_storyboard_program_sha256,
     semantic_storyboard_record_sha256,
     semantic_storyboard_scene_sha256,
@@ -315,3 +316,22 @@ def test_new_hash_domains_are_deterministic_ordered_and_distinct() -> None:
     assert semantic_storyboard_scene_sha256(scene) == semantic_storyboard_scene_sha256(
         different_chain_head
     )
+    assert semantic_storyboard_frontier_sha256(scene.revision, scene.components) == (
+        semantic_storyboard_scene_sha256(scene)
+    )
+
+
+def test_frontier_hash_rejects_impossible_pre_certificate_boundaries() -> None:
+    problem = _problem()
+    component = ProjectileStoryboardStateV1(problemSpec=problem)
+
+    assert semantic_storyboard_frontier_sha256(0, ())
+    assert semantic_storyboard_frontier_sha256(1, (component,))
+    with pytest.raises(TypeError, match="strict integer"):
+        semantic_storyboard_frontier_sha256(True, ())
+    with pytest.raises(TypeError, match="tuple"):
+        semantic_storyboard_frontier_sha256(0, [])  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="at most one"):
+        semantic_storyboard_frontier_sha256(1, (component, component))
+    with pytest.raises(ValueError, match="revision"):
+        semantic_storyboard_frontier_sha256(2, (component,))

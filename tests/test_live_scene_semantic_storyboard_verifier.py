@@ -29,6 +29,8 @@ from murmur.live_scene.semantic_storyboard_contracts import (
 )
 from murmur.live_scene.semantic_storyboard_routing import route_semantic_storyboard_record
 from murmur.live_scene.semantic_storyboard_verifier import (
+    SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS,
+    SEMANTIC_STORYBOARD_MODEL_VERIFICATION_OBLIGATIONS,
     SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS,
     SemanticStoryboardVerificationError,
     SemanticStoryboardVerificationObligation,
@@ -153,7 +155,7 @@ def _replace_result_node(
     )
 
 
-def test_anchor_receipt_binds_exact_empty_program_and_complete_obligations() -> None:
+def test_anchor_receipt_binds_only_obligations_applicable_at_genesis() -> None:
     problem = _problem()
     checkpoint = compile_semantic_storyboard_anchor(problem)
     verified = verify_semantic_storyboard_anchor(problem, checkpoint)
@@ -165,11 +167,24 @@ def test_anchor_receipt_binds_exact_empty_program_and_complete_obligations() -> 
         base_program_sha256=empty_hash,
         result_program_sha256=empty_hash,
         semantic_effect=None,
-        obligation_codes=SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS,
+        obligation_codes=SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS,
     )
-    assert verified.obligation_codes == tuple(SemanticStoryboardVerificationObligation)
+    assert SemanticStoryboardVerificationObligation.EFFECT_CLOSURE not in verified.obligation_codes
+    assert (
+        SemanticStoryboardVerificationObligation.CERTIFICATE_CHAIN not in verified.obligation_codes
+    )
     with pytest.raises(FrozenInstanceError):
         verified.checkpoint_id = "changed"  # type: ignore[misc]
+
+
+def test_model_receipt_binds_the_complete_verifier_suite() -> None:
+    receipt = _verify_case(
+        _problem(),
+        (_record("trace", trajectoryId="lower_angle"),),
+    )[-1]
+
+    assert receipt.obligation_codes == SEMANTIC_STORYBOARD_MODEL_VERIFICATION_OBLIGATIONS
+    assert receipt.obligation_codes == SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS
 
 
 def test_all_nine_anchor_frontiers_verify_against_independent_materialization() -> None:

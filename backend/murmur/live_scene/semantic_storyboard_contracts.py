@@ -628,11 +628,31 @@ def semantic_storyboard_scene_sha256(
 
     if not isinstance(scene, ProjectileStoryboardSemanticSceneStateV1):
         raise TypeError("scene must be a ProjectileStoryboardSemanticSceneStateV1")
+    return semantic_storyboard_frontier_sha256(scene.revision, scene.components)
+
+
+def semantic_storyboard_frontier_sha256(
+    revision: int,
+    components: tuple[ProjectileStoryboardStateV1, ...],
+) -> str:
+    """Hash a valid semantic frontier before its new certificate head exists."""
+
+    if type(revision) is not int or revision < 0:
+        raise TypeError("revision must be a non-negative strict integer")
+    if not isinstance(components, tuple) or any(
+        not isinstance(component, ProjectileStoryboardStateV1) for component in components
+    ):
+        raise TypeError("components must be a tuple of storyboard states")
+    if len(components) > 1:
+        raise ValueError("storyboard semantic frontier supports at most one component")
+    expected_revision = 0 if not components else 1 + len(components[0].accepted_records)
+    if revision != expected_revision:
+        raise ValueError("storyboard semantic frontier revision does not match its ledger")
     return canonical_sha256(
         {
-            "revision": scene.revision,
+            "revision": revision,
             "components": [
-                component.model_dump(mode="json", by_alias=True) for component in scene.components
+                component.model_dump(mode="json", by_alias=True) for component in components
             ],
         },
         domain=SEMANTIC_STORYBOARD_SCENE_HASH_DOMAIN,
@@ -688,6 +708,7 @@ __all__ = [
     "TraceStoryboardRecordV1",
     "paired_projectile_comparison_sha256",
     "routed_semantic_storyboard_beat_sha256",
+    "semantic_storyboard_frontier_sha256",
     "semantic_storyboard_program_sha256",
     "semantic_storyboard_record_sha256",
     "semantic_storyboard_scene_sha256",

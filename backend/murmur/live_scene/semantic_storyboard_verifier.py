@@ -195,6 +195,16 @@ class SemanticStoryboardVerificationObligation(StrEnum):
 
 
 SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS = tuple(SemanticStoryboardVerificationObligation)
+SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS = tuple(
+    code
+    for code in SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS
+    if code
+    not in {
+        SemanticStoryboardVerificationObligation.EFFECT_CLOSURE,
+        SemanticStoryboardVerificationObligation.CERTIFICATE_CHAIN,
+    }
+)
+SEMANTIC_STORYBOARD_MODEL_VERIFICATION_OBLIGATIONS = SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS
 
 
 class SemanticStoryboardVerificationError(ValueError):
@@ -213,7 +223,7 @@ class SemanticStoryboardVerificationError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class VerifiedStoryboardCheckpoint:
-    """Compact proof output consumed by the future certificate layer."""
+    """Diagnostic proof facts; certificate code must derive its own receipt."""
 
     checkpoint_id: str
     operation_targets: tuple[str, ...]
@@ -1476,7 +1486,7 @@ def verify_semantic_storyboard_anchor(
         base_program_sha256=program_hash,
         result_program_sha256=program_hash,
         semantic_effect=None,
-        obligation_codes=SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS,
+        obligation_codes=SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS,
     )
 
 
@@ -1624,6 +1634,8 @@ def verify_semantic_storyboard_frontier(
 
 
 __all__ = [
+    "SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS",
+    "SEMANTIC_STORYBOARD_MODEL_VERIFICATION_OBLIGATIONS",
     "SEMANTIC_STORYBOARD_VERIFICATION_OBLIGATIONS",
     "SemanticStoryboardCheckpointBlueprintLike",
     "SemanticStoryboardVerificationError",
