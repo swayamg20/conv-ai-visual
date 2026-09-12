@@ -258,6 +258,25 @@ def test_deeply_nested_json_fails_closed_with_a_fixed_error() -> None:
     with pytest.raises(SemanticStoryboardDirectorStreamError) as captured:
         parser.feed(deeply_nested)
 
+    assert captured.value.code in {
+        SemanticStoryboardDirectorStreamErrorCode.INVALID_JSON,
+        SemanticStoryboardDirectorStreamErrorCode.INVALID_RECORD,
+    }
+    assert parser.closed
+
+
+def test_json_decoder_recursion_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raise_recursion(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError
+
+    monkeypatch.setattr(json, "loads", raise_recursion)
+    parser = SemanticStoryboardDirectorStreamParser()
+
+    with pytest.raises(SemanticStoryboardDirectorStreamError) as captured:
+        parser.feed(b"{}\n")
+
     assert captured.value.code is SemanticStoryboardDirectorStreamErrorCode.INVALID_JSON
     assert parser.closed
 
