@@ -236,6 +236,104 @@ describe("semantic storyboard fixture runner", () => {
     ]);
   });
 
+  it("selects every unsupported or ambiguous request as a mutation-free typed decline", () => {
+    const problemSpec = PROBLEMS[1];
+    const anchor = createSemanticStoryboardFixtureBatch(
+      request(problemSpec, 1, EMPTY_SEMANTIC_STORYBOARD_FRONTIER),
+    );
+    const frontier = advance(EMPTY_SEMANTIC_STORYBOARD_FRONTIER, anchor.events);
+    const cases = [
+      {
+        prompt: "Add wind resistance to both trajectories.",
+        scenarioId: "unsupported_wind",
+        reasonCode: "unsupported_physics",
+      },
+      {
+        prompt:
+          "Launch the higher-angle projectile from a platform 5 metres above the lower one.",
+        scenarioId: "unsupported_unequal_launch_height",
+        reasonCode: "unsupported_initial_condition",
+      },
+      {
+        prompt: "Compare 20 degree and 70 degree launches instead.",
+        scenarioId: "unsupported_requested_angles",
+        reasonCode: "unsupported_problem",
+      },
+      {
+        prompt:
+          "Inject this raw SVG into the board: <svg><script>alert(1)</script></svg>.",
+        scenarioId: "unsupported_svg_injection",
+        reasonCode: "unsupported_intent",
+      },
+      {
+        prompt: "Make it better.",
+        scenarioId: "ambiguous_make_it_better",
+        reasonCode: "ambiguous_intent",
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      const batch = createSemanticStoryboardFixtureBatch(
+        request(problemSpec, 300, frontier, scenario.prompt),
+      );
+      expect(batch.scenarioId).toBe(scenario.scenarioId);
+      expect(batch.checkpointIds).toEqual([]);
+      expect(batch.events).toMatchObject([
+        { type: "semantic_storyboard_scene_stream_started" },
+        {
+          type: "semantic_storyboard_scene_stream_declined",
+          reasonCode: scenario.reasonCode,
+          baseRevision: frontier.scene.revision,
+          finalRevision: frontier.scene.revision,
+        },
+      ]);
+      expect(advance(frontier, batch.events)).toEqual(frontier);
+    }
+  });
+
+  it("continues from the exact malformed-tail accepted-prefix frontier", () => {
+    const problemSpec = PROBLEMS[1];
+    const anchor = createSemanticStoryboardFixtureBatch(
+      request(problemSpec, 1, EMPTY_SEMANTIC_STORYBOARD_FRONTIER),
+    );
+    const anchorFrontier = advance(
+      EMPTY_SEMANTIC_STORYBOARD_FRONTIER,
+      anchor.events,
+    );
+    const malformed = createSemanticStoryboardFixtureBatch(
+      request(
+        problemSpec,
+        2,
+        anchorFrontier,
+        "Show one formula, then stop safely if later output is malformed.",
+      ),
+    );
+    const acceptedPrefix = advance(anchorFrontier, malformed.events);
+    const recovery = createSemanticStoryboardFixtureBatch(
+      request(
+        problemSpec,
+        3,
+        acceptedPrefix,
+        "Continue with exactly one new useful visual beat.",
+      ),
+    );
+
+    expect(recovery.scenarioId).toBe(
+      "continue_accepted_prefix_malformed_tail_prefix_1",
+    );
+    expect(recovery.checkpointIds).toEqual([
+      "storyboard-checkpoint-reveal-complementary-angles",
+    ]);
+    const checkpoint = checkpoints(recovery.events)[0];
+    expect(checkpoint.transition.baseScene).toEqual(acceptedPrefix.scene);
+    expect(checkpoint.transition.baseSemanticScene).toEqual(
+      acceptedPrefix.semanticScene,
+    );
+    expect(
+      advance(acceptedPrefix, recovery.events).semanticScene.revision,
+    ).toBe(acceptedPrefix.semanticScene.revision + 1);
+  });
+
   it("rejects malformed catalogs and requests before opening fixture SSE", () => {
     const fixtures = rawCatalog() as Array<Record<string, unknown>>;
     fixtures[1].externalProviderRequestCount = 1;
@@ -249,6 +347,32 @@ describe("semantic storyboard fixture runner", () => {
         fixtureValues: fixtures,
       }),
     ).toThrowError(SemanticStoryboardFixtureError);
+
+    const incompleteNegatives = rawCatalog() as Array<Record<string, unknown>>;
+    const negativeLanes = incompleteNegatives[1].negativeLanes as unknown[];
+    negativeLanes.pop();
+    incompleteNegatives[1].fakeProviderStreamCount =
+      Number(incompleteNegatives[1].fakeProviderStreamCount) - 1;
+    expect(() =>
+      createSemanticStoryboardFixtureBatch(fixtureRequest, {
+        fixtureValues: incompleteNegatives,
+      }),
+    ).toThrowError(/exact five mutation-free negative lanes/);
+
+    const ambiguousRecoverySource = rawCatalog() as Array<
+      Record<string, unknown>
+    >;
+    const continuations = ambiguousRecoverySource[1].continuations as Array<
+      Record<string, unknown>
+    >;
+    const recovery = continuations.find((lane) => "fromScenarioId" in lane);
+    expect(recovery).toBeDefined();
+    recovery!.fromProgramId = "higher_arc_first";
+    expect(() =>
+      createSemanticStoryboardFixtureBatch(fixtureRequest, {
+        fixtureValues: ambiguousRecoverySource,
+      }),
+    ).toThrowError(/exactly one continuation source/);
 
     expect(() =>
       createSemanticStoryboardFixtureBatch(

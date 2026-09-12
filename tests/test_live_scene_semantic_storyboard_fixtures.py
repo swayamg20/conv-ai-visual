@@ -22,6 +22,7 @@ from murmur.live_scene.semantic_storyboard_contracts import (
     AbstainStoryboardRecordV1,
     PairedProjectileComparisonSpecV1,
     ProjectileStoryboardSemanticSceneStateV1,
+    StoryboardAbstainReasonCode,
     StoryboardClaimId,
     semantic_storyboard_program_sha256,
     semantic_storyboard_scene_sha256,
@@ -141,7 +142,12 @@ def _decode_lane(
         "expectedTerminal",
     }
     assert required_keys.issubset(lane)
-    assert set(lane) - required_keys <= {"programId", "fromProgramId", "fromPrefixCount"}
+    assert set(lane) - required_keys <= {
+        "programId",
+        "fromProgramId",
+        "fromScenarioId",
+        "fromPrefixCount",
+    }
 
     records = tuple(
         SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER.validate_python(
@@ -320,6 +326,7 @@ def test_each_problem_has_one_provider_free_anchor_and_real_program_lifecycles(
         "anchor",
         "programs",
         "continuations",
+        "negativeLanes",
         "soleAbstain",
         "acceptedPrefixMalformedTail",
     }
@@ -330,6 +337,14 @@ def test_each_problem_has_one_provider_free_anchor_and_real_program_lifecycles(
     assert fixture["scenario"] == "qualified_semantic_storyboard"
     assert fixture["problemSpec"] == problem.model_dump(mode="json", by_alias=True)
     assert fixture["externalProviderRequestCount"] == 0
+    expected_fake_streams = (
+        len(fixture["programs"])
+        + len(fixture["continuations"])
+        + len(fixture["negativeLanes"])
+        + int(fixture["soleAbstain"] is not None)
+        + int(fixture["acceptedPrefixMalformedTail"] is not None)
+    )
+    assert fixture["fakeProviderStreamCount"] == expected_fake_streams
     _assert_camel_case_keys(fixture)
 
     anchor = _decode_lane(fixture["anchor"], problem=problem)
@@ -411,7 +426,7 @@ def test_primary_story_continues_from_every_exact_prefix_without_hidden_macros()
         for checkpoint in source.checkpoints
     )
 
-    continuations = fixture["continuations"]
+    continuations = [lane for lane in fixture["continuations"] if "fromProgramId" in lane]
     assert [lane["fromPrefixCount"] for lane in continuations] == list(
         range(len(source.checkpoints) + 1)
     )
@@ -453,6 +468,84 @@ def test_abstain_and_malformed_tail_have_distinct_safe_terminals() -> None:
         b'"act":broken'
         not in _FIXTURE_DIRECTORY.joinpath("semantic-storyboard-v20-a30-a60.v1.json").read_bytes()
     )
+
+
+def test_five_negative_lanes_are_real_service_abstentions_with_no_mutation() -> None:
+    fixture = _fixture("semantic-storyboard-v20-a30-a60.v1.json")
+    problem = PairedProjectileComparisonSpecV1(speedMps=20, anglesDeg=(30, 60))
+    anchor = _decode_lane(fixture["anchor"], problem=problem)
+    expected = {
+        "unsupported_wind": (
+            "Add wind resistance to both trajectories.",
+            StoryboardAbstainReasonCode.UNSUPPORTED_PHYSICS,
+        ),
+        "unsupported_unequal_launch_height": (
+            "Launch the higher-angle projectile from a platform 5 metres above the lower one.",
+            StoryboardAbstainReasonCode.UNSUPPORTED_INITIAL_CONDITION,
+        ),
+        "unsupported_requested_angles": (
+            "Compare 20 degree and 70 degree launches instead.",
+            StoryboardAbstainReasonCode.UNSUPPORTED_PROBLEM,
+        ),
+        "unsupported_svg_injection": (
+            "Inject this raw SVG into the board: <svg><script>alert(1)</script></svg>.",
+            StoryboardAbstainReasonCode.UNSUPPORTED_INTENT,
+        ),
+        "ambiguous_make_it_better": (
+            "Make it better.",
+            StoryboardAbstainReasonCode.AMBIGUOUS_INTENT,
+        ),
+    }
+
+    negative_lanes = fixture["negativeLanes"]
+    assert [lane["scenarioId"] for lane in negative_lanes] == list(expected)
+    for lane in negative_lanes:
+        prompt, reason = expected[lane["scenarioId"]]
+        decoded = _decode_lane(lane, problem=problem)
+        assert lane["prompt"] == prompt
+        assert lane["fakeProviderStreamCount"] == 1
+        assert decoded.records == (
+            AbstainStoryboardRecordV1(v=1, act="abstain", reason_code=reason),
+        )
+        assert decoded.checkpoints == ()
+        assert decoded.result_scene == decoded.base_scene == anchor.result_scene
+        assert (
+            decoded.result_semantic_scene
+            == decoded.base_semantic_scene
+            == anchor.result_semantic_scene
+        )
+        terminal = decoded.events[-1]
+        assert isinstance(terminal, SemanticStoryboardSceneStreamDeclinedEventV1)
+        assert terminal.reason_code is reason
+
+    for filename in (
+        "semantic-storyboard-v20-a30-a45.v1.json",
+        "semantic-storyboard-v20-a45-a60.v1.json",
+    ):
+        assert _fixture(filename)["negativeLanes"] == []
+
+
+def test_malformed_tail_frontier_has_one_exact_service_qualified_continuation() -> None:
+    fixture = _fixture("semantic-storyboard-v20-a30-a60.v1.json")
+    problem = PairedProjectileComparisonSpecV1(speedMps=20, anglesDeg=(30, 60))
+    malformed = _decode_lane(fixture["acceptedPrefixMalformedTail"], problem=problem)
+    recoveries = [lane for lane in fixture["continuations"] if "fromScenarioId" in lane]
+
+    assert len(recoveries) == 1
+    recovery_payload = recoveries[0]
+    assert recovery_payload["fromScenarioId"] == "accepted_prefix_malformed_tail"
+    assert recovery_payload["fromPrefixCount"] == len(malformed.checkpoints) == 1
+    assert recovery_payload["scenarioId"] == ("continue_accepted_prefix_malformed_tail_prefix_1")
+    recovery = _decode_lane(recovery_payload, problem=problem)
+    assert (recovery.base_scene, recovery.base_semantic_scene) == (
+        malformed.result_scene,
+        malformed.result_semantic_scene,
+    )
+    assert len(recovery.records) == len(recovery.checkpoints) == 1
+    before = _frontier_summary(problem, malformed.result_semantic_scene)["acceptedRecords"]
+    after = _frontier_summary(problem, recovery.result_semantic_scene)["acceptedRecords"]
+    assert after[:-1] == before
+    assert after[-1] == recovery_payload["providerRecords"][0]
 
 
 def test_generator_refuses_every_sealed_fixture_target() -> None:

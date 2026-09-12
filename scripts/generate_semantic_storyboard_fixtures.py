@@ -74,6 +74,13 @@ class _Program:
 
 
 @dataclass(frozen=True, slots=True)
+class _NegativeScenario:
+    scenario_id: str
+    prompt: str
+    reason_code: StoryboardAbstainReasonCode
+
+
+@dataclass(frozen=True, slots=True)
 class _Lane:
     scenario_id: str
     generation: int
@@ -164,6 +171,34 @@ _FORMULA_EVIDENCE: Final = (StoryboardEvidenceId.RANGE_FORMULA,)
 _COMPLEMENTARY_EVIDENCE: Final = (
     StoryboardEvidenceId.RANGE_FORMULA,
     StoryboardEvidenceId.COMPLEMENTARY_ANGLES,
+)
+_CONTINUE_PROMPT: Final = "Continue with exactly one new useful visual beat."
+_NEGATIVE_SCENARIOS: Final = (
+    _NegativeScenario(
+        "unsupported_wind",
+        "Add wind resistance to both trajectories.",
+        StoryboardAbstainReasonCode.UNSUPPORTED_PHYSICS,
+    ),
+    _NegativeScenario(
+        "unsupported_unequal_launch_height",
+        "Launch the higher-angle projectile from a platform 5 metres above the lower one.",
+        StoryboardAbstainReasonCode.UNSUPPORTED_INITIAL_CONDITION,
+    ),
+    _NegativeScenario(
+        "unsupported_requested_angles",
+        "Compare 20 degree and 70 degree launches instead.",
+        StoryboardAbstainReasonCode.UNSUPPORTED_PROBLEM,
+    ),
+    _NegativeScenario(
+        "unsupported_svg_injection",
+        "Inject this raw SVG into the board: <svg><script>alert(1)</script></svg>.",
+        StoryboardAbstainReasonCode.UNSUPPORTED_INTENT,
+    ),
+    _NegativeScenario(
+        "ambiguous_make_it_better",
+        "Make it better.",
+        StoryboardAbstainReasonCode.AMBIGUOUS_INTENT,
+    ),
 )
 
 
@@ -483,6 +518,7 @@ async def _build_fixture(angles_deg: tuple[int, int]) -> dict[str, object]:
         program_lanes.append((program, lane))
 
     continuations: list[dict[str, object]] = []
+    negative_lanes: list[_Lane] = []
     sole_abstain: dict[str, object] | None = None
     accepted_prefix: dict[str, object] | None = None
     if angles_deg == PRIMARY_ANGLE_PAIR:
@@ -498,7 +534,7 @@ async def _build_fixture(angles_deg: tuple[int, int]) -> dict[str, object]:
                 problem,
                 scenario_id=f"continue_higher_arc_first_prefix_{prefix_count}",
                 generation=100 + prefix_count,
-                prompt="Continue with exactly one new useful visual beat.",
+                prompt=_CONTINUE_PROMPT,
                 records=(continuation_records[prefix_count],),
                 base_scene=scene,
                 base_semantic_scene=semantic_scene,
@@ -549,9 +585,56 @@ async def _build_fixture(angles_deg: tuple[int, int]) -> dict[str, object]:
             raise RuntimeError("fixture malformed tail did not retain its accepted prefix")
         accepted_prefix = _dump_lane(problem, malformed)
 
+        recovery = await _director_lane(
+            problem,
+            scenario_id="continue_accepted_prefix_malformed_tail_prefix_1",
+            generation=202,
+            prompt=_CONTINUE_PROMPT,
+            records=(_reveal(StoryboardConceptId.COMPLEMENTARY_ANGLES),),
+            base_scene=malformed.result_scene,
+            base_semantic_scene=malformed.result_semantic_scene,
+        )
+        continuations.append(
+            _dump_lane(
+                problem,
+                recovery,
+                fromScenarioId=malformed.scenario_id,
+                fromPrefixCount=len(malformed.checkpoints),
+            )
+        )
+
+        for generation, scenario in enumerate(_NEGATIVE_SCENARIOS, start=210):
+            lane = await _director_lane(
+                problem,
+                scenario_id=scenario.scenario_id,
+                generation=generation,
+                prompt=scenario.prompt,
+                records=(
+                    AbstainStoryboardRecordV1(
+                        v=1,
+                        act="abstain",
+                        reason_code=scenario.reason_code,
+                    ),
+                ),
+                base_scene=anchor.result_scene,
+                base_semantic_scene=anchor.result_semantic_scene,
+            )
+            if (
+                lane.checkpoints
+                or lane.result_scene != anchor.result_scene
+                or lane.result_semantic_scene != anchor.result_semantic_scene
+                or not isinstance(lane.events[-1], SemanticStoryboardSceneStreamDeclinedEventV1)
+                or lane.events[-1].reason_code is not scenario.reason_code
+            ):
+                raise RuntimeError(
+                    f"fixture negative lane {scenario.scenario_id} mutated its frontier"
+                )
+            negative_lanes.append(lane)
+
     fixture_id = f"semantic-storyboard-v20-a{angles_deg[0]}-a{angles_deg[1]}"
     fake_stream_count = sum(lane.fake_provider_stream_count for _, lane in program_lanes)
     fake_stream_count += len(continuations)
+    fake_stream_count += len(negative_lanes)
     fake_stream_count += int(sole_abstain is not None) + int(accepted_prefix is not None)
     return {
         "v": FIXTURE_FORMAT_VERSION,
@@ -577,6 +660,7 @@ async def _build_fixture(angles_deg: tuple[int, int]) -> dict[str, object]:
             for program, lane in program_lanes
         ],
         "continuations": continuations,
+        "negativeLanes": [_dump_lane(problem, lane) for lane in negative_lanes],
         "soleAbstain": sole_abstain,
         "acceptedPrefixMalformedTail": accepted_prefix,
     }

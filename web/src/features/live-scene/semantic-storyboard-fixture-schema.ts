@@ -39,7 +39,12 @@ export class SemanticStoryboardFixtureError extends Error {
 
 type UnknownRecord = Record<string, unknown>;
 export type SemanticStoryboardFixtureLaneKind =
-  "anchor" | "program" | "continuation" | "sole_abstain" | "accepted_prefix";
+  | "anchor"
+  | "program"
+  | "continuation"
+  | "negative"
+  | "sole_abstain"
+  | "accepted_prefix";
 
 interface FrontierSummary {
   readonly revision: number;
@@ -64,6 +69,7 @@ export interface DecodedSemanticStoryboardFixtureLane {
   >;
   readonly programId?: string;
   readonly fromProgramId?: string;
+  readonly fromScenarioId?: string;
   readonly fromPrefixCount?: number;
 }
 
@@ -323,7 +329,33 @@ function requireCompleted(
   return terminal;
 }
 
-function laneKeys(kind: SemanticStoryboardFixtureLaneKind): readonly string[] {
+type ContinuationSourceKey = "fromProgramId" | "fromScenarioId";
+
+function continuationSourceKey(
+  input: UnknownRecord,
+  field: string,
+): ContinuationSourceKey {
+  const hasProgram = Object.prototype.hasOwnProperty.call(
+    input,
+    "fromProgramId",
+  );
+  const hasScenario = Object.prototype.hasOwnProperty.call(
+    input,
+    "fromScenarioId",
+  );
+  if (hasProgram === hasScenario) {
+    return failSemanticStoryboardFixture(
+      "invalid_fixture",
+      `${field} must identify exactly one continuation source`,
+    );
+  }
+  return hasProgram ? "fromProgramId" : "fromScenarioId";
+}
+
+function laneKeys(
+  kind: SemanticStoryboardFixtureLaneKind,
+  continuationSource?: ContinuationSourceKey,
+): readonly string[] {
   const shared = [
     "scenarioId",
     "generation",
@@ -342,7 +374,13 @@ function laneKeys(kind: SemanticStoryboardFixtureLaneKind): readonly string[] {
   ];
   if (kind === "program") return [...shared, "programId"];
   if (kind === "continuation") {
-    return [...shared, "fromProgramId", "fromPrefixCount"];
+    if (!continuationSource) {
+      return failSemanticStoryboardFixture(
+        "invalid_fixture",
+        "continuation lane has no source identity",
+      );
+    }
+    return [...shared, continuationSource, "fromPrefixCount"];
   }
   return shared;
 }
@@ -354,7 +392,9 @@ function decodeLane(
   field: string,
 ): DecodedSemanticStoryboardFixtureLane {
   const input = record(value, field);
-  exactKeys(input, laneKeys(kind), field);
+  const sourceKey =
+    kind === "continuation" ? continuationSourceKey(input, field) : undefined;
+  exactKeys(input, laneKeys(kind, sourceKey), field);
   const scenarioId = identifier(input.scenarioId, `${field} scenarioId`);
   const generation = safeInteger(input.generation, `${field} generation`, 1);
   const routingMode = kind === "anchor" ? "reflex" : "director";
@@ -508,7 +548,7 @@ function decodeLane(
         `${field} is not one provider-free anchor`,
       );
     }
-  } else if (kind === "sole_abstain") {
+  } else if (kind === "sole_abstain" || kind === "negative") {
     if (
       providerRecords.length !== 1 ||
       providerRecords[0].act !== "abstain" ||
@@ -673,8 +713,12 @@ function decodeLane(
       ? identifier(input.programId, `${field} programId`)
       : undefined;
   const fromProgramId =
-    kind === "continuation"
+    kind === "continuation" && sourceKey === "fromProgramId"
       ? identifier(input.fromProgramId, `${field} fromProgramId`)
+      : undefined;
+  const fromScenarioId =
+    kind === "continuation" && sourceKey === "fromScenarioId"
+      ? identifier(input.fromScenarioId, `${field} fromScenarioId`)
       : undefined;
   const fromPrefixCount =
     kind === "continuation"
@@ -685,7 +729,7 @@ function decodeLane(
     (kind === "program" && programId !== scenarioId) ||
     (kind === "continuation" &&
       scenarioId !==
-        `continue_${fromProgramId}_prefix_${String(fromPrefixCount)}`) ||
+        `continue_${fromProgramId ?? fromScenarioId}_prefix_${String(fromPrefixCount)}`) ||
     (kind === "sole_abstain" && scenarioId !== "sole_abstain") ||
     (kind === "accepted_prefix" &&
       scenarioId !== "accepted_prefix_malformed_tail")
@@ -708,6 +752,7 @@ function decodeLane(
     resultFrontiers,
     ...(programId ? { programId } : {}),
     ...(fromProgramId ? { fromProgramId } : {}),
+    ...(fromScenarioId ? { fromScenarioId } : {}),
     ...(fromPrefixCount === undefined ? {} : { fromPrefixCount }),
   });
 }
@@ -719,6 +764,7 @@ export interface DecodedSemanticStoryboardFixtureEnvelope {
   readonly anchor: DecodedSemanticStoryboardFixtureLane;
   readonly programs: readonly DecodedSemanticStoryboardFixtureLane[];
   readonly continuations: readonly DecodedSemanticStoryboardFixtureLane[];
+  readonly negativeLanes: readonly DecodedSemanticStoryboardFixtureLane[];
   readonly soleAbstain?: DecodedSemanticStoryboardFixtureLane;
   readonly acceptedPrefix?: DecodedSemanticStoryboardFixtureLane;
 }
@@ -743,6 +789,7 @@ export function decodeSemanticStoryboardFixtureEnvelope(
       "anchor",
       "programs",
       "continuations",
+      "negativeLanes",
       "soleAbstain",
       "acceptedPrefixMalformedTail",
     ],
@@ -793,10 +840,14 @@ export function decodeSemanticStoryboardFixtureEnvelope(
       "fixture coverage does not match its problem",
     );
   }
-  if (!Array.isArray(input.programs) || !Array.isArray(input.continuations)) {
+  if (
+    !Array.isArray(input.programs) ||
+    !Array.isArray(input.continuations) ||
+    !Array.isArray(input.negativeLanes)
+  ) {
     return failSemanticStoryboardFixture(
       "invalid_fixture",
-      "fixture programs and continuations must be arrays",
+      "fixture programs, continuations, and negativeLanes must be arrays",
     );
   }
 
@@ -818,6 +869,16 @@ export function decodeSemanticStoryboardFixtureEnvelope(
         problemSpec,
         "continuation",
         `fixture continuations[${index}]`,
+      ),
+    ),
+  );
+  const negativeLanes = Object.freeze(
+    input.negativeLanes.map((lane, index) =>
+      decodeLane(
+        lane,
+        problemSpec,
+        "negative",
+        `fixture negativeLanes[${index}]`,
       ),
     ),
   );
@@ -850,6 +911,7 @@ export function decodeSemanticStoryboardFixtureEnvelope(
     anchor,
     programs,
     continuations,
+    negativeLanes,
     ...(soleAbstain ? { soleAbstain } : {}),
     ...(acceptedPrefix ? { acceptedPrefix } : {}),
   });

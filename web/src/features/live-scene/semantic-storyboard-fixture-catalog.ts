@@ -18,6 +18,35 @@ import {
 } from "./semantic-storyboard-fixture-schema";
 
 const EXPECTED_ANGLE_PAIRS = Object.freeze(["30:45", "30:60", "45:60"]);
+const EXPECTED_NEGATIVE_LANES = Object.freeze([
+  Object.freeze({
+    scenarioId: "unsupported_wind",
+    prompt: "Add wind resistance to both trajectories.",
+    reasonCode: "unsupported_physics",
+  }),
+  Object.freeze({
+    scenarioId: "unsupported_unequal_launch_height",
+    prompt:
+      "Launch the higher-angle projectile from a platform 5 metres above the lower one.",
+    reasonCode: "unsupported_initial_condition",
+  }),
+  Object.freeze({
+    scenarioId: "unsupported_requested_angles",
+    prompt: "Compare 20 degree and 70 degree launches instead.",
+    reasonCode: "unsupported_problem",
+  }),
+  Object.freeze({
+    scenarioId: "unsupported_svg_injection",
+    prompt:
+      "Inject this raw SVG into the board: <svg><script>alert(1)</script></svg>.",
+    reasonCode: "unsupported_intent",
+  }),
+  Object.freeze({
+    scenarioId: "ambiguous_make_it_better",
+    prompt: "Make it better.",
+    reasonCode: "ambiguous_intent",
+  }),
+]);
 const LAYOUTS = Object.freeze([
   "cinematic",
   "compact",
@@ -92,16 +121,29 @@ function qualifyFixture(
       "fixture acceptedPrefixMalformedTail",
     );
   }
+  for (const [index, lane] of fixture.negativeLanes.entries()) {
+    exactAnchorBase(fixture.anchor, lane, `fixture negativeLanes[${index}]`);
+  }
 
   for (const [index, lane] of fixture.continuations.entries()) {
-    const source = fixture.programs.find(
-      (program) => program.programId === lane.fromProgramId,
-    );
+    const source = lane.fromProgramId
+      ? fixture.programs.find(
+          (program) => program.programId === lane.fromProgramId,
+        )
+      : fixture.acceptedPrefix?.scenarioId === lane.fromScenarioId
+        ? fixture.acceptedPrefix
+        : undefined;
     const prefix = lane.fromPrefixCount;
     if (!source || prefix === undefined || prefix > source.checkpoints.length) {
       return failSemanticStoryboardFixture(
         "invalid_fixture",
         `fixture continuations[${index}] has no valid source prefix`,
+      );
+    }
+    if (lane.fromScenarioId && prefix !== source.checkpoints.length) {
+      return failSemanticStoryboardFixture(
+        "invalid_fixture",
+        `fixture continuations[${index}] does not start at its source terminal`,
       );
     }
     const prefixScene =
@@ -157,6 +199,7 @@ function qualifyFixture(
     fixture.anchor,
     ...fixture.programs,
     ...fixture.continuations,
+    ...fixture.negativeLanes,
     ...(fixture.soleAbstain ? [fixture.soleAbstain] : []),
     ...(fixture.acceptedPrefix ? [fixture.acceptedPrefix] : []),
   ]);
@@ -248,6 +291,34 @@ function decodeCatalog(
     );
   }
 
+  const negativeFixtures = fixtures.filter(
+    (fixture) => fixture.negativeLanes.length > 0,
+  );
+  const negativeLanes = negativeFixtures.flatMap(
+    (fixture) => fixture.negativeLanes,
+  );
+  if (
+    negativeFixtures.length !== 1 ||
+    negativeFixtures[0].problemSpec.anglesDeg.join(":") !== "30:60" ||
+    !sameSemanticStoryboardFixtureValue(
+      negativeLanes.map((lane) => ({
+        scenarioId: lane.scenarioId,
+        prompt:
+          lane.request.routingMode === "director" ? lane.request.prompt : null,
+        reasonCode:
+          lane.providerRecords[0]?.act === "abstain"
+            ? lane.providerRecords[0].reasonCode
+            : null,
+      })),
+      EXPECTED_NEGATIVE_LANES,
+    )
+  ) {
+    return failSemanticStoryboardFixture(
+      "invalid_fixture",
+      "fixture catalog lacks the exact five mutation-free negative lanes",
+    );
+  }
+
   const continuationFixture = fixtures.find(
     (fixture) => fixture.continuations.length > 0,
   );
@@ -255,16 +326,28 @@ function decodeCatalog(
     (program) =>
       program.programId === continuationFixture.continuations[0]?.fromProgramId,
   );
+  const programContinuations =
+    continuationFixture?.continuations.filter((lane) => lane.fromProgramId) ??
+    [];
+  const recoveryContinuations =
+    continuationFixture?.continuations.filter((lane) => lane.fromScenarioId) ??
+    [];
+  const recovery = recoveryContinuations[0];
   if (
     !continuationFixture ||
     !continuationSource ||
     !sameSemanticStoryboardFixtureValue(
-      continuationFixture.continuations.map((lane) => lane.fromPrefixCount),
+      programContinuations.map((lane) => lane.fromPrefixCount),
       Array.from(
         { length: continuationSource.checkpoints.length + 1 },
         (_, index) => index,
       ),
     ) ||
+    recoveryContinuations.length !== 1 ||
+    recovery?.fromScenarioId !==
+      continuationFixture.acceptedPrefix?.scenarioId ||
+    recovery?.fromPrefixCount !==
+      continuationFixture.acceptedPrefix?.checkpoints.length ||
     !continuationFixture.soleAbstain ||
     !continuationFixture.acceptedPrefix
   ) {
