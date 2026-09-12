@@ -374,7 +374,7 @@ def test_frontier_rejects_physics_label_layout_style_and_trajectory_mutations() 
         _replace_scene_node(
             summary_scene,
             summary.id,
-            summary.model_copy(update={"latex": summary.latex.replace("R=", "R=999+", 1)}),
+            summary.model_copy(update={"latex": summary.latex.replace("R&=", "R&=999+", 1)}),
         ),
         ProjectileMotionVerificationCode.LABEL_FACT,
     )
@@ -431,7 +431,7 @@ def test_frontier_rejects_board_clipping_and_text_collision() -> None:
 
     title = next(node for node in scene.nodes if node.id == "lesson__title")
     assert isinstance(title, LatexTokenSceneNode)
-    collision = title.model_copy(update={"x": 640.0, "y": 92.0})
+    collision = title.model_copy(update={"x": 600.0, "y": 92.0})
     _assert_frontier_rejected(
         component,
         _replace_scene_node(scene, title.id, collision),
@@ -453,6 +453,70 @@ def test_every_main_checkpoint_of_every_problem_passes_independent_verification(
     for checkpoint in checkpoints:
         assert verify_projectile_motion_checkpoint(checkpoint) is None
     assert sum(checkpoint.choreography.phase.total_ms for checkpoint in checkpoints) == 36_600
+
+
+def test_every_distinct_emitted_token_rejects_a_one_unit_smaller_frame() -> None:
+    examples: dict[
+        tuple[str, str, float, float],
+        tuple[ProjectileMotionCheckpointBlueprint, LatexTokenSceneNode],
+    ] = {}
+    for problem in SUPPORTED_PROBLEMS:
+        checkpoints = list(_full_lesson(problem))
+        checkpoints.extend(
+            compile_projectile_motion_checkpoint_blueprints(
+                _clarify_beat(problem, topic),
+                _state(problem, ProjectileMotionMainCheckpoint.SUMMARY),
+            ).checkpoints[0]
+            for topic in PROJECTILE_MOTION_CLARIFICATION_ORDER
+        )
+        for checkpoint in checkpoints:
+            for node in checkpoint.result_nodes:
+                if not isinstance(node, LatexTokenSceneNode):
+                    continue
+                suffix = node.id.split("__", 1)[1]
+                examples.setdefault(
+                    (suffix, node.latex, node.width, node.height),
+                    (checkpoint, node),
+                )
+
+    assert {key[0] for key in examples} == {
+        "apex_acceleration",
+        "apex_velocity",
+        "axis_x",
+        "axis_y",
+        "clarify_apex_acceleration",
+        "clarify_flight_symmetry",
+        "clarify_horizontal_velocity",
+        "component_values",
+        "equation_x",
+        "equation_y",
+        "givens",
+        "height_value",
+        "label_horizontal",
+        "label_resultant",
+        "label_vertical",
+        "summary_values",
+        "title",
+        "vertical_state",
+    }
+    for checkpoint, token in examples.values():
+        narrower = _replace_result_node(
+            checkpoint,
+            token.id,
+            token.model_copy(update={"width": token.width - 1.0}),
+        )
+        with pytest.raises(ProjectileMotionVerificationError, match="browser-safe frame") as error:
+            verify_projectile_motion_checkpoint(narrower)
+        assert error.value.code is ProjectileMotionVerificationCode.LABEL_LAYOUT
+
+        shorter = _replace_result_node(
+            checkpoint,
+            token.id,
+            token.model_copy(update={"height": token.height - 1.0}),
+        )
+        with pytest.raises(ProjectileMotionVerificationError, match="browser-safe frame") as error:
+            verify_projectile_motion_checkpoint(shorter)
+        assert error.value.code is ProjectileMotionVerificationCode.LABEL_LAYOUT
 
 
 @pytest.mark.parametrize(

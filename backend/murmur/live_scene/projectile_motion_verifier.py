@@ -139,6 +139,33 @@ _AMBER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--amber))"}
 _SAGE_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--sage))"}
 _LAVENDER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--lavender))"}
 _EMBER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--ember))"}
+_SOFT_LAVENDER_TEXT = {**_SOFT_TEXT, "color": "hsl(var(--lavender))"}
+_SUMMARY_TEXT = {**_AMBER_TEXT, "fontSize": 20.0}
+_DETAIL_TEXT = {**_LAVENDER_TEXT, "fontSize": 20.0}
+
+_TOKEN_MINIMUM_FRAMES: Mapping[str, tuple[float, float]] = {
+    "axis_x": (28.0, 30.0),
+    "axis_y": (28.0, 42.0),
+    "title": (330.0, 42.0),
+    "givens": (300.0, 42.0),
+    "label_resultant": (50.0, 42.0),
+    "label_horizontal": (50.0, 42.0),
+    "label_vertical": (72.0, 42.0),
+    "equation_x": (220.0, 42.0),
+    "equation_y": (250.0, 52.0),
+    "component_values": (300.0, 42.0),
+    "apex_velocity": (264.0, 42.0),
+    "apex_acceleration": (280.0, 42.0),
+    "height_value": (124.0, 36.0),
+    "summary_values": (220.0, 116.0),
+    "clarify_horizontal_velocity": (340.0, 42.0),
+    "clarify_apex_acceleration": (380.0, 42.0),
+    "clarify_flight_symmetry": (392.0, 80.0),
+}
+_VERTICAL_STATE_MINIMUM_FRAMES: Mapping[str, tuple[float, float]] = {
+    r"a_x=0,\quad a_y=-g": (210.0, 42.0),
+    r"v_y<0,\qquad v_x=\text{constant}": (268.0, 42.0),
+}
 
 _TIMING: Mapping[ProjectileMotionCheckpointId, tuple[int, int, str]] = {
     ProjectileMotionCheckpointId.SETUP: (4_200, 1_000, "ease_out_quint"),
@@ -342,6 +369,32 @@ class _Physics:
 
 def _fail(code: ProjectileMotionVerificationCode, message: str) -> None:
     raise ProjectileMotionVerificationError(code, message)
+
+
+def _verify_browser_safe_token_frame(suffix: str, node: LatexTokenSceneNode) -> None:
+    """Enforce the independently measured closed KaTeX frame vocabulary."""
+
+    minimum = (
+        _VERTICAL_STATE_MINIMUM_FRAMES.get(node.latex)
+        if suffix == "vertical_state"
+        else _TOKEN_MINIMUM_FRAMES.get(suffix)
+    )
+    if minimum is None:
+        _fail(
+            ProjectileMotionVerificationCode.LABEL_LAYOUT,
+            f"label {node.id!r} is outside the browser-safe token vocabulary",
+        )
+    minimum_width, minimum_height = minimum
+    if node.width < minimum_width - _EPSILON:
+        _fail(
+            ProjectileMotionVerificationCode.LABEL_LAYOUT,
+            f"label {node.id!r} is narrower than its browser-safe frame",
+        )
+    if node.height < minimum_height - _EPSILON:
+        _fail(
+            ProjectileMotionVerificationCode.LABEL_LAYOUT,
+            f"label {node.id!r} is shorter than its browser-safe frame",
+        )
 
 
 def _derive_physics(problem: ProjectileMotionProblemSpecV1) -> _Physics:
@@ -571,16 +624,16 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
             closed=True,
             style=_MARKER_STYLE,
         ),
-        _token(component_id, "axis_x", "x", 518.0, 475.0, 28.0, height=24.0, style=_SOFT_TEXT),
+        _token(component_id, "axis_x", "x", 518.0, 475.0, 28.0, height=30.0, style=_SOFT_TEXT),
         _token(component_id, "axis_y", "y", 55.0, 96.0, 28.0, style=_SOFT_TEXT),
-        _token(component_id, "title", r"\text{One launch, two motions}", 640.0, 38.0, 250.0),
+        _token(component_id, "title", r"\text{One launch, two motions}", 600.0, 38.0, 330.0),
         _token(
             component_id,
             "givens",
             rf"v_0={physics.speed_mps}\,\mathrm{{m/s}},\quad \theta={physics.angle_deg}^\circ",
-            640.0,
+            618.0,
             92.0,
-            250.0,
+            300.0,
             style=_AMBER_TEXT,
         ),
         _token(component_id, "label_resultant", "v_0", 102.0, 386.0, 50.0, style=_AMBER_TEXT),
@@ -642,9 +695,9 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 rf"v_x={_format_value(physics.vx_mps)},\quad "
                 rf"v_{{y0}}={_format_value(physics.vy0_mps)}\ "
                 r"\mathrm{m/s}",
-                640.0,
+                618.0,
                 286.0,
-                250.0,
+                300.0,
                 style=_SOFT_TEXT,
             ),
             _token(
@@ -684,8 +737,8 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
         for retired_suffix in ("label_resultant", "label_horizontal", "label_vertical"):
             nodes.pop(_node_id(component_id, retired_suffix), None)
         apex = ascent[-1]
-        label_x = min(405.0, apex[0] + 110.0)
-        label_y = max(105.0, apex[1] - 120.0)
+        label_x = min(325.0, apex[0] + 110.0)
+        label_y = max(140.0, apex[1] - 120.0)
         acceleration_end = (apex[0], min(458.0, apex[1] + 58.0))
         add(
             _line(component_id, "apex_guide", (apex[0], 470.0), apex, _GUIDE_STYLE),
@@ -709,7 +762,7 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 r"v_y=0\quad\text{at the apex}",
                 label_x,
                 label_y,
-                220.0,
+                264.0,
                 style=_LAVENDER_TEXT,
             ),
             _token(
@@ -718,17 +771,18 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 r"a_y=-g=-10\,\mathrm{m/s^2}",
                 label_x,
                 label_y + 48.0,
-                190.0,
+                280.0,
                 style=_EMBER_TEXT,
             ),
             _token(
                 component_id,
                 "height_value",
                 rf"H={_format_value(physics.h_max_m)}\,\mathrm{{m}}",
-                apex[0] - 54.0,
+                max(97.0, apex[0] - 62.0),
                 (apex[1] + 470.0) / 2.0 - 20.0,
-                100.0,
-                style=_LAVENDER_TEXT,
+                124.0,
+                height=36.0,
+                style=_SOFT_LAVENDER_TEXT,
             ),
         )
 
@@ -744,11 +798,11 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
             _token(
                 component_id,
                 "vertical_state",
-                r"v_y<0,\quad v_x\ \text{stays constant}",
-                640.0,
+                r"v_y<0,\qquad v_x=\text{constant}",
+                630.0,
                 334.0,
-                250.0,
-                style=_LAVENDER_TEXT,
+                268.0,
+                style=_SOFT_LAVENDER_TEXT,
             ),
         )
 
@@ -764,14 +818,14 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
             _token(
                 component_id,
                 "summary_values",
-                rf"T={_format_value(physics.t_flight_s)}\,\mathrm{{s}},\quad "
-                rf"H={_format_value(physics.h_max_m)}\,\mathrm{{m}},\quad "
-                rf"R={_format_value(physics.x_range_m)}\,\mathrm{{m}}",
-                635.0,
-                510.0,
-                260.0,
-                height=52.0,
-                style=_AMBER_TEXT,
+                rf"\begin{{aligned}}T&={_format_value(physics.t_flight_s)}\,\mathrm{{s}}\\"
+                rf"H&={_format_value(physics.h_max_m)}\,\mathrm{{m}}\\"
+                rf"R&={_format_value(physics.x_range_m)}\,\mathrm{{m}}\end{{aligned}}",
+                650.0,
+                452.0,
+                220.0,
+                height=116.0,
+                style=_SUMMARY_TEXT,
             ),
         )
 
@@ -783,8 +837,8 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 "clarify_horizontal_velocity",
                 r"a_x=0\ \Longrightarrow\ v_x\ \text{stays constant}",
                 280.0,
-                524.0,
-                276.0,
+                526.0,
+                340.0,
                 style=_SAGE_TEXT,
             )
         )
@@ -795,8 +849,8 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 "clarify_apex_acceleration",
                 r"v_y=0\ \text{for an instant};\quad a_y=-g",
                 280.0,
-                524.0,
-                286.0,
+                500.0,
+                380.0,
                 style=_EMBER_TEXT,
             )
         )
@@ -805,11 +859,13 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
             _token(
                 component_id,
                 "clarify_flight_symmetry",
-                r"t_{\uparrow}=t_{\downarrow}\quad\text{when launch and impact heights match}",
+                r"\begin{gathered}t_{\uparrow}=t_{\downarrow}\\"
+                r"\text{when launch and impact heights match}\end{gathered}",
                 280.0,
-                524.0,
-                292.0,
-                style=_LAVENDER_TEXT,
+                480.0,
+                392.0,
+                height=80.0,
+                style=_DETAIL_TEXT,
             )
         )
     return nodes
@@ -914,6 +970,7 @@ def _verify_expected_node(actual: SceneNode, expected: SceneNode) -> None:
                 ProjectileMotionVerificationCode.LABEL_FACT,
                 f"label {expected.id!r} does not state the independently derived fact",
             )
+        _verify_browser_safe_token_frame(expected.id.split("__", 1)[1], actual)
         if actual.anchor != expected.anchor:
             _fail(
                 ProjectileMotionVerificationCode.LABEL_LAYOUT,

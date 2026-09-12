@@ -310,6 +310,42 @@ def test_main_lesson_authors_exactly_36_6_seconds_with_bounded_holds() -> None:
         )
 
 
+def test_dense_facts_reflow_inside_stable_nonoverlapping_frames() -> None:
+    problem = SUPPORTED_PROBLEMS[1]
+    summary = compile_projectile_motion_checkpoint_blueprints(
+        _advance_beat(problem, base_problem=None)
+    ).checkpoints[-1]
+    summary_token = _node_map(summary.result_nodes)["lesson__summary_values"]
+    assert isinstance(summary_token, LatexTokenSceneNode)
+    assert summary_token.latex.startswith(r"\begin{aligned}T&=")
+    assert summary_token.latex.count(r"\\") == 2
+    assert (summary_token.x, summary_token.y, summary_token.width, summary_token.height) == (
+        650.0,
+        452.0,
+        220.0,
+        116.0,
+    )
+    assert summary_token.style.font_size == 20.0
+
+    symmetry = compile_projectile_motion_checkpoint_blueprints(
+        _clarify_beat(problem, ProjectileMotionClarificationTopic.FLIGHT_SYMMETRY),
+        _state(problem, ProjectileMotionMainCheckpoint.SUMMARY),
+    ).checkpoints[0]
+    symmetry_token = _node_map(symmetry.result_nodes)["lesson__clarify_flight_symmetry"]
+    assert isinstance(symmetry_token, LatexTokenSceneNode)
+    assert symmetry_token.latex.startswith(r"\begin{gathered}")
+    assert (
+        symmetry_token.x,
+        symmetry_token.y,
+        symmetry_token.width,
+        symmetry_token.height,
+    ) == (280.0, 480.0, 392.0, 80.0)
+    assert symmetry_token.style.font_size == 20.0
+    assert symmetry_token.x + symmetry_token.width / 2.0 < (
+        summary_token.x - summary_token.width / 2.0
+    )
+
+
 def test_all_three_clarifications_are_legal_once_for_every_problem() -> None:
     for problem in SUPPORTED_PROBLEMS:
         for topic in PROJECTILE_MOTION_CLARIFICATION_ORDER:

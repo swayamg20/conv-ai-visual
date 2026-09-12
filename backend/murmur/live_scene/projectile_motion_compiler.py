@@ -142,6 +142,9 @@ _AMBER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--amber))"}
 _SAGE_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--sage))"}
 _LAVENDER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--lavender))"}
 _EMBER_TEXT = {**_CHALK_TEXT, "color": "hsl(var(--ember))"}
+_SOFT_LAVENDER_TEXT = {**_SOFT_TEXT, "color": "hsl(var(--lavender))"}
+_SUMMARY_TEXT = {**_AMBER_TEXT, "fontSize": 20.0}
+_DETAIL_TEXT = {**_LAVENDER_TEXT, "fontSize": 20.0}
 
 _FULL_VIEWPORT = ((20.0, 20.0, 760.0, 560.0), (0.0, 0.0, 800.0, 600.0))
 _PLOT_VIEWPORT = ((35.0, 75.0, 535.0, 455.0), (0.0, 70.0, 590.0, 470.0))
@@ -410,18 +413,18 @@ def _base_geometry(component_id: str, problem: ProjectileMotionProblemSpecV1) ->
             518.0,
             475.0,
             28.0,
-            height=24.0,
+            height=30.0,
             style=_SOFT_TEXT,
         ),
         _token(component_id, "axis_y", "y", 55.0, 96.0, 28.0, style=_SOFT_TEXT),
-        _token(component_id, "title", r"\text{One launch, two motions}", 640.0, 38.0, 250.0),
+        _token(component_id, "title", r"\text{One launch, two motions}", 600.0, 38.0, 330.0),
         _token(
             component_id,
             "givens",
             rf"v_0={problem.speed_mps}\,\mathrm{{m/s}},\quad \theta={problem.angle_deg}^\circ",
-            640.0,
+            618.0,
             92.0,
-            250.0,
+            300.0,
             style=_AMBER_TEXT,
         ),
         _token(
@@ -492,9 +495,9 @@ def _decomposition_nodes(component_id: str, problem: ProjectileMotionProblemSpec
             component_id,
             "component_values",
             rf"v_x={_format_value(horizontal)},\quad v_{{y0}}={_format_value(vertical)}\ \mathrm{{m/s}}",
-            640.0,
+            618.0,
             286.0,
-            250.0,
+            300.0,
             style=_SOFT_TEXT,
         ),
         _token(
@@ -545,8 +548,8 @@ def _apex_nodes(component_id: str, problem: ProjectileMotionProblemSpecV1) -> No
     _, _, _, height, _ = _physics(problem)
     ascent, _ = _trajectory_halves(problem)
     apex = ascent[-1]
-    label_x = min(405.0, apex[0] + 110.0)
-    label_y = max(105.0, apex[1] - 120.0)
+    label_x = min(325.0, apex[0] + 110.0)
+    label_y = max(140.0, apex[1] - 120.0)
     acceleration_end = (apex[0], min(458.0, apex[1] + 58.0))
     nodes: NodeMap = {}
     for node in (
@@ -571,7 +574,7 @@ def _apex_nodes(component_id: str, problem: ProjectileMotionProblemSpecV1) -> No
             r"v_y=0\quad\text{at the apex}",
             label_x,
             label_y,
-            220.0,
+            264.0,
             style=_LAVENDER_TEXT,
         ),
         _token(
@@ -580,17 +583,18 @@ def _apex_nodes(component_id: str, problem: ProjectileMotionProblemSpecV1) -> No
             r"a_y=-g=-10\,\mathrm{m/s^2}",
             label_x,
             label_y + 48.0,
-            190.0,
+            280.0,
             style=_EMBER_TEXT,
         ),
         _token(
             component_id,
             "height_value",
             rf"H={_format_value(height)}\,\mathrm{{m}}",
-            apex[0] - 54.0,
+            max(97.0, apex[0] - 62.0),
             (apex[1] + 470.0) / 2.0 - 20.0,
-            100.0,
-            style=_LAVENDER_TEXT,
+            124.0,
+            height=36.0,
+            style=_SOFT_LAVENDER_TEXT,
         ),
     ):
         nodes[node.id] = node
@@ -601,11 +605,11 @@ def _descent_annotation(component_id: str) -> LatexTokenSceneNode:
     return _token(
         component_id,
         "vertical_state",
-        r"v_y<0,\quad v_x\ \text{stays constant}",
-        640.0,
+        r"v_y<0,\qquad v_x=\text{constant}",
+        630.0,
         334.0,
-        250.0,
-        style=_LAVENDER_TEXT,
+        268.0,
+        style=_SOFT_LAVENDER_TEXT,
     )
 
 
@@ -618,12 +622,12 @@ def _summary_nodes(component_id: str, problem: ProjectileMotionProblemSpecV1) ->
         _token(
             component_id,
             "summary_values",
-            rf"T={_format_value(flight_time)}\,\mathrm{{s}},\quad H={_format_value(height)}\,\mathrm{{m}},\quad R={_format_value(range_m)}\,\mathrm{{m}}",
-            635.0,
-            510.0,
-            260.0,
-            height=52.0,
-            style=_AMBER_TEXT,
+            rf"\begin{{aligned}}T&={_format_value(flight_time)}\,\mathrm{{s}}\\H&={_format_value(height)}\,\mathrm{{m}}\\R&={_format_value(range_m)}\,\mathrm{{m}}\end{{aligned}}",
+            650.0,
+            452.0,
+            220.0,
+            height=116.0,
+            style=_SUMMARY_TEXT,
         ),
     ):
         nodes[node.id] = node
@@ -641,8 +645,8 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
             "clarify_horizontal_velocity",
             r"a_x=0\ \Longrightarrow\ v_x\ \text{stays constant}",
             280.0,
-            524.0,
-            276.0,
+            526.0,
+            340.0,
             style=_SAGE_TEXT,
         )
         nodes[node.id] = node
@@ -652,8 +656,8 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
             "clarify_apex_acceleration",
             r"v_y=0\ \text{for an instant};\quad a_y=-g",
             280.0,
-            524.0,
-            286.0,
+            500.0,
+            380.0,
             style=_EMBER_TEXT,
         )
         nodes[node.id] = node
@@ -661,11 +665,12 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
         node = _token(
             component_id,
             "clarify_flight_symmetry",
-            r"t_{\uparrow}=t_{\downarrow}\quad\text{when launch and impact heights match}",
+            r"\begin{gathered}t_{\uparrow}=t_{\downarrow}\\\text{when launch and impact heights match}\end{gathered}",
             280.0,
-            524.0,
-            292.0,
-            style=_LAVENDER_TEXT,
+            480.0,
+            392.0,
+            height=80.0,
+            style=_DETAIL_TEXT,
         )
         nodes[node.id] = node
     return nodes

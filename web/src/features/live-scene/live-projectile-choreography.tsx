@@ -95,7 +95,7 @@ const CHECKPOINT_LABELS: Readonly<
   trace_ascent: "Trace the ascent",
   apex_state: "Read the apex",
   trace_descent: "Follow the descent",
-  summary: "Time, height, and range",
+  summary: "Time, height & range",
   horizontal_velocity_detail: "Horizontal motion clarified",
   apex_acceleration_detail: "Apex acceleration clarified",
   flight_symmetry_detail: "Flight symmetry clarified",
