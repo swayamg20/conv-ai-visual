@@ -117,7 +117,7 @@ function webm() {
 
 function playwrightReport(suite) {
   const expected = {
-    accelerated: { file: "projectile-motion.spec.ts", testCount: 16 },
+    accelerated: { file: "projectile-motion.spec.ts", testCount: 22 },
     capture: { file: "projectile-motion-capture.spec.ts", testCount: 1 },
     "product-smoke": {
       file: "projectile-motion-product-auth.spec.ts",
@@ -1010,7 +1010,7 @@ test("report validation rejects empty and failed Playwright proofs", () => {
   assert.equal(
     validateReportForTests(playwrightReport("accelerated"), "accelerated")
       .testCount,
-    16,
+    22,
   );
   const failed = structuredClone(playwrightReport("capture"));
   failed.suites[0].specs[0].tests[0].results[0].status = "failed";
@@ -1402,7 +1402,7 @@ test("finalize and validate bind source, fixtures, runtime, browser, reports, an
       finalized.manifest.evidence.runtime.evidence.finalCheckpointId,
       "summary",
     );
-    assert.equal(finalized.manifest.evidence.reports.accelerated.testCount, 16);
+    assert.equal(finalized.manifest.evidence.reports.accelerated.testCount, 22);
     assert.equal(
       finalized.manifest.evidence.motionBoundary.interruption.trials.length,
       24,

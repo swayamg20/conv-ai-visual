@@ -35,7 +35,7 @@ const SUITES = Object.freeze(["accelerated", "capture", "product-smoke"]);
 const EXPECTED_REPORTS = Object.freeze({
   accelerated: Object.freeze({
     file: "projectile-motion.spec.ts",
-    testCount: 16,
+    testCount: 22,
   }),
   capture: Object.freeze({
     file: "projectile-motion-capture.spec.ts",

@@ -9,6 +9,7 @@ import {
 const STAGE = "projectile-choreography-stage";
 const LINE_TOLERANCE = 0.05;
 const PATH_RELATIVE_TOLERANCE = Number.EPSILON;
+const LATEX_CONTENT_BOUNDS_TOLERANCE_CSS_PX = 0.5;
 type Point = readonly [number, number];
 type ProjectileNode = Extract<
   SceneNode,
@@ -32,6 +33,7 @@ type MismatchCode =
   | "latex_structure"
   | "latex_geometry"
   | "latex_content"
+  | "latex_content_bounds"
   | "latex_style";
 type Mismatch = Readonly<{
   code: MismatchCode;
@@ -116,6 +118,9 @@ export async function inspectProjectileSvgAgainstScene(
     );
 
   const nodes = scene.nodes as readonly ProjectileNode[];
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+  });
   return page
     .getByTestId(STAGE)
     .locator("svg")
@@ -489,12 +494,14 @@ export async function inspectProjectileSvgAgainstScene(
               : null;
           check("latex_structure", node.id, !!container);
           if (!container) continue;
-          check(
-            "latex_structure",
-            node.id,
+          const katexRootCandidate = container.firstElementChild;
+          const katexRoot =
             container.children.length === 1 &&
-              !!container.firstElementChild?.classList.contains("katex"),
-          );
+            katexRootCandidate instanceof HTMLElement &&
+            katexRootCandidate.classList.contains("katex")
+              ? katexRootCandidate
+              : null;
+          check("latex_structure", node.id, !!katexRoot);
           const box = {
             left: numeric(foreign.getAttribute("x")),
             y: numeric(foreign.getAttribute("y")),
@@ -526,6 +533,70 @@ export async function inspectProjectileSvgAgainstScene(
             node.id,
             annotations.length === 1 && latex === node.latex,
           );
+          const katexHtmlCandidates = katexRoot
+            ? Array.from(katexRoot.children).filter(
+                (child): child is HTMLElement =>
+                  child instanceof HTMLElement &&
+                  child.classList.contains("katex-html"),
+              )
+            : [];
+          check(
+            "latex_structure",
+            node.id,
+            katexHtmlCandidates.length === 1,
+            "KaTeX HTML visual tree",
+            "one direct .katex-html child",
+            `${katexHtmlCandidates.length} direct .katex-html children`,
+          );
+          const katexHtml =
+            katexHtmlCandidates.length === 1 ? katexHtmlCandidates[0] : null;
+          const finitePositiveBounds = (bounds: DOMRect | null) =>
+            bounds !== null &&
+            [
+              bounds.left,
+              bounds.top,
+              bounds.right,
+              bounds.bottom,
+              bounds.width,
+              bounds.height,
+            ].every(Number.isFinite) &&
+            bounds.width > 0 &&
+            bounds.height > 0;
+          const describeBounds = (bounds: DOMRect | null) =>
+            bounds
+              ? `left=${round(bounds.left)}, top=${round(bounds.top)}, right=${round(bounds.right)}, bottom=${round(bounds.bottom)}, width=${round(bounds.width)}, height=${round(bounds.height)}`
+              : "missing";
+          if (katexHtml) {
+            const contentRange = document.createRange();
+            let contentBounds: DOMRect | null = null;
+            try {
+              contentRange.selectNodeContents(katexHtml);
+              contentBounds = contentRange.getBoundingClientRect();
+            } finally {
+              contentRange.detach();
+            }
+            const frameBounds = foreign.getBoundingClientRect();
+            const contentIsContained =
+              finitePositiveBounds(frameBounds) &&
+              finitePositiveBounds(contentBounds) &&
+              contentBounds !== null &&
+              contentBounds.left >=
+                frameBounds.left - input.latexContentBoundsToleranceCssPx &&
+              contentBounds.right <=
+                frameBounds.right + input.latexContentBoundsToleranceCssPx &&
+              contentBounds.top >=
+                frameBounds.top - input.latexContentBoundsToleranceCssPx &&
+              contentBounds.bottom <=
+                frameBounds.bottom + input.latexContentBoundsToleranceCssPx;
+            check(
+              "latex_content_bounds",
+              node.id,
+              contentIsContained,
+              "rendered KaTeX bounds",
+              `inside foreignObject within ${input.latexContentBoundsToleranceCssPx} CSS px (${describeBounds(frameBounds)})`,
+              describeBounds(contentBounds),
+            );
+          }
           const anchors = {
             "flex-start": "start",
             center: "middle",
@@ -607,6 +678,7 @@ export async function inspectProjectileSvgAgainstScene(
         paintOrder: expectedProjectilePaintOrder(nodes),
         lineTolerance: LINE_TOLERANCE,
         pathRelativeTolerance: PATH_RELATIVE_TOLERANCE,
+        latexContentBoundsToleranceCssPx: LATEX_CONTENT_BOUNDS_TOLERANCE_CSS_PX,
       },
     );
 }

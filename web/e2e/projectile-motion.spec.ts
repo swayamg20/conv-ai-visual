@@ -3,7 +3,11 @@ import path from "node:path";
 
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
+import fixtureV20A30Value from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v20-a30.v1.json";
 import primaryFixtureValue from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v20-a45.v1.json";
+import fixtureV20A60Value from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v20-a60.v1.json";
+import fixtureV30A45Value from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v30-a45.v1.json";
+import fixtureV30A60Value from "../src/features/live-scene/fixtures/projectile-motion-v1/projectile-motion-v30-a60.v1.json";
 import {
   decodeProjectileChoreographySceneStreamEventV1,
   type ProjectileChoreographySceneCheckpointEventV1,
@@ -15,6 +19,7 @@ import {
 import { createSceneState, type SceneState } from "../src/lib/live-scene";
 import {
   expectProjectileSvgMatchesScene,
+  inspectProjectileSvgAgainstScene,
   type ProjectileSvgSemanticSignature,
 } from "./projectile-motion-dom-oracle";
 import {
@@ -51,6 +56,13 @@ import {
 import { observeChoreographyExecution } from "./live-choreography-provenance";
 
 const primaryFixture = projectileFixture(primaryFixtureValue);
+const qualifiedProjectileFixtures = Object.freeze([
+  projectileFixture(fixtureV20A30Value),
+  primaryFixture,
+  projectileFixture(fixtureV20A60Value),
+  projectileFixture(fixtureV30A45Value),
+  projectileFixture(fixtureV30A60Value),
+]);
 const primaryProblem = Object.freeze({
   v: 1,
   speedMps: 20,
@@ -1485,6 +1497,82 @@ test("records twenty fresh click-to-first-ink samples below the local 300 ms p95
   });
 });
 
+test.describe("rendered formula containment across qualified launches", () => {
+  for (const fixture of qualifiedProjectileFixtures) {
+    const { speedMps, angleDeg } = fixture.problemSpec;
+
+    test(`${speedMps} m/s at ${angleDeg} degrees contains every main checkpoint`, async ({
+      page,
+    }) => {
+      const requests = observeProviderFreeRequests(page);
+      await page.goto(
+        "/e2e/projectile-motion?layout=cinematic&motion=reduced&flow=main&speed=accelerated&proof=keyframes",
+      );
+      await waitForProjectileBridge(page);
+      await selectProjectileProblem(page, fixture.problemSpec);
+
+      const checkpoints = fixtureCheckpoints(fixture, "main");
+      expect(checkpoints).toHaveLength(PROJECTILE_MAIN_CHECKPOINTS.length);
+      let expectedScene = createSceneState({ revision: 0, nodes: [] });
+      await drawLaunch(page);
+
+      for (const [index, checkpoint] of checkpoints.entries()) {
+        expectedScene = applyScenePatch(
+          expectedScene,
+          checkpointPatchEvent(checkpoint),
+        );
+        await expect(projectileStage(page)).toHaveAttribute(
+          "data-settled-main-count",
+          String(index + 1),
+        );
+        await expect(projectileStage(page)).toHaveAttribute(
+          "data-visible-checkpoint-id",
+          checkpoint.semantic.checkpointId,
+        );
+        await expectProjectileSvgMatchesScene(page, expectedScene);
+      }
+
+      await expectProjectileTerminal(
+        page,
+        expectedProjectileBoard(fixture, "main", "cinematic"),
+      );
+      expectProviderFree(requests);
+    });
+  }
+});
+
+test("the rendered formula oracle rejects internal glyph overflow without an authored geometry change", async ({
+  page,
+}) => {
+  await page.goto(
+    "/e2e/projectile-motion?layout=cinematic&motion=reduced&flow=main&speed=accelerated&proof=none",
+  );
+  await waitForProjectileBridge(page);
+  await drawLaunch(page);
+  await expectProjectileTerminal(
+    page,
+    expectedProjectileBoard(primaryFixture, "main", "cinematic"),
+  );
+  await projectileBoard(page)
+    .locator('[data-element-id="projectile__summary"] .katex-html')
+    .evaluate((element) => {
+      (element as HTMLElement).style.fontSize = "400%";
+    });
+
+  const inspection = await inspectProjectileSvgAgainstScene(
+    page,
+    primaryFixture.lanes.main.expectedTerminal.scene,
+  );
+  expect(inspection.mismatches).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        code: "latex_content_bounds",
+        nodeId: "projectile__summary",
+      }),
+    ]),
+  );
+});
+
 test("the certified main flow draws a curved trace with one stable projectile marker and no provider", async ({
   page,
   browser,
@@ -1779,6 +1867,10 @@ test.describe("real certified clarification lanes", () => {
       await expectProjectileTerminal(page, expected, {
         settledMainCount: clarification.settledMainCount,
       });
+      await expectProjectileSvgMatchesScene(
+        page,
+        primaryFixture.lanes[clarification.lane].expectedTerminal.scene,
+      );
       await expect(page.getByText(clarification.settledLabel)).toBeVisible();
       await expect(
         page.getByRole("button", { name: clarification.button }),
