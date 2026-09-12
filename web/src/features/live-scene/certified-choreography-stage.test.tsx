@@ -25,38 +25,46 @@ import { CertifiedChoreographyStage } from "./certified-choreography-stage";
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const roots: Root[] = [];
+type LegacyStageProps = Extract<
+  React.ComponentProps<typeof CertifiedChoreographyStage>,
+  { readonly progress?: undefined }
+>;
 
-async function renderStage(
-  overrides: Partial<
-    React.ComponentProps<typeof CertifiedChoreographyStage>
-  > = {},
+async function renderStageElement(
+  element: React.ReactElement,
 ): Promise<HTMLDivElement> {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   roots.push(root);
   await act(async () => {
-    root.render(
-      <CertifiedChoreographyStage
-        canvasRef={createRef<SVGCanvasHandle>()}
-        phase="completed"
-        layout="cinematic"
-        subjectLabel="Projectile motion"
-        checkpointLabel="trace ascent"
-        settledMainCount={4}
-        totalMainCount={6}
-        settledDetailLabels={["Horizontal speed", "Apex acceleration"]}
-        caption="The marker follows equal-time samples along the arc."
-        rendererTrusted
-        reducedMotion
-        playbackRate={16}
-        testId="projectile-stage"
-        dataAttributes={{ "data-checkpoint-id": "trace_ascent" }}
-        {...overrides}
-      />,
-    );
+    root.render(element);
   });
   return container;
+}
+
+async function renderStage(
+  overrides: Partial<LegacyStageProps> = {},
+): Promise<HTMLDivElement> {
+  return renderStageElement(
+    <CertifiedChoreographyStage
+      canvasRef={createRef<SVGCanvasHandle>()}
+      phase="completed"
+      layout="cinematic"
+      subjectLabel="Projectile motion"
+      checkpointLabel="trace ascent"
+      settledMainCount={4}
+      totalMainCount={6}
+      settledDetailLabels={["Horizontal speed", "Apex acceleration"]}
+      caption="The marker follows equal-time samples along the arc."
+      rendererTrusted
+      reducedMotion
+      playbackRate={16}
+      testId="projectile-stage"
+      dataAttributes={{ "data-checkpoint-id": "trace_ascent" }}
+      {...overrides}
+    />,
+  );
 }
 
 afterEach(async () => {
@@ -133,5 +141,74 @@ describe("CertifiedChoreographyStage", () => {
       container.querySelector('[data-testid="live-choreography-board"]')
         ?.className,
     ).toContain("opacity-0");
+  });
+
+  it("keeps the canonical bounded progress model DOM-identical to legacy props", async () => {
+    const legacy = await renderStage();
+    const canonical = await renderStageElement(
+      <CertifiedChoreographyStage
+        canvasRef={createRef<SVGCanvasHandle>()}
+        phase="completed"
+        layout="cinematic"
+        subjectLabel="Projectile motion"
+        checkpointLabel="trace ascent"
+        progress={{
+          kind: "bounded",
+          settledMainCount: 4,
+          totalMainCount: 6,
+          settledDetailLabels: ["Horizontal speed", "Apex acceleration"],
+        }}
+        caption="The marker follows equal-time samples along the arc."
+        rendererTrusted
+        reducedMotion
+        playbackRate={16}
+        testId="projectile-stage"
+        dataAttributes={{ "data-checkpoint-id": "trace_ascent" }}
+      />,
+    );
+
+    expect(canonical.innerHTML).toBe(legacy.innerHTML);
+  });
+
+  it("renders an honest open frontier without inventing a total", async () => {
+    const container = await renderStageElement(
+      <CertifiedChoreographyStage
+        canvasRef={createRef<SVGCanvasHandle>()}
+        phase="streaming"
+        layout="compact"
+        subjectLabel="Live storyboard"
+        checkpointLabel="A relationship takes shape"
+        progress={{
+          kind: "open",
+          settledBeatCount: 3,
+          frontierStatus: "live",
+          recentCertifiedLabels: ["Question anchored", "Cause connected"],
+        }}
+        caption="A new relation extends the accepted visual frontier."
+        rendererTrusted
+        testId="storyboard-stage"
+      />,
+    );
+    const stage = container.querySelector<HTMLElement>(
+      '[data-testid="storyboard-stage"]',
+    );
+    const progress = container.querySelector<HTMLElement>(
+      '[data-testid="open-choreography-progress"]',
+    );
+
+    expect(stage?.dataset.settledBeatCount).toBe("3");
+    expect(stage?.hasAttribute("data-settled-main-count")).toBe(false);
+    expect(progress?.getAttribute("aria-label")).toBe(
+      "3 certified beats settled; frontier live",
+    );
+    expect(progress?.textContent).toContain("3 beats settled");
+    expect(progress?.textContent).toContain("Frontier live");
+    expect(
+      progress?.querySelectorAll('[data-certified-label="true"]'),
+    ).toHaveLength(2);
+    expect(progress?.textContent).toContain("Question anchored");
+    expect(progress?.textContent).toContain("Cause connected");
+    expect(progress?.textContent).not.toContain(" of ");
+    expect(progress?.querySelectorAll(".w-3")).toHaveLength(0);
   });
 });
