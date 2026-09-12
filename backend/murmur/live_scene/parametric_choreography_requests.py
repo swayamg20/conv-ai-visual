@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, TypeAlias
 
-from pydantic import Field, TypeAdapter, model_validator
+from pydantic import BeforeValidator, Field, TypeAdapter, model_validator
 
 from murmur.live_scene.choreography_contracts import RoutedChoreographyRouteV2
 from murmur.live_scene.contracts import (
@@ -21,6 +21,10 @@ from murmur.live_scene.contracts import (
 from murmur.live_scene.projectile_motion_requests import ProjectileMotionRequestV1
 from murmur.live_scene.semantic_contracts import SemanticSceneState
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
+from murmur.live_scene.semantic_storyboard_requests import (
+    SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER,
+    SemanticStoryboardRequestV1,
+)
 
 PARAMETRIC_CHOREOGRAPHY_PROTOCOL = "parametric_choreography_v3"
 
@@ -60,11 +64,21 @@ ParametricChoreographyRequestV3: TypeAlias = Annotated[
     Field(discriminator="routing_mode"),
 ]
 
+# FastAPI validates this shared union directly, so keep the Gate 1.8 arm behind
+# its aliases-only adapter. Older request arms retain their existing behavior.
+_SemanticStoryboardWireRequestV1: TypeAlias = Annotated[
+    SemanticStoryboardRequestV1,
+    BeforeValidator(SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER.validate_python),
+]
+
 # Absence of ``protocol`` remains the sealed Gate 1.5 request. Exact Gate 1.6
 # and Gate 1.7 protocol literals select their own disjoint contracts; unknown
 # values match none and therefore fail rather than falling back to V2.
 ChoreographyLiveSceneRequest: TypeAlias = (
-    SemanticLiveSceneRequest | ParametricChoreographyRequestV3 | ProjectileMotionRequestV1
+    SemanticLiveSceneRequest
+    | ParametricChoreographyRequestV3
+    | ProjectileMotionRequestV1
+    | _SemanticStoryboardWireRequestV1
 )
 
 PARAMETRIC_CHOREOGRAPHY_REQUEST_V3_ADAPTER = TypeAdapter(ParametricChoreographyRequestV3)

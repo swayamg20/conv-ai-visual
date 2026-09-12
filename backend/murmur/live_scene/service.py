@@ -113,6 +113,11 @@ from murmur.live_scene.semantic_service_contracts import (
     SemanticSceneStreamDeclinedEvent,
     SemanticSceneStreamEvent,
 )
+from murmur.live_scene.semantic_storyboard_requests import SemanticStoryboardRequestV1
+from murmur.live_scene.semantic_storyboard_service import SemanticStoryboardService
+from murmur.live_scene.semantic_storyboard_service_contracts import (
+    SemanticStoryboardSceneStreamEventV1,
+)
 from murmur.live_scene.semantic_stream_parser import (
     TeachingBeatStreamError,
     TeachingBeatStreamParser,
@@ -1417,6 +1422,14 @@ class SceneAuthoringService:
             timeout_seconds=timeout_seconds,
             before_provider_dispatch=before_provider_dispatch,
         )
+        self._semantic_storyboard = SemanticStoryboardService(
+            client=client,
+            client_factory=client_factory,
+            clock=clock,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            before_provider_dispatch=before_provider_dispatch,
+        )
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
             DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -2020,6 +2033,14 @@ class SceneAuthoringService:
         """Delegate exact Gate 1.7 requests to the focused projectile service."""
 
         return self._projectile_motion.stream_events(request)
+
+    def stream_semantic_storyboard_events(
+        self,
+        request: SemanticStoryboardRequestV1,
+    ) -> AsyncIterator[SemanticStoryboardSceneStreamEventV1]:
+        """Delegate exact Gate 1.8 requests to the focused storyboard service."""
+
+        return self._semantic_storyboard.stream_events(request)
 
     async def stream_routed_semantic_events(
         self,
