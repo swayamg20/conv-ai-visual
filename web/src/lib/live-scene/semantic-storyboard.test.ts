@@ -9,6 +9,7 @@ import {
   decodePairedProjectileComparisonSpecV1,
   decodeProjectileStoryboardSemanticSceneStateV1,
   decodeProjectileStoryboardStateV1,
+  decodeSemanticStoryboardDirectorPromptV1,
   decodeSemanticStoryboardRecordV1,
   decodeSemanticStoryboardRequestV1,
   storyboardHasForwardCapacity,
@@ -417,6 +418,51 @@ describe("Gate 1.8 ordered semantic frontier", () => {
 });
 
 describe("Gate 1.8 request encoding", () => {
+  describe("Director prompt boundary", () => {
+    it("normalizes every canonical Unicode edge-whitespace code point", () => {
+      const edgeWhitespace =
+        "\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff";
+
+      expect(
+        decodeSemanticStoryboardDirectorPromptV1(
+          `${edgeWhitespace}Compare\u2003both 🚀 paths.${edgeWhitespace}`,
+        ),
+      ).toBe("Compare\u2003both 🚀 paths.");
+    });
+
+    it.each([
+      ["empty", ""],
+      [
+        "Unicode whitespace only",
+        "\u0085\u00a0\u1680\u2000\u2028\u202f\u3000\ufeff",
+      ],
+    ])("rejects %s", (_label, value) => {
+      expect(() => decodeSemanticStoryboardDirectorPromptV1(value)).toThrow(
+        /non-empty string/,
+      );
+    });
+
+    it.each([undefined, null, true, 42, {}, [], new String("wrapped")])(
+      "rejects the non-primitive string value %j",
+      (value) => {
+        expect(() => decodeSemanticStoryboardDirectorPromptV1(value)).toThrow(
+          /non-empty string/,
+        );
+      },
+    );
+
+    it("counts Unicode code points at the exact 2000-character boundary", () => {
+      const exactlyAtCap = `\u3000${"🚀".repeat(2_000)}\ufeff`;
+      const decoded = decodeSemanticStoryboardDirectorPromptV1(exactlyAtCap);
+
+      expect([...decoded]).toHaveLength(2_000);
+      expect(decoded).toBe("🚀".repeat(2_000));
+      expect(() =>
+        decodeSemanticStoryboardDirectorPromptV1("🚀".repeat(2_001)),
+      ).toThrow(/at most 2000 characters/);
+    });
+  });
+
   it("encodes an exact prompt-free fresh Reflex anchor", () => {
     const decoded = decodeSemanticStoryboardRequestV1(request());
 

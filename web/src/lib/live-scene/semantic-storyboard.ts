@@ -201,7 +201,10 @@ function normalizePromptEdges(value: string): string {
   return characters.slice(start, end).join("");
 }
 
-function boundedPrompt(value: unknown): string {
+/** Decode and canonicalize one bounded Director prompt before transport. */
+export function decodeSemanticStoryboardDirectorPromptV1(
+  value: unknown,
+): string {
   const normalized =
     typeof value === "string" ? normalizePromptEdges(value) : value;
   if (
@@ -675,6 +678,6 @@ export function decodeSemanticStoryboardRequestV1(
     generation,
     baseScene,
     baseSemanticScene,
-    prompt: boundedPrompt(input.prompt),
+    prompt: decodeSemanticStoryboardDirectorPromptV1(input.prompt),
   });
 }
