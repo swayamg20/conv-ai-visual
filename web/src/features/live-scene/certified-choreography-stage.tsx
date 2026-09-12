@@ -83,7 +83,7 @@ export function CertifiedChoreographyStage({
         className="pointer-events-none absolute inset-x-0 top-0 z-10 h-28 bg-gradient-to-b from-void via-void/72 to-transparent"
       />
 
-      <div className="absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-4 px-4 pt-4 sm:px-6 sm:pt-5">
+      <div className="absolute inset-x-0 top-0 z-20 flex items-start justify-between gap-2 px-4 pt-4 sm:gap-4 sm:px-6 sm:pt-5">
         <div className="min-w-0">
           <p className="font-mono text-[9px] uppercase tracking-[0.24em] text-chalk-soft">
             {subjectLabel}
@@ -108,7 +108,7 @@ export function CertifiedChoreographyStage({
               <span
                 key={index}
                 className={cn(
-                  "h-1 w-4 rounded-full transition-[background-color,opacity] duration-300 motion-reduce:transition-none sm:w-5",
+                  "h-1 w-3 rounded-full transition-[background-color,opacity] duration-300 motion-reduce:transition-none sm:w-5",
                   index < boundedMainCount
                     ? "bg-amber opacity-100"
                     : "bg-chalk-faint opacity-35",

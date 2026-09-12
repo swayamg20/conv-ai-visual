@@ -2378,6 +2378,16 @@ test.describe("responsive compact proof", () => {
         page,
         primaryFixture.lanes.main.expectedTerminal.scene,
       );
+      const checkpointLabel = projectileStage(page).getByText(
+        "Time, height & range",
+        { exact: true },
+      );
+      await expect(checkpointLabel).toBeVisible();
+      const labelWidths = await checkpointLabel.evaluate((element) => ({
+        client: element.clientWidth,
+        scroll: element.scrollWidth,
+      }));
+      expect(labelWidths.scroll).toBeLessThanOrEqual(labelWidths.client);
       await expect(projectileStage(page)).toHaveAttribute(
         "data-layout",
         "compact",
