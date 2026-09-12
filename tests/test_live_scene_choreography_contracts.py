@@ -5,11 +5,17 @@ from copy import deepcopy
 import pytest
 from murmur.live_scene.choreography_contracts import (
     CHOREOGRAPHY_CUE_V1_ADAPTER,
+    CHOREOGRAPHY_CUE_V2_ADAPTER,
+    CHOREOGRAPHY_PLAN_V2_ADAPTER,
+    CHOREOGRAPHY_PLAN_V2_HASH_DOMAIN,
+    CHOREOGRAPHY_PLAN_V2_VERSION,
     CHOREOGRAPHY_PLAN_VERSION,
     MAX_CHOREOGRAPHY_HOLD_AFTER_MS,
     MAX_CHOREOGRAPHY_PHASE_MS,
     MAX_CHOREOGRAPHY_PLAN_MS,
     MAX_CHOREOGRAPHY_TARGET_REFERENCES,
+    MAX_CHOREOGRAPHY_V2_CUES,
+    MAX_CHOREOGRAPHY_V2_NODE_REFERENCES,
     MIN_CHOREOGRAPHY_PHASE_MS,
     PRESENTATION_CHECKPOINT_VERSION,
     ROUTED_CHOREOGRAPHY_BEAT_V2_ADAPTER,
@@ -20,13 +26,16 @@ from murmur.live_scene.choreography_contracts import (
     AdvanceChoreographyRouteV2,
     ChoreographyEasing,
     ChoreographyPlanV1,
+    ChoreographyPlanV2,
     ClarifyCornerRouteV2,
     CompletingSquareStage,
     PresentationCheckpointV1,
     RoutedChoreographyBeatV2,
     RoutedChoreographyBeatV3,
+    TracePathCueV2,
     ViewportPoseV1,
     choreography_plan_sha256,
+    choreography_plan_v2_sha256,
     presentation_checkpoint_sha256,
     routed_choreography_beat_sha256,
     routed_choreography_beat_v3_sha256,
@@ -87,6 +96,37 @@ def _plan() -> dict[str, object]:
             "durationMs": 1_800,
             "easing": "ease_in_out",
             "holdAfterMs": 6_000,
+        },
+    }
+
+
+def _plan_v2() -> dict[str, object]:
+    return {
+        "v": CHOREOGRAPHY_PLAN_V2_VERSION,
+        "phase": {
+            "cues": [
+                {
+                    "cue": "enter",
+                    "targetIds": [
+                        "equation",
+                        "launch_vector",
+                        "projectile",
+                        "trajectory_ascent",
+                    ],
+                },
+                {"cue": "exit", "targetIds": ["old_label"]},
+                {"cue": "transform", "targetIds": ["velocity_vector"]},
+                {
+                    "cue": "trace_path",
+                    "pathId": "trajectory_ascent",
+                    "markerId": "projectile",
+                },
+                {"cue": "emphasize", "targetIds": ["apex"]},
+                {"cue": "focus", "targetIds": ["apex", "projectile"]},
+            ],
+            "durationMs": 2_500,
+            "easing": "ease_in_out",
+            "holdAfterMs": 1_000,
         },
     }
 
@@ -322,6 +362,193 @@ def test_cues_fail_closed_on_open_motion_or_noncanonical_targets(
         CHOREOGRAPHY_CUE_V1_ADAPTER.validate_python(payload)
 
 
+def test_v2_trace_path_cue_and_plan_round_trip_without_reinterpreting_v1() -> None:
+    payload = _plan_v2()
+
+    plan = CHOREOGRAPHY_PLAN_V2_ADAPTER.validate_python(payload)
+
+    assert plan.model_dump(mode="json", by_alias=True) == payload
+    assert plan.phase.total_ms == 3_500
+    assert tuple(cue.cue for cue in plan.phase.cues) == (
+        "enter",
+        "exit",
+        "transform",
+        "trace_path",
+        "emphasize",
+        "focus",
+    )
+    trace = plan.phase.cues[3]
+    assert isinstance(trace, TracePathCueV2)
+    assert trace.path_id == "trajectory_ascent"
+    assert trace.marker_id == "projectile"
+    assert {trace.path_id, trace.marker_id}.issubset(plan.phase.cues[0].target_ids)
+    assert set(TracePathCueV2.model_fields) == {"cue", "path_id", "marker_id"}
+
+    with pytest.raises(ValidationError, match="union_tag_invalid"):
+        CHOREOGRAPHY_CUE_V1_ADAPTER.validate_python(
+            {"cue": "trace_path", "pathId": "trajectory_ascent", "markerId": "projectile"}
+        )
+    with pytest.raises(ValidationError):
+        ChoreographyPlanV1.model_validate(payload)
+
+
+def test_v2_plan_may_omit_trace_for_non_tracing_transitions() -> None:
+    payload = _plan_v2()
+    phase = payload["phase"]
+    assert isinstance(phase, dict)
+    cues = phase["cues"]
+    assert isinstance(cues, list)
+    phase["cues"] = [cue for cue in cues if cue["cue"] != "trace_path"]
+
+    plan = ChoreographyPlanV2.model_validate(payload)
+
+    assert all(not isinstance(cue, TracePathCueV2) for cue in plan.phase.cues)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"markerId": "trajectory_ascent"}, "distinct nodes"),
+        ({"pathId": "#trajectory"}, "string_pattern_mismatch"),
+        ({"markerId": "m" * 65}, "at most 64 characters"),
+        ({"points": [[0, 0], [1, 1]]}, "Extra inputs"),
+        ({"keyframes": [{"x": 1, "y": 1}]}, "Extra inputs"),
+        ({"coordinates": [10, 20]}, "Extra inputs"),
+        ({"targetIds": ["projectile"]}, "Extra inputs"),
+    ],
+)
+def test_v2_trace_path_rejects_open_motion_and_invalid_node_identity(
+    mutation: dict[str, object],
+    message: str,
+) -> None:
+    payload: dict[str, object] = {
+        "cue": "trace_path",
+        "pathId": "trajectory_ascent",
+        "markerId": "projectile",
+    }
+    payload.update(mutation)
+
+    with pytest.raises(ValidationError, match=message):
+        CHOREOGRAPHY_CUE_V2_ADAPTER.validate_python(payload)
+
+
+def test_v2_trace_path_requires_both_closed_node_roles() -> None:
+    for missing in ("pathId", "markerId"):
+        payload = {
+            "cue": "trace_path",
+            "pathId": "trajectory_ascent",
+            "markerId": "projectile",
+        }
+        del payload[missing]
+        with pytest.raises(ValidationError, match="Field required"):
+            CHOREOGRAPHY_CUE_V2_ADAPTER.validate_python(payload)
+
+
+@pytest.mark.parametrize("trace_owned_id", ["trajectory_ascent", "projectile"])
+def test_v2_trace_owned_nodes_cannot_also_be_transformed(trace_owned_id: str) -> None:
+    payload = _plan_v2()
+    phase = payload["phase"]
+    assert isinstance(phase, dict)
+    cues = phase["cues"]
+    assert isinstance(cues, list)
+    transform = next(cue for cue in cues if cue["cue"] == "transform")
+    transform["targetIds"] = sorted(["velocity_vector", trace_owned_id])
+
+    with pytest.raises(ValidationError, match="disjoint from transform targetIds"):
+        ChoreographyPlanV2.model_validate(payload)
+
+
+def test_v2_phase_enforces_cue_and_node_reference_budgets() -> None:
+    assert MAX_CHOREOGRAPHY_V2_CUES == 6
+    assert MAX_CHOREOGRAPHY_V2_NODE_REFERENCES == 32
+
+    maximum = _plan_v2()
+    phase = maximum["phase"]
+    assert isinstance(phase, dict)
+    phase["cues"] = [
+        {"cue": "enter", "targetIds": [f"enter_{index:02d}" for index in range(16)]},
+        {
+            "cue": "transform",
+            "targetIds": [f"transform_{index:02d}" for index in range(14)],
+        },
+        {
+            "cue": "trace_path",
+            "pathId": "trajectory_ascent",
+            "markerId": "projectile",
+        },
+    ]
+    assert ChoreographyPlanV2.model_validate(maximum).phase.cues
+
+    over_references = deepcopy(maximum)
+    over_phase = over_references["phase"]
+    assert isinstance(over_phase, dict)
+    over_cues = over_phase["cues"]
+    assert isinstance(over_cues, list)
+    transform = next(cue for cue in over_cues if cue["cue"] == "transform")
+    transform["targetIds"] = [f"transform_{index:02d}" for index in range(15)]
+    with pytest.raises(ValidationError, match="node-reference budget"):
+        ChoreographyPlanV2.model_validate(over_references)
+
+    over_cues = _plan_v2()
+    over_phase = over_cues["phase"]
+    assert isinstance(over_phase, dict)
+    cues = over_phase["cues"]
+    assert isinstance(cues, list)
+    cues.append({"cue": "focus", "targetIds": ["second_focus"]})
+    with pytest.raises(ValidationError, match="at most 6"):
+        ChoreographyPlanV2.model_validate(over_cues)
+
+
+def test_v2_phase_requires_unique_cue_kinds_and_canonical_order() -> None:
+    duplicate = _plan_v2()
+    phase = duplicate["phase"]
+    assert isinstance(phase, dict)
+    cues = phase["cues"]
+    assert isinstance(cues, list)
+    cues[4] = {
+        "cue": "trace_path",
+        "pathId": "trajectory_descent",
+        "markerId": "projectile_2",
+    }
+    with pytest.raises(ValidationError, match="cue kinds must be unique"):
+        ChoreographyPlanV2.model_validate(duplicate)
+
+    unordered = _plan_v2()
+    phase = unordered["phase"]
+    assert isinstance(phase, dict)
+    cues = phase["cues"]
+    assert isinstance(cues, list)
+    phase["cues"] = list(reversed(cues))
+    with pytest.raises(ValidationError, match="canonical cue order"):
+        ChoreographyPlanV2.model_validate(unordered)
+
+
+@pytest.mark.parametrize("version", [True, 2.0, "2"])
+def test_v2_plan_requires_a_strict_integer_version(version: object) -> None:
+    payload = _plan_v2()
+    payload["v"] = version
+
+    with pytest.raises(ValidationError, match="strict integer"):
+        CHOREOGRAPHY_PLAN_V2_ADAPTER.validate_python(payload)
+
+
+def test_v2_plan_reuses_strict_timing_budgets() -> None:
+    too_short = _plan_v2()
+    phase = too_short["phase"]
+    assert isinstance(phase, dict)
+    phase["durationMs"] = MIN_CHOREOGRAPHY_PHASE_MS - 1
+    with pytest.raises(ValidationError):
+        ChoreographyPlanV2.model_validate(too_short)
+
+    over_total = _plan_v2()
+    phase = over_total["phase"]
+    assert isinstance(phase, dict)
+    phase["durationMs"] = MAX_CHOREOGRAPHY_PHASE_MS
+    phase["holdAfterMs"] = MAX_CHOREOGRAPHY_PLAN_MS - MAX_CHOREOGRAPHY_PHASE_MS + 1
+    with pytest.raises(ValidationError, match="total duration budget"):
+        ChoreographyPlanV2.model_validate(over_total)
+
+
 def test_plan_contains_exactly_one_bounded_parallel_phase() -> None:
     plan = ChoreographyPlanV1.model_validate(_plan())
 
@@ -544,6 +771,28 @@ def test_all_three_contract_hashes_are_canonical_stable_and_domain_separated() -
     assert presentation_checkpoint_sha256(
         PresentationCheckpointV1.model_validate(changed_checkpoint)
     ) != presentation_checkpoint_sha256(checkpoint)
+
+
+def test_v2_plan_hash_is_canonical_and_uses_only_its_v2_domain() -> None:
+    payload = _plan_v2()
+    reordered = dict(reversed(tuple(payload.items())))
+    plan = ChoreographyPlanV2.model_validate(payload)
+
+    digest = choreography_plan_v2_sha256(plan)
+
+    assert digest == choreography_plan_v2_sha256(ChoreographyPlanV2.model_validate(reordered))
+    assert digest == canonical_sha256(payload, domain=CHOREOGRAPHY_PLAN_V2_HASH_DOMAIN)
+    assert digest == "99b3147f32daa704092d976204cffbff296baecc62cca6deb1667d6a8611a013"
+    assert digest != canonical_sha256(payload, domain="murmur:choreography-plan:v1")
+
+    changed = deepcopy(payload)
+    phase = changed["phase"]
+    assert isinstance(phase, dict)
+    cues = phase["cues"]
+    assert isinstance(cues, list)
+    trace = next(cue for cue in cues if cue["cue"] == "trace_path")
+    trace["markerId"] = "projectile_retargeted"
+    assert choreography_plan_v2_sha256(ChoreographyPlanV2.model_validate(changed)) != digest
 
 
 def test_parametric_beat_hash_is_canonical_problem_bound_and_v3_domain_separated() -> None:

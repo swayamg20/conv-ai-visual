@@ -1,5 +1,7 @@
 import type { SVGCanvasHandle } from "@/features/canvas/types";
 import type {
+  ChoreographyCueKindV2,
+  ChoreographyPlan,
   PlannedCheckpointChoreography,
   SceneState,
   ViewportPoseV1,
@@ -19,11 +21,13 @@ export type CheckpointChoreographyRenderer = Pick<
   | "materializeScene"
   | "materializeViewport"
   | "cancelMotion"
+  | "prepareReplayScene"
+  | "finishReplayScene"
   | "clear"
 >;
 
 export interface PlayableCheckpoint {
-  readonly plan: PlannedCheckpointChoreography;
+  readonly plan: PlannedCheckpointChoreography<ChoreographyPlan>;
   readonly base: { readonly viewport: ViewportPoseV1 };
   readonly bootstrappedViewport: boolean;
 }
@@ -75,6 +79,7 @@ function playbackHandle(value: unknown): ChoreographyPlayback {
 export class CheckpointChoreographyPlayer {
   private viewportInitialized = false;
   private initializedViewport: ViewportPoseV1 | null = null;
+  private retainedReplay = false;
 
   constructor(private readonly renderer: CheckpointChoreographyRenderer) {}
 
@@ -90,7 +95,9 @@ export class CheckpointChoreographyPlayer {
       invalid: null,
       closed: false,
     };
-    const observer: ChoreographyExecutorObserver = (signal) => {
+    const observer: ChoreographyExecutorObserver<ChoreographyCueKindV2> = (
+      signal,
+    ) => {
       if (signals.closed) return;
       try {
         this.acceptSignal(prepared, signals, signal);
@@ -104,7 +111,14 @@ export class CheckpointChoreographyPlayer {
     return Object.freeze({
       prepared,
       playback: playbackHandle(
-        this.renderer.playCheckpointChoreography(prepared.plan, observer),
+        // The canvas handle keeps its legacy V1 default; its executor is generic.
+        // Contain the additive V2 widening at this protocol-neutral boundary.
+        (
+          this.renderer.playCheckpointChoreography as unknown as (
+            plan: PlannedCheckpointChoreography<ChoreographyPlan>,
+            observer: ChoreographyExecutorObserver<ChoreographyCueKindV2>,
+          ) => ChoreographyPlayback
+        )(prepared.plan, observer),
       ),
       signals,
     });
@@ -162,8 +176,12 @@ export class CheckpointChoreographyPlayer {
   }): string | undefined {
     try {
       this.renderer.cancelMotion();
-      this.renderer.clear();
-      this.renderer.materializeScene(frontier.scene);
+      if (this.retainedReplay) {
+        this.renderer.materializeScene(frontier.scene);
+      } else {
+        this.renderer.clear();
+        this.renderer.materializeScene(frontier.scene);
+      }
       if (frontier.viewport) {
         this.renderer.materializeViewport(frontier.viewport);
         this.viewportInitialized = true;
@@ -172,22 +190,53 @@ export class CheckpointChoreographyPlayer {
         this.viewportInitialized = false;
         this.initializedViewport = null;
       }
+      this.finishReplay();
       return undefined;
     } catch (error) {
+      try {
+        this.finishReplay();
+      } catch {
+        // Preserve the primary restoration failure.
+      }
       return message(error);
     }
   }
 
   clear(): void {
     this.renderer.cancelMotion();
-    this.renderer.clear();
-    this.viewportInitialized = false;
-    this.initializedViewport = null;
+    try {
+      this.renderer.clear();
+    } finally {
+      this.retainedReplay = false;
+      this.viewportInitialized = false;
+      this.initializedViewport = null;
+    }
   }
 
   materializeEmpty(scene: SceneState): void {
+    const prepare = this.renderer.prepareReplayScene;
+    const finish = this.renderer.finishReplayScene;
+    if (prepare && finish) {
+      if (this.retainedReplay) {
+        throw new Error("A retained Replay is already active");
+      }
+      this.retainedReplay = true;
+      prepare.call(this.renderer, scene);
+      this.viewportInitialized = false;
+      this.initializedViewport = null;
+      return;
+    }
     this.clear();
     this.renderer.materializeScene(scene);
+  }
+
+  finishReplay(): void {
+    if (!this.retainedReplay) return;
+    try {
+      this.renderer.finishReplayScene?.();
+    } finally {
+      this.retainedReplay = false;
+    }
   }
 
   cancel(playback?: ChoreographyPlayback): void {
@@ -214,7 +263,7 @@ export class CheckpointChoreographyPlayer {
   private acceptSignal(
     prepared: PlayableCheckpoint,
     signals: PlaybackSignals,
-    signal: ChoreographyExecutorSignal,
+    signal: ChoreographyExecutorSignal<ChoreographyCueKindV2>,
   ): void {
     if (signals.invalid) throw signals.invalid;
     if (signals.settlement) {

@@ -22,6 +22,12 @@ class _CancellationResistantCloser:
             await self.release.wait()
 
 
+class _BrokenCloseDescriptor:
+    @property
+    def aclose(self) -> object:
+        raise RuntimeError("private cleanup detail")
+
+
 @pytest.mark.asyncio
 async def test_blocking_closer_cannot_outlive_the_callers_deadline() -> None:
     resource = _CancellationResistantCloser()
@@ -48,3 +54,8 @@ async def test_caller_cancellation_is_not_replaced_by_cleanup() -> None:
 
     resource.release.set()
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_close_method_lookup_failure_is_best_effort() -> None:
+    assert await close_async_resource(_BrokenCloseDescriptor()) is False

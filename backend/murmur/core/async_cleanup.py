@@ -25,7 +25,10 @@ async def close_async_resource(
 
     if resource is None:
         return True
-    close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    try:
+        close = getattr(resource, "aclose", None) or getattr(resource, "close", None)
+    except Exception:
+        return False
     if close is None:
         return True
     if timeout_seconds <= 0:

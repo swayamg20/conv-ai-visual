@@ -11,6 +11,7 @@ import {
   createSceneState,
   planSceneTransition,
   type PlannedCheckpointChoreography,
+  type SceneState,
 } from "@/lib/live-scene";
 
 import type { SVGCanvasHandle } from "./types";
@@ -451,6 +452,113 @@ describe("SVGCanvas", () => {
     expect(
       host.querySelector("[data-element-id='fresh-board']"),
     ).not.toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("preserves stable DOM objects through Replay and discards them on Reset", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+    const empty = createSceneState({ revision: 0, nodes: [] });
+    const scene = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "trajectory",
+          kind: "path",
+          points: [
+            [20, 180],
+            [160, 40],
+            [300, 180],
+          ],
+          closed: false,
+          presentation: { enter: "draw", exit: "fade" },
+          style: {
+            stroke: "#f59e0b",
+            strokeWidth: 3,
+            fill: "none",
+            opacity: 1,
+            roughness: 0,
+          },
+        },
+        {
+          id: "trajectory-label",
+          kind: "text",
+          x: 160,
+          y: 30,
+          text: "y(x)",
+          presentation: { enter: "fade", exit: "fade" },
+          style: {
+            color: "#fff",
+            fontSize: 18,
+            opacity: 1,
+            anchor: "middle",
+          },
+        },
+      ],
+    });
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={320} height={220} showGrid={false} />,
+      );
+    });
+    act(() => canvas.current?.materializeScene(scene));
+    const originalPath = host.querySelector("[data-element-id='trajectory']");
+    const originalLabel = host.querySelector(
+      "[data-element-id='trajectory-label']",
+    );
+    expect(originalPath).not.toBeNull();
+    expect(originalLabel).not.toBeNull();
+
+    const invalidReplayBase = {
+      revision: 2,
+      nodes: [scene.nodes[0], scene.nodes[0]],
+    } as unknown as SceneState;
+    expect(() => {
+      act(() => canvas.current?.prepareReplayScene?.(invalidReplayBase));
+    }).toThrow();
+    expect(host.querySelector("[data-element-id='trajectory']")).toBe(
+      originalPath,
+    );
+    expect(host.querySelector("[data-element-id='trajectory-label']")).toBe(
+      originalLabel,
+    );
+
+    for (let replay = 0; replay < 2; replay += 1) {
+      act(() => canvas.current?.prepareReplayScene?.(empty));
+      expect(host.querySelector("[data-element-id='trajectory']")).toBeNull();
+      expect(
+        host.querySelector("[data-element-id='trajectory-label']"),
+      ).toBeNull();
+
+      act(() => {
+        canvas.current?.materializeScene(scene);
+        canvas.current?.finishReplayScene?.();
+      });
+      expect(host.querySelector("[data-element-id='trajectory']")).toBe(
+        originalPath,
+      );
+      expect(host.querySelector("[data-element-id='trajectory-label']")).toBe(
+        originalLabel,
+      );
+      expect(
+        Array.from(host.querySelectorAll("svg > g"), (element) => element.id),
+      ).toEqual(["trajectory", "trajectory-label"]);
+    }
+
+    act(() => {
+      canvas.current?.clear();
+      canvas.current?.materializeScene(scene);
+    });
+    expect(host.querySelector("[data-element-id='trajectory']")).not.toBe(
+      originalPath,
+    );
+    expect(host.querySelector("[data-element-id='trajectory-label']")).not.toBe(
+      originalLabel,
+    );
 
     await act(async () => root.unmount());
   });

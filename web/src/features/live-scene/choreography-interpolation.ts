@@ -3,6 +3,7 @@ import { gsap } from "gsap";
 import { resolveCssColor } from "@/lib/gsap-setup";
 import type {
   MotionStep,
+  PathSceneNode,
   SceneNode,
   ScenePoint,
   ViewportPoseV1,
@@ -10,6 +11,126 @@ import type {
 
 function interpolate(from: number, to: number, progress: number): number {
   return from + (to - from) * progress;
+}
+
+export interface UniformTimePathSample {
+  readonly point: ScenePoint;
+  readonly revealedLength: number;
+  readonly totalLength: number;
+}
+
+export interface UniformTimePathSampler {
+  readonly totalLength: number;
+  sample(progress: number): UniformTimePathSample;
+}
+
+/**
+ * Sample authored equal-time points without reparameterizing them by arc
+ * length. Arc length is accumulated only for the matching stroke reveal.
+ */
+export function createUniformTimePathSampler(
+  points: readonly ScenePoint[],
+): UniformTimePathSampler {
+  if (points.length < 2) {
+    throw new Error("A traced path requires at least two sample points");
+  }
+  const segmentLengths = points.slice(1).map((point, index) =>
+    Math.hypot(point[0] - points[index][0], point[1] - points[index][1]),
+  );
+  const totalLength = segmentLengths.reduce((sum, length) => sum + length, 0);
+  if (!Number.isFinite(totalLength) || totalLength <= 0) {
+    throw new Error("A traced path must have positive finite length");
+  }
+  const cumulativeLengths = [0];
+  segmentLengths.forEach((length) => {
+    cumulativeLengths.push(cumulativeLengths.at(-1)! + length);
+  });
+
+  return Object.freeze({
+    totalLength,
+    sample: (progress: number): UniformTimePathSample => {
+      if (!Number.isFinite(progress) || progress < 0 || progress > 1) {
+        throw new RangeError(
+          "Trace progress must be finite and between zero and one",
+        );
+      }
+      const samplePosition = progress * (points.length - 1);
+      const segmentIndex = Math.min(
+        Math.floor(samplePosition),
+        points.length - 2,
+      );
+      const segmentProgress =
+        progress === 1 ? 1 : samplePosition - segmentIndex;
+      const start = points[segmentIndex];
+      const end = points[segmentIndex + 1];
+      return Object.freeze({
+        point: Object.freeze([
+          interpolate(start[0], end[0], segmentProgress),
+          interpolate(start[1], end[1], segmentProgress),
+        ]) as ScenePoint,
+        revealedLength:
+          cumulativeLengths[segmentIndex] +
+          segmentLengths[segmentIndex] * segmentProgress,
+        totalLength,
+      });
+    },
+  });
+}
+
+export function sampleUniformTimePath(
+  points: readonly ScenePoint[],
+  progress: number,
+): UniformTimePathSample {
+  return createUniformTimePathSampler(points).sample(progress);
+}
+
+/** The trace marker's closed-path anchor is its deterministic bounding-box center. */
+export function pathBoundingBoxCenter(node: PathSceneNode): ScenePoint {
+  if (node.points.length === 0) {
+    throw new Error(`Path ${node.id} has no points`);
+  }
+  const xs = node.points.map((point) => point[0]);
+  const ys = node.points.map((point) => point[1]);
+  return Object.freeze([
+    (Math.min(...xs) + Math.max(...xs)) / 2,
+    (Math.min(...ys) + Math.max(...ys)) / 2,
+  ]);
+}
+
+function sameMarkerContract(left: PathSceneNode, right: PathSceneNode): boolean {
+  return (
+    left.closed === right.closed &&
+    left.presentation.enter === right.presentation.enter &&
+    left.presentation.exit === right.presentation.exit &&
+    left.style.stroke === right.style.stroke &&
+    left.style.strokeWidth === right.style.strokeWidth &&
+    left.style.opacity === right.style.opacity &&
+    left.style.roughness === right.style.roughness &&
+    left.style.fill === right.style.fill &&
+    left.points.length === right.points.length
+  );
+}
+
+/** Return the exact retained-marker translation, or null for any shape/style morph. */
+export function pathTranslationDelta(
+  previous: PathSceneNode,
+  next: PathSceneNode,
+): ScenePoint | null {
+  if (!sameMarkerContract(previous, next) || previous.points.length === 0) {
+    return null;
+  }
+  const delta: ScenePoint = Object.freeze([
+    next.points[0][0] - previous.points[0][0],
+    next.points[0][1] - previous.points[0][1],
+  ]);
+  const tolerance = 1e-9;
+  return previous.points.every(
+    (point, index) =>
+      Math.abs(next.points[index][0] - point[0] - delta[0]) <= tolerance &&
+      Math.abs(next.points[index][1] - point[1] - delta[1]) <= tolerance,
+  )
+    ? delta
+    : null;
 }
 
 export function interpolateViewport(

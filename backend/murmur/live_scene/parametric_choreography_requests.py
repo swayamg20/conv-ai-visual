@@ -18,6 +18,7 @@ from murmur.live_scene.contracts import (
     PromptText,
     SceneState,
 )
+from murmur.live_scene.projectile_motion_requests import ProjectileMotionRequestV1
 from murmur.live_scene.semantic_contracts import SemanticSceneState
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
 
@@ -59,10 +60,12 @@ ParametricChoreographyRequestV3: TypeAlias = Annotated[
     Field(discriminator="routing_mode"),
 ]
 
-# Absence of ``protocol`` remains the sealed Gate 1.5 request. Unknown protocol
-# values match neither exact contract and therefore fail rather than falling
-# back to V2.
-ChoreographyLiveSceneRequest: TypeAlias = SemanticLiveSceneRequest | ParametricChoreographyRequestV3
+# Absence of ``protocol`` remains the sealed Gate 1.5 request. Exact Gate 1.6
+# and Gate 1.7 protocol literals select their own disjoint contracts; unknown
+# values match none and therefore fail rather than falling back to V2.
+ChoreographyLiveSceneRequest: TypeAlias = (
+    SemanticLiveSceneRequest | ParametricChoreographyRequestV3 | ProjectileMotionRequestV1
+)
 
 PARAMETRIC_CHOREOGRAPHY_REQUEST_V3_ADAPTER = TypeAdapter(ParametricChoreographyRequestV3)
 CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER = TypeAdapter(ChoreographyLiveSceneRequest)

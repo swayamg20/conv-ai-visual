@@ -2,6 +2,7 @@ import type { gsap } from "gsap";
 
 import type {
   ChoreographyEasing,
+  ChoreographyPlan,
   MotionStep,
   PlannedCheckpointChoreography,
   ScenePoint,
@@ -12,6 +13,10 @@ import {
   addCompatibleTransform,
   interpolateViewport,
 } from "./choreography-interpolation";
+import {
+  appendTracePathTween,
+  prepareTracePathMotion,
+} from "./choreography-path-trace";
 import type {
   SvgNodeReconciler,
   SvgNodeReconcilerContext,
@@ -34,7 +39,7 @@ interface AppendPhaseTweensOptions {
   readonly timeline: gsap.core.Timeline;
   readonly reconciler: SvgNodeReconciler;
   readonly context: TimelineContext;
-  readonly plan: PlannedCheckpointChoreography;
+  readonly plan: PlannedCheckpointChoreography<ChoreographyPlan>;
   readonly duration: number;
   readonly onError: (error: unknown) => void;
 }
@@ -93,6 +98,13 @@ function replaceCanonicalContent(target: SVGElement, source: SVGElement): void {
   );
 }
 
+/** Fail closed before reduced or animated execution touches the target scene. */
+export function validateChoreographyPhaseMotion(
+  plan: PlannedCheckpointChoreography<ChoreographyPlan>,
+): void {
+  prepareTracePathMotion(plan);
+}
+
 function pathLength(points: readonly ScenePoint[], closed: boolean): number {
   let length = 0;
   for (let index = 1; index < points.length; index += 1) {
@@ -146,12 +158,7 @@ function addEnter(
   ease: string,
   position: number,
 ): void {
-  const svg = context.getSvg();
-  if (!svg) throw new Error("The SVG canvas is unavailable");
-  const element = reconciler.create(step.node);
-  if (!element) throw new Error(`Could not render enter target ${step.id}`);
-  svg.appendChild(element);
-  reconciler.remember(step.node, element);
+  const element = appendEnterElement(reconciler, context, step);
   const opacity = step.node.style.opacity;
 
   if (step.effect === "none") {
@@ -230,6 +237,20 @@ function addEnter(
     { opacity, duration, ease },
     position,
   );
+}
+
+function appendEnterElement(
+  reconciler: SvgNodeReconciler,
+  context: TimelineContext,
+  step: Extract<MotionStep, { type: "enter" }>,
+): SVGElement {
+  const svg = context.getSvg();
+  if (!svg) throw new Error("The SVG canvas is unavailable");
+  const element = reconciler.create(step.node);
+  if (!element) throw new Error(`Could not render enter target ${step.id}`);
+  svg.appendChild(element);
+  reconciler.remember(step.node, element);
+  return element;
 }
 
 function addExit(
@@ -335,8 +356,15 @@ export function appendChoreographyPhaseTweens({
   onError,
 }: AppendPhaseTweensOptions): void {
   const ease = CLOSED_EASINGS[plan.choreographyPlan.phase.easing];
-  const schedule = phaseSchedule(plan.motionPlan.steps, duration);
-  for (const step of plan.motionPlan.steps) {
+  const trace = prepareTracePathMotion(plan);
+  const traceOwnedIds = trace
+    ? new Set([trace.cue.pathId, trace.cue.markerId])
+    : null;
+  const scheduledSteps = traceOwnedIds
+    ? plan.motionPlan.steps.filter((step) => !traceOwnedIds.has(step.id))
+    : plan.motionPlan.steps;
+  const schedule = phaseSchedule(scheduledSteps, duration);
+  for (const step of scheduledSteps) {
     addMotionStep(
       timeline,
       reconciler,
@@ -347,9 +375,19 @@ export function appendChoreographyPhaseTweens({
       schedule,
     );
   }
+  if (trace) {
+    appendTracePathTween(
+      timeline,
+      reconciler,
+      context,
+      trace,
+      duration,
+      onError,
+    );
+  }
 
   const camera = { progress: 0 };
-  const cameraStart = plan.motionPlan.steps.some(
+  const cameraStart = !trace && plan.motionPlan.steps.some(
     (step) => step.type === "update",
   )
     ? schedule.updateStart

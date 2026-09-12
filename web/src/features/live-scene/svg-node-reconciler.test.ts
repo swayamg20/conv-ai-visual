@@ -157,7 +157,11 @@ function textNode(id: string, text: string, x = 20): SceneNode {
 }
 
 function harness(
-  options: { renderer?: SVGPrimitiveRenderer; svg?: SVGSVGElement | null } = {},
+  options: {
+    renderer?: SVGPrimitiveRenderer;
+    replayElements?: Map<string, SVGElement>;
+    svg?: SVGSVGElement | null;
+  } = {},
 ) {
   const svg =
     options.svg === undefined
@@ -171,6 +175,14 @@ function harness(
     elements,
     getSvg: () => svg,
     getRenderer: () => nodeRenderer,
+    ...(options.replayElements
+      ? {
+          getDetachedReplayElement: (id: string) => {
+            const element = options.replayElements?.get(id) ?? null;
+            return element && element.parentNode === null ? element : null;
+          },
+        }
+      : {}),
     invalidate,
   });
   return { elements, invalidate, reconciler, svg };
@@ -322,6 +334,51 @@ describe("SVG node reconciler", () => {
     target.nodes.forEach((node) =>
       expect(elements.get(node.id)?.data).toEqual(node),
     );
+  });
+
+  it("reuses only detached canonical Replay identities and refreshes their exact content", () => {
+    const parked = group("stable", "text");
+    parked.setAttribute("data-stale", "remove");
+    parked.setAttribute("style", "opacity: 0.2; transform: scale(0.7)");
+    parked.querySelector("text")!.textContent = "Stale";
+    const replayElements = new Map([["stable", parked]]);
+    const { elements, reconciler, svg } = harness({ replayElements });
+    if (!svg) throw new Error("missing SVG fixture");
+    const current = textNode("stable", "Canonical", 75);
+
+    const replayed = reconciler.create(current) as SVGElement;
+
+    expect(replayed).toBe(parked);
+    expect(replayed.getAttribute("data-stale")).toBeNull();
+    expect(replayed.getAttribute("style")).toBeNull();
+    expect(replayed.querySelector("text")?.textContent).toBe("Canonical");
+    expect(replayed.querySelector("text")?.getAttribute("x")).toBe("75");
+
+    svg.appendChild(replayed);
+    reconciler.remember(current, replayed);
+    expect(replayElements.get("stable")).toBe(parked);
+    expect(reconciler.create(textNode("stable", "While live"))).not.toBe(
+      parked,
+    );
+    expect(reconciler.create(current, "stable--incoming")).not.toBe(parked);
+
+    replayed.remove();
+    reconciler.forget("stable", replayed);
+    expect(reconciler.create(textNode("stable", "Re-entered"))).toBe(parked);
+    expect(elements.has("stable")).toBe(false);
+  });
+
+  it("does not mutate a parked Replay identity when canonical rendering fails", () => {
+    const parked = group("boom", "text");
+    parked.querySelector("text")!.textContent = "Keep";
+    const { reconciler } = harness({
+      renderer: renderer([], "boom"),
+      replayElements: new Map([["boom", parked]]),
+    });
+
+    expect(reconciler.create(textNode("boom", "Replace"))).toBeNull();
+    expect(parked.querySelector("text")?.textContent).toBe("Keep");
+    expect(parked.parentNode).toBeNull();
   });
 
   it("keeps lexical area labels above opaque geometry during entry and exact replay", () => {

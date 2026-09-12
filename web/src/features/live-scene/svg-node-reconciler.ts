@@ -9,6 +9,8 @@ export interface SvgNodeReconcilerContext {
   readonly elements: Map<string, SVGElementData>;
   getSvg(): SVGSVGElement | null;
   getRenderer(): SVGPrimitiveRenderer | null;
+  /** Return a detached stable object parked solely for certified Replay. */
+  getDetachedReplayElement?(id: string): SVGElement | null;
   invalidate(): void;
 }
 
@@ -219,7 +221,10 @@ function clearDrawResidue(element: SVGElement): void {
 export function createSvgNodeReconciler(
   context: SvgNodeReconcilerContext,
 ): SvgNodeReconciler {
-  const create = (node: SceneNode, domId = node.id): SVGElement | null => {
+  const createCanonical = (
+    node: SceneNode,
+    domId: string,
+  ): SVGElement | null => {
     const renderer = context.getRenderer();
     if (!renderer) return null;
     if (node.kind === "latex") {
@@ -255,6 +260,19 @@ export function createSvgNodeReconciler(
         ?.setAttribute("text-anchor", node.style.anchor);
     }
     return element;
+  };
+
+  const create = (node: SceneNode, domId = node.id): SVGElement | null => {
+    const canonical = createCanonical(node, domId);
+    if (!canonical || domId !== node.id || context.elements.has(node.id)) {
+      return canonical;
+    }
+    const parked = context.getDetachedReplayElement?.(node.id) ?? null;
+    if (!parked || parked.parentNode !== null || parked.isConnected) {
+      return canonical;
+    }
+    copyElement(parked, canonical);
+    return parked;
   };
 
   const remember = (node: SceneNode, element: SVGElement): void => {

@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 import { LiveSceneProtocolError } from "./patch";
 import {
   CHOREOGRAPHY_CUE_ORDER,
+  CHOREOGRAPHY_CUE_V2_ORDER,
   CHOREOGRAPHY_EASINGS,
   CHOREOGRAPHY_PLAN_VERSION,
+  CHOREOGRAPHY_PLAN_V2_VERSION,
   COMPLETING_SQUARE_STAGES,
   MAX_CHOREOGRAPHY_CUES,
   MAX_CHOREOGRAPHY_HOLD_AFTER_MS,
@@ -12,12 +14,17 @@ import {
   MAX_CHOREOGRAPHY_PLAN_MS,
   MAX_CHOREOGRAPHY_TARGET_REFERENCES,
   MAX_CHOREOGRAPHY_TARGETS_PER_CUE,
+  MAX_CHOREOGRAPHY_V2_CUES,
+  MAX_CHOREOGRAPHY_V2_NODE_REFERENCES,
   MIN_CHOREOGRAPHY_PHASE_MS,
   PRESENTATION_CHECKPOINT_VERSION,
   ROUTED_CHOREOGRAPHY_BEAT_VERSION,
   VIEWPORT_POSE_VERSION,
   decodeChoreographyCueV1,
+  decodeChoreographyCueV2,
+  decodeChoreographyPlan,
   decodeChoreographyPlanV1,
+  decodeChoreographyPlanV2,
   decodePresentationCheckpointV1,
   decodeRoutedChoreographyBeatV2,
   decodeViewportPoseV1,
@@ -56,6 +63,32 @@ function choreographyPlan(): Record<string, unknown> {
       durationMs: 1_800,
       easing: "ease_in_out",
       holdAfterMs: 6_000,
+    },
+  };
+}
+
+function tracePlan(): Record<string, unknown> {
+  return {
+    v: CHOREOGRAPHY_PLAN_V2_VERSION,
+    phase: {
+      cues: [
+        {
+          cue: "enter",
+          targetIds: ["projectile__marker", "projectile__trajectory_ascent"],
+        },
+        {
+          cue: "trace_path",
+          pathId: "projectile__trajectory_ascent",
+          markerId: "projectile__marker",
+        },
+        {
+          cue: "focus",
+          targetIds: ["projectile__marker", "projectile__trajectory_ascent"],
+        },
+      ],
+      durationMs: 2_000,
+      easing: "linear",
+      holdAfterMs: 800,
     },
   };
 }
@@ -223,6 +256,150 @@ describe("live choreography contracts", () => {
     expect(protocolCode(() => decodeChoreographyCueV1(source))).toBe(
       "budget_exceeded",
     );
+  });
+
+  it("decodes and freezes the one closed V2 path-trace cue", () => {
+    const source = {
+      cue: "trace_path",
+      pathId: "projectile__trajectory_ascent",
+      markerId: "projectile__marker",
+    };
+    const decoded = decodeChoreographyCueV2(source);
+
+    expect(decoded).toEqual(source);
+    expect(Object.isFrozen(decoded)).toBe(true);
+    expect(CHOREOGRAPHY_CUE_ORDER).not.toContain("trace_path");
+    expect(CHOREOGRAPHY_CUE_V2_ORDER).toEqual([
+      "enter",
+      "exit",
+      "transform",
+      "trace_path",
+      "emphasize",
+      "focus",
+    ]);
+  });
+
+  it.each([
+    [
+      {
+        cue: "trace_path",
+        pathId: "projectile__trajectory",
+        markerId: "projectile__trajectory",
+      },
+      "must be distinct",
+    ],
+    [
+      {
+        cue: "trace_path",
+        pathId: "#trajectory",
+        markerId: "projectile__marker",
+      },
+      "unsafe identifier",
+    ],
+    [
+      {
+        cue: "trace_path",
+        pathId: "projectile__trajectory",
+        markerId: "projectile__marker",
+        progress: 0.5,
+      },
+      "unknown field progress",
+    ],
+    [
+      {
+        cue: "trace_path",
+        pathId: "projectile__trajectory",
+        markerId: "projectile__marker",
+        targetIds: ["projectile__marker"],
+      },
+      "unknown field targetIds",
+    ],
+  ])("rejects an open or ambiguous V2 trace cue %#", (source, message) => {
+    expect(() => decodeChoreographyCueV2(source)).toThrow(message as string);
+  });
+
+  it("decodes V2 without widening either sealed V1 decoder", () => {
+    const source = tracePlan();
+    const decoded = decodeChoreographyPlanV2(source);
+
+    expect(decoded).toEqual(source);
+    expect(decodeChoreographyPlan(source)).toEqual(decoded);
+    expect(Object.isFrozen(decoded)).toBe(true);
+    expect(Object.isFrozen(decoded.phase)).toBe(true);
+    expect(Object.isFrozen(decoded.phase.cues)).toBe(true);
+    expect(() => decodeChoreographyPlanV1(source)).toThrow();
+    expect(() =>
+      decodeChoreographyCueV1({
+        cue: "trace_path",
+        pathId: "projectile__trajectory_ascent",
+        markerId: "projectile__marker",
+      }),
+    ).toThrow();
+    expect(decodeChoreographyPlan(choreographyPlan())).toEqual(
+      decodeChoreographyPlanV1(choreographyPlan()),
+    );
+
+    const noTrace = tracePlan();
+    const phase = noTrace.phase as { cues: Record<string, unknown>[] };
+    phase.cues = phase.cues.filter((cue) => cue.cue !== "trace_path");
+    expect(decodeChoreographyPlanV2(noTrace).phase.cues).toHaveLength(2);
+  });
+
+  it("requires V2 trace ownership to remain disjoint from normal transforms", () => {
+    const source = tracePlan();
+    const phase = source.phase as { cues: Record<string, unknown>[] };
+    phase.cues.splice(1, 0, {
+      cue: "transform",
+      targetIds: ["projectile__marker"],
+    });
+
+    expect(() => decodeChoreographyPlanV2(source)).toThrow(
+      "trace-owned nodes must be disjoint from transform targetIds",
+    );
+  });
+
+  it("enforces V2 cue ordering, count, and node-reference budgets independently", () => {
+    expect(MAX_CHOREOGRAPHY_V2_CUES).toBe(6);
+    const unordered = tracePlan();
+    const unorderedPhase = unordered.phase as { cues: unknown[] };
+    unorderedPhase.cues = [...unorderedPhase.cues].reverse();
+    expect(() => decodeChoreographyPlanV2(unordered)).toThrow(
+      "canonical cue order",
+    );
+
+    const tooManyCues = tracePlan();
+    (tooManyCues.phase as { cues: unknown[] }).cues = Array.from(
+      { length: MAX_CHOREOGRAPHY_V2_CUES + 1 },
+      (_, index) => ({ cue: "enter", targetIds: [`node_${index}`] }),
+    );
+    expect(protocolCode(() => decodeChoreographyPlanV2(tooManyCues))).toBe(
+      "budget_exceeded",
+    );
+
+    const tooManyReferences = tracePlan();
+    (tooManyReferences.phase as { cues: unknown[] }).cues = [
+      {
+        cue: "enter",
+        targetIds: Array.from({ length: 16 }, (_, index) =>
+          `enter_${index.toString().padStart(2, "0")}`,
+        ),
+      },
+      {
+        cue: "exit",
+        targetIds: Array.from({ length: 15 }, (_, index) =>
+          `exit_${index.toString().padStart(2, "0")}`,
+        ),
+      },
+      {
+        cue: "trace_path",
+        pathId: "projectile__trajectory",
+        markerId: "projectile__marker",
+      },
+    ];
+    expect(16 + 15 + 2).toBe(MAX_CHOREOGRAPHY_V2_NODE_REFERENCES + 1);
+    expect(
+      protocolCode(() => decodeChoreographyPlanV2(tooManyReferences)),
+    ).toBe("budget_exceeded");
   });
 
   it.each(CHOREOGRAPHY_EASINGS)(

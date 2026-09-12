@@ -7,6 +7,8 @@ export type ChoreographyCanvasRenderer = Pick<
   | "materializeScene"
   | "materializeViewport"
   | "cancelMotion"
+  | "prepareReplayScene"
+  | "finishReplayScene"
   | "clear"
 >;
 
@@ -37,6 +39,25 @@ export class ChoreographyCanvasBridge implements ChoreographyCanvasRenderer {
   ) => {
     if (!this.handle) throw new Error("The visual stage is not ready yet.");
     this.handle.materializeViewport(pose);
+  };
+
+  prepareReplayScene: NonNullable<
+    ChoreographyCanvasRenderer["prepareReplayScene"]
+  > = (scene) => {
+    if (!this.handle) throw new Error("The visual stage is not ready yet.");
+    if (this.handle.prepareReplayScene && this.handle.finishReplayScene) {
+      this.handle.prepareReplayScene(scene);
+      return;
+    }
+    this.handle.cancelMotion();
+    this.handle.clear();
+    this.handle.materializeScene(scene);
+  };
+
+  finishReplayScene: NonNullable<
+    ChoreographyCanvasRenderer["finishReplayScene"]
+  > = () => {
+    this.handle?.finishReplayScene?.();
   };
 
   cancelMotion = (): void => {
