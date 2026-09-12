@@ -20,6 +20,7 @@
     "e2e:projectile-motion": "PROJECTILE_MOTION_E2E_SUITE=accelerated playwright test --config=playwright.projectile-motion.config.ts",
     "e2e:projectile-motion:capture": "PROJECTILE_MOTION_E2E_SUITE=capture playwright test --config=playwright.projectile-motion.config.ts",
     "e2e:projectile-motion:product-smoke": "PROJECTILE_MOTION_E2E_SUITE=product-smoke playwright test --config=playwright.projectile-motion.config.ts",
+    "test:semantic-storyboard-token-fit": "playwright test --config=playwright.semantic-storyboard-token-fit.config.ts",
     "finalize:projectile-motion-artifacts": "node scripts/projectile-motion-artifacts.mjs finalize",
     "validate:projectile-motion-artifacts": "node scripts/validate-projectile-motion-artifacts.mjs",
     "finalize:choreography-artifacts": "node scripts/live-choreography-artifacts.mjs finalize",
