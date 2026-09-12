@@ -646,7 +646,7 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
             r"a_x=0\ \Longrightarrow\ v_x\ \text{stays constant}",
             280.0,
             526.0,
-            340.0,
+            400.0,
             style=_SAGE_TEXT,
         )
         nodes[node.id] = node
@@ -657,7 +657,7 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
             r"v_y=0\ \text{for an instant};\quad a_y=-g",
             280.0,
             500.0,
-            380.0,
+            430.0,
             style=_EMBER_TEXT,
         )
         nodes[node.id] = node
@@ -668,7 +668,7 @@ def _clarification_nodes(state: ProjectileMotionStateV1) -> NodeMap:
             r"\begin{gathered}t_{\uparrow}=t_{\downarrow}\\\text{when launch and impact heights match}\end{gathered}",
             280.0,
             480.0,
-            392.0,
+            440.0,
             height=80.0,
             style=_DETAIL_TEXT,
         )

@@ -158,9 +158,9 @@ _TOKEN_MINIMUM_FRAMES: Mapping[str, tuple[float, float]] = {
     "apex_acceleration": (280.0, 42.0),
     "height_value": (124.0, 36.0),
     "summary_values": (220.0, 116.0),
-    "clarify_horizontal_velocity": (340.0, 42.0),
-    "clarify_apex_acceleration": (380.0, 42.0),
-    "clarify_flight_symmetry": (392.0, 80.0),
+    "clarify_horizontal_velocity": (400.0, 42.0),
+    "clarify_apex_acceleration": (430.0, 42.0),
+    "clarify_flight_symmetry": (440.0, 80.0),
 }
 _VERTICAL_STATE_MINIMUM_FRAMES: Mapping[str, tuple[float, float]] = {
     r"a_x=0,\quad a_y=-g": (210.0, 42.0),
@@ -838,7 +838,7 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 r"a_x=0\ \Longrightarrow\ v_x\ \text{stays constant}",
                 280.0,
                 526.0,
-                340.0,
+                400.0,
                 style=_SAGE_TEXT,
             )
         )
@@ -850,7 +850,7 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 r"v_y=0\ \text{for an instant};\quad a_y=-g",
                 280.0,
                 500.0,
-                380.0,
+                430.0,
                 style=_EMBER_TEXT,
             )
         )
@@ -863,7 +863,7 @@ def _expected_nodes(state: ProjectileMotionStateV1, physics: _Physics) -> NodeMa
                 r"\text{when launch and impact heights match}\end{gathered}",
                 280.0,
                 480.0,
-                392.0,
+                440.0,
                 height=80.0,
                 style=_DETAIL_TEXT,
             )

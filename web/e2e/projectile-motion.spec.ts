@@ -1553,8 +1553,13 @@ test("the rendered formula oracle rejects internal glyph overflow without an aut
     page,
     expectedProjectileBoard(primaryFixture, "main", "cinematic"),
   );
+  const baseline = await inspectProjectileSvgAgainstScene(
+    page,
+    primaryFixture.lanes.main.expectedTerminal.scene,
+  );
+  expect(baseline.mismatches).toEqual([]);
   await projectileBoard(page)
-    .locator('[data-element-id="projectile__summary"] .katex-html')
+    .locator('[data-element-id="projectile__summary_values"] .katex-html')
     .evaluate((element) => {
       (element as HTMLElement).style.fontSize = "400%";
     });
@@ -1567,10 +1572,11 @@ test("the rendered formula oracle rejects internal glyph overflow without an aut
     expect.arrayContaining([
       expect.objectContaining({
         code: "latex_content_bounds",
-        nodeId: "projectile__summary",
+        nodeId: "projectile__summary_values",
       }),
     ]),
   );
+  expect(inspection.signature).toEqual(baseline.signature);
 });
 
 test("the certified main flow draws a curved trace with one stable projectile marker and no provider", async ({
@@ -2367,6 +2373,10 @@ test.describe("responsive compact proof", () => {
       await expectProjectileTerminal(
         page,
         expectedProjectileBoard(primaryFixture, "main", "compact"),
+      );
+      await expectProjectileSvgMatchesScene(
+        page,
+        primaryFixture.lanes.main.expectedTerminal.scene,
       );
       await expect(projectileStage(page)).toHaveAttribute(
         "data-layout",

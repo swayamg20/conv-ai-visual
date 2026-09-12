@@ -339,7 +339,7 @@ def test_dense_facts_reflow_inside_stable_nonoverlapping_frames() -> None:
         symmetry_token.y,
         symmetry_token.width,
         symmetry_token.height,
-    ) == (280.0, 480.0, 392.0, 80.0)
+    ) == (280.0, 480.0, 440.0, 80.0)
     assert symmetry_token.style.font_size == 20.0
     assert symmetry_token.x + symmetry_token.width / 2.0 < (
         summary_token.x - summary_token.width / 2.0
