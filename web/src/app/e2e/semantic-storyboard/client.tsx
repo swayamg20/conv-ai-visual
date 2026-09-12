@@ -16,6 +16,7 @@ import type {
 } from "@/features/live-scene/semantic-storyboard-model-stream";
 import type { SemanticStoryboardSessionSnapshot } from "@/features/live-scene/semantic-storyboard-session-controller";
 import type { PairedProjectileComparisonSpecV1 } from "@/lib/live-scene/semantic-storyboard";
+import type { SemanticStoryboardSceneStreamEventV1 } from "@/lib/live-scene/semantic-storyboard-stream";
 
 import type { SemanticStoryboardE2EOptions } from "./options";
 
@@ -24,6 +25,7 @@ export const SEMANTIC_STORYBOARD_E2E_BRIDGE_KEY =
 
 export interface SemanticStoryboardFixtureInvocationObservation {
   readonly ordinal: number;
+  readonly observedAtMs: number;
   readonly generation: number;
   readonly routingMode: "reflex" | "director";
   readonly prompt: string | null;
@@ -32,6 +34,16 @@ export interface SemanticStoryboardFixtureInvocationObservation {
   readonly semanticRevision: number;
   readonly certificateHeadSha256: string | null;
   readonly acceptedRecordCount: number;
+}
+
+export interface SemanticStoryboardFixtureEventObservation {
+  readonly ordinal: number;
+  readonly observedAtMs: number;
+  readonly type: SemanticStoryboardSceneStreamEventV1["type"];
+  readonly generation: number;
+  readonly sequence: number | null;
+  readonly resultRevision: number | null;
+  readonly checkpointId: string | null;
 }
 
 export interface SemanticStoryboardSessionObservation {
@@ -45,6 +57,7 @@ export interface SemanticStoryboardE2EBridgeV1 {
     readonly runnerCallCount: number;
     readonly calls: readonly SemanticStoryboardFixtureInvocationObservation[];
   };
+  getEventHistory(): readonly SemanticStoryboardFixtureEventObservation[];
   getSessionObservation(): SemanticStoryboardSessionObservation | null;
   getSessionObservationHistory(): readonly SemanticStoryboardSessionObservation[];
 }
@@ -72,11 +85,13 @@ function copyProblemSpec(
 function observeInvocation(
   invocation: SemanticStoryboardSceneStreamRunInvocation,
   ordinal: number,
+  observedAtMs: number,
 ): SemanticStoryboardFixtureInvocationObservation {
   const request = invocation.request;
   const component = request.baseSemanticScene.components[0];
   return Object.freeze({
     ordinal,
+    observedAtMs,
     generation: request.generation,
     routingMode: request.routingMode,
     prompt: request.routingMode === "director" ? request.prompt : null,
@@ -89,6 +104,31 @@ function observeInvocation(
   });
 }
 
+function observeEvent(
+  event: SemanticStoryboardSceneStreamEventV1,
+  ordinal: number,
+  observedAtMs: number,
+): SemanticStoryboardFixtureEventObservation {
+  return Object.freeze({
+    ordinal,
+    observedAtMs,
+    type: event.type,
+    generation: event.generation,
+    sequence:
+      event.type === "semantic_storyboard_scene_checkpoint"
+        ? event.sequence
+        : null,
+    resultRevision:
+      event.type === "semantic_storyboard_scene_checkpoint"
+        ? event.resultRevision
+        : null,
+    checkpointId:
+      event.type === "semantic_storyboard_scene_checkpoint"
+        ? event.transition.checkpoint.checkpointId
+        : null,
+  });
+}
+
 /** Create one provider-free fixture session for a single route mount. */
 export function createSemanticStoryboardE2ESession(
   keyframeProof: boolean,
@@ -97,12 +137,21 @@ export function createSemanticStoryboardE2ESession(
     keyframeProof ? { eventDelayMs: 1_200 } : undefined;
   const fixtureRunner = createSemanticStoryboardFixtureRunner(fixtureOptions);
   const calls: SemanticStoryboardFixtureInvocationObservation[] = [];
+  const events: SemanticStoryboardFixtureEventObservation[] = [];
   let sessionObservation: SemanticStoryboardSessionObservation | null = null;
   const sessionObservationHistory: SemanticStoryboardSessionObservation[] = [];
 
   const runner: SemanticStoryboardSceneStreamRunner = async (invocation) => {
-    calls.push(observeInvocation(invocation, calls.length + 1));
-    await fixtureRunner(invocation);
+    calls.push(
+      observeInvocation(invocation, calls.length + 1, performance.now()),
+    );
+    await fixtureRunner({
+      ...invocation,
+      onEvent: (event) => {
+        events.push(observeEvent(event, events.length + 1, performance.now()));
+        invocation.onEvent(event);
+      },
+    });
   };
 
   return Object.freeze({
@@ -121,6 +170,7 @@ export function createSemanticStoryboardE2ESession(
           runnerCallCount: calls.length,
           calls: Object.freeze([...calls]),
         }),
+      getEventHistory: () => Object.freeze([...events]),
       getSessionObservation: () => sessionObservation,
       getSessionObservationHistory: () =>
         Object.freeze([...sessionObservationHistory]),

@@ -108,6 +108,22 @@ describe("semantic-storyboard e2e client session", () => {
   it("records exact request frontiers while the real fixture runner stays provider-free", async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal("fetch", fetchSpy);
+    vi.spyOn(performance, "now")
+      .mockReturnValueOnce(10)
+      .mockReturnValueOnce(11)
+      .mockReturnValueOnce(12)
+      .mockReturnValueOnce(13)
+      .mockReturnValueOnce(20)
+      .mockReturnValueOnce(21)
+      .mockReturnValueOnce(22)
+      .mockReturnValueOnce(23)
+      .mockReturnValueOnce(24)
+      .mockReturnValueOnce(25)
+      .mockReturnValueOnce(26)
+      .mockReturnValueOnce(30)
+      .mockReturnValueOnce(31)
+      .mockReturnValueOnce(32)
+      .mockReturnValueOnce(33);
     const session = createSemanticStoryboardE2ESession(false);
 
     const anchorEvents: SemanticStoryboardSceneStreamEventV1[] = [];
@@ -163,6 +179,7 @@ describe("semantic-storyboard e2e client session", () => {
       calls: [
         {
           ordinal: 1,
+          observedAtMs: 10,
           generation: 1,
           routingMode: "reflex",
           prompt: null,
@@ -174,6 +191,7 @@ describe("semantic-storyboard e2e client session", () => {
         },
         {
           ordinal: 2,
+          observedAtMs: 20,
           generation: 2,
           routingMode: "director",
           prompt: DIRECTOR_PROMPT,
@@ -186,6 +204,7 @@ describe("semantic-storyboard e2e client session", () => {
         },
         {
           ordinal: 3,
+          observedAtMs: 30,
           generation: 3,
           routingMode: "director",
           prompt: CONTINUE_PROMPT,
@@ -204,6 +223,60 @@ describe("semantic-storyboard e2e client session", () => {
     expect(Object.isFrozen(state.calls[0])).toBe(true);
     expect(Object.isFrozen(state.calls[0].problemSpec)).toBe(true);
     expect(Object.isFrozen(state.calls[0].problemSpec.anglesDeg)).toBe(true);
+    const eventHistory = session.bridge.getEventHistory();
+    expect(eventHistory.slice(0, 3)).toEqual([
+      {
+        ordinal: 1,
+        observedAtMs: 11,
+        type: "semantic_storyboard_scene_stream_started",
+        generation: 1,
+        sequence: null,
+        resultRevision: null,
+        checkpointId: null,
+      },
+      {
+        ordinal: 2,
+        observedAtMs: 12,
+        type: "semantic_storyboard_scene_checkpoint",
+        generation: 1,
+        sequence: 1,
+        resultRevision: 1,
+        checkpointId: "storyboard-anchor",
+      },
+      {
+        ordinal: 3,
+        observedAtMs: 13,
+        type: "semantic_storyboard_scene_stream_completed",
+        generation: 1,
+        sequence: null,
+        resultRevision: null,
+        checkpointId: null,
+      },
+    ]);
+    expect(eventHistory).toHaveLength(12);
+    expect(eventHistory[3]).toMatchObject({
+      ordinal: 4,
+      observedAtMs: 21,
+      type: "semantic_storyboard_scene_stream_started",
+      generation: 2,
+    });
+    expect(eventHistory[4]).toMatchObject({
+      ordinal: 5,
+      observedAtMs: 22,
+      type: "semantic_storyboard_scene_checkpoint",
+      generation: 2,
+      sequence: 1,
+      resultRevision: 2,
+      checkpointId: "storyboard-checkpoint-trace-higher-angle",
+    });
+    expect(eventHistory.at(-1)).toMatchObject({
+      ordinal: 12,
+      observedAtMs: 33,
+      type: "semantic_storyboard_scene_stream_completed",
+      generation: 3,
+    });
+    expect(Object.isFrozen(eventHistory)).toBe(true);
+    expect(eventHistory.every(Object.isFrozen)).toBe(true);
     expect(session.bridge.getSessionObservation()).toBeNull();
     expect(session.bridge.getSessionObservationHistory()).toEqual([]);
   });
