@@ -524,6 +524,7 @@ export class CertifiedChoreographyStreamRuntime<
     this.queue = [];
     this.provisional = this.active?.prepared.target ?? this.committed;
     if (!this.active) {
+      this.player.finishReplay();
       this.currentToken = null;
       this.streamControl = null;
       this.interruptPending = false;
@@ -701,6 +702,18 @@ export class CertifiedChoreographyStreamRuntime<
     }
 
     if (this.currentToken !== token) return;
+    try {
+      this.player.finishReplay();
+    } catch (error) {
+      this.failReplay(
+        originalRecords,
+        originalFrontier,
+        originalCaption,
+        originalCheckpoint,
+        message(error),
+      );
+      return;
+    }
     this.accepted = originalRecords;
     this.committed = originalFrontier;
     this.provisional = originalFrontier;
@@ -723,6 +736,7 @@ export class CertifiedChoreographyStreamRuntime<
       if (this.active) this.player.close(this.active);
       this.player.cancel(this.active?.playback);
       this.player.cancelMotion();
+      this.player.finishReplay();
     } catch {
       // Disposal has no recoverable user-facing state.
     }
@@ -1058,6 +1072,12 @@ export class CertifiedChoreographyStreamRuntime<
     this.sequence = lastAccepted
       ? this.domain.acceptedSequence(lastAccepted)
       : 0;
+    try {
+      this.player.finishReplay();
+    } catch (error) {
+      this.failReplayRecovery(message(error));
+      return;
+    }
     this.active = null;
     this.currentToken = null;
     this.interruptPending = false;

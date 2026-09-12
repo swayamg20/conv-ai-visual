@@ -21,6 +21,8 @@ export type CheckpointChoreographyRenderer = Pick<
   | "materializeScene"
   | "materializeViewport"
   | "cancelMotion"
+  | "prepareReplayScene"
+  | "finishReplayScene"
   | "clear"
 >;
 
@@ -77,6 +79,7 @@ function playbackHandle(value: unknown): ChoreographyPlayback {
 export class CheckpointChoreographyPlayer {
   private viewportInitialized = false;
   private initializedViewport: ViewportPoseV1 | null = null;
+  private retainedReplay = false;
 
   constructor(private readonly renderer: CheckpointChoreographyRenderer) {}
 
@@ -173,8 +176,12 @@ export class CheckpointChoreographyPlayer {
   }): string | undefined {
     try {
       this.renderer.cancelMotion();
-      this.renderer.clear();
-      this.renderer.materializeScene(frontier.scene);
+      if (this.retainedReplay) {
+        this.renderer.materializeScene(frontier.scene);
+      } else {
+        this.renderer.clear();
+        this.renderer.materializeScene(frontier.scene);
+      }
       if (frontier.viewport) {
         this.renderer.materializeViewport(frontier.viewport);
         this.viewportInitialized = true;
@@ -183,22 +190,53 @@ export class CheckpointChoreographyPlayer {
         this.viewportInitialized = false;
         this.initializedViewport = null;
       }
+      this.finishReplay();
       return undefined;
     } catch (error) {
+      try {
+        this.finishReplay();
+      } catch {
+        // Preserve the primary restoration failure.
+      }
       return message(error);
     }
   }
 
   clear(): void {
     this.renderer.cancelMotion();
-    this.renderer.clear();
-    this.viewportInitialized = false;
-    this.initializedViewport = null;
+    try {
+      this.renderer.clear();
+    } finally {
+      this.retainedReplay = false;
+      this.viewportInitialized = false;
+      this.initializedViewport = null;
+    }
   }
 
   materializeEmpty(scene: SceneState): void {
+    const prepare = this.renderer.prepareReplayScene;
+    const finish = this.renderer.finishReplayScene;
+    if (prepare && finish) {
+      if (this.retainedReplay) {
+        throw new Error("A retained Replay is already active");
+      }
+      this.retainedReplay = true;
+      prepare.call(this.renderer, scene);
+      this.viewportInitialized = false;
+      this.initializedViewport = null;
+      return;
+    }
     this.clear();
     this.renderer.materializeScene(scene);
+  }
+
+  finishReplay(): void {
+    if (!this.retainedReplay) return;
+    try {
+      this.renderer.finishReplayScene?.();
+    } finally {
+      this.retainedReplay = false;
+    }
   }
 
   cancel(playback?: ChoreographyPlayback): void {

@@ -202,6 +202,13 @@ export interface SVGCanvasHandle {
   cancelViewportAnimation(): ViewportPlaybackOutcome | null;
   /** Atomically reconcile the retained SVG to one canonical scene snapshot. */
   materializeScene(scene: SceneState): void;
+  /**
+   * Empty the certified stage for Replay while parking stable DOM objects so
+   * the same conceptual ink can be reintroduced without replacement.
+   */
+  prepareReplayScene?(scene: SceneState): void;
+  /** Close a prepared Replay and discard any detached objects not retained. */
+  finishReplayScene?(): void;
   emphasizeElement(id: string, color?: string): void;
   /** Stop queued work and settle each active motion to its canonical terminal state. */
   cancelMotion(): void;

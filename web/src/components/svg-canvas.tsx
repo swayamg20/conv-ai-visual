@@ -75,6 +75,8 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const svgRef = useRef<SVGSVGElement>(null);
     const roughRef = useRef<RoughSVG | null>(null);
     const elementsRef = useRef<Map<string, SVGElementData>>(new Map());
+    const replayElementsRef = useRef<Map<string, SVGElement>>(new Map());
+    const replayActiveRef = useRef(false);
     const timelinesRef = useRef<Map<string, gsap.core.Timeline>>(new Map());
     const sequenceQueueRef = useRef<gsap.core.Timeline[]>([]);
     const isPlayingRef = useRef(false);
@@ -130,11 +132,14 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     useEffect(() => {
       const timelines = timelinesRef.current;
       const sequenceQueue = sequenceQueueRef.current;
+      const replayElements = replayElementsRef.current;
       return () => {
         timelines.forEach((timeline) => timeline.kill());
         timelines.clear();
         sequenceQueue.forEach((timeline) => timeline.kill());
         sequenceQueue.length = 0;
+        replayElements.clear();
+        replayActiveRef.current = false;
       };
     }, []);
 
@@ -158,6 +163,15 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         elements: elementsRef.current,
         getSvg: () => svgRef.current,
         getRenderer: primitiveRenderer,
+        getDetachedReplayElement: (id: string) => {
+          if (!replayActiveRef.current || elementsRef.current.has(id)) {
+            return null;
+          }
+          const element = replayElementsRef.current.get(id) ?? null;
+          return element && element.parentNode === null && !element.isConnected
+            ? element
+            : null;
+        },
         getHighlightColor: () => paletteRef.current.error,
         invalidate: () => forceRender((revision) => revision + 1),
       }),
@@ -567,8 +581,70 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       [cancelMotion, sceneReconciler],
     );
 
+    const prepareReplayScene = useCallback<
+      NonNullable<SVGCanvasHandle["prepareReplayScene"]>
+    >(
+      (scene) => {
+        if (replayActiveRef.current) {
+          throw new Error("A retained Replay is already active");
+        }
+        const originalEntries = [...elementsRef.current.entries()];
+        const svg = svgRef.current;
+        const originalChildren = svg ? Array.from(svg.children) : [];
+        const originalViewport = readViewport();
+        cancelMotion();
+        replayElementsRef.current.clear();
+        for (const [id, data] of originalEntries) {
+          replayElementsRef.current.set(id, data.element);
+        }
+        replayActiveRef.current = true;
+
+        try {
+          panRef.current = { x: 0, y: 0 };
+          applyViewBox(zoomLevel, panRef.current, true);
+          if (svg) {
+            Array.from(svg.children)
+              .filter((element) => element.id !== "canvas-grid")
+              .forEach((element) => element.remove());
+          }
+          elementsRef.current.clear();
+          sceneReconciler.reconcile(scene);
+        } catch (error) {
+          if (svg) svg.replaceChildren(...originalChildren);
+          elementsRef.current.clear();
+          originalEntries.forEach(([id, data]) =>
+            elementsRef.current.set(id, data),
+          );
+          try {
+            materializeViewport(originalViewport);
+          } catch {
+            // Preserve the primary preparation failure for runtime recovery.
+          }
+          replayElementsRef.current.clear();
+          replayActiveRef.current = false;
+          throw error;
+        }
+      },
+      [
+        applyViewBox,
+        cancelMotion,
+        materializeViewport,
+        panRef,
+        readViewport,
+        sceneReconciler,
+        zoomLevel,
+      ],
+    );
+
+    const finishReplayScene = useCallback(() => {
+      replayElementsRef.current.clear();
+      replayActiveRef.current = false;
+    }, []);
+
     const clear = useCallback(() => {
       cancelMotion();
+      replayElementsRef.current.clear();
+      replayActiveRef.current = false;
       panRef.current = { x: 0, y: 0 };
       applyViewBox(zoomLevel, panRef.current, true);
 
@@ -609,6 +685,8 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         resetViewport,
         cancelViewportAnimation,
         materializeScene,
+        prepareReplayScene,
+        finishReplayScene,
         emphasizeElement,
         cancelMotion,
         clear,
@@ -627,11 +705,13 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
         createPausedSequence,
         createSequence,
         emphasizeElement,
+        finishReplayScene,
         materializeScene,
         materializeViewport,
         panTo,
         playCheckpointChoreography,
         playMotionPlan,
+        prepareReplayScene,
         readViewport,
         render,
         renderFunctionPlot,
