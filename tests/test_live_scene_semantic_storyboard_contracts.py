@@ -10,6 +10,8 @@ from murmur.live_scene.projectile_motion_contracts import (
     SUPPORTED_PROJECTILE_SPEEDS_MPS,
 )
 from murmur.live_scene.semantic_storyboard_contracts import (
+    MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS,
+    MAX_STORYBOARD_EVIDENCE_IDS,
     SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER,
     AbstainStoryboardRecordV1,
     PairedProjectileComparisonSpecV1,
@@ -147,6 +149,38 @@ def test_model_records_reject_open_compound_noncanonical_and_extra_values(
 ) -> None:
     with pytest.raises(ValidationError):
         _decode(payload)
+
+
+def test_collection_bounds_fail_before_nested_record_parsing() -> None:
+    oversized_evidence = {
+        "v": 1,
+        "act": "relate",
+        "claimId": "equal_range",
+        "evidenceIds": ["invented"] * (MAX_STORYBOARD_EVIDENCE_IDS + 1),
+    }
+    with pytest.raises(ValidationError) as evidence_error:
+        _decode(oversized_evidence)
+    assert len(evidence_error.value.errors()) == 1
+    assert "must contain 1-4 values" in str(evidence_error.value)
+
+    with pytest.raises(ValidationError) as ledger_error:
+        ProjectileStoryboardStateV1.model_validate(
+            {
+                "problemSpec": _problem().model_dump(mode="json", by_alias=True),
+                "acceptedRecords": [
+                    {"invalid": True} for _ in range(MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS + 1)
+                ],
+            }
+        )
+    assert len(ledger_error.value.errors()) == 1
+    assert "exceeds the closed storyboard catalog" in str(ledger_error.value)
+
+    with pytest.raises(ValidationError) as component_error:
+        ProjectileStoryboardSemanticSceneStateV1.model_validate(
+            {"revision": 0, "components": [{"invalid": True}, {"invalid": True}]}
+        )
+    assert len(component_error.value.errors()) == 1
+    assert "supports at most one component" in str(component_error.value)
 
 
 @pytest.mark.parametrize(

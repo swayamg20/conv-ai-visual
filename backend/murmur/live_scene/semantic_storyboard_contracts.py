@@ -240,6 +240,15 @@ class RelateStoryboardRecordV1(_SemanticStoryboardRecordBase):
     claim_id: StoryboardClaimId = Field(alias="claimId")
     evidence_ids: StoryboardEvidenceIds = Field(alias="evidenceIds")
 
+    @field_validator("evidence_ids", mode="before")
+    @classmethod
+    def validate_evidence_bound_before_items(cls, value: object) -> object:
+        if not isinstance(value, list | tuple):
+            raise ValueError("evidenceIds must be an array")
+        if not 1 <= len(value) <= MAX_STORYBOARD_EVIDENCE_IDS:
+            raise ValueError(f"evidenceIds must contain 1-{MAX_STORYBOARD_EVIDENCE_IDS} values")
+        return value
+
     @model_validator(mode="after")
     def validate_canonical_evidence(self) -> Self:
         if len(self.evidence_ids) != len(set(self.evidence_ids)):
@@ -398,6 +407,15 @@ class ProjectileStoryboardStateV1(LiveSceneContract):
             raise ValueError("v must be a strict integer")
         return value
 
+    @field_validator("accepted_records", mode="before")
+    @classmethod
+    def validate_ledger_bound_before_records(cls, value: object) -> object:
+        if not isinstance(value, list | tuple):
+            raise ValueError("acceptedRecords must be an array")
+        if len(value) > MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS:
+            raise ValueError("acceptedRecords exceeds the closed storyboard catalog")
+        return value
+
     @model_validator(mode="after")
     def validate_ordered_program(self) -> Self:
         validate_storyboard_program(self.problem_spec, self.accepted_records)
@@ -417,6 +435,15 @@ class ProjectileStoryboardSemanticSceneStateV1(LiveSceneContract):
         alias="certificateHeadSha256",
         exclude_if=lambda value: value is None,
     )
+
+    @field_validator("components", mode="before")
+    @classmethod
+    def validate_component_bound_before_components(cls, value: object) -> object:
+        if not isinstance(value, list | tuple):
+            raise ValueError("components must be an array")
+        if len(value) > 1:
+            raise ValueError("storyboard semantic scene supports at most one component")
+        return value
 
     @model_validator(mode="after")
     def validate_anchor_and_atomic_revisions(self) -> Self:

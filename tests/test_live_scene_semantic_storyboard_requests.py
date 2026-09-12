@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
+from murmur.live_scene.contracts import MAX_SCENE_NODES
 from murmur.live_scene.semantic_storyboard_requests import (
     PROJECTILE_COMPARISON_STORYBOARD_PROTOCOL,
     SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER,
@@ -114,6 +117,24 @@ def test_director_request_is_prompt_only_and_bound_to_certified_anchor() -> None
     assert "records" not in SemanticStoryboardDirectorRequestV1.model_fields
 
 
+@pytest.mark.parametrize("prompt", ["\u0085", "\ufeff", "\u0085\ufeff"])
+def test_director_rejects_unicode_edge_whitespace_only_prompts(prompt: str) -> None:
+    payload = _director()
+    payload["prompt"] = prompt
+
+    with pytest.raises(ValidationError):
+        SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER.validate_python(payload)
+
+
+def test_director_uses_the_same_explicit_unicode_edge_normalization() -> None:
+    payload = _director()
+    payload["prompt"] = "\u0085\ufeff  Compare their ranges.  \ufeff\u0085"
+
+    request = SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER.validate_python(payload)
+
+    assert request.prompt == "Compare their ranges."
+
+
 def test_director_continuation_preserves_the_exact_ordered_frontier() -> None:
     component = _anchor_component()
     component["acceptedRecords"] = [{"v": 1, "act": "trace", "trajectoryId": "lower_angle"}]
@@ -202,3 +223,61 @@ def test_identity_frontier_and_problem_values_are_strict(
     payload[field] = value
     with pytest.raises(ValidationError):
         SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER.validate_python(payload)
+
+
+def test_request_adapter_requires_canonical_wire_keys_at_every_layer() -> None:
+    canonical = _director()
+    canonical["baseScene"] = {"revision": 2, "nodes": []}
+    canonical["baseSemanticScene"]["revision"] = 2
+    canonical["baseSemanticScene"]["components"][0]["acceptedRecords"] = [
+        {"v": 1, "act": "trace", "trajectoryId": "lower_angle"}
+    ]
+
+    payloads: list[dict[str, object]] = []
+    for path, canonical_key, alias_key in (
+        ((), "routingMode", "routing_mode"),
+        (("problemSpec",), "speedMps", "speed_mps"),
+        (("baseScene",), "revision", "base_revision"),
+        (("baseSemanticScene",), "certificateHeadSha256", "certificate_head_sha256"),
+        (("baseSemanticScene", "components", 0), "problemSpec", "problem_spec"),
+        (
+            ("baseSemanticScene", "components", 0, "acceptedRecords", 0),
+            "trajectoryId",
+            "trajectory_id",
+        ),
+    ):
+        payload = deepcopy(canonical)
+        target: object = payload
+        for segment in path:
+            target = target[segment]  # type: ignore[index]
+        assert isinstance(target, dict)
+        target[alias_key] = target.pop(canonical_key)
+        payloads.append(payload)
+
+    for payload in payloads:
+        with pytest.raises(ValidationError):
+            SEMANTIC_STORYBOARD_REQUEST_V1_ADAPTER.validate_python(payload)
+
+
+def test_request_collections_are_capped_before_child_parsing() -> None:
+    oversized_nodes = _reflex()
+    oversized_nodes["baseScene"] = {
+        "revision": 0,
+        "nodes": [{"invalid": True} for _ in range(MAX_SCENE_NODES + 1)],
+    }
+    with pytest.raises(ValidationError) as node_error:
+        SemanticStoryboardReflexRequestV1.model_validate(oversized_nodes)
+    assert len(node_error.value.errors()) == 1
+    assert f"exceeds {MAX_SCENE_NODES} nodes" in str(node_error.value)
+
+
+def test_direct_model_construction_remains_ergonomic_with_python_field_names() -> None:
+    payload = _reflex()
+    payload["routing_mode"] = payload.pop("routingMode")
+    payload["problem_spec"] = payload.pop("problemSpec")
+    payload["base_scene"] = payload.pop("baseScene")
+    payload["base_semantic_scene"] = payload.pop("baseSemanticScene")
+
+    request = SemanticStoryboardReflexRequestV1.model_validate(payload)
+
+    assert request.routing_mode == "reflex"

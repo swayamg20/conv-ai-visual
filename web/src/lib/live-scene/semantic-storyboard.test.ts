@@ -334,6 +334,53 @@ describe("Gate 1.8 ordered semantic frontier", () => {
     expect(fullNonComplementary.acceptedRecords).toHaveLength(6);
   });
 
+  it("runtime-decodes both forward-capacity inputs and rejects open values", () => {
+    expect(() =>
+      storyboardHasForwardCapacity(problem(20, [60, 30]), []),
+    ).toThrow(/distinct and ascending/);
+    expect(() =>
+      storyboardHasForwardCapacity(problem(), [
+        { v: 1, act: "abstain", reasonCode: "already_present" },
+      ]),
+    ).toThrow(/cannot contain abstain/);
+    expect(() =>
+      storyboardHasForwardCapacity(problem(), [
+        { v: 1, act: "trace", trajectoryId: "invented" },
+      ]),
+    ).toThrow(/unsupported value/);
+    expect(() =>
+      storyboardHasForwardCapacity(problem(), "not-an-array"),
+    ).toThrow(/must be an array/);
+  });
+
+  it("pre-caps forward-capacity inputs before decoding their children", () => {
+    const tooManyAngles = [30, 45, 60];
+    Object.defineProperty(tooManyAngles, 0, {
+      get: () => {
+        throw new Error("angle decoder must not run beyond the pair cap");
+      },
+    });
+    expect(() =>
+      storyboardHasForwardCapacity(
+        { v: 1, speedMps: 20, anglesDeg: tooManyAngles },
+        [],
+      ),
+    ).toThrow(/exactly two angles/);
+
+    const tooManyRecords = Array.from(
+      { length: MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS + 1 },
+      () => trace("lower_angle"),
+    );
+    Object.defineProperty(tooManyRecords, 0, {
+      get: () => {
+        throw new Error("record decoder must not run beyond the ledger cap");
+      },
+    });
+    expect(() =>
+      storyboardHasForwardCapacity(problem(), tooManyRecords),
+    ).toThrow(/exceeds the closed storyboard catalog/);
+  });
+
   it("enforces the anchor-plus-record revision and certificate head", () => {
     const accepted = [trace("lower_angle")];
     const decoded = decodeProjectileStoryboardSemanticSceneStateV1(
@@ -395,6 +442,29 @@ describe("Gate 1.8 request encoding", () => {
     expect(decoded.baseSemanticScene.components[0].acceptedRecords[0]).toEqual(
       trace("lower_angle"),
     );
+  });
+
+  it.each(["\u0085", "\ufeff", "\u0085\ufeff"])(
+    "rejects the explicit Unicode edge-whitespace-only prompt %j",
+    (prompt) => {
+      expect(() =>
+        decodeSemanticStoryboardRequestV1({
+          ...request("director"),
+          prompt,
+        }),
+      ).toThrow(/non-empty string/);
+    },
+  );
+
+  it("uses the same explicit Unicode prompt-edge normalization", () => {
+    const decoded = decodeSemanticStoryboardRequestV1({
+      ...request("director"),
+      prompt: "\u0085\ufeff  Compare their ranges.  \ufeff\u0085",
+    });
+    expect(decoded.routingMode).toBe("director");
+    if (decoded.routingMode !== "director")
+      throw new Error("expected Director");
+    expect(decoded.prompt).toBe("Compare their ranges.");
   });
 
   it.each([
@@ -462,5 +532,50 @@ describe("Gate 1.8 request encoding", () => {
     expect(
       protocolCode(() => decodeSemanticStoryboardRequestV1(oversized)),
     ).toBe("budget_exceeded");
+  });
+
+  it("rejects non-canonical aliases at every nested request layer", () => {
+    const source = request("director");
+    source.baseScene = { revision: 2, nodes: [] };
+    source.baseSemanticScene = semanticScene([trace("lower_angle")]);
+
+    const rename = (
+      path: readonly (string | number)[],
+      canonical: string,
+      alias: string,
+    ): Record<string, unknown> => {
+      const payload = structuredClone(source);
+      let target: unknown = payload;
+      for (const segment of path) {
+        target = (target as Record<string | number, unknown>)[segment];
+      }
+      const object = target as Record<string, unknown>;
+      object[alias] = object[canonical];
+      delete object[canonical];
+      return payload;
+    };
+
+    for (const payload of [
+      rename([], "routingMode", "routing_mode"),
+      rename(["problemSpec"], "speedMps", "speed_mps"),
+      rename(["baseScene"], "revision", "base_revision"),
+      rename(
+        ["baseSemanticScene"],
+        "certificateHeadSha256",
+        "certificate_head_sha256",
+      ),
+      rename(
+        ["baseSemanticScene", "components", 0],
+        "problemSpec",
+        "problem_spec",
+      ),
+      rename(
+        ["baseSemanticScene", "components", 0, "acceptedRecords", 0],
+        "trajectoryId",
+        "trajectory_id",
+      ),
+    ]) {
+      expect(() => decodeSemanticStoryboardRequestV1(payload)).toThrow();
+    }
   });
 });

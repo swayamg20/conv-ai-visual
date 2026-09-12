@@ -24,6 +24,10 @@ export const MAX_SEMANTIC_STORYBOARD_RECORDS_PER_TURN = 5;
 export const MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS = 7;
 export const MAX_STORYBOARD_EVIDENCE_IDS = 4;
 
+const PROMPT_EDGE_WHITESPACE = new Set([
+  ..."\u0009\u000a\u000b\u000c\u000d\u001c\u001d\u001e\u001f\u0020\u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff",
+]);
+
 export interface PairedProjectileComparisonSpecV1 {
   readonly v: typeof PAIRED_PROJECTILE_COMPARISON_VERSION;
   readonly speedMps: ProjectileSpeedMps;
@@ -188,17 +192,28 @@ function integer(value: unknown, field: string, minimum: number): number {
   return value as number;
 }
 
+function normalizePromptEdges(value: string): string {
+  const characters = [...value];
+  let start = 0;
+  let end = characters.length;
+  while (start < end && PROMPT_EDGE_WHITESPACE.has(characters[start])) start++;
+  while (end > start && PROMPT_EDGE_WHITESPACE.has(characters[end - 1])) end--;
+  return characters.slice(start, end).join("");
+}
+
 function boundedPrompt(value: unknown): string {
+  const normalized =
+    typeof value === "string" ? normalizePromptEdges(value) : value;
   if (
-    typeof value !== "string" ||
-    value.trim().length === 0 ||
-    [...value.trim()].length > 2_000
+    typeof normalized !== "string" ||
+    normalized.length === 0 ||
+    [...normalized].length > 2_000
   ) {
     fail(
       "request prompt must be a non-empty string of at most 2000 characters",
     );
   }
-  return value.trim();
+  return normalized;
 }
 
 function decodeBaseScene(value: unknown): SceneState {
@@ -467,12 +482,20 @@ function validateProgram(
 
 /** Return whether this valid frontier still has an applicable unused effect. */
 export function storyboardHasForwardCapacity(
-  problemSpec: PairedProjectileComparisonSpecV1,
-  records: readonly AcceptedSemanticStoryboardRecordV1[],
+  problemSpec: unknown,
+  records: unknown,
 ): boolean {
-  validateProgram(problemSpec, records);
-  const applicableEffectCount = hasComplementaryAngles(problemSpec) ? 7 : 6;
-  return records.length < applicableEffectCount;
+  const decodedProblem = decodePairedProjectileComparisonSpecV1(problemSpec);
+  if (!Array.isArray(records)) {
+    fail("state acceptedRecords must be an array");
+  }
+  if (records.length > MAX_SEMANTIC_STORYBOARD_LEDGER_RECORDS) {
+    fail("state acceptedRecords exceeds the closed storyboard catalog");
+  }
+  const decodedRecords = records.map(decodeAcceptedRecord);
+  validateProgram(decodedProblem, decodedRecords);
+  const applicableEffectCount = hasComplementaryAngles(decodedProblem) ? 7 : 6;
+  return decodedRecords.length < applicableEffectCount;
 }
 
 function decodeAcceptedRecord(
