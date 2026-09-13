@@ -22,7 +22,13 @@ const draw = {
 };
 
 /** Small waveform logo mark for the nav bar */
-export function MurmurLogoMark({ className }: { className?: string }) {
+export function MurmurLogoMark({
+  className,
+  reducedMotion = false,
+}: {
+  className?: string;
+  reducedMotion?: boolean;
+}) {
   return (
     <svg
       viewBox="0 0 32 32"
@@ -36,34 +42,48 @@ export function MurmurLogoMark({ className }: { className?: string }) {
         d="M6 20 C6.2 19.8 6 12 6.3 12 C6.5 12.2 6.8 20 7 20"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.8, ease: "easeOut" }}
+        initial={reducedMotion ? false : { pathLength: 0 }}
+        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        transition={
+          reducedMotion ? undefined : { duration: 0.8, ease: "easeOut" }
+        }
       />
       <motion.path
         d="M11 22 C11.1 21.8 10.9 7 11.2 7 C11.4 7.1 11.6 22 11.8 22"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.8, delay: 0.1, ease: "easeOut" }}
+        initial={reducedMotion ? false : { pathLength: 0 }}
+        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        transition={
+          reducedMotion
+            ? undefined
+            : { duration: 0.8, delay: 0.1, ease: "easeOut" }
+        }
       />
       <motion.path
         d="M16 18 C16.2 17.9 16 10 16.3 10 C16.5 10.1 16.7 18 16.9 18"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.8, delay: 0.2, ease: "easeOut" }}
+        initial={reducedMotion ? false : { pathLength: 0 }}
+        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        transition={
+          reducedMotion
+            ? undefined
+            : { duration: 0.8, delay: 0.2, ease: "easeOut" }
+        }
       />
       {/* Arrow morphing into a sketchy circle (voice → drawing) */}
       <motion.path
         d="M20 16 L24 16 L22.5 14"
         stroke="hsl(var(--chalk-soft))"
         strokeWidth="1.2"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.6, delay: 0.5, ease: "easeOut" }}
+        initial={reducedMotion ? false : { pathLength: 0 }}
+        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        transition={
+          reducedMotion
+            ? undefined
+            : { duration: 0.6, delay: 0.5, ease: "easeOut" }
+        }
       />
       <motion.circle
         cx="27"
@@ -72,9 +92,13 @@ export function MurmurLogoMark({ className }: { className?: string }) {
         stroke="hsl(var(--lavender))"
         strokeWidth="1.2"
         fill="none"
-        initial={{ pathLength: 0 }}
-        animate={{ pathLength: 1 }}
-        transition={{ duration: 0.8, delay: 0.7, ease: "easeOut" }}
+        initial={reducedMotion ? false : { pathLength: 0 }}
+        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        transition={
+          reducedMotion
+            ? undefined
+            : { duration: 0.8, delay: 0.7, ease: "easeOut" }
+        }
         style={{ strokeDasharray: "1 0.5" }}
       />
     </svg>
@@ -215,7 +239,10 @@ export function BackgroundDoodles({ className }: { className?: string }) {
     <motion.svg
       viewBox="0 0 400 300"
       fill="none"
-      className={cn("absolute inset-0 w-full h-full pointer-events-none", className)}
+      className={cn(
+        "absolute inset-0 w-full h-full pointer-events-none",
+        className,
+      )}
       strokeLinecap="round"
       strokeLinejoin="round"
       initial="hidden"

@@ -99,11 +99,14 @@ interface StreamCall {
   readonly request: SemanticStoryboardRequestV1;
   readonly signal: AbortSignal;
   readonly events: SemanticStoryboardSceneStreamEventV1[];
+  readonly publish: (event: SemanticStoryboardSceneStreamEventV1) => void;
 }
 
 function instrumentedRunner(options: {
   readonly eventDelayMs: number;
   readonly chunkDelayMs?: number;
+  readonly publishLastEventOnAbort?: boolean;
+  readonly resolveOnAbort?: boolean;
 }) {
   const delegate = createSemanticStoryboardFixtureRunner(options);
   const calls: StreamCall[] = [];
@@ -113,15 +116,30 @@ function instrumentedRunner(options: {
         request: invocation.request,
         signal: invocation.signal,
         events: [],
+        publish: invocation.onEvent,
       };
       calls.push(call);
-      await delegate({
-        ...invocation,
-        onEvent: (event) => {
-          call.events.push(event);
-          invocation.onEvent(event);
-        },
-      });
+      if (options.publishLastEventOnAbort) {
+        invocation.signal.addEventListener(
+          "abort",
+          () => {
+            const lateEvent = call.events.at(-1);
+            if (lateEvent) invocation.onEvent(lateEvent);
+          },
+          { once: true },
+        );
+      }
+      try {
+        await delegate({
+          ...invocation,
+          onEvent: (event) => {
+            call.events.push(event);
+            invocation.onEvent(event);
+          },
+        });
+      } catch (error) {
+        if (!options.resolveOnAbort || !invocation.signal.aborted) throw error;
+      }
     },
   );
   return { calls, runStream };
@@ -172,9 +190,22 @@ async function settleUntil(
   throw new Error(`runtime did not settle into ${phases.join(" or ")}`);
 }
 
-function createRuntime(eventDelayMs = 0) {
+function createRuntime(
+  eventDelayMs = 0,
+  options: {
+    readonly publishLastEventOnAbort?: boolean;
+    readonly resolveOnAbort?: boolean;
+  } = {},
+) {
   const renderer = new ControlledRenderer();
-  const runner = instrumentedRunner({ eventDelayMs, chunkDelayMs: 0 });
+  const runner = instrumentedRunner({
+    eventDelayMs,
+    chunkDelayMs: 0,
+    ...(options.publishLastEventOnAbort
+      ? { publishLastEventOnAbort: true }
+      : {}),
+    ...(options.resolveOnAbort ? { resolveOnAbort: true } : {}),
+  });
   const runtime = new SemanticStoryboardStreamRuntime({
     renderer,
     runStream: runner.runStream,
@@ -315,7 +346,9 @@ describe("SemanticStoryboardStreamRuntime with provider-free fixtures", () => {
   });
 
   it("settles only the in-flight beat when interrupted and ignores the tail", async () => {
-    const { runtime, renderer, runner, cursor } = createRuntime(4);
+    const { runtime, renderer, runner, cursor } = createRuntime(4, {
+      resolveOnAbort: true,
+    });
     await runToTerminal(runtime, renderer, cursor, {
       routingMode: "reflex",
       problemSpec: COMPLEMENTARY_PROBLEM,
@@ -348,6 +381,160 @@ describe("SemanticStoryboardStreamRuntime with provider-free fixtures", () => {
 
     await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 30));
     expect(runtime.getSnapshot()).toEqual(settled);
+  });
+
+  it("accepts the completed post-paint checkpoint when it wins the Stop race", async () => {
+    const { runtime, renderer, runner, cursor } = createRuntime(4, {
+      publishLastEventOnAbort: true,
+      resolveOnAbort: true,
+    });
+    await runToTerminal(runtime, renderer, cursor, {
+      routingMode: "reflex",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+    });
+    const renderedBefore = renderer.rendered.length;
+    runtime.start({
+      routingMode: "director",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+      prompt: "Begin with the higher arc, then compare height and time.",
+    });
+    await waitFor(
+      () => renderer.rendered.length > renderedBefore,
+      "the first Director playback",
+    );
+    await waitFor(
+      () => runtime.getSnapshot().queuedCheckpointCount > 0,
+      "a queued Director tail",
+    );
+    const active = renderer.rendered.at(-1)!;
+    const call = runner.calls.at(-1)!;
+    for (const cue of active.plan.choreographyPlan.phase.cues) {
+      active.observer?.({ type: "cueStarted", cue: cue.cue });
+    }
+    active.observer?.({ type: "firstCuePresented" });
+
+    expect(runtime.interrupt()).toBe(true);
+    expect(call.signal.aborted).toBe(true);
+    expect(runtime.getSnapshot().queuedCheckpointCount).toBe(0);
+    call.publish(call.events.at(-1)!);
+    await tick();
+    await flush();
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupting",
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
+    active.observer?.({
+      type: "checkpointSettled",
+      settlement: "completed",
+    });
+    active.playback.settle({ status: "completed", firstCuePresented: true });
+    await waitFor(
+      () => runtime.getSnapshot().phase === "interrupted",
+      "completed post-paint interruption settlement",
+    );
+
+    expect(acceptedIds(runtime)).toEqual([
+      "storyboard-anchor",
+      "storyboard-checkpoint-trace-higher-angle",
+    ]);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 2 },
+      provisionalScene: { revision: 2 },
+      accepted: [
+        { scene: { revision: 1 } },
+        {
+          scene: { revision: 2 },
+          presentation: { settlement: "completed" },
+        },
+      ],
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
+  });
+
+  it("retains a Replay checkpoint whose completed post-paint barrier wins the Stop race", async () => {
+    const { runtime, renderer, runner, cursor } = createRuntime();
+    await runToTerminal(runtime, renderer, cursor, {
+      routingMode: "reflex",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+    });
+    await runToTerminal(runtime, renderer, cursor, {
+      routingMode: "director",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+      prompt: "Begin with the higher arc, then compare height and time.",
+    });
+    const storedPrefix = structuredClone(
+      runtime.getSnapshot().accepted.slice(0, 2),
+    );
+    const callsBeforeReplay = runner.calls.length;
+    const replayStart = renderer.rendered.length;
+    const replay = runtime.replayAccepted();
+    settle(renderer.rendered[replayStart]);
+    await flush();
+    const active = renderer.rendered[replayStart + 1];
+    for (const cue of active.plan.choreographyPlan.phase.cues) {
+      active.observer?.({ type: "cueStarted", cue: cue.cue });
+    }
+    active.observer?.({ type: "firstCuePresented" });
+
+    expect(runtime.interrupt()).toBe(true);
+    active.observer?.({
+      type: "checkpointSettled",
+      settlement: "completed",
+    });
+    active.playback.settle({ status: "completed", firstCuePresented: true });
+    await replay;
+
+    expect(runner.calls).toHaveLength(callsBeforeReplay);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 2 },
+      accepted: storedPrefix,
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
+  });
+
+  it("rolls Replay provisional state back when stopped before presentation", async () => {
+    const { runtime, renderer, runner, cursor } = createRuntime();
+    await runToTerminal(runtime, renderer, cursor, {
+      routingMode: "reflex",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+    });
+    await runToTerminal(runtime, renderer, cursor, {
+      routingMode: "director",
+      problemSpec: COMPLEMENTARY_PROBLEM,
+      prompt: "Begin with the higher arc, then compare height and time.",
+    });
+    const callsBeforeReplay = runner.calls.length;
+    const replayStart = renderer.rendered.length;
+    const replay = runtime.replayAccepted();
+    const active = renderer.rendered[replayStart];
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "replaying",
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+    });
+    expect(runtime.interrupt()).toBe(true);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupting",
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 1 },
+    });
+    active.playback.settle({
+      status: "cancelled_before_presented",
+      firstCuePresented: false,
+    });
+    await replay;
+
+    expect(runner.calls).toHaveLength(callsBeforeReplay);
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 0 },
+      provisionalScene: { revision: 0 },
+      accepted: [],
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
   });
 
   it("rejects a mismatched Director problem before invoking the runner", async () => {

@@ -81,7 +81,12 @@ vi.mock("next/link", () => ({
 }));
 
 vi.mock("@/components/murmur-doodles", () => ({
-  MurmurLogoMark: () => <span data-testid="logo" />,
+  MurmurLogoMark: ({ reducedMotion }: { reducedMotion?: boolean }) => (
+    <span
+      data-testid="logo"
+      data-reduced-motion={String(reducedMotion ?? false)}
+    />
+  ),
 }));
 
 vi.mock("@/components/svg-canvas", async () => {
@@ -698,6 +703,11 @@ describe("LiveSemanticStoryboard", () => {
         .querySelector('[data-testid="semantic-storyboard-canvas"]')
         ?.getAttribute("data-playback-rate"),
     ).toBe("16");
+    expect(
+      mounted.container
+        .querySelector('[data-testid="logo"]')
+        ?.getAttribute("data-reduced-motion"),
+    ).toBe("true");
     expect(
       mounted.container.querySelectorAll('[aria-live="polite"]'),
     ).toHaveLength(1);

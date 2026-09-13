@@ -539,7 +539,12 @@ export class CertifiedChoreographyStreamRuntime<
     if (!this.isBusy()) return false;
     if (this.interruptPending) return true;
     this.interruptPending = true;
-    this.streamControl?.controller.abort();
+    // Stop revokes the network producer before aborting it. Abort listeners and
+    // promise settlement may run synchronously, but neither may mutate the
+    // accepted frontier while the active paint barrier is still settling.
+    const streamControl = this.streamControl;
+    this.streamControl = null;
+    streamControl?.controller.abort();
     this.queue = [];
     this.provisional = this.active?.prepared.target ?? this.committed;
     if (!this.active) {
@@ -1066,6 +1071,9 @@ export class CertifiedChoreographyStreamRuntime<
     this.sequence = lastAccepted
       ? this.domain.acceptedSequence(lastAccepted)
       : 0;
+    // A replay checkpoint cancelled before first presentation was never
+    // accepted. Keep the provisional frontier identical to the retained prefix.
+    this.provisional = this.committed;
     try {
       this.player.finishReplay();
     } catch (error) {

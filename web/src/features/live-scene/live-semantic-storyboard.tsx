@@ -356,7 +356,10 @@ function StoryboardStudio({
             >
               <ArrowLeft className="h-5 w-5" />
             </Link>
-            <MurmurLogoMark className="hidden shrink-0 sm:block" />
+            <MurmurLogoMark
+              className="hidden shrink-0 sm:block"
+              reducedMotion={reducedMotion}
+            />
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h1 className="truncate text-base font-semibold tracking-[-0.025em] sm:text-lg">
