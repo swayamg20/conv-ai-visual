@@ -743,6 +743,79 @@ test("capture contract derives checkpoint order from the selected fixture progra
     () => validateCaptureObservation(mutated, [fixture]),
     /ordinal|checkpointId/,
   );
+
+  const crossRuntime = structuredClone(observation);
+  const coordinate =
+    crossRuntime.terminal.snapshot.runtime.committedScene.nodes[5].points[3];
+  const expectedX = coordinate[0];
+  coordinate[0] += (Number.EPSILON * Math.max(1, Math.abs(expectedX))) / 2;
+  assert.notEqual(coordinate[0], expectedX);
+  crossRuntime.dom.signature.nodes[5].points[3][0] = coordinate[0];
+  validateCaptureObservation(crossRuntime, [fixture]);
+
+  const svgLine = structuredClone(observation);
+  const fixtureLineX =
+    observation.terminal.snapshot.runtime.committedScene.nodes[3].points[1][0];
+  svgLine.dom.signature.nodes[3].points[1][0] = Number(
+    Math.fround(fixtureLineX).toFixed(6),
+  );
+  validateCaptureObservation(svgLine, [fixture]);
+
+  const driftedSvgLine = structuredClone(svgLine);
+  driftedSvgLine.dom.signature.nodes[3].points[1][0] += 0.00001;
+  assert.throws(
+    () => validateCaptureObservation(driftedSvgLine, [fixture]),
+    /nearest Float32 representation/,
+  );
+
+  const drifted = structuredClone(observation);
+  drifted.terminal.snapshot.runtime.committedScene.nodes[5].points[3][0] += 0.000001;
+  drifted.dom.signature.nodes[5].points[3][0] += 0.000001;
+  assert.throws(
+    () => validateCaptureObservation(drifted, [fixture]),
+    /scaled Number\.EPSILON/,
+  );
+
+  const styleDrift = structuredClone(observation);
+  const styledNode =
+    styleDrift.terminal.snapshot.runtime.committedScene.nodes.find(
+      (node) => node.kind === "path",
+    );
+  assert.ok(styledNode);
+  const expectedStrokeWidth = styledNode.style.strokeWidth;
+  styledNode.style.strokeWidth +=
+    Number.EPSILON * Math.max(1, Math.abs(expectedStrokeWidth)) * 2;
+  assert.notEqual(styledNode.style.strokeWidth, expectedStrokeWidth);
+  assert.throws(
+    () => validateCaptureObservation(styleDrift, [fixture]),
+    /must exactly match fixture-derived evidence/,
+  );
+
+  const copyDrift = structuredClone(observation);
+  const copyNode =
+    copyDrift.terminal.snapshot.runtime.committedScene.nodes.find(
+      (node) => node.kind === "latex_token",
+    );
+  assert.ok(copyNode);
+  copyNode.latex += " ";
+  assert.throws(
+    () => validateCaptureObservation(copyDrift, [fixture]),
+    /must exactly match fixture-derived evidence/,
+  );
+
+  const reorderedNodes = structuredClone(observation);
+  const [firstNode, secondNode] =
+    reorderedNodes.terminal.snapshot.runtime.committedScene.nodes;
+  reorderedNodes.terminal.snapshot.runtime.committedScene.nodes.splice(
+    0,
+    2,
+    secondNode,
+    firstNode,
+  );
+  assert.throws(
+    () => validateCaptureObservation(reorderedNodes, [fixture]),
+    /must exactly match fixture-derived evidence/,
+  );
 });
 
 test("prepare is bounded, deterministic, and rejects unsafe roots", async () => {

@@ -119,6 +119,87 @@ export function exact(value, expected, location) {
   return value;
 }
 
+function sameFixtureValue(
+  actual,
+  expected,
+  location,
+  { allowSemanticLineQuantization = false } = {},
+) {
+  if (Array.isArray(expected)) {
+    const actualEntries = array(actual, location, expected.length);
+    expected.forEach((entry, index) =>
+      sameFixtureValue(actualEntries[index], entry, `${location}[${index}]`, {
+        allowSemanticLineQuantization,
+      }),
+    );
+    return;
+  }
+  if (expected !== null && typeof expected === "object") {
+    const actualRecord = exactKeys(actual, Object.keys(expected), location);
+    for (const [key, value] of Object.entries(expected)) {
+      if (
+        key === "points" &&
+        (expected.kind === "path" ||
+          (allowSemanticLineQuantization && expected.kind === "line"))
+      ) {
+        const actualPoints = array(
+          actualRecord.points,
+          `${location}.points`,
+          value.length,
+        );
+        value.forEach((expectedPoint, pointIndex) => {
+          const actualPoint = array(
+            actualPoints[pointIndex],
+            `${location}.points[${pointIndex}]`,
+            2,
+          );
+          expectedPoint.forEach((expectedCoordinate, coordinateIndex) => {
+            const coordinateLocation = `${location}.points[${pointIndex}][${coordinateIndex}]`;
+            const actualCoordinate = finiteNumber(
+              actualPoint[coordinateIndex],
+              coordinateLocation,
+            );
+            finiteNumber(expectedCoordinate, `${coordinateLocation} fixture`);
+            const scaledEpsilon =
+              Number.EPSILON *
+              Math.max(
+                1,
+                Math.abs(actualCoordinate),
+                Math.abs(expectedCoordinate),
+              );
+            const isSemanticLine = expected.kind === "line";
+            const tolerance = isSemanticLine
+              ? 0.5e-6 + scaledEpsilon
+              : scaledEpsilon;
+            const distance = isSemanticLine
+              ? Math.min(
+                  Math.abs(actualCoordinate - expectedCoordinate),
+                  Math.abs(actualCoordinate - Math.fround(expectedCoordinate)),
+                )
+              : Math.abs(actualCoordinate - expectedCoordinate);
+            if (distance > tolerance) {
+              fail(
+                coordinateLocation,
+                isSemanticLine
+                  ? `must be within ${tolerance} of the fixture coordinate or its nearest Float32 representation`
+                  : `must be within scaled Number.EPSILON (${tolerance}) of the fixture coordinate`,
+              );
+            }
+          });
+        });
+      } else {
+        sameFixtureValue(actualRecord[key], value, `${location}.${key}`, {
+          allowSemanticLineQuantization,
+        });
+      }
+    }
+    return;
+  }
+  if (!isDeepStrictEqual(actual, expected)) {
+    fail(location, "must exactly match fixture-derived evidence");
+  }
+}
+
 function exactRounded(value, expected, location) {
   finiteNumber(value, location);
   finiteNumber(expected, `${location} expected`);
@@ -571,7 +652,7 @@ function validateTerminalSnapshot(value, expected, stage, location) {
   const runtime = plainObject(snapshot.runtime, `${location}.runtime`);
   exact(runtime.phase, "completed", `${location}.runtime.phase`);
   exact(runtime.rendererTrusted, true, `${location}.runtime.rendererTrusted`);
-  exact(
+  sameFixtureValue(
     runtime.committedScene,
     expected.program.expectedTerminal.scene,
     `${location}.runtime.committedScene`,
@@ -811,9 +892,7 @@ function expectedDomNode(node) {
     return {
       kind: "line",
       id: node.id,
-      points: node.points.map((point) =>
-        point.map((coordinate) => Number(coordinate.toFixed(6))),
-      ),
+      points: node.points,
       stroke: node.style.stroke,
       strokeWidth: node.style.strokeWidth,
       opacity: node.style.opacity,
@@ -876,10 +955,11 @@ function validateDom(value, expected, stage, location) {
     expectedPaintOrder(expected.scene.nodes),
     `${location}.signature.paintOrder`,
   );
-  exact(
+  sameFixtureValue(
     signature.nodes,
     expected.scene.nodes.map(expectedDomNode),
     `${location}.signature.nodes`,
+    { allowSemanticLineQuantization: true },
   );
   return dom;
 }
