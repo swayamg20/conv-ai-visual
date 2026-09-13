@@ -234,6 +234,8 @@ export interface SVGCanvasProps {
   reducedMotion?: boolean;
   /** Scale only certified choreography timing; legacy canvas motion is unchanged. */
   choreographyPlaybackRate?: ChoreographyPlaybackRate;
+  /** Matte xMidYMid meet letterboxing to the exact certified logical camera. */
+  exactCameraClip?: boolean;
 }
 
 export interface CanvasPalette {

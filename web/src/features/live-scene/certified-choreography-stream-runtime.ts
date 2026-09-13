@@ -70,6 +70,11 @@ export interface CertifiedChoreographyReplay<
   readonly frontier: CertifiedChoreographyFrontier<SemanticScene>;
 }
 
+export interface CertifiedChoreographyCompletionMetadata {
+  readonly reasonCode: string;
+  readonly detailCode: string | null;
+}
+
 export type CertifiedChoreographyStreamEvent<
   CheckpointEvent,
   DeclineReason extends string,
@@ -106,6 +111,7 @@ export type CertifiedChoreographyStreamEvent<
       readonly firstPatchMs: number;
       readonly totalMs: number;
       readonly repaired: boolean;
+      readonly completionMetadata?: CertifiedChoreographyCompletionMetadata;
     }
   | {
       readonly kind: "declined";
@@ -160,9 +166,7 @@ export interface CertifiedChoreographyRuntimeCopy {
 }
 
 export type CertifiedChoreographyRuntimeErrorCode =
-  | "runtime_busy"
-  | "runtime_reset_required"
-  | "invalid_command";
+  "runtime_busy" | "runtime_reset_required" | "invalid_command";
 
 export interface CertifiedChoreographyStreamDomain<
   Command,
@@ -170,7 +174,10 @@ export interface CertifiedChoreographyStreamDomain<
   StreamEvent,
   CheckpointEvent,
   SemanticScene extends CertifiedChoreographySemanticScene,
-  Prepared extends CertifiedChoreographyPreparedCheckpoint<CheckpointEvent, SemanticScene>,
+  Prepared extends CertifiedChoreographyPreparedCheckpoint<
+    CheckpointEvent,
+    SemanticScene
+  >,
   Accepted,
   CheckpointId extends string,
   DeclineReason extends string,
@@ -209,7 +216,10 @@ export interface CertifiedChoreographyStreamDomain<
   ) => Error;
 }
 
-export interface CertifiedChoreographyStreamRunInvocation<Request, StreamEvent> {
+export interface CertifiedChoreographyStreamRunInvocation<
+  Request,
+  StreamEvent,
+> {
   readonly request: Request;
   readonly signal: AbortSignal;
   readonly onEvent: (event: StreamEvent) => void;
@@ -246,6 +256,7 @@ export interface CertifiedChoreographyRuntimeSnapshot<
     readonly firstPatchMs: number;
     readonly totalMs: number;
     readonly repaired: boolean;
+    readonly metadata?: CertifiedChoreographyCompletionMetadata;
   };
   readonly decline?: {
     readonly reasonCode: DeclineReason;
@@ -258,7 +269,10 @@ export interface CertifiedChoreographyStreamRuntimeOptions<
   StreamEvent,
   CheckpointEvent,
   SemanticScene extends CertifiedChoreographySemanticScene,
-  Prepared extends CertifiedChoreographyPreparedCheckpoint<CheckpointEvent, SemanticScene>,
+  Prepared extends CertifiedChoreographyPreparedCheckpoint<
+    CheckpointEvent,
+    SemanticScene
+  >,
   Accepted,
   CheckpointId extends string,
   DeclineReason extends string,
@@ -292,8 +306,9 @@ interface StreamControl {
   terminal: "completed" | "declined" | "failed" | undefined;
 }
 
-interface ActivePlayback<Prepared extends PlayableCheckpoint>
-  extends CheckpointPlaybackSession<Prepared> {
+interface ActivePlayback<
+  Prepared extends PlayableCheckpoint,
+> extends CheckpointPlaybackSession<Prepared> {
   readonly token: RuntimeToken;
   readonly source: "stream" | "replay";
   readonly replayIndex?: number;
@@ -336,13 +351,19 @@ export class CertifiedChoreographyStreamRuntime<
   StreamEvent,
   CheckpointEvent,
   SemanticScene extends CertifiedChoreographySemanticScene,
-  Prepared extends CertifiedChoreographyPreparedCheckpoint<CheckpointEvent, SemanticScene>,
+  Prepared extends CertifiedChoreographyPreparedCheckpoint<
+    CheckpointEvent,
+    SemanticScene
+  >,
   Accepted,
   CheckpointId extends string,
   DeclineReason extends string,
 > {
   private readonly player: CheckpointChoreographyPlayer;
-  private readonly runStream: CertifiedChoreographyStreamRunner<Request, StreamEvent>;
+  private readonly runStream: CertifiedChoreographyStreamRunner<
+    Request,
+    StreamEvent
+  >;
   private readonly domain: CertifiedChoreographyStreamDomain<
     Command,
     Request,
@@ -375,7 +396,11 @@ export class CertifiedChoreographyStreamRuntime<
   private interruptionDeadline: ReturnType<
     typeof globalThis.setTimeout
   > | null = null;
-  private replayRecovery: ReplayRecovery<Accepted, SemanticScene, CheckpointId> | null = null;
+  private replayRecovery: ReplayRecovery<
+    Accepted,
+    SemanticScene,
+    CheckpointId
+  > | null = null;
   private visibleCheckpointId: CheckpointId | undefined;
   private committedCaption = "";
   private visibleCaption = "";
@@ -456,10 +481,7 @@ export class CertifiedChoreographyStreamRuntime<
   start(command: Command): number {
     this.assertUsable();
     if (this.isBusy()) {
-      throw this.domain.runtimeError(
-        "runtime_busy",
-        this.domain.copy.busy,
-      );
+      throw this.domain.runtimeError("runtime_busy", this.domain.copy.busy);
     }
     if (
       this.phase === "failed" &&
@@ -476,10 +498,7 @@ export class CertifiedChoreographyStreamRuntime<
     try {
       request = this.domain.createRequest(command, generation, this.committed);
     } catch (error) {
-      throw this.domain.runtimeError(
-        "invalid_command",
-        message(error),
-      );
+      throw this.domain.runtimeError("invalid_command", message(error));
     }
 
     this.invalidate(true);
@@ -520,7 +539,12 @@ export class CertifiedChoreographyStreamRuntime<
     if (!this.isBusy()) return false;
     if (this.interruptPending) return true;
     this.interruptPending = true;
-    this.streamControl?.controller.abort();
+    // Stop revokes the network producer before aborting it. Abort listeners and
+    // promise settlement may run synchronously, but neither may mutate the
+    // accepted frontier while the active paint barrier is still settling.
+    const streamControl = this.streamControl;
+    this.streamControl = null;
+    streamControl?.controller.abort();
     this.queue = [];
     this.provisional = this.active?.prepared.target ?? this.committed;
     if (!this.active) {
@@ -599,10 +623,7 @@ export class CertifiedChoreographyStreamRuntime<
   async replayAccepted(): Promise<void> {
     this.assertUsable();
     if (this.isBusy()) {
-      throw this.domain.runtimeError(
-        "runtime_busy",
-        this.domain.copy.busy,
-      );
+      throw this.domain.runtimeError("runtime_busy", this.domain.copy.busy);
     }
     if (this.accepted.length === 0) return;
 
@@ -610,16 +631,13 @@ export class CertifiedChoreographyStreamRuntime<
     const originalFrontier = this.committed;
     const originalCaption = this.committedCaption;
     const originalCheckpoint = this.visibleCheckpointId;
-    const recovery: ReplayRecovery<
-      Accepted,
-      SemanticScene,
-      CheckpointId
-    > = Object.freeze({
-      records: originalRecords,
-      frontier: originalFrontier,
-      caption: originalCaption,
-      ...(originalCheckpoint ? { checkpointId: originalCheckpoint } : {}),
-    });
+    const recovery: ReplayRecovery<Accepted, SemanticScene, CheckpointId> =
+      Object.freeze({
+        records: originalRecords,
+        frontier: originalFrontier,
+        caption: originalCaption,
+        ...(originalCheckpoint ? { checkpointId: originalCheckpoint } : {}),
+      });
     let replay: CertifiedChoreographyReplay<Prepared, Accepted, SemanticScene>;
     try {
       replay = this.domain.preflightReplay(originalRecords);
@@ -644,9 +662,7 @@ export class CertifiedChoreographyStreamRuntime<
     this.decline = undefined;
     this.narration = this.domain.copy.replaying(replay.records.length);
     try {
-      this.player.materializeEmpty(
-        this.domain.emptyFrontier.scene,
-      );
+      this.player.materializeEmpty(this.domain.emptyFrontier.scene);
     } catch (error) {
       this.failReplay(
         originalRecords,
@@ -746,10 +762,7 @@ export class CertifiedChoreographyStreamRuntime<
     this.disposed = true;
   }
 
-  private acceptEvent(
-    token: RuntimeToken,
-    eventValue: StreamEvent,
-  ): void {
+  private acceptEvent(token: RuntimeToken, eventValue: StreamEvent): void {
     const control = this.streamControl;
     if (
       this.currentToken !== token ||
@@ -813,6 +826,9 @@ export class CertifiedChoreographyStreamRuntime<
             firstPatchMs: event.firstPatchMs,
             totalMs: event.totalMs,
             repaired: event.repaired,
+            ...(event.completionMetadata
+              ? { metadata: event.completionMetadata }
+              : {}),
           });
           this.settleTerminal();
           return;
@@ -993,13 +1009,7 @@ export class CertifiedChoreographyStreamRuntime<
     outcome: ChoreographyPlaybackOutcome,
   ): void {
     let valid = false;
-    if (
-      this.player.validSettlement(
-        transition,
-        outcome,
-        "cancelled_to_checkpoint",
-      )
-    ) {
+    if (this.validInterruptionSettlement(transition, outcome)) {
       try {
         this.commitPrepared(transition.prepared, outcome);
         valid = true;
@@ -1037,29 +1047,18 @@ export class CertifiedChoreographyStreamRuntime<
   ): void {
     const recovery = this.replayRecovery;
     if (!recovery) {
-      this.failPlayback(
-        transition.token,
-        this.domain.copy.replayRecoveryLost,
-      );
+      this.failPlayback(transition.token, this.domain.copy.replayRecoveryLost);
       return;
     }
     let prefixLength = index;
-    if (
-      this.player.validSettlement(
-        transition,
-        outcome,
-        "cancelled_to_checkpoint",
-      )
-    ) {
+    if (this.validInterruptionSettlement(transition, outcome)) {
       this.committed = transition.prepared.target;
       this.provisional = this.committed;
       this.committedCaption = this.domain.checkpointCaption(
         transition.prepared,
       );
       this.visibleCaption = this.committedCaption;
-      this.visibleCheckpointId = this.domain.checkpointId(
-        transition.prepared,
-      );
+      this.visibleCheckpointId = this.domain.checkpointId(transition.prepared);
       prefixLength += 1;
     } else if (!this.player.cancelledBeforePresented(transition, outcome)) {
       this.failReplayRecovery(
@@ -1072,6 +1071,9 @@ export class CertifiedChoreographyStreamRuntime<
     this.sequence = lastAccepted
       ? this.domain.acceptedSequence(lastAccepted)
       : 0;
+    // A replay checkpoint cancelled before first presentation was never
+    // accepted. Keep the provisional frontier identical to the retained prefix.
+    this.provisional = this.committed;
     try {
       this.player.finishReplay();
     } catch (error) {
@@ -1088,6 +1090,23 @@ export class CertifiedChoreographyStreamRuntime<
     this.narration =
       this.visibleCaption || this.domain.copy.replayStoppedBeforeCheckpoint;
     this.publish();
+  }
+
+  private validInterruptionSettlement(
+    transition: ActivePlayback<Prepared>,
+    outcome: ChoreographyPlaybackOutcome,
+  ): boolean {
+    // Stop can arrive after the executor has materialized the exact target and
+    // entered its completion paint barrier. Cancellation deliberately cannot
+    // invalidate that in-flight proof, so its eventual completed settlement is
+    // just as trustworthy as an explicit cancelled-to-checkpoint settlement.
+    return (
+      this.player.validSettlement(
+        transition,
+        outcome,
+        "cancelled_to_checkpoint",
+      ) || this.player.validSettlement(transition, outcome, "completed")
+    );
   }
 
   private commitPrepared(
@@ -1107,9 +1126,7 @@ export class CertifiedChoreographyStreamRuntime<
     this.narration = this.visibleCaption;
   }
 
-  private preparedJoinsCommitted(
-    prepared: Prepared,
-  ): boolean {
+  private preparedJoinsCommitted(prepared: Prepared): boolean {
     return (
       same(prepared.base.scene, this.committed.scene) &&
       same(prepared.base.semanticScene, this.committed.semanticScene) &&
@@ -1370,10 +1387,7 @@ export class CertifiedChoreographyStreamRuntime<
       try {
         listener();
       } catch (error) {
-        console.error(
-          this.domain.copy.subscriberFailureLog,
-          error,
-        );
+        console.error(this.domain.copy.subscriberFailureLog, error);
       }
     }
   }
