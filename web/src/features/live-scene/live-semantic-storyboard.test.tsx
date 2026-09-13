@@ -81,9 +81,16 @@ vi.mock("next/link", () => ({
 }));
 
 vi.mock("@/components/murmur-doodles", () => ({
-  MurmurLogoMark: ({ reducedMotion }: { reducedMotion?: boolean }) => (
+  MurmurLogoMark: ({
+    animateOnMount,
+    reducedMotion,
+  }: {
+    animateOnMount?: boolean;
+    reducedMotion?: boolean;
+  }) => (
     <span
       data-testid="logo"
+      data-animate-on-mount={String(animateOnMount ?? true)}
       data-reduced-motion={String(reducedMotion ?? false)}
     />
   ),
@@ -275,9 +282,20 @@ describe("LiveSemanticStoryboard", () => {
     const calls: SemanticStoryboardSceneStreamRunInvocation[] = [];
     const snapshots: SemanticStoryboardSessionSnapshot[] = [];
     const mounted = await mount({
+      reducedMotion: false,
       runStream: fixtureRunner(calls),
       onSessionSnapshot: (snapshot) => snapshots.push(snapshot),
     });
+    expect(
+      mounted.container
+        .querySelector('[data-testid="logo"]')
+        ?.getAttribute("data-animate-on-mount"),
+    ).toBe("false");
+    expect(
+      mounted.container
+        .querySelector('[data-testid="logo"]')
+        ?.getAttribute("data-reduced-motion"),
+    ).toBe("false");
 
     await act(async () => button(mounted.container, "Make it visible").click());
     await waitFor(
@@ -708,6 +726,11 @@ describe("LiveSemanticStoryboard", () => {
         .querySelector('[data-testid="logo"]')
         ?.getAttribute("data-reduced-motion"),
     ).toBe("true");
+    expect(
+      mounted.container
+        .querySelector('[data-testid="logo"]')
+        ?.getAttribute("data-animate-on-mount"),
+    ).toBe("false");
     expect(
       mounted.container.querySelectorAll('[aria-live="polite"]'),
     ).toHaveLength(1);

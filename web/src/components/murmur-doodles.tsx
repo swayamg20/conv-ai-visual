@@ -24,11 +24,14 @@ const draw = {
 /** Small waveform logo mark for the nav bar */
 export function MurmurLogoMark({
   className,
+  animateOnMount = true,
   reducedMotion = false,
 }: {
   className?: string;
+  animateOnMount?: boolean;
   reducedMotion?: boolean;
 }) {
+  const shouldAnimate = animateOnMount && !reducedMotion;
   return (
     <svg
       viewBox="0 0 32 32"
@@ -42,34 +45,34 @@ export function MurmurLogoMark({
         d="M6 20 C6.2 19.8 6 12 6.3 12 C6.5 12.2 6.8 20 7 20"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={reducedMotion ? false : { pathLength: 0 }}
-        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        initial={shouldAnimate ? { pathLength: 0 } : false}
+        animate={shouldAnimate ? { pathLength: 1 } : undefined}
         transition={
-          reducedMotion ? undefined : { duration: 0.8, ease: "easeOut" }
+          shouldAnimate ? { duration: 0.8, ease: "easeOut" } : undefined
         }
       />
       <motion.path
         d="M11 22 C11.1 21.8 10.9 7 11.2 7 C11.4 7.1 11.6 22 11.8 22"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={reducedMotion ? false : { pathLength: 0 }}
-        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        initial={shouldAnimate ? { pathLength: 0 } : false}
+        animate={shouldAnimate ? { pathLength: 1 } : undefined}
         transition={
-          reducedMotion
-            ? undefined
-            : { duration: 0.8, delay: 0.1, ease: "easeOut" }
+          shouldAnimate
+            ? { duration: 0.8, delay: 0.1, ease: "easeOut" }
+            : undefined
         }
       />
       <motion.path
         d="M16 18 C16.2 17.9 16 10 16.3 10 C16.5 10.1 16.7 18 16.9 18"
         stroke="hsl(var(--amber))"
         strokeWidth="1.8"
-        initial={reducedMotion ? false : { pathLength: 0 }}
-        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        initial={shouldAnimate ? { pathLength: 0 } : false}
+        animate={shouldAnimate ? { pathLength: 1 } : undefined}
         transition={
-          reducedMotion
-            ? undefined
-            : { duration: 0.8, delay: 0.2, ease: "easeOut" }
+          shouldAnimate
+            ? { duration: 0.8, delay: 0.2, ease: "easeOut" }
+            : undefined
         }
       />
       {/* Arrow morphing into a sketchy circle (voice → drawing) */}
@@ -77,12 +80,12 @@ export function MurmurLogoMark({
         d="M20 16 L24 16 L22.5 14"
         stroke="hsl(var(--chalk-soft))"
         strokeWidth="1.2"
-        initial={reducedMotion ? false : { pathLength: 0 }}
-        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        initial={shouldAnimate ? { pathLength: 0 } : false}
+        animate={shouldAnimate ? { pathLength: 1 } : undefined}
         transition={
-          reducedMotion
-            ? undefined
-            : { duration: 0.6, delay: 0.5, ease: "easeOut" }
+          shouldAnimate
+            ? { duration: 0.6, delay: 0.5, ease: "easeOut" }
+            : undefined
         }
       />
       <motion.circle
@@ -92,12 +95,12 @@ export function MurmurLogoMark({
         stroke="hsl(var(--lavender))"
         strokeWidth="1.2"
         fill="none"
-        initial={reducedMotion ? false : { pathLength: 0 }}
-        animate={reducedMotion ? undefined : { pathLength: 1 }}
+        initial={shouldAnimate ? { pathLength: 0 } : false}
+        animate={shouldAnimate ? { pathLength: 1 } : undefined}
         transition={
-          reducedMotion
-            ? undefined
-            : { duration: 0.8, delay: 0.7, ease: "easeOut" }
+          shouldAnimate
+            ? { duration: 0.8, delay: 0.7, ease: "easeOut" }
+            : undefined
         }
         style={{ strokeDasharray: "1 0.5" }}
       />

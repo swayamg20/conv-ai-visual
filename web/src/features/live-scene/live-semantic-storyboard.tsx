@@ -358,6 +358,7 @@ function StoryboardStudio({
             </Link>
             <MurmurLogoMark
               className="hidden shrink-0 sm:block"
+              animateOnMount={false}
               reducedMotion={reducedMotion}
             />
             <div className="min-w-0">
