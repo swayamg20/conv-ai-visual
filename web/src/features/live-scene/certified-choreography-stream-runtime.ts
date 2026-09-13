@@ -1004,13 +1004,7 @@ export class CertifiedChoreographyStreamRuntime<
     outcome: ChoreographyPlaybackOutcome,
   ): void {
     let valid = false;
-    if (
-      this.player.validSettlement(
-        transition,
-        outcome,
-        "cancelled_to_checkpoint",
-      )
-    ) {
+    if (this.validInterruptionSettlement(transition, outcome)) {
       try {
         this.commitPrepared(transition.prepared, outcome);
         valid = true;
@@ -1052,13 +1046,7 @@ export class CertifiedChoreographyStreamRuntime<
       return;
     }
     let prefixLength = index;
-    if (
-      this.player.validSettlement(
-        transition,
-        outcome,
-        "cancelled_to_checkpoint",
-      )
-    ) {
+    if (this.validInterruptionSettlement(transition, outcome)) {
       this.committed = transition.prepared.target;
       this.provisional = this.committed;
       this.committedCaption = this.domain.checkpointCaption(
@@ -1094,6 +1082,23 @@ export class CertifiedChoreographyStreamRuntime<
     this.narration =
       this.visibleCaption || this.domain.copy.replayStoppedBeforeCheckpoint;
     this.publish();
+  }
+
+  private validInterruptionSettlement(
+    transition: ActivePlayback<Prepared>,
+    outcome: ChoreographyPlaybackOutcome,
+  ): boolean {
+    // Stop can arrive after the executor has materialized the exact target and
+    // entered its completion paint barrier. Cancellation deliberately cannot
+    // invalidate that in-flight proof, so its eventual completed settlement is
+    // just as trustworthy as an explicit cancelled-to-checkpoint settlement.
+    return (
+      this.player.validSettlement(
+        transition,
+        outcome,
+        "cancelled_to_checkpoint",
+      ) || this.player.validSettlement(transition, outcome, "completed")
+    );
   }
 
   private commitPrepared(

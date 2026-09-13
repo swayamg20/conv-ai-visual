@@ -382,6 +382,40 @@ describe("choreography SceneStreamRuntime", () => {
     });
   });
 
+  it("accepts the completed post-paint checkpoint when it wins the Stop race", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    emit(run, MAIN_STARTED, MAIN_CHECKPOINTS[0], MAIN_CHECKPOINTS[1]);
+    const first = renderer.rendered[0];
+    emitCertifiedCues(first);
+    first.observer?.({ type: "firstCuePresented" });
+
+    expect(runtime.interrupt()).toBe(true);
+    expect(run.invocation.signal.aborted).toBe(true);
+    expect(runtime.getSnapshot().queuedPatchCount).toBe(0);
+    first.observer?.({
+      type: "checkpointSettled",
+      settlement: "completed",
+    });
+    first.playback.settle({ status: "completed", firstCuePresented: true });
+    await flushMicrotasks();
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 1 },
+      provisionalScene: { revision: 1 },
+      choreography: {
+        accepted: [
+          {
+            scene: { revision: 1 },
+            presentation: { settlement: "completed" },
+          },
+        ],
+      },
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
+  });
+
   it("quarantines contradictory executor evidence and ignores its stale callbacks", async () => {
     const { runtime, renderer, runner } = createRuntime();
     const run = await startRuntime(runtime, runner);
@@ -984,6 +1018,33 @@ describe("choreography SceneStreamRuntime", () => {
       type: "checkpointSettled",
       settlement: "cancelled_to_checkpoint",
     });
+  });
+
+  it("retains a Replay checkpoint whose completed post-paint barrier wins the Stop race", async () => {
+    const { runtime, renderer, runner } = createRuntime();
+    const run = await startRuntime(runtime, runner);
+    await acceptMainPrefix(runtime, renderer, run, 2);
+    const storedFirst = clone(runtime.getSnapshot().choreography!.accepted[0]);
+    const replayStart = renderer.rendered.length;
+    const replay = runtime.replayAccepted();
+    const first = renderer.rendered[replayStart];
+    emitCertifiedCues(first);
+    first.observer?.({ type: "firstCuePresented" });
+
+    expect(runtime.interrupt()).toBe(true);
+    first.observer?.({
+      type: "checkpointSettled",
+      settlement: "completed",
+    });
+    first.playback.settle({ status: "completed", firstCuePresented: true });
+    await replay;
+
+    expect(runtime.getSnapshot()).toMatchObject({
+      phase: "interrupted",
+      committedScene: { revision: 1 },
+      choreography: { accepted: [storedFirst] },
+    });
+    expect(runtime.getSnapshot().error).toBeUndefined();
   });
 
   it("retains only the committed replay prefix when reset cleanup fails", async () => {
