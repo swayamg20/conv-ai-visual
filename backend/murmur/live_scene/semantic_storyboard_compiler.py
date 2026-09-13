@@ -349,7 +349,7 @@ def _anchor_nodes(problem: PairedProjectileComparisonSpecV1) -> NodeMap:
         _ring("projectile_marker_lower", _ORIGIN, 5.0, style=_LOWER_MARKER_STYLE),
         _ring("projectile_marker_higher", _ORIGIN, 8.0, style=_HIGHER_MARKER_STYLE),
         _token("axis_x_label", "x", 555.0, 472.0, 24.0, height=28.0, style=_SOFT_TEXT),
-        _token("axis_y_label", "y", 58.0, 194.0, 24.0, height=28.0, style=_SOFT_TEXT),
+        _token("axis_y_label", "y", 58.0, 176.0, 24.0, height=28.0, style=_SOFT_TEXT),
         _token(
             "launch_angle_lower",
             rf"{problem.lower_angle_deg}^\circ",
@@ -713,17 +713,18 @@ def _viewport(
 
 _ANCHOR_VIEWPORT = _viewport((0.0, 0.0, 800.0, 600.0), (24.0, 336.0, 320.0, 240.0))
 _TRAJECTORY_VIEWPORT = _viewport((36.0, 204.0, 548.0, 324.0), (36.0, 160.0, 548.0, 411.0))
+_APEX_VIEWPORT = _viewport((36.0, 204.0, 548.0, 364.0), (36.0, 160.0, 548.0, 411.0))
 _RANGE_VISUAL_VIEWPORT = _viewport((36.0, 230.0, 548.0, 338.0), (36.0, 230.0, 548.0, 338.0))
-_FORMULA_VIEWPORT = _viewport((548.0, 128.0, 252.0, 142.0), (548.0, 114.0, 252.0, 189.0))
+_FORMULA_VIEWPORT = _viewport((548.0, 60.0, 252.0, 210.0), (548.0, 60.0, 252.0, 210.0))
 _COMPLEMENTARY_VIEWPORT = _viewport(
-    (548.0, 176.0, 252.0, 142.0),
-    (548.0, 154.0, 252.0, 189.0),
+    (548.0, 60.0, 252.0, 218.0),
+    (548.0, 60.0, 252.0, 218.0),
 )
 _RANGE_ANALYTIC_VIEWPORT = _viewport(
-    (492.0, 140.0, 308.0, 326.0),
-    (492.0, 140.0, 308.0, 326.0),
+    (568.0, 60.0, 232.0, 430.0),
+    (568.0, 60.0, 232.0, 430.0),
 )
-_FLIGHT_VIEWPORT = _viewport((569.0, 472.0, 231.0, 128.0), (584.0, 438.0, 216.0, 162.0))
+_FLIGHT_VIEWPORT = _viewport((569.0, 442.0, 231.0, 158.0), (584.0, 442.0, 216.0, 158.0))
 
 
 def _record_viewports(
@@ -742,7 +743,7 @@ def _record_viewports(
             else _RANGE_ANALYTIC_VIEWPORT
         )
     if record.claim_id is StoryboardClaimId.HIGHER_APEX:
-        return _TRAJECTORY_VIEWPORT
+        return _APEX_VIEWPORT
     return _FLIGHT_VIEWPORT
 
 

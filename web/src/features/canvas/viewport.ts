@@ -19,6 +19,7 @@ interface CanvasViewportOptions {
   width: number;
   height: number;
   interactionLocked?: boolean;
+  onViewportPoseWrite?(pose: ViewportPoseV1): void;
 }
 
 interface ManagedViewportPlayback extends ViewportPlayback {
@@ -109,6 +110,7 @@ export function useCanvasViewport({
   width,
   height,
   interactionLocked = false,
+  onViewportPoseWrite,
 }: CanvasViewportOptions) {
   const defaultPose = useMemo(
     () => freezeCertifiedPose({ x: 0, y: 0, width, height }, width, height),
@@ -136,9 +138,10 @@ export function useCanvasViewport({
       if (!svg) throw new Error("The SVG canvas is unavailable");
       svg.setAttribute("viewBox", viewBoxValue(pose));
       viewportPoseRef.current = pose;
+      onViewportPoseWrite?.(pose);
       return pose;
     },
-    [height, svgRef, width],
+    [height, onViewportPoseWrite, svgRef, width],
   );
 
   const renderViewportFrame = useCallback(

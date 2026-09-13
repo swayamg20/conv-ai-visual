@@ -100,7 +100,11 @@ vi.mock("@/components/svg-canvas", async () => {
   const React = await import("react");
   return {
     SVGCanvas: React.forwardRef(function MockCanvas(
-      props: { reducedMotion?: boolean; choreographyPlaybackRate?: number },
+      props: {
+        reducedMotion?: boolean;
+        choreographyPlaybackRate?: number;
+        exactCameraClip?: boolean;
+      },
       ref,
     ) {
       React.useImperativeHandle(ref, () => ({
@@ -116,6 +120,7 @@ vi.mock("@/components/svg-canvas", async () => {
         "data-testid": "semantic-storyboard-canvas",
         "data-reduced-motion": String(props.reducedMotion),
         "data-playback-rate": String(props.choreographyPlaybackRate),
+        "data-exact-camera-clip": String(props.exactCameraClip),
       });
     }),
   };
@@ -721,6 +726,11 @@ describe("LiveSemanticStoryboard", () => {
         .querySelector('[data-testid="semantic-storyboard-canvas"]')
         ?.getAttribute("data-playback-rate"),
     ).toBe("16");
+    expect(
+      mounted.container
+        .querySelector('[data-testid="semantic-storyboard-canvas"]')
+        ?.getAttribute("data-exact-camera-clip"),
+    ).toBe("true");
     expect(
       mounted.container
         .querySelector('[data-testid="logo"]')

@@ -5,6 +5,7 @@ import type { SceneNode, SceneState } from "../src/lib/live-scene";
 const LINE_TOLERANCE = 0.05;
 const PATH_RELATIVE_TOLERANCE = Number.EPSILON;
 const LATEX_BOUNDS_TOLERANCE_CSS_PX = 0.5;
+const CAMERA_CLIP_TOLERANCE_CSS_PX = 0.02;
 
 type Point = readonly [number, number];
 type StoryboardNode = Extract<
@@ -30,7 +31,8 @@ export interface SemanticStoryboardDomMismatch {
     | "latex_geometry"
     | "latex_content"
     | "latex_content_bounds"
-    | "latex_style";
+    | "latex_style"
+    | "camera_visibility";
   readonly nodeId: string | null;
   readonly field: string;
   readonly expected: string;
@@ -73,6 +75,11 @@ type NodeSignature =
 export interface SemanticStoryboardSvgSignature {
   readonly sourceRevision: number;
   readonly viewBox: string;
+  readonly cameraVisibility: Readonly<{
+    readonly exact: boolean;
+    readonly preserveAspectRatio: string;
+    readonly policy: "root_css_inset";
+  }>;
   readonly paintOrder: readonly string[];
   readonly nodes: readonly NodeSignature[];
   readonly residueFree: boolean;
@@ -123,6 +130,7 @@ export async function inspectSemanticStoryboardSvgAgainstScene(
     .evaluate(
       (root, input): SemanticStoryboardDomInspection => {
         const SVG_NS = "http://www.w3.org/2000/svg";
+        const svgRoot = root as SVGSVGElement;
         const mismatches: SemanticStoryboardDomMismatch[] = [];
         const signatures: NodeSignature[] = [];
         const same = (left: unknown, right: unknown) =>
@@ -169,6 +177,116 @@ export async function inspectSemanticStoryboardSvgAgainstScene(
           check(code, id, valid);
           return valid ? children[0] : null;
         };
+        const expandInset = (
+          values: readonly number[],
+        ): readonly [number, number, number, number] | null => {
+          if (values.length === 1) {
+            return [values[0], values[0], values[0], values[0]];
+          }
+          if (values.length === 2) {
+            return [values[0], values[1], values[0], values[1]];
+          }
+          if (values.length === 3) {
+            return [values[0], values[1], values[2], values[1]];
+          }
+          return values.length === 4
+            ? [values[0], values[1], values[2], values[3]]
+            : null;
+        };
+        const parseInset = (
+          value: string,
+        ): readonly [number, number, number, number] | null => {
+          const match = value.trim().match(/^inset\(([^)]+)\)$/u);
+          if (!match) return null;
+          const tokens = match[1].trim().split(/\s+/u);
+          const parsed = tokens.map((token) => {
+            const tokenMatch = token.match(/^([-+]?(?:\d+\.?\d*|\.\d+))px$/u);
+            return tokenMatch ? Number(tokenMatch[1]) : Number.NaN;
+          });
+          return parsed.every(Number.isFinite) ? expandInset(parsed) : null;
+        };
+        const viewBoxValues = (root.getAttribute("viewBox") ?? "")
+          .trim()
+          .split(/[\s,]+/u)
+          .map(Number);
+        const preserveAspectRatio =
+          root.getAttribute("preserveAspectRatio") ?? "";
+        const clipPath = root.style.clipPath;
+        const clipInsets = parseInset(clipPath);
+        const bounds = root.getBoundingClientRect();
+        let expectedClipInsets:
+          readonly [number, number, number, number] | null = null;
+        const screenTransform = svgRoot.getScreenCTM();
+        if (
+          viewBoxValues.length === 4 &&
+          viewBoxValues.every(Number.isFinite) &&
+          viewBoxValues[2] > 0 &&
+          viewBoxValues[3] > 0 &&
+          screenTransform !== null &&
+          bounds.width > 0 &&
+          bounds.height > 0
+        ) {
+          const [x, y, width, height] = viewBoxValues;
+          const projected = [
+            [x, y],
+            [x + width, y],
+            [x + width, y + height],
+            [x, y + height],
+          ].map(([pointX, pointY]) => {
+            const point = svgRoot.createSVGPoint();
+            point.x = pointX;
+            point.y = pointY;
+            return point.matrixTransform(screenTransform);
+          });
+          const xs = projected.map((point) => point.x);
+          const ys = projected.map((point) => point.y);
+          const projectedLeft = Math.min(...xs);
+          const projectedRight = Math.max(...xs);
+          const projectedTop = Math.min(...ys);
+          const projectedBottom = Math.max(...ys);
+          if (
+            [
+              projectedLeft,
+              projectedRight,
+              projectedTop,
+              projectedBottom,
+            ].every(Number.isFinite)
+          ) {
+            expectedClipInsets = [
+              Math.max(0, projectedTop - bounds.top),
+              Math.max(0, bounds.right - projectedRight),
+              Math.max(0, bounds.bottom - projectedBottom),
+              Math.max(0, projectedLeft - bounds.left),
+            ];
+          }
+        }
+        const cameraVisibilityMatches =
+          root.dataset.exactCameraClip === "true" &&
+          preserveAspectRatio === "xMidYMid meet" &&
+          clipInsets !== null &&
+          expectedClipInsets !== null &&
+          clipInsets.every(
+            (value, index) =>
+              Math.abs(value - expectedClipInsets[index]) <=
+              input.cameraClipToleranceCssPx,
+          );
+        check(
+          "camera_visibility",
+          null,
+          cameraVisibilityMatches,
+          "root exact camera matte",
+          JSON.stringify({
+            marker: "true",
+            preserveAspectRatio: "xMidYMid meet",
+            insetsCssPx: expectedClipInsets,
+          }),
+          JSON.stringify({
+            marker: root.dataset.exactCameraClip ?? "absent",
+            preserveAspectRatio,
+            clipPath,
+            insetsCssPx: clipInsets,
+          }),
+        );
 
         const paintOrder = Array.from(
           root.children,
@@ -216,21 +334,46 @@ export async function inspectSemanticStoryboardSvgAgainstScene(
           "stroke-dashoffset",
         ];
         for (const element of [root, ...root.querySelectorAll("*")]) {
-          if (element.namespaceURI !== SVG_NS) continue;
           const id =
             element
               .closest("[data-element-id]")
               ?.getAttribute("data-element-id") ?? null;
           for (const property of residue) {
+            const attribute = element.getAttribute(property);
+            const inline =
+              (
+                element as Element & {
+                  readonly style?: CSSStyleDeclaration;
+                }
+              ).style?.getPropertyValue(property) ?? "";
+            if (element === root && property === "clip-path") {
+              check(
+                "presentation_residue",
+                id,
+                attribute === null,
+                "root clip-path attribute",
+                "absent; exact camera matte is CSS-only",
+                attribute ?? "absent",
+              );
+              continue;
+            }
+            const computedClip =
+              property === "clip-path"
+                ? getComputedStyle(element).getPropertyValue(property)
+                : "";
+            const computedClipIsClear =
+              property !== "clip-path" ||
+              computedClip === "" ||
+              computedClip === "none";
             check(
               "presentation_residue",
               id,
-              !element.hasAttribute(property) &&
-                !(element as SVGElement).style.getPropertyValue(property),
+              attribute === null && !inline && computedClipIsClear,
               property,
               "absent",
-              element.getAttribute(property) ??
-                (element as SVGElement).style.getPropertyValue(property),
+              [attribute, inline, computedClip]
+                .filter((value) => value)
+                .join(" | ") || "absent",
             );
           }
         }
@@ -635,6 +778,11 @@ export async function inspectSemanticStoryboardSvgAgainstScene(
           signature: {
             sourceRevision,
             viewBox: root.getAttribute("viewBox") ?? "",
+            cameraVisibility: {
+              exact: cameraVisibilityMatches,
+              preserveAspectRatio,
+              policy: "root_css_inset",
+            },
             paintOrder,
             nodes: signatures,
             residueFree: !mismatches.some(
@@ -653,6 +801,7 @@ export async function inspectSemanticStoryboardSvgAgainstScene(
         lineTolerance: LINE_TOLERANCE,
         pathRelativeTolerance: PATH_RELATIVE_TOLERANCE,
         latexBoundsToleranceCssPx: LATEX_BOUNDS_TOLERANCE_CSS_PX,
+        cameraClipToleranceCssPx: CAMERA_CLIP_TOLERANCE_CSS_PX,
       },
     );
 }

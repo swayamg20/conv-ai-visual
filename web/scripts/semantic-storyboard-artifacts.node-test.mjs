@@ -357,6 +357,11 @@ function domSignature(scene, viewBox) {
   return {
     sourceRevision: scene.revision,
     viewBox,
+    cameraVisibility: {
+      exact: true,
+      preserveAspectRatio: "xMidYMid meet",
+      policy: "root_css_inset",
+    },
     paintOrder: [
       ...scene.nodes.filter((node) => !label(node)).map((node) => node.id),
       ...scene.nodes.filter(label).map((node) => node.id),
@@ -880,6 +885,34 @@ test("capture contract derives checkpoint order from the selected fixture progra
     /ordinal|checkpointId/,
   );
 
+  const cameraNotExact = structuredClone(observation);
+  cameraNotExact.dom.signature.cameraVisibility.exact = false;
+  assert.throws(
+    () => validateCaptureObservation(cameraNotExact, [fixture]),
+    /cameraVisibility\.exact/,
+  );
+
+  const missingCameraEdge = structuredClone(observation);
+  delete missingCameraEdge.dom.signature.cameraVisibility.policy;
+  assert.throws(
+    () => validateCaptureObservation(missingCameraEdge, [fixture]),
+    /must contain exactly keys/,
+  );
+
+  const inconsistentCameraClip = structuredClone(observation);
+  inconsistentCameraClip.dom.signature.cameraVisibility.policy = "svg_group";
+  assert.throws(
+    () => validateCaptureObservation(inconsistentCameraClip, [fixture]),
+    /cameraVisibility\.policy/,
+  );
+
+  const nodeClipClaim = structuredClone(observation);
+  nodeClipClaim.dom.signature.cameraVisibility.unexpected = true;
+  assert.throws(
+    () => validateCaptureObservation(nodeClipClaim, [fixture]),
+    /must contain exactly keys/,
+  );
+
   const crossRuntime = structuredClone(observation);
   const coordinate =
     crossRuntime.terminal.snapshot.runtime.committedScene.nodes[5].points[3];
@@ -997,6 +1030,19 @@ test("manifest round-trip revalidates every report, capture, and inventory byte"
   const validated = await validateManifestForTests(root, SOURCE);
   assert.equal(validated.digest, written.digest);
   assert.equal(validated.manifest.evidence.reports.accelerated.testCount, 6);
+  const runtimeSourcePaths = new Set(
+    validated.manifest.source.runtimeSources.files.map(
+      ({ path: sourcePath }) => sourcePath,
+    ),
+  );
+  for (const sourcePath of [
+    "web/src/components/svg-canvas.tsx",
+    "web/src/features/canvas/exact-camera-clip.ts",
+    "web/src/features/canvas/types.ts",
+    "web/src/features/canvas/viewport.ts",
+  ]) {
+    assert.equal(runtimeSourcePaths.has(sourcePath), true, sourcePath);
+  }
   assert.equal(
     validated.manifest.evidence.latency.fixtureId,
     "semantic-storyboard-v20-a30-a60",

@@ -1036,6 +1036,22 @@ function expectedDomNode(node) {
   );
 }
 
+function validateCameraVisibility(value, location) {
+  const camera = exactKeys(
+    value,
+    ["exact", "policy", "preserveAspectRatio"],
+    location,
+  );
+  exact(camera.exact, true, `${location}.exact`);
+  exact(
+    camera.preserveAspectRatio,
+    "xMidYMid meet",
+    `${location}.preserveAspectRatio`,
+  );
+  exact(camera.policy, "root_css_inset", `${location}.policy`);
+  return camera;
+}
+
 function validateDom(value, expected, stage, location) {
   const dom = exactKeys(value, ["mismatches", "signature"], location);
   exact(
@@ -1045,7 +1061,14 @@ function validateDom(value, expected, stage, location) {
   );
   const signature = exactKeys(
     dom.signature,
-    ["nodes", "paintOrder", "residueFree", "sourceRevision", "viewBox"],
+    [
+      "cameraVisibility",
+      "nodes",
+      "paintOrder",
+      "residueFree",
+      "sourceRevision",
+      "viewBox",
+    ],
     `${location}.signature`,
   );
   exact(
@@ -1054,6 +1077,10 @@ function validateDom(value, expected, stage, location) {
     `${location}.signature.sourceRevision`,
   );
   exact(signature.viewBox, stage.viewBox, `${location}.signature.viewBox`);
+  validateCameraVisibility(
+    signature.cameraVisibility,
+    `${location}.signature.cameraVisibility`,
+  );
   exact(signature.residueFree, true, `${location}.signature.residueFree`);
   exact(
     signature.paintOrder,

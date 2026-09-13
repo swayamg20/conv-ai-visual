@@ -600,6 +600,7 @@ function StoryboardStudio({
             rendererTrusted={snapshot.runtime.rendererTrusted}
             reducedMotion={reducedMotion}
             playbackRate={playbackRate}
+            exactCameraClip
             className="w-full shadow-[0_30px_100px_hsl(var(--void)/0.7)]"
             testId="semantic-storyboard-stage"
             dataAttributes={{

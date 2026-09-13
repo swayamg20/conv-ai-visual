@@ -111,7 +111,16 @@ describe("CertifiedChoreographyStage", () => {
         reducedMotion: true,
         choreographyPlaybackRate: 16,
         viewportInteractionLocked: true,
+        exactCameraClip: false,
       }),
+    );
+  });
+
+  it("forwards the exact camera matte only when its caller opts in", async () => {
+    await renderStage({ exactCameraClip: true });
+
+    expect(canvas.renderProps).toHaveBeenCalledWith(
+      expect.objectContaining({ exactCameraClip: true }),
     );
   });
 

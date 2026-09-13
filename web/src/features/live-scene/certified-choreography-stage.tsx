@@ -47,6 +47,7 @@ interface CertifiedChoreographyStageBaseProps {
   readonly rendererTrusted: boolean;
   readonly reducedMotion?: boolean;
   readonly playbackRate?: ChoreographyPlaybackRate;
+  readonly exactCameraClip?: boolean;
   readonly className?: string;
   readonly testId?: string;
   readonly dataAttributes?: CertifiedChoreographyStageDataAttributes;
@@ -106,6 +107,7 @@ export function CertifiedChoreographyStage(
     rendererTrusted,
     reducedMotion = false,
     playbackRate = 1,
+    exactCameraClip = false,
     className,
     testId = "certified-choreography-stage",
     dataAttributes,
@@ -256,6 +258,7 @@ export function CertifiedChoreographyStage(
           viewportInteractionLocked
           reducedMotion={reducedMotion}
           choreographyPlaybackRate={playbackRate}
+          exactCameraClip={exactCameraClip}
           className="h-full w-full"
         />
       </div>

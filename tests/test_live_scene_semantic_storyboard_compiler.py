@@ -624,10 +624,10 @@ def test_evidence_specific_range_cameras_and_targets_do_not_fake_dependencies() 
 
     assert analytic_checkpoint.presentation.result_viewports.cinematic.model_dump() == {
         "v": 1,
-        "x": 492.0,
-        "y": 140.0,
-        "width": 308.0,
-        "height": 326.0,
+        "x": 568.0,
+        "y": 60.0,
+        "width": 232.0,
+        "height": 430.0,
     }
     assert visual_checkpoint.presentation.result_viewports.cinematic.model_dump() == {
         "v": 1,

@@ -1,7 +1,10 @@
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
 
 import type { DecodedSemanticStoryboardFixtureLane } from "../src/features/live-scene/semantic-storyboard-fixture-schema";
-import { expectSemanticStoryboardSvgMatchesScene } from "./semantic-storyboard-dom-oracle";
+import {
+  expectSemanticStoryboardSvgMatchesScene,
+  inspectSemanticStoryboardSvgAgainstScene,
+} from "./semantic-storyboard-dom-oracle";
 import {
   STORYBOARD_PROMPTS,
   STORYBOARD_SCENARIOS,
@@ -337,6 +340,32 @@ test("the Director owns semantic teaching order instead of a hardcoded stage ord
     page.getByLabel("What should the board explain next?"),
   ).toBeEnabled();
   await expectSemanticStoryboardSvgMatchesScene(page, pathsLane.resultScene);
+  const latexHtml = semanticStoryboardStage(page)
+    .locator(".katex-html")
+    .first();
+  await expect(latexHtml).toBeVisible();
+  const clippedNodeId = await latexHtml.evaluate((element) => {
+    element.style.setProperty("clip-path", "inset(1px)");
+    return (
+      element.closest("[data-element-id]")?.getAttribute("data-element-id") ??
+      null
+    );
+  });
+  expect(clippedNodeId).not.toBeNull();
+  const clipResidueInspection = await inspectSemanticStoryboardSvgAgainstScene(
+    page,
+    pathsLane.resultScene,
+  );
+  expect(clipResidueInspection.mismatches).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        code: "presentation_residue",
+        nodeId: clippedNodeId,
+        field: "clip-path",
+      }),
+    ]),
+  );
+  expect(clipResidueInspection.signature.residueFree).toBe(false);
 
   await resetSemanticStoryboard(page);
   const higherLane = semanticStoryboardLane(STORYBOARD_SCENARIOS.higherFirst);

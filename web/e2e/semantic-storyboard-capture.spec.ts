@@ -306,6 +306,15 @@ async function captureSettledCheckpoints(
       { expectedCount: ordinal + 1, expectedId: checkpointId },
       { polling: "raf", timeout: 30_000 },
     );
+    const observation = await semanticStoryboardSessionObservation(page);
+    const dom = await inspectSemanticStoryboardSvgAgainstScene(
+      page,
+      observation.snapshot.runtime.committedScene,
+    );
+    expect(
+      dom.mismatches,
+      `checkpoint ${checkpointId} must pass the semantic DOM oracle before capture`,
+    ).toEqual([]);
     const fileName = `semantic-storyboard-normal-speed-checkpoint-${String(
       ordinal,
     ).padStart(2, "0")}-${checkpointId}.png`;

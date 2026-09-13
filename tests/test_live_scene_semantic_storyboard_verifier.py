@@ -9,7 +9,11 @@ from itertools import combinations
 
 import pytest
 from murmur.live_scene import semantic_storyboard_verifier
-from murmur.live_scene.choreography_contracts import ChoreographyPlanV2
+from murmur.live_scene.choreography_contracts import (
+    ChoreographyPlanV2,
+    LayoutViewportMapV1,
+    ViewportPoseV1,
+)
 from murmur.live_scene.contracts import LatexTokenSceneNode, PathSceneNode, SceneState
 from murmur.live_scene.semantic_storyboard_compiler import (
     SemanticStoryboardCheckpointBlueprint,
@@ -27,7 +31,10 @@ from murmur.live_scene.semantic_storyboard_contracts import (
     TraceStoryboardRecordV1,
     semantic_storyboard_program_sha256,
 )
-from murmur.live_scene.semantic_storyboard_routing import route_semantic_storyboard_record
+from murmur.live_scene.semantic_storyboard_routing import (
+    SemanticStoryboardRoutingError,
+    route_semantic_storyboard_record,
+)
 from murmur.live_scene.semantic_storyboard_verifier import (
     SEMANTIC_STORYBOARD_ANCHOR_VERIFICATION_OBLIGATIONS,
     SEMANTIC_STORYBOARD_MODEL_VERIFICATION_OBLIGATIONS,
@@ -410,6 +417,130 @@ def test_camera_containment_includes_strokes_and_twelve_point_safe_inset() -> No
             (path_id,),
         )
     assert captured.value.code is SemanticStoryboardVerificationObligation.VIEWPORT
+
+
+def test_camera_labels_are_wholly_visible_or_wholly_outside() -> None:
+    pose = ViewportPoseV1(x=100.0, y=100.0, width=100.0, height=100.0)
+    viewports = LayoutViewportMapV1(cinematic=pose, compact=pose)
+    token = next(
+        node
+        for node in compile_semantic_storyboard_anchor(_problem()).result_nodes
+        if node.id == f"{PREFIX}axis_x_label"
+    )
+    assert isinstance(token, LatexTokenSceneNode)
+
+    for x, y in (
+        (112.0, 100.0),  # exact contained left and top edges
+        (88.0, 120.0),  # exact outside left edge
+        (212.0, 120.0),  # exact outside right edge
+        (150.0, 72.0),  # exact outside top edge
+        (150.0, 200.0),  # exact outside bottom edge
+    ):
+        candidate = token.model_copy(update={"x": x, "y": y})
+        semantic_storyboard_verifier._verify_atomic_viewport_labels(
+            viewports,
+            {candidate.id: candidate},
+        )
+
+    for x, y in (
+        (89.0, 120.0),
+        (211.0, 120.0),
+        (150.0, 73.0),
+        (150.0, 199.0),
+    ):
+        candidate = token.model_copy(update={"x": x, "y": y})
+        with pytest.raises(SemanticStoryboardVerificationError) as captured:
+            semantic_storyboard_verifier._verify_atomic_viewport_labels(
+                viewports,
+                {candidate.id: candidate},
+            )
+        assert captured.value.code is SemanticStoryboardVerificationObligation.VIEWPORT
+
+
+def test_every_reachable_camera_has_atomic_retained_labels() -> None:
+    formula = _record("reveal", conceptId="range_formula")
+    lower = _record("trace", trajectoryId="lower_angle")
+    higher = _record("trace", trajectoryId="higher_angle")
+    apex = _record(
+        "relate",
+        claimId="higher_apex",
+        evidenceIds=["lower_trajectory", "higher_trajectory"],
+    )
+    flight = _record(
+        "relate",
+        claimId="longer_flight",
+        evidenceIds=["lower_trajectory", "higher_trajectory"],
+    )
+    verified_transitions = 0
+
+    for problem in SUPPORTED_PROBLEMS:
+        candidates = [formula, lower, higher, apex, flight]
+        if problem.has_complementary_angles:
+            candidates.extend(
+                (
+                    _record("reveal", conceptId="complementary_angles"),
+                    _record(
+                        "relate",
+                        claimId="equal_range",
+                        evidenceIds=["lower_trajectory", "higher_trajectory"],
+                    ),
+                    _record(
+                        "relate",
+                        claimId="equal_range",
+                        evidenceIds=["range_formula", "complementary_angles"],
+                    ),
+                )
+            )
+        else:
+            candidates.extend(
+                (
+                    _record(
+                        "relate",
+                        claimId="unequal_range",
+                        evidenceIds=["lower_trajectory", "higher_trajectory"],
+                    ),
+                    _record(
+                        "relate",
+                        claimId="unequal_range",
+                        evidenceIds=["range_formula"],
+                    ),
+                )
+            )
+
+        anchor = compile_semantic_storyboard_anchor(problem)
+        semantic_storyboard_verifier._verify_atomic_viewport_labels(
+            anchor.presentation.result_viewports,
+            {node.id: node for node in anchor.result_nodes},
+        )
+
+        def walk(
+            component: ProjectileStoryboardStateV1,
+            *,
+            candidates=candidates,
+            problem=problem,
+        ) -> None:
+            nonlocal verified_transitions
+            for candidate in candidates:
+                semantic_scene = _semantic_scene(component)
+                try:
+                    beat = route_semantic_storyboard_record(
+                        candidate,
+                        problem_spec=problem,
+                        semantic_scene=semantic_scene,
+                    )
+                except SemanticStoryboardRoutingError:
+                    continue
+                checkpoint = compile_semantic_storyboard_checkpoint(beat, component)
+                semantic_storyboard_verifier._verify_atomic_viewport_labels(
+                    checkpoint.presentation.result_viewports,
+                    {node.id: node for node in checkpoint.result_nodes},
+                )
+                verified_transitions += 1
+                walk(checkpoint.result_component)
+
+        walk(anchor.result_component)
+
+    assert verified_transitions == 7_584
 
 
 def test_node_identity_order_label_style_and_snapshot_prefix_mutations_fail_closed() -> None:

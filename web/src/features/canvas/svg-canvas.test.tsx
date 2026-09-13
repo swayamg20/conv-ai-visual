@@ -23,8 +23,72 @@ actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   document.body.replaceChildren();
 });
+
+function renderedBounds(width: number, height: number): DOMRect {
+  return {
+    x: 0,
+    y: 0,
+    top: 0,
+    right: width,
+    bottom: height,
+    left: 0,
+    width,
+    height,
+    toJSON: () => ({}),
+  };
+}
+
+function installResizeObserver() {
+  let callback: ResizeObserverCallback | null = null;
+  let target: Element | null = null;
+  const observer: ResizeObserver = {
+    observe: vi.fn((value: Element) => {
+      target = value;
+    }),
+    unobserve: vi.fn(),
+    disconnect: vi.fn(),
+  };
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      constructor(value: ResizeObserverCallback) {
+        callback = value;
+      }
+
+      observe(value: Element) {
+        observer.observe(value);
+      }
+
+      unobserve(value: Element) {
+        observer.unobserve(value);
+      }
+
+      disconnect() {
+        observer.disconnect();
+      }
+    },
+  );
+  return {
+    observer,
+    resize(width: number, height: number) {
+      if (!callback || !target) throw new Error("ResizeObserver is not active");
+      callback(
+        [
+          {
+            target,
+            borderBoxSize: [
+              { inlineSize: width, blockSize: height } as ResizeObserverSize,
+            ],
+          } as unknown as ResizeObserverEntry,
+        ],
+        observer,
+      );
+    },
+  };
+}
 
 function animationSnapshot(): ReadonlySet<gsap.core.Animation> {
   return new Set(gsap.globalTimeline.getChildren(true, true, true));
@@ -1062,6 +1126,200 @@ describe("SVGCanvas", () => {
     });
     act(() => canvas.current?.materializeViewport(certifiedPose));
     expect(canvas.current?.readViewport()).toEqual(certifiedPose);
+
+    await act(async () => root.unmount());
+  });
+
+  it("atomically mattes every exact camera pose and resize without touching scene groups", async () => {
+    const rendered = { width: 1_000, height: 600 };
+    let borders = { top: 0, right: 0, bottom: 0, left: 0 };
+    const nativeGetComputedStyle = window.getComputedStyle.bind(window);
+    vi.spyOn(window, "getComputedStyle").mockImplementation(
+      (element, pseudoElement) => {
+        const style = nativeGetComputedStyle(element, pseudoElement);
+        if (!(element instanceof SVGSVGElement)) return style;
+        return new Proxy(style, {
+          get(target, property) {
+            if (property === "borderTopWidth") return `${borders.top}px`;
+            if (property === "borderRightWidth") return `${borders.right}px`;
+            if (property === "borderBottomWidth") return `${borders.bottom}px`;
+            if (property === "borderLeftWidth") return `${borders.left}px`;
+            const value = Reflect.get(target, property, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    );
+    vi.spyOn(
+      SVGSVGElement.prototype,
+      "getBoundingClientRect",
+    ).mockImplementation(() => renderedBounds(rendered.width, rendered.height));
+    const resize = installResizeObserver();
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas
+          ref={canvas}
+          width={800}
+          height={600}
+          showGrid={false}
+          viewportInteractionLocked
+          exactCameraClip
+        />,
+      );
+    });
+    const svg = host.querySelector("svg");
+    expect(svg?.getAttribute("preserveAspectRatio")).toBe("xMidYMid meet");
+    expect(svg?.dataset.exactCameraClip).toBe("true");
+    expect(svg?.style.clipPath).toBe("inset(0px 100px 0px 100px)");
+
+    const scene = createSceneState({
+      revision: 1,
+      nodes: [
+        {
+          id: "camera-proof__label_a",
+          kind: "latex_token",
+          x: 100,
+          y: 80,
+          width: 100,
+          height: 30,
+          anchor: "start",
+          latex: "a",
+          presentation: { enter: "fade", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1 },
+        },
+        {
+          id: "camera-proof__label_b",
+          kind: "latex_token",
+          x: 300,
+          y: 200,
+          width: 100,
+          height: 30,
+          anchor: "middle",
+          latex: "b",
+          presentation: { enter: "fade", exit: "fade" },
+          style: { color: "#fff", fontSize: 18, opacity: 1 },
+        },
+      ],
+    });
+    act(() => canvas.current?.materializeScene(scene));
+    const groups = Array.from(
+      svg?.querySelectorAll<SVGGElement>("[data-element-id]") ?? [],
+    );
+
+    act(() =>
+      canvas.current?.renderViewportFrame({
+        v: 1,
+        x: 0,
+        y: 100,
+        width: 800,
+        height: 400,
+      }),
+    );
+    expect(svg?.style.clipPath).toBe("inset(50px 0px 50px 0px)");
+    expect(
+      Array.from(svg?.querySelectorAll("[data-element-id]") ?? []),
+    ).toEqual(groups);
+
+    act(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 100,
+        y: 0,
+        width: 600,
+        height: 600,
+      }),
+    );
+    expect(svg?.style.clipPath).toBe("inset(0px 200px 0px 200px)");
+    expect(
+      Array.from(svg?.querySelectorAll("[data-element-id]") ?? []),
+    ).toEqual(groups);
+
+    borders = { top: 1, right: 1, bottom: 1, left: 1 };
+    rendered.width = 853.59375;
+    rendered.height = 387.59375;
+    act(() => resize.resize(1, 1));
+    act(() =>
+      canvas.current?.renderViewportFrame({
+        v: 1,
+        x: 36,
+        y: 204,
+        width: 548,
+        height: 324,
+      }),
+    );
+    expect(svg?.style.clipPath).toBe(
+      "inset(1px 100.708333px 1px 100.708333px)",
+    );
+    expect(
+      Array.from(svg?.querySelectorAll("[data-element-id]") ?? []),
+    ).toEqual(groups);
+
+    borders = { top: 0, right: 0, bottom: 0, left: 0 };
+    rendered.width = 800;
+    rendered.height = 800;
+    act(() => resize.resize(1_600, 900));
+    act(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 100,
+        y: 0,
+        width: 600,
+        height: 600,
+      }),
+    );
+    expect(
+      Array.from(svg?.querySelectorAll("[data-element-id]") ?? []),
+    ).toEqual(groups);
+    expect(svg?.style.clipPath).toBe("inset(0px 0px 0px 0px)");
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas
+          ref={canvas}
+          width={800}
+          height={600}
+          showGrid={false}
+          viewportInteractionLocked
+        />,
+      );
+    });
+    expect(svg?.hasAttribute("data-exact-camera-clip")).toBe(false);
+    expect(svg?.style.clipPath).toBe("");
+    expect(resize.observer.disconnect).toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+  });
+
+  it("leaves the camera matte absent unless the canvas explicitly opts in", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const canvas = createRef<SVGCanvasHandle>();
+
+    await act(async () => {
+      root.render(
+        <SVGCanvas ref={canvas} width={800} height={600} showGrid={false} />,
+      );
+    });
+    const svg = host.querySelector("svg");
+    act(() =>
+      canvas.current?.materializeViewport({
+        v: 1,
+        x: 100,
+        y: 100,
+        width: 600,
+        height: 300,
+      }),
+    );
+
+    expect(svg?.getAttribute("preserveAspectRatio")).toBe("xMidYMid meet");
+    expect(svg?.hasAttribute("data-exact-camera-clip")).toBe(false);
+    expect(svg?.style.clipPath).toBe("");
 
     await act(async () => root.unmount());
   });
