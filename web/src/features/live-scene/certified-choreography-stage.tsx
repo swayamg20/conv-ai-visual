@@ -16,16 +16,33 @@ export type CertifiedChoreographyStageDataAttributes = Readonly<
   >
 >;
 
-export interface CertifiedChoreographyStageProps {
+export interface CertifiedChoreographyBoundedProgress {
+  readonly kind: "bounded";
+  readonly settledMainCount: number;
+  readonly totalMainCount: number;
+  readonly settledDetailLabels?: readonly string[];
+  readonly progressAriaLabel?: string;
+}
+
+export type CertifiedChoreographyOpenFrontierStatus = "live" | "paused";
+
+export interface CertifiedChoreographyOpenProgress {
+  readonly kind: "open";
+  readonly settledBeatCount: number;
+  readonly frontierStatus: CertifiedChoreographyOpenFrontierStatus;
+  readonly recentCertifiedLabels?: readonly string[];
+  readonly progressAriaLabel?: string;
+}
+
+export type CertifiedChoreographyStageProgress =
+  CertifiedChoreographyBoundedProgress | CertifiedChoreographyOpenProgress;
+
+interface CertifiedChoreographyStageBaseProps {
   readonly canvasRef: RefObject<SVGCanvasHandle | null>;
   readonly phase: string;
   readonly layout: ChoreographyLayout;
   readonly subjectLabel: string;
   readonly checkpointLabel: string;
-  readonly settledMainCount: number;
-  readonly totalMainCount: number;
-  readonly settledDetailLabels?: readonly string[];
-  readonly progressAriaLabel?: string;
   readonly caption: string;
   readonly rendererTrusted: boolean;
   readonly reducedMotion?: boolean;
@@ -35,32 +52,74 @@ export interface CertifiedChoreographyStageProps {
   readonly dataAttributes?: CertifiedChoreographyStageDataAttributes;
 }
 
+interface CertifiedChoreographyStageProgressProps {
+  readonly progress: CertifiedChoreographyStageProgress;
+  readonly settledMainCount?: never;
+  readonly totalMainCount?: never;
+  readonly settledDetailLabels?: never;
+  readonly progressAriaLabel?: never;
+}
+
+/** Compatibility surface for the bounded Gate 1.5-1.7 callers. */
+interface CertifiedChoreographyStageLegacyBoundedProgressProps {
+  readonly progress?: undefined;
+  readonly settledMainCount: number;
+  readonly totalMainCount: number;
+  readonly settledDetailLabels?: readonly string[];
+  readonly progressAriaLabel?: string;
+}
+
+export type CertifiedChoreographyStageProps =
+  CertifiedChoreographyStageBaseProps &
+    (
+      | CertifiedChoreographyStageProgressProps
+      | CertifiedChoreographyStageLegacyBoundedProgressProps
+    );
+
+function stageProgress(
+  props: CertifiedChoreographyStageProps,
+): CertifiedChoreographyStageProgress {
+  if (props.progress) return props.progress;
+  return {
+    kind: "bounded",
+    settledMainCount: props.settledMainCount,
+    totalMainCount: props.totalMainCount,
+    settledDetailLabels: props.settledDetailLabels,
+    progressAriaLabel: props.progressAriaLabel,
+  };
+}
+
 /**
  * Protocol-neutral presentation shell for one certified visual lesson.
  * Transport, controls, and semantic checkpoint policy stay with its caller.
  */
-export function CertifiedChoreographyStage({
-  canvasRef,
-  phase,
-  layout,
-  subjectLabel,
-  checkpointLabel,
-  settledMainCount,
-  totalMainCount,
-  settledDetailLabels = [],
-  progressAriaLabel,
-  caption,
-  rendererTrusted,
-  reducedMotion = false,
-  playbackRate = 1,
-  className,
-  testId = "certified-choreography-stage",
-  dataAttributes,
-}: CertifiedChoreographyStageProps) {
-  const boundedMainCount = Math.min(
-    Math.max(settledMainCount, 0),
-    totalMainCount,
-  );
+export function CertifiedChoreographyStage(
+  props: CertifiedChoreographyStageProps,
+) {
+  const {
+    canvasRef,
+    phase,
+    layout,
+    subjectLabel,
+    checkpointLabel,
+    caption,
+    rendererTrusted,
+    reducedMotion = false,
+    playbackRate = 1,
+    className,
+    testId = "certified-choreography-stage",
+    dataAttributes,
+  } = props;
+  const progress = stageProgress(props);
+  const boundedMainCount =
+    progress.kind === "bounded"
+      ? Math.min(
+          Math.max(progress.settledMainCount, 0),
+          progress.totalMainCount,
+        )
+      : 0;
+  const settledBeatCount =
+    progress.kind === "open" ? Math.max(progress.settledBeatCount, 0) : 0;
 
   return (
     <figure
@@ -74,7 +133,12 @@ export function CertifiedChoreographyStage({
       )}
       data-testid={testId}
       data-phase={phase}
-      data-settled-main-count={boundedMainCount}
+      data-settled-main-count={
+        progress.kind === "bounded" ? boundedMainCount : undefined
+      }
+      {...(progress.kind === "open"
+        ? { "data-settled-beat-count": settledBeatCount }
+        : {})}
       data-layout={layout}
       data-renderer-trusted={rendererTrusted ? "true" : "false"}
     >
@@ -93,38 +157,85 @@ export function CertifiedChoreographyStage({
           </p>
         </div>
 
-        <div
-          className="shrink-0"
-          aria-label={
-            progressAriaLabel ??
-            `${boundedMainCount} of ${totalMainCount} main checkpoints settled`
-          }
-        >
+        {progress.kind === "bounded" ? (
           <div
-            className="flex items-center justify-end gap-1.5"
-            aria-hidden="true"
+            className="shrink-0"
+            aria-label={
+              progress.progressAriaLabel ??
+              `${boundedMainCount} of ${progress.totalMainCount} main checkpoints settled`
+            }
           >
-            {Array.from({ length: totalMainCount }, (_, index) => (
-              <span
-                key={index}
-                className={cn(
-                  "h-1 w-3 rounded-full transition-[background-color,opacity] duration-300 motion-reduce:transition-none sm:w-5",
-                  index < boundedMainCount
-                    ? "bg-amber opacity-100"
-                    : "bg-chalk-faint opacity-35",
-                )}
-              />
+            <div
+              className="flex items-center justify-end gap-1.5"
+              aria-hidden="true"
+            >
+              {Array.from({ length: progress.totalMainCount }, (_, index) => (
+                <span
+                  key={index}
+                  className={cn(
+                    "h-1 w-3 rounded-full transition-[background-color,opacity] duration-300 motion-reduce:transition-none sm:w-5",
+                    index < boundedMainCount
+                      ? "bg-amber opacity-100"
+                      : "bg-chalk-faint opacity-35",
+                  )}
+                />
+              ))}
+            </div>
+            {(progress.settledDetailLabels ?? []).map((label, index) => (
+              <p
+                key={`${label}-${index}`}
+                className="mt-2 text-right font-mono text-[8px] uppercase tracking-[0.18em] text-sage"
+              >
+                {label}
+              </p>
             ))}
           </div>
-          {settledDetailLabels.map((label, index) => (
-            <p
-              key={`${label}-${index}`}
-              className="mt-2 text-right font-mono text-[8px] uppercase tracking-[0.18em] text-sage"
+        ) : (
+          <div
+            className="shrink-0 text-right"
+            aria-label={
+              progress.progressAriaLabel ??
+              `${settledBeatCount} certified ${settledBeatCount === 1 ? "beat" : "beats"} settled; frontier ${progress.frontierStatus}`
+            }
+            data-testid="open-choreography-progress"
+          >
+            <div
+              className="flex items-center justify-end gap-2 font-mono text-[8px] uppercase tracking-[0.18em]"
+              aria-hidden="true"
             >
-              {label}
-            </p>
-          ))}
-        </div>
+              <span className="text-chalk-soft">
+                {settledBeatCount} {settledBeatCount === 1 ? "beat" : "beats"}{" "}
+                settled
+              </span>
+              <span
+                className={cn(
+                  "h-1.5 w-1.5 rounded-full",
+                  progress.frontierStatus === "live"
+                    ? "bg-sage"
+                    : "bg-chalk-faint",
+                )}
+              />
+              <span
+                className={
+                  progress.frontierStatus === "live"
+                    ? "text-sage"
+                    : "text-chalk-soft"
+                }
+              >
+                Frontier {progress.frontierStatus}
+              </span>
+            </div>
+            {(progress.recentCertifiedLabels ?? []).map((label, index) => (
+              <p
+                key={`${label}-${index}`}
+                className="mt-2 font-mono text-[8px] uppercase tracking-[0.18em] text-sage"
+                data-certified-label="true"
+              >
+                {label}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       <div

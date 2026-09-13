@@ -55,6 +55,16 @@ from murmur.live_scene.semantic_service_contracts import (
     SemanticLiveSceneRequest,
     SemanticSceneStreamEvent,
 )
+from murmur.live_scene.semantic_storyboard_requests import (
+    SemanticStoryboardDirectorRequestV1,
+    SemanticStoryboardReflexRequestV1,
+)
+from murmur.live_scene.semantic_storyboard_service_contracts import (
+    SemanticStoryboardSceneStreamEventV1,
+)
+from murmur.live_scene.semantic_storyboard_wire import (
+    encode_semantic_storyboard_scene_stream_event,
+)
 from murmur.live_scene.semantic_wire import encode_semantic_scene_stream_event
 
 router = APIRouter(prefix="/api/live-scenes", tags=["live-scenes"])
@@ -157,6 +167,18 @@ async def _encode_projectile_choreography_scene_events(
         await close_async_resource(events)
 
 
+async def _encode_semantic_storyboard_scene_events(
+    events: AsyncIterator[SemanticStoryboardSceneStreamEventV1],
+) -> AsyncIterator[str]:
+    """Encode exact Gate 1.8 records and release every owned upstream resource."""
+
+    try:
+        async for event in events:
+            yield encode_semantic_storyboard_scene_stream_event(event)
+    finally:
+        await close_async_resource(events)
+
+
 async def _stream_semantic_scene(
     body: SemanticLiveSceneRequest,
     *,
@@ -209,6 +231,13 @@ async def _stream_choreography_scene(
     elif isinstance(body, (ProjectileMotionReflexRequestV1, ProjectileMotionDirectorRequestV1)):
         encoded_events = _encode_projectile_choreography_scene_events(
             scene_service.stream_projectile_choreography_events(body)
+        )
+    elif isinstance(
+        body,
+        (SemanticStoryboardReflexRequestV1, SemanticStoryboardDirectorRequestV1),
+    ):
+        encoded_events = _encode_semantic_storyboard_scene_events(
+            scene_service.stream_semantic_storyboard_events(body)
         )
     else:
         await lease.aclose()
