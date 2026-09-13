@@ -373,20 +373,117 @@ function reportJsonAttachment(tests, name, location) {
   }
 }
 
+function validatePlaywrightCi(value, source, location) {
+  const coreKeys = ["commitHref", "commitHash", "buildHref"];
+  const pullRequestKeys = ["prHref", "prTitle", "prBaseHash"];
+  const record = plainObject(value, location);
+  const isPullRequest = pullRequestKeys.some((key) =>
+    Object.hasOwn(record, key),
+  );
+  const ci = exactKeys(
+    record,
+    isPullRequest ? [...coreKeys, ...pullRequestKeys] : coreKeys,
+    location,
+  );
+  const commitHash = gitObject(ci.commitHash, `${location}.commitHash`);
+  if (!isPullRequest) {
+    exact(commitHash, source.gitCommit, `${location}.commitHash`);
+  }
+
+  const githubUrl = (value, name) => {
+    let url;
+    try {
+      url = new URL(nonEmptyString(value, `${location}.${name}`));
+    } catch {
+      fail(`${location}.${name}`, "must be an absolute GitHub URL");
+    }
+    if (
+      url.protocol !== "https:" ||
+      url.hostname !== "github.com" ||
+      url.port !== "" ||
+      url.username !== "" ||
+      url.password !== "" ||
+      url.search !== "" ||
+      url.hash !== ""
+    ) {
+      fail(`${location}.${name}`, "must be a canonical github.com HTTPS URL");
+    }
+    return url;
+  };
+
+  const commitUrl = githubUrl(ci.commitHref, "commitHref");
+  const buildUrl = githubUrl(ci.buildHref, "buildHref");
+  const commitMatch = commitUrl.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/commit\/([a-f0-9]{40})\/?$/,
+  );
+  if (!commitMatch) {
+    fail(`${location}.commitHref`, "must identify the exact CI commit");
+  }
+  const [, owner, repository, hrefCommitHash] = commitMatch;
+  exact(hrefCommitHash, commitHash, `${location}.commitHref`);
+  const buildMatch = buildUrl.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/actions\/runs\/([1-9][0-9]*)\/?$/,
+  );
+  if (!buildMatch || buildMatch[1] !== owner || buildMatch[2] !== repository) {
+    fail(
+      `${location}.buildHref`,
+      "must identify a workflow run in the same GitHub repository",
+    );
+  }
+  const normalized = {
+    commitHref: commitUrl.href.replace(/\/$/, ""),
+    commitHash,
+    buildHref: buildUrl.href.replace(/\/$/, ""),
+  };
+  if (!isPullRequest) return normalized;
+
+  const prHref = githubUrl(ci.prHref, "prHref");
+  const prMatch = prHref.pathname.match(
+    /^\/([^/]+)\/([^/]+)\/pull\/([1-9][0-9]*)\/?$/,
+  );
+  if (!prMatch || prMatch[1] !== owner || prMatch[2] !== repository) {
+    fail(
+      `${location}.prHref`,
+      "must identify a pull request in the same GitHub repository",
+    );
+  }
+  return {
+    ...normalized,
+    prHref: prHref.href.replace(/\/$/, ""),
+    prTitle: nonEmptyString(ci.prTitle, `${location}.prTitle`),
+    prBaseHash: gitObject(ci.prBaseHash, `${location}.prBaseHash`),
+  };
+}
+
+/** Test-only wrapper for Playwright's optional GitHub report provenance. */
+export function validatePlaywrightCiForTests(value, source) {
+  return validatePlaywrightCi(value, source, "report.config.metadata.ci");
+}
+
 export function validateReport(value, suite, location = `${suite} report`) {
   if (!SUITES.includes(suite)) fail(location, "has an unknown suite");
   const report = plainObject(value, location);
   const config = plainObject(report.config, `${location}.config`);
-  const metadata = plainObject(config.metadata, `${location}.config.metadata`);
-  const metadataKeys = Object.keys(metadata).filter(
-    (key) => key !== "actualWorkers",
+  const metadataValue = plainObject(
+    config.metadata,
+    `${location}.config.metadata`,
   );
-  exact(
-    metadataKeys.sort(),
-    ["environment", "gate", "protocol", "source", "suite"],
-    `${location}.config.metadata keys`,
+  const metadata = exactKeys(
+    metadataValue,
+    [
+      "environment",
+      "gate",
+      "protocol",
+      "source",
+      "suite",
+      ...(Object.hasOwn(metadataValue, "actualWorkers")
+        ? ["actualWorkers"]
+        : []),
+      ...(Object.hasOwn(metadataValue, "ci") ? ["ci"] : []),
+    ],
+    `${location}.config.metadata`,
   );
-  if (metadata.actualWorkers !== undefined) {
+  if (Object.hasOwn(metadata, "actualWorkers")) {
     exact(
       metadata.actualWorkers,
       1,
@@ -400,6 +497,13 @@ export function validateReport(value, suite, location = `${suite} report`) {
     metadata.source,
     `${location}.config.metadata.source`,
   );
+  const ci = Object.hasOwn(metadata, "ci")
+    ? validatePlaywrightCi(
+        metadata.ci,
+        source,
+        `${location}.config.metadata.ci`,
+      )
+    : null;
   const environment = validateEnvironment(
     metadata.environment,
     `${location}.config.metadata.environment`,
@@ -466,6 +570,7 @@ export function validateReport(value, suite, location = `${suite} report`) {
   return Object.freeze({
     source,
     environment,
+    ci,
     testCount: tests.length,
     interruption,
     latency,

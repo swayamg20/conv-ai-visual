@@ -14,6 +14,7 @@ import {
   SemanticStoryboardEvidenceError,
   sha256,
   validateCaptureObservation,
+  validatePlaywrightCiForTests,
   validateReport,
 } from "./semantic-storyboard-artifact-contract.mjs";
 import {
@@ -728,6 +729,141 @@ test("report validator rejects wrong provenance, files, counts, and retries", ()
     () => validateReport(badLatencySummary, "accelerated"),
     /submitToAnchorVisible\.p95Ms/,
   );
+});
+
+test("Playwright push CI metadata binds the report to one source commit and repository run", () => {
+  const ci = {
+    commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${SOURCE.gitCommit}`,
+    commitHash: SOURCE.gitCommit,
+    buildHref:
+      "https://github.com/swayamg20/conv-ai-visual/actions/runs/34728998680",
+  };
+  assert.deepEqual(validatePlaywrightCiForTests(ci, SOURCE), ci);
+
+  const withCi = report("capture");
+  withCi.config.metadata.ci = ci;
+  assert.deepEqual(validateReport(withCi, "capture").ci, ci);
+
+  const otherCommit = "c".repeat(40);
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        {
+          ...ci,
+          commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${otherCommit}`,
+          commitHash: otherCommit,
+        },
+        SOURCE,
+      ),
+    /commitHash/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        {
+          ...ci,
+          commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${otherCommit}`,
+        },
+        SOURCE,
+      ),
+    /commitHref/,
+  );
+  assert.throws(
+    () => validatePlaywrightCiForTests({ ...ci, unexpected: true }, SOURCE),
+    /must contain exactly keys/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...ci, commitHash: "c".repeat(39) },
+        SOURCE,
+      ),
+    /commitHash/,
+  );
+  for (const buildHref of [
+    "https://github.com/other/repository/actions/runs/1",
+    "https://github.com/swayamg20/conv-ai-visual/actions/runs/0",
+    "https://github.com:444/swayamg20/conv-ai-visual/actions/runs/1",
+    "https://github.com/swayamg20/conv-ai-visual/actions/runs/1?attempt=2",
+  ]) {
+    assert.throws(
+      () => validatePlaywrightCiForTests({ ...ci, buildHref }, SOURCE),
+      /buildHref/,
+    );
+  }
+});
+
+test("Playwright pull-request metadata preserves synthetic merge and source boundaries", () => {
+  const mergeCommit = "c".repeat(40);
+  const pullRequestCi = {
+    commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${mergeCommit}`,
+    commitHash: mergeCommit,
+    prHref: "https://github.com/swayamg20/conv-ai-visual/pull/38",
+    prTitle: "feat: qualify a live semantic storyboard",
+    prBaseHash: "d".repeat(40),
+    buildHref:
+      "https://github.com/swayamg20/conv-ai-visual/actions/runs/34728998680",
+  };
+  assert.deepEqual(
+    validatePlaywrightCiForTests(pullRequestCi, SOURCE),
+    pullRequestCi,
+  );
+
+  const withCi = report("capture");
+  withCi.config.metadata.ci = pullRequestCi;
+  assert.deepEqual(validateReport(withCi, "capture").ci, pullRequestCi);
+
+  for (const missingKey of ["prHref", "prTitle", "prBaseHash"]) {
+    const partial = { ...pullRequestCi };
+    delete partial[missingKey];
+    assert.throws(
+      () => validatePlaywrightCiForTests(partial, SOURCE),
+      /must contain exactly keys/,
+    );
+  }
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...pullRequestCi, unexpected: "field" },
+        SOURCE,
+      ),
+    /must contain exactly keys/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        { ...pullRequestCi, prBaseHash: "d".repeat(39) },
+        SOURCE,
+      ),
+    /prBaseHash/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests({ ...pullRequestCi, prTitle: "" }, SOURCE),
+    /prTitle/,
+  );
+  assert.throws(
+    () =>
+      validatePlaywrightCiForTests(
+        {
+          ...pullRequestCi,
+          commitHref: `https://github.com/swayamg20/conv-ai-visual/commit/${"e".repeat(40)}`,
+        },
+        SOURCE,
+      ),
+    /commitHref/,
+  );
+  for (const prHref of [
+    "https://github.com/other/repository/pull/38",
+    "https://github.com/swayamg20/conv-ai-visual/issues/38",
+    "https://github.com:444/swayamg20/conv-ai-visual/pull/38",
+    "https://github.com/swayamg20/conv-ai-visual/pull/38?diff=split",
+  ]) {
+    assert.throws(
+      () => validatePlaywrightCiForTests({ ...pullRequestCi, prHref }, SOURCE),
+      /prHref/,
+    );
+  }
 });
 
 test("capture contract derives checkpoint order from the selected fixture program", async () => {
