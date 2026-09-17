@@ -46,6 +46,7 @@ from murmur.live_scene.semantic_storyboard_service_contracts import (
     SemanticStoryboardSceneStreamDeclinedEventV1,
     SemanticStoryboardSceneStreamFailedEventV1,
 )
+from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 
 def _problem() -> PairedProjectileComparisonSpecV1:
@@ -420,6 +421,40 @@ async def test_failure_before_first_beat_is_mutation_free_and_sanitized(
         anchor.result_scene.revision,
     )
     assert "private provider body" not in repr(events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        (LLMProviderFailureKind.TIMEOUT, SemanticStoryboardFailureCode.PROVIDER_TIMEOUT),
+        (
+            LLMProviderFailureKind.RATE_LIMITED,
+            SemanticStoryboardFailureCode.PROVIDER_RATE_LIMITED,
+        ),
+        (LLMProviderFailureKind.CONNECTION, SemanticStoryboardFailureCode.PROVIDER_ERROR),
+        (LLMProviderFailureKind.INVALID_REQUEST, SemanticStoryboardFailureCode.PROVIDER_ERROR),
+    ],
+)
+async def test_sanitized_provider_failures_use_closed_storyboard_codes(
+    kind: LLMProviderFailureKind,
+    expected: SemanticStoryboardFailureCode,
+) -> None:
+    anchor = await _anchor()
+    events = await _collect(
+        SemanticStoryboardService(
+            _Client([_Stream([LLMProviderError(kind)])]),
+        ),
+        _director_request(anchor),
+    )
+
+    assert _checkpoints(events) == []
+    terminal = events[-1]
+    assert isinstance(terminal, SemanticStoryboardSceneStreamFailedEventV1)
+    assert (terminal.code, terminal.last_accepted_revision) == (
+        expected,
+        anchor.result_scene.revision,
+    )
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,7 @@ from murmur.live_scene.semantic_storyboard_verifier import (
 from murmur.live_scene.semantic_storyboard_wire import (
     encode_semantic_storyboard_scene_stream_event,
 )
+from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 DEFAULT_SEMANTIC_STORYBOARD_DIRECTOR_MAX_TOKENS = 2_048
 DEFAULT_SEMANTIC_STORYBOARD_TIMEOUT_SECONDS = 20.0
@@ -664,6 +665,13 @@ class SemanticStoryboardService:
                 raise
             except _CandidateRejected as exc:
                 terminal_cause = exc.cause
+            except LLMProviderError as exc:
+                if exc.kind is LLMProviderFailureKind.TIMEOUT:
+                    terminal_cause = _PROVIDER_TIMEOUT
+                elif exc.kind is LLMProviderFailureKind.RATE_LIMITED:
+                    terminal_cause = _PROVIDER_RATE_LIMITED
+                else:
+                    terminal_cause = _PROVIDER_ERROR
             except SceneAdmissionError:
                 terminal_cause = _PROVIDER_RATE_LIMITED
             except TimeoutError:

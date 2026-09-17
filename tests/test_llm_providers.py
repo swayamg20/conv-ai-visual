@@ -1,9 +1,13 @@
 """Provider adapter contracts without external API calls."""
 
+import logging
 from types import SimpleNamespace
 
+import httpx
+import openai
 import pytest
 from murmur.llm import GeminiClient, OpenAIClient, create_llm_client
+from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 
 @pytest.mark.asyncio
@@ -206,6 +210,115 @@ def test_openai_transport_retry_ceiling_is_sdk_only(monkeypatch) -> None:
 
     assert captured == {"api_key": "server-key", "max_retries": 0}
     assert client.default_params == {"reasoning_effort": "low"}
+
+
+def _status_error(error_type, status_code: int):
+    request = httpx.Request("POST", "https://example.invalid/openai/v1/chat/completions")
+    response = httpx.Response(status_code, request=request)
+    return error_type(
+        "RAW-PROVIDER-SENTINEL",
+        response=response,
+        body={"message": "RAW-PROVIDER-SENTINEL"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_error", "expected_kind"),
+    [
+        pytest.param(
+            openai.APITimeoutError(request=httpx.Request("POST", "https://example.invalid")),
+            LLMProviderFailureKind.TIMEOUT,
+            id="timeout",
+        ),
+        pytest.param(
+            openai.APIConnectionError(
+                message="RAW-PROVIDER-SENTINEL",
+                request=httpx.Request("POST", "https://example.invalid"),
+            ),
+            LLMProviderFailureKind.CONNECTION,
+            id="connection",
+        ),
+        pytest.param(
+            _status_error(openai.RateLimitError, 429),
+            LLMProviderFailureKind.RATE_LIMITED,
+            id="rate-limit",
+        ),
+        pytest.param(
+            _status_error(openai.AuthenticationError, 401),
+            LLMProviderFailureKind.AUTHENTICATION,
+            id="authentication",
+        ),
+        pytest.param(
+            _status_error(openai.PermissionDeniedError, 403),
+            LLMProviderFailureKind.PERMISSION,
+            id="permission",
+        ),
+        pytest.param(
+            _status_error(openai.BadRequestError, 400),
+            LLMProviderFailureKind.INVALID_REQUEST,
+            id="bad-request",
+        ),
+        pytest.param(
+            _status_error(openai.NotFoundError, 404),
+            LLMProviderFailureKind.INVALID_REQUEST,
+            id="not-found",
+        ),
+        pytest.param(
+            _status_error(openai.InternalServerError, 500),
+            LLMProviderFailureKind.SERVER,
+            id="server",
+        ),
+        pytest.param(
+            _status_error(openai.APIStatusError, 418),
+            LLMProviderFailureKind.UNKNOWN,
+            id="other-status",
+        ),
+    ],
+)
+async def test_openai_stream_normalizes_provider_failures_without_raw_text(
+    provider_error: Exception,
+    expected_kind: LLMProviderFailureKind,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Completions:
+        async def create(self, **_kwargs):
+            raise provider_error
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    client.model = "test-model"
+    client.max_tokens_parameter = "max_completion_tokens"
+    client.default_params = {}
+
+    with caplog.at_level(logging.ERROR), pytest.raises(LLMProviderError) as captured:
+        await anext(client.stream([{"role": "user", "content": "local-only"}]))
+
+    assert captured.value.kind is expected_kind
+    assert str(captured.value) == expected_kind.value
+    assert captured.value.__suppress_context__ is True
+    assert "RAW-PROVIDER-SENTINEL" not in caplog.text
+    assert "RAW-PROVIDER-SENTINEL" not in repr(captured.value)
+
+
+@pytest.mark.asyncio
+async def test_openai_stream_preserves_unclassified_programming_errors() -> None:
+    error = RuntimeError("local programming failure")
+
+    class Completions:
+        async def create(self, **_kwargs):
+            raise error
+
+    client = OpenAIClient.__new__(OpenAIClient)
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    client.model = "test-model"
+    client.max_tokens_parameter = "max_tokens"
+    client.default_params = {}
+
+    with pytest.raises(RuntimeError) as captured:
+        await anext(client.stream([{"role": "user", "content": "local-only"}]))
+
+    assert captured.value is error
 
 
 @pytest.mark.parametrize("value", [-1, True, 1.5, "0"])

@@ -2,7 +2,31 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator
+from enum import StrEnum
 from typing import Any
+
+
+class LLMProviderFailureKind(StrEnum):
+    """Closed, provider-neutral failure categories with no upstream payload."""
+
+    TIMEOUT = "timeout"
+    CONNECTION = "connection"
+    RATE_LIMITED = "rate_limited"
+    AUTHENTICATION = "authentication"
+    PERMISSION = "permission"
+    INVALID_REQUEST = "invalid_request"
+    SERVER = "server"
+    UNKNOWN = "unknown"
+
+
+class LLMProviderError(RuntimeError):
+    """Sanitized provider failure safe to cross orchestration boundaries."""
+
+    def __init__(self, kind: LLMProviderFailureKind) -> None:
+        if not isinstance(kind, LLMProviderFailureKind):
+            raise TypeError("kind must be an LLMProviderFailureKind")
+        self.kind = kind
+        super().__init__(kind.value)
 
 
 class LLMClient(ABC):
