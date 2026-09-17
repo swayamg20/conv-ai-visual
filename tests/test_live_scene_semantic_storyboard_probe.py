@@ -1310,6 +1310,16 @@ def _ndjson(record: Any) -> str:
     return json.dumps(record.canonical(), separators=(",", ":")) + "\n"
 
 
+def _abstain(reason: str) -> str:
+    return (
+        json.dumps(
+            {"v": 1, "act": "abstain", "reasonCode": reason},
+            separators=(",", ":"),
+        )
+        + "\n"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     (
@@ -1345,16 +1355,50 @@ def _ndjson(record: Any) -> str:
         ),
         (
             "unsupported_wind",
-            [
-                json.dumps(
-                    {"v": 1, "act": "abstain", "reasonCode": "unsupported_physics"},
-                    separators=(",", ":"),
-                )
-                + "\n"
-            ],
+            [_abstain("unsupported_physics")],
             "declined",
             (),
             "unsupported_physics",
+            None,
+            True,
+            False,
+        ),
+        (
+            "unsupported_launch_height",
+            [_abstain("unsupported_initial_condition")],
+            "declined",
+            (),
+            "unsupported_initial_condition",
+            None,
+            True,
+            False,
+        ),
+        (
+            "unsupported_angles",
+            [_abstain("unsupported_problem")],
+            "declined",
+            (),
+            "unsupported_problem",
+            None,
+            True,
+            False,
+        ),
+        (
+            "ambiguous_better",
+            [_abstain("ambiguous_intent")],
+            "declined",
+            (),
+            "ambiguous_intent",
+            None,
+            True,
+            False,
+        ),
+        (
+            "followup_apex_from_paths",
+            [_ndjson(HIGHER_APEX)],
+            "model_stop",
+            (HIGHER_APEX,),
+            None,
             None,
             True,
             False,
@@ -1594,6 +1638,82 @@ def test_accepted_prefix_is_safe_but_never_first_attempt_valid_or_rubric_complet
     assert score.safe_terminal is True
     assert score.first_attempt_valid is False
     assert score.rubric_passed is False
+
+
+def test_observed_paid_run_failure_signatures_remain_disqualifying() -> None:
+    round_one_generic = {
+        "unsupported_launch_height": (
+            RANGE_FORMULA,
+            COMPLEMENTARY,
+            LOWER,
+            HIGHER,
+            HIGHER_APEX,
+        ),
+        "unsupported_angles": (
+            RANGE_FORMULA,
+            COMPLEMENTARY,
+            LOWER,
+            HIGHER,
+            EQUAL_MATH,
+        ),
+        "ambiguous_better": (
+            RANGE_FORMULA,
+            COMPLEMENTARY,
+            LOWER,
+            HIGHER,
+            EQUAL_MATH,
+        ),
+    }
+    round_two_generic = (RANGE_FORMULA, COMPLEMENTARY, EQUAL_MATH)
+    scores = []
+
+    for scheduled in PROBE["SCHEDULE"]:
+        if scheduled.case.case_id in round_one_generic:
+            records = (
+                round_one_generic[scheduled.case.case_id]
+                if scheduled.round_index == 1
+                else round_two_generic
+            )
+            observation = _observation(
+                scheduled,
+                records=records,
+                terminal="model_stop",
+                mutate=True,
+            )
+        elif scheduled.case.case_id == "followup_apex_from_paths" and scheduled.round_index == 2:
+            observation = _observation(
+                scheduled,
+                records=(),
+                terminal="declined",
+                abstain_reason="no_forward_progress",
+                mutate=False,
+            )
+        else:
+            observation = _observation(scheduled)
+        scores.append(PROBE["_score_case"](scheduled.case, observation))
+
+    failed = [score for score in scores if not score.rubric_passed]
+    assert [(score.round_index, score.case_id) for score in failed] == [
+        (1, "unsupported_launch_height"),
+        (1, "unsupported_angles"),
+        (1, "ambiguous_better"),
+        (2, "followup_apex_from_paths"),
+        (2, "unsupported_launch_height"),
+        (2, "unsupported_angles"),
+        (2, "ambiguous_better"),
+    ]
+    assert sum(score.forbidden_mutation for score in failed) == 6
+    followup_failure = next(
+        score for score in failed if score.case_id == "followup_apex_from_paths"
+    )
+    assert followup_failure.forbidden_mutation is False
+
+    metrics = PROBE["_qualification_metrics"](scores)
+    assert metrics["rubricPassCount"] == 33
+    assert metrics["forbiddenMutationCount"] == 6
+    assert metrics["mandatoryCasesPassedBothRounds"] is False
+    assert metrics["negativeCasesPassedBothRounds"] is False
+    assert metrics["serverQualificationPassed"] is False
 
 
 def test_qualification_thresholds_and_mandatory_cases_are_fail_closed() -> None:
