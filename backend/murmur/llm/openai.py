@@ -6,7 +6,8 @@ from collections.abc import AsyncGenerator
 from typing import Any, Literal, NoReturn
 
 from murmur.core.async_cleanup import close_async_resource
-from murmur.llm.base import LLMClient, LLMProviderError, LLMProviderFailureKind
+from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
+from murmur.llm.base import LLMClient
 from murmur.tools.contracts import ToolCall
 
 logger = logging.getLogger(__name__)
@@ -53,13 +54,11 @@ def _normalized_provider_error(error: Exception) -> LLMProviderError | None:
     return LLMProviderError(kind)
 
 
-def _raise_provider_error(operation: str, error: Exception) -> NoReturn:
-    normalized = _normalized_provider_error(error)
-    if normalized is None:
-        logger.error("OpenAI %s failed (unclassified)", operation)
-        raise error
-    logger.error("OpenAI %s failed (%s)", operation, normalized.kind.value)
-    raise normalized from None
+def _raise_provider_error(operation: str, error: LLMProviderError) -> NoReturn:
+    """Raise only an already-sanitized error outside the SDK exception frame."""
+
+    logger.error("OpenAI %s failed (%s)", operation, error.kind.value)
+    raise error from None
 
 
 class OpenAIClient(LLMClient):
@@ -130,6 +129,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> str:
         """Non-streaming completion."""
+        provider_error: LLMProviderError | None = None
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -139,7 +139,11 @@ class OpenAIClient(LLMClient):
             )
             return (response.choices[0].message.content or "").strip()
         except Exception as error:
-            _raise_provider_error("completion", error)
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI completion failed (unclassified)")
+                raise
+        _raise_provider_error("completion", provider_error)
 
     async def stream(
         self,
@@ -150,6 +154,7 @@ class OpenAIClient(LLMClient):
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
         stream = None
+        provider_error: LLMProviderError | None = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -163,9 +168,14 @@ class OpenAIClient(LLMClient):
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
         except Exception as error:
-            _raise_provider_error("stream", error)
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI stream failed (unclassified)")
+                raise
         finally:
             await _close_provider_resource(stream)
+        if provider_error is not None:
+            _raise_provider_error("stream", provider_error)
 
     async def complete_with_tools(
         self,
@@ -176,6 +186,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> Any:
         """Non-streaming completion with tools."""
+        provider_error: LLMProviderError | None = None
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -186,7 +197,11 @@ class OpenAIClient(LLMClient):
             )
             return response
         except Exception as error:
-            _raise_provider_error("completion with tools", error)
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI completion with tools failed (unclassified)")
+                raise
+        _raise_provider_error("completion with tools", provider_error)
 
     async def stream_with_tools(
         self,
@@ -198,6 +213,7 @@ class OpenAIClient(LLMClient):
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
         stream = None
+        provider_error: LLMProviderError | None = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -211,9 +227,14 @@ class OpenAIClient(LLMClient):
             async for chunk in stream:
                 yield chunk
         except Exception as error:
-            _raise_provider_error("stream with tools", error)
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI stream with tools failed (unclassified)")
+                raise
         finally:
             await _close_provider_resource(stream)
+        if provider_error is not None:
+            _raise_provider_error("stream with tools", provider_error)
 
     async def aclose(self) -> None:
         """Close the owned OpenAI-compatible HTTP client."""

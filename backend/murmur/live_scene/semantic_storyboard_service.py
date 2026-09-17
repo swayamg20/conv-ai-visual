@@ -13,6 +13,7 @@ from murmur.core.async_cleanup import (
     DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
     close_async_resource,
 )
+from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
 from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import MAX_SAFE_SEQUENCE, MAX_SCENE_MODEL_OUTPUT_TOKENS, SceneState
 from murmur.live_scene.semantic_storyboard_checkpoint_compiler import (
@@ -60,7 +61,6 @@ from murmur.live_scene.semantic_storyboard_verifier import (
 from murmur.live_scene.semantic_storyboard_wire import (
     encode_semantic_storyboard_scene_stream_event,
 )
-from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 DEFAULT_SEMANTIC_STORYBOARD_DIRECTOR_MAX_TOKENS = 2_048
 DEFAULT_SEMANTIC_STORYBOARD_TIMEOUT_SECONDS = 20.0

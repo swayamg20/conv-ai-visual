@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import httpx
 import openai
 import pytest
+from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
 from murmur.llm import GeminiClient, OpenAIClient, create_llm_client
-from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 
 @pytest.mark.asyncio
@@ -296,6 +296,8 @@ async def test_openai_stream_normalizes_provider_failures_without_raw_text(
 
     assert captured.value.kind is expected_kind
     assert str(captured.value) == expected_kind.value
+    assert captured.value.__context__ is None
+    assert captured.value.__cause__ is None
     assert captured.value.__suppress_context__ is True
     assert "RAW-PROVIDER-SENTINEL" not in caplog.text
     assert "RAW-PROVIDER-SENTINEL" not in repr(captured.value)

@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
+from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
 from murmur.live_scene import semantic_storyboard_service as service_module
 from murmur.live_scene.admission import SceneAdmissionError
 from murmur.live_scene.contracts import SceneState
@@ -46,7 +47,6 @@ from murmur.live_scene.semantic_storyboard_service_contracts import (
     SemanticStoryboardSceneStreamDeclinedEventV1,
     SemanticStoryboardSceneStreamFailedEventV1,
 )
-from murmur.llm.base import LLMProviderError, LLMProviderFailureKind
 
 
 def _problem() -> PairedProjectileComparisonSpecV1:
