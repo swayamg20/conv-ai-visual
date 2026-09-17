@@ -6,9 +6,12 @@ import json
 
 import pytest
 from murmur.live_scene.semantic_storyboard_contracts import (
+    SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER,
+    AcceptedSemanticStoryboardRecordV1,
     PairedProjectileComparisonSpecV1,
     ProjectileStoryboardSemanticSceneStateV1,
     ProjectileStoryboardStateV1,
+    TraceStoryboardRecordV1,
 )
 from murmur.live_scene.semantic_storyboard_director import (
     SemanticStoryboardDirectorStreamError,
@@ -16,6 +19,7 @@ from murmur.live_scene.semantic_storyboard_director import (
     SemanticStoryboardDirectorStreamParser,
     build_semantic_storyboard_director_messages,
 )
+from murmur.live_scene.semantic_storyboard_routing import route_semantic_storyboard_record
 
 
 def _problem() -> PairedProjectileComparisonSpecV1:
@@ -24,14 +28,16 @@ def _problem() -> PairedProjectileComparisonSpecV1:
 
 def _scene(
     problem: PairedProjectileComparisonSpecV1 | None = None,
+    records: tuple[AcceptedSemanticStoryboardRecordV1, ...] = (),
 ) -> ProjectileStoryboardSemanticSceneStateV1:
     bound_problem = _problem() if problem is None else problem
     return ProjectileStoryboardSemanticSceneStateV1(
-        revision=1,
+        revision=1 + len(records),
         components=(
             ProjectileStoryboardStateV1(
                 id="projectile-comparison",
                 problemSpec=bound_problem,
+                acceptedRecords=records,
             ),
         ),
         certificateHeadSha256="a" * 64,
@@ -40,6 +46,11 @@ def _scene(
 
 def _line(act: str, **fields: object) -> str:
     return json.dumps({"v": 1, "act": act, **fields}, separators=(",", ":"))
+
+
+def _section_json(content: str, marker: str) -> object:
+    lines = content.splitlines()
+    return json.loads(lines[lines.index(marker) + 1])
 
 
 def test_prompt_is_deterministic_catalog_only_and_excludes_certificate_frontier() -> None:
@@ -138,6 +149,117 @@ def test_prompt_treats_accepted_records_as_visible_relation_evidence() -> None:
     assert "Accepted records are already visible and may satisfy evidence" in system
     assert "lower_angle -> lower_trajectory" in system
     assert "higher_angle -> higher_trajectory" in system
+
+
+def test_affordance_manifest_derives_visible_evidence_from_the_certified_frontier() -> None:
+    problem = _problem()
+    lower = TraceStoryboardRecordV1(v=1, act="trace", trajectoryId="lower_angle")
+    higher = TraceStoryboardRecordV1(v=1, act="trace", trajectoryId="higher_angle")
+    scene = _scene(problem, (lower, higher))
+    user = build_semantic_storyboard_director_messages(
+        "Use both visible paths to relate the higher apex.",
+        problem,
+        scene,
+    )[1]["content"]
+    manifest = _section_json(user, "CURRENT_STORYBOARD_AFFORDANCES_JSON:")
+
+    assert manifest["supportedWorld"] == {
+        "boundProblemImmutable": True,
+        "fixedGravity": True,
+        "noDrag": True,
+        "noExtraForces": True,
+        "noWind": True,
+        "sameLaunchAndLandingGroundHeight": True,
+    }
+    assert manifest["acceptedEffectIds"] == ["trace:lower_angle", "trace:higher_angle"]
+    assert manifest["visibleEvidenceIds"] == ["lower_trajectory", "higher_trajectory"]
+    variants = manifest["unusedApplicableRecordVariants"]
+    apex = next(item for item in variants if item["record"].get("claimId") == "higher_apex")
+    assert apex == {
+        "missingEvidenceIds": [],
+        "readyNow": True,
+        "record": {
+            "act": "relate",
+            "claimId": "higher_apex",
+            "evidenceIds": ["lower_trajectory", "higher_trajectory"],
+            "v": 1,
+        },
+    }
+    assert all(item["record"].get("trajectoryId") is None for item in variants)
+
+
+def test_affordance_manifest_excludes_inapplicable_and_accepted_effects() -> None:
+    problem = PairedProjectileComparisonSpecV1(speedMps=20, anglesDeg=(30, 45))
+    lower = TraceStoryboardRecordV1(v=1, act="trace", trajectoryId="lower_angle")
+    user = build_semantic_storyboard_director_messages(
+        "Continue the bound comparison.",
+        problem,
+        _scene(problem, (lower,)),
+    )[1]["content"]
+    manifest = _section_json(user, "CURRENT_STORYBOARD_AFFORDANCES_JSON:")
+    records = [item["record"] for item in manifest["unusedApplicableRecordVariants"]]
+
+    assert not any(record.get("trajectoryId") == "lower_angle" for record in records)
+    assert not any(record.get("conceptId") == "complementary_angles" for record in records)
+    assert not any(record.get("claimId") == "equal_range" for record in records)
+    assert sum(record.get("claimId") == "unequal_range" for record in records) == 2
+
+
+def test_affordance_manifest_marks_exact_missing_evidence() -> None:
+    user = build_semantic_storyboard_director_messages(
+        "Relate the higher apex after showing both paths.",
+        _problem(),
+        _scene(),
+    )[1]["content"]
+    manifest = _section_json(user, "CURRENT_STORYBOARD_AFFORDANCES_JSON:")
+    variants = manifest["unusedApplicableRecordVariants"]
+    apex = next(item for item in variants if item["record"].get("claimId") == "higher_apex")
+
+    assert apex["readyNow"] is False
+    assert apex["missingEvidenceIds"] == ["lower_trajectory", "higher_trajectory"]
+
+
+def test_every_ready_manifest_record_routes_from_the_exact_frontier() -> None:
+    problem = _problem()
+    lower = TraceStoryboardRecordV1(v=1, act="trace", trajectoryId="lower_angle")
+    higher = TraceStoryboardRecordV1(v=1, act="trace", trajectoryId="higher_angle")
+    scene = _scene(problem, (lower, higher))
+    user = build_semantic_storyboard_director_messages(
+        "Continue with a supported effect.",
+        problem,
+        scene,
+    )[1]["content"]
+    manifest = _section_json(user, "CURRENT_STORYBOARD_AFFORDANCES_JSON:")
+    ready_records = [
+        SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER.validate_python(item["record"])
+        for item in manifest["unusedApplicableRecordVariants"]
+        if item["readyNow"]
+    ]
+
+    assert ready_records
+    for record in ready_records:
+        route_semantic_storyboard_record(
+            record,
+            problem_spec=problem,
+            semantic_scene=scene,
+        )
+
+
+def test_affordance_manifest_is_independent_of_prompt_wording() -> None:
+    first = build_semantic_storyboard_director_messages(
+        "Trace the lower path.",
+        _problem(),
+        _scene(),
+    )[1]["content"]
+    second = build_semantic_storyboard_director_messages(
+        "Show the formula.",
+        _problem(),
+        _scene(),
+    )[1]["content"]
+
+    assert _section_json(first, "CURRENT_STORYBOARD_AFFORDANCES_JSON:") == _section_json(
+        second, "CURRENT_STORYBOARD_AFFORDANCES_JSON:"
+    )
 
 
 def test_parser_emits_each_complete_non_abstain_record_across_arbitrary_chunks() -> None:

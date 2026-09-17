@@ -20,11 +20,23 @@ from murmur.live_scene.contracts import (
 from murmur.live_scene.semantic_storyboard_contracts import (
     MAX_SEMANTIC_STORYBOARD_RECORDS_PER_TURN,
     SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER,
+    STORYBOARD_CLAIM_EVIDENCE_OPTIONS,
+    STORYBOARD_EVIDENCE_ORDER,
     AbstainStoryboardRecordV1,
     AcceptedSemanticStoryboardRecordV1,
     PairedProjectileComparisonSpecV1,
     ProjectileStoryboardSemanticSceneStateV1,
+    RelateStoryboardRecordV1,
+    RevealStoryboardRecordV1,
     SemanticStoryboardRecordV1,
+    StoryboardClaimId,
+    StoryboardConceptId,
+    StoryboardEvidenceId,
+    StoryboardTrajectoryId,
+    TraceStoryboardRecordV1,
+    storyboard_evidence_after,
+    storyboard_record_effect_key,
+    storyboard_record_is_applicable,
 )
 
 MAX_SEMANTIC_STORYBOARD_DIRECTOR_FRAME_BYTES = 2_048
@@ -58,6 +70,15 @@ _DIRECTOR_SYSTEM_PROMPT = "\n".join(
         "but no legal requested record can advance the current frontier.",
         "- If the request is clear, supported, and has a legal new requested effect, do not "
         "abstain.",
+        "AFFORDANCE MANIFEST:",
+        "- CURRENT_STORYBOARD_AFFORDANCES_JSON is server-derived from the bound problem and "
+        "certified accepted frontier.",
+        "- Its record variants are permissions, not requests. Never emit a record merely "
+        "because the manifest lists it.",
+        "- readyNow=true means the exact record can legally follow the accepted frontier. "
+        "readyNow=false lists the exact missingEvidenceIds.",
+        "- A not-ready record may follow only after the user explicitly requested records that "
+        "produce all missing evidence earlier in this same output.",
         "OUTPUT CONTRACT (strict):",
         "- Output NDJSON only: one complete JSON object per line, with no other text.",
         "- Output from one through five records, then stop cleanly.",
@@ -156,6 +177,97 @@ def _canonical_storyboard_context(
     return encoded
 
 
+def _effect_id(record: AcceptedSemanticStoryboardRecordV1) -> str:
+    act, target = storyboard_record_effect_key(record)
+    return f"{act}:{target.value}"
+
+
+def _applicable_record_variants(
+    problem_spec: PairedProjectileComparisonSpecV1,
+) -> tuple[AcceptedSemanticStoryboardRecordV1, ...]:
+    records: list[AcceptedSemanticStoryboardRecordV1] = [
+        *(
+            RevealStoryboardRecordV1(v=1, act="reveal", conceptId=concept)
+            for concept in StoryboardConceptId
+        ),
+        *(
+            TraceStoryboardRecordV1(v=1, act="trace", trajectoryId=trajectory)
+            for trajectory in StoryboardTrajectoryId
+        ),
+        *(
+            RelateStoryboardRecordV1(
+                v=1,
+                act="relate",
+                claimId=claim,
+                evidenceIds=evidence,
+            )
+            for claim in StoryboardClaimId
+            for evidence in STORYBOARD_CLAIM_EVIDENCE_OPTIONS[claim]
+        ),
+    ]
+    return tuple(
+        record
+        for record in records
+        if storyboard_record_is_applicable(record, problem_spec=problem_spec)
+    )
+
+
+def _canonical_storyboard_affordances(
+    problem_spec: PairedProjectileComparisonSpecV1,
+    semantic_scene: ProjectileStoryboardSemanticSceneStateV1,
+) -> str:
+    if not isinstance(problem_spec, PairedProjectileComparisonSpecV1):
+        raise TypeError("problem_spec must be a PairedProjectileComparisonSpecV1")
+    if not isinstance(semantic_scene, ProjectileStoryboardSemanticSceneStateV1):
+        raise TypeError("semantic_scene must be a ProjectileStoryboardSemanticSceneStateV1")
+    if not semantic_scene.components:
+        raise ValueError("Director affordances require the certified storyboard anchor")
+    component = semantic_scene.components[0]
+    if component.problem_spec != problem_spec:
+        raise ValueError("problem_spec must match the accepted storyboard problem")
+
+    accepted_effects = tuple(_effect_id(record) for record in component.accepted_records)
+    accepted_effect_set = frozenset(accepted_effects)
+    visible = storyboard_evidence_after(component.accepted_records)
+    visible_in_order = tuple(
+        evidence for evidence in STORYBOARD_EVIDENCE_ORDER if evidence in visible
+    )
+    variants: list[dict[str, object]] = []
+    for record in _applicable_record_variants(problem_spec):
+        if _effect_id(record) in accepted_effect_set:
+            continue
+        required_evidence: tuple[StoryboardEvidenceId, ...] = (
+            record.evidence_ids if isinstance(record, RelateStoryboardRecordV1) else ()
+        )
+        missing = tuple(evidence for evidence in required_evidence if evidence not in visible)
+        variants.append(
+            {
+                "record": record.model_dump(mode="json", by_alias=True),
+                "readyNow": not missing,
+                "missingEvidenceIds": [evidence.value for evidence in missing],
+            }
+        )
+
+    encoded = _json_dump(
+        {
+            "supportedWorld": {
+                "boundProblemImmutable": True,
+                "sameLaunchAndLandingGroundHeight": True,
+                "fixedGravity": True,
+                "noWind": True,
+                "noDrag": True,
+                "noExtraForces": True,
+            },
+            "acceptedEffectIds": list(accepted_effects),
+            "visibleEvidenceIds": [evidence.value for evidence in visible_in_order],
+            "unusedApplicableRecordVariants": variants,
+        }
+    )
+    if len(encoded.encode("utf-8")) > _MAX_SEMANTIC_STORYBOARD_CONTEXT_BYTES:
+        raise ValueError("storyboard affordances exceed the Director context budget")
+    return encoded
+
+
 def build_semantic_storyboard_director_messages(
     prompt: str,
     problem_spec: PairedProjectileComparisonSpecV1,
@@ -179,6 +291,8 @@ def build_semantic_storyboard_director_messages(
             _json_dump(problem_spec.model_dump(mode="json", by_alias=True)),
             "CURRENT_ACCEPTED_STORYBOARD_FRONTIER_JSON:",
             _canonical_storyboard_context(semantic_scene),
+            "CURRENT_STORYBOARD_AFFORDANCES_JSON:",
+            _canonical_storyboard_affordances(problem_spec, semantic_scene),
             "OUTPUT_SEMANTIC_STORYBOARD_NDJSON_NOW:",
         )
     )
