@@ -63,6 +63,7 @@ AZURE_ACCOUNT_ID = (
 AZURE_DEPLOYMENT_ID = f"{AZURE_ACCOUNT_ID}/deployments/{PROBE['EXPECTED_AZURE_DEPLOYMENT']}"
 AZURE_DEPLOYMENT_ETAG = '"paid-probe-etag"'
 AZURE_VERSION_UPGRADE_OPTION = "NoAutoUpgrade"
+TEST_PAID_AUTHORIZATION_ID = "test-paid-authorization"
 _MISSING = object()
 
 
@@ -475,6 +476,78 @@ def test_budget_parser_rejects_even_a_sub_nano_amount_above_fifty_cents() -> Non
         PROBE["_parse_budget_nano_usd"]("0.5000000001")
 
 
+def test_live_args_require_a_fresh_source_pinned_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parser = PROBE["_parser"]()
+    live_args = parser.parse_args(
+        [
+            "--max-cost-usd",
+            "0.50",
+            "--authorization-id",
+            TEST_PAID_AUTHORIZATION_ID,
+            "--acknowledge-paid-provider",
+            PROBE["ACKNOWLEDGEMENT"],
+        ]
+    )
+    globals_ = PROBE["_validate_args"].__globals__
+
+    assert PROBE["ACTIVE_PAID_AUTHORIZATION_ID"] is None
+    with pytest.raises(PROBE["ProbeRefusal"], match="no fresh paid authorization"):
+        PROBE["_validate_args"](live_args)
+
+    monkeypatch.setitem(globals_, "ACTIVE_PAID_AUTHORIZATION_ID", TEST_PAID_AUTHORIZATION_ID)
+    assert PROBE["_validate_args"](live_args) == 500_000_000
+    wrong = parser.parse_args(
+        [
+            "--max-cost-usd",
+            "0.50",
+            "--authorization-id",
+            "stale-authorization",
+            "--acknowledge-paid-provider",
+            PROBE["ACKNOWLEDGEMENT"],
+        ]
+    )
+    with pytest.raises(PROBE["ProbeRefusal"], match="exact fresh paid authorization"):
+        PROBE["_validate_args"](wrong)
+
+    monkeypatch.setitem(globals_, "ACTIVE_PAID_AUTHORIZATION_ID", None)
+    dry_run = parser.parse_args(["--max-cost-usd", "0.50", "--dry-run"])
+    assert PROBE["_validate_args"](dry_run) == 500_000_000
+
+
+def test_paid_authorization_is_consumed_once_without_storing_its_raw_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _remote = _pushed_repository(tmp_path)
+    second_worktree = tmp_path / "second-worktree"
+    _git("worktree", "add", "-b", "second-worktree", str(second_worktree), cwd=repo)
+    globals_ = PROBE["_consume_paid_authorization"].__globals__
+    monkeypatch.setitem(globals_, "ACTIVE_PAID_AUTHORIZATION_ID", TEST_PAID_AUTHORIZATION_ID)
+    source = PROBE["GitState"](_git("rev-parse", "HEAD", cwd=repo), "main", "origin/main")
+    monkeypatch.setitem(globals_, "PROJECT_ROOT", repo)
+
+    PROBE["_consume_paid_authorization"](TEST_PAID_AUTHORIZATION_ID, source)
+
+    common_dir = Path(_git("rev-parse", "--git-common-dir", cwd=repo))
+    if not common_dir.is_absolute():
+        common_dir = repo / common_dir
+    authorization_root = common_dir.resolve() / "murmur-paid-authorizations-v1"
+    markers = list(authorization_root.glob("*.consumed.json"))
+    assert len(markers) == 1
+    marker = markers[0]
+    payload = json.loads(marker.read_text())
+    assert payload["authorizationIdSha256"] == PROBE["_sha256_text"](TEST_PAID_AUTHORIZATION_ID)
+    assert payload["sourceCommit"] == source.commit
+    assert TEST_PAID_AUTHORIZATION_ID not in marker.read_text()
+    assert stat.S_IMODE(authorization_root.stat().st_mode) == 0o700
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o600
+    monkeypatch.setitem(globals_, "PROJECT_ROOT", second_worktree)
+    with pytest.raises(PROBE["ProbeRefusal"], match="already consumed"):
+        PROBE["_consume_paid_authorization"](TEST_PAID_AUTHORIZATION_ID, source)
+
+
 def test_live_entrypoint_never_constructs_provider_when_preflight_refuses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -496,6 +569,8 @@ def test_live_entrypoint_never_constructs_provider_when_preflight_refuses(
             str(SCRIPT),
             "--max-cost-usd",
             "0.50",
+            "--authorization-id",
+            TEST_PAID_AUTHORIZATION_ID,
             "--acknowledge-paid-provider",
             PROBE["ACKNOWLEDGEMENT"],
         ],
@@ -962,6 +1037,8 @@ def test_live_entrypoint_never_constructs_provider_after_attestation_refusal(
             str(SCRIPT),
             "--max-cost-usd",
             "0.50",
+            "--authorization-id",
+            TEST_PAID_AUTHORIZATION_ID,
             "--acknowledge-paid-provider",
             PROBE["ACKNOWLEDGEMENT"],
         ],
@@ -1004,6 +1081,8 @@ def _patch_live_main_after_preflight(
             str(SCRIPT),
             "--max-cost-usd",
             "0.50",
+            "--authorization-id",
+            TEST_PAID_AUTHORIZATION_ID,
             "--acknowledge-paid-provider",
             PROBE["ACKNOWLEDGEMENT"],
         ],
@@ -1030,6 +1109,7 @@ def _patch_live_main_after_preflight(
     )
     monkeypatch.setitem(globals_, "_attest_azure_deployment", attest_azure_deployment)
     monkeypatch.setitem(globals_, "_provider_factory", lambda _attestation: lambda: object())
+    monkeypatch.setitem(globals_, "_consume_paid_authorization", lambda _id, _source: None)
     monkeypatch.setitem(globals_, "_run_schedule", run_schedule)
     monkeypatch.setitem(
         globals_,
@@ -1965,6 +2045,21 @@ def test_case_report_redacts_prompt_messages_raw_chunks_and_private_errors() -> 
     assert not {"prompt", "messages", "rawChunks", "error", "endpoint"} & set(report)
 
 
+@pytest.mark.parametrize(
+    "environment_name",
+    ("SERVICEPRIVATEKEY", "AZURE_CLIENTSECRET", "WEBHOOKSECRET", "REFRESHTOKEN"),
+)
+def test_private_report_rejects_concatenated_secret_environment_names(
+    environment_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sentinel = f"PRIVATE_{environment_name}_SENTINEL"
+    monkeypatch.setenv(environment_name, sentinel)
+
+    with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):
+        PROBE["_validate_private_report_secret_absence"]({"allowedLeaf": sentinel})
+
+
 def test_full_private_report_has_a_closed_recursive_schema(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2019,6 +2114,8 @@ def test_full_private_report_has_a_closed_recursive_schema(
     assert AZURE_ENDPOINT not in serialized
     assert AZURE_ACCOUNT_ID not in serialized
     assert AZURE_DEPLOYMENT_ID not in serialized
+    assert TEST_PAID_AUTHORIZATION_ID not in serialized
+    assert report["authorizationIdSha256"] == PROBE["_sha256_text"](TEST_PAID_AUTHORIZATION_ID)
     assert all(
         PROBE["_sha256_text"](scheduled.case.prompt) in serialized
         for scheduled in PROBE["SCHEDULE"]
@@ -2044,6 +2141,7 @@ def test_full_private_report_has_a_closed_recursive_schema(
         (("metrics",), "serverQualificationPassed", False),
         (("pricing", "sourceProjection"), "encoding", "PRIVATE_ENCODING"),
         (("limits",), "maxCostUsd", "0.400000000"),
+        ((), "authorizationIdSha256", "b" * 64),
         ((), "postRunAzureDeploymentAttestation", None),
     )
     for path, key, value in mutations:
@@ -2084,6 +2182,9 @@ def test_full_private_report_has_a_closed_recursive_schema(
             PROBE["_validate_private_report_secret_absence"]({"allowedLeaf": secret})
     with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):
         PROBE["_validate_private_report_secret_absence"]({"allowedLeaf": PROBE["CASES"][0].prompt})
+    monkeypatch.delenv("MURMUR_PRIVATE_TOKEN")
+    monkeypatch.setenv("MONKEY_MODE", "GlobalStandard")
+    validate_private_report(report, expected=expected)
 
     assert capsys.readouterr().err == ""
 
@@ -2231,6 +2332,11 @@ def test_private_report_is_confined_atomic_and_mode_0600(
     assert json.loads(output.read_text()) == {"safe": True}
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert not list(root.glob("*.tmp"))
+    with pytest.raises(PROBE["ProbeRefusal"], match="already exists"):
+        PROBE["_write_private_report"](output, {"safe": False})
+    assert json.loads(output.read_text()) == {"safe": True}
+    with pytest.raises(PROBE["ProbeRefusal"], match="must not already exist"):
+        PROBE["_safe_output_path"](str(output))
 
     with pytest.raises(PROBE["ProbeRefusal"], match="escaped"):
         PROBE["_write_private_report"](

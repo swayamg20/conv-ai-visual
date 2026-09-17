@@ -36,6 +36,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VAR_ROOT = (PROJECT_ROOT / "var" / "live-scene" / "evaluations").resolve()
 
 ACKNOWLEDGEMENT = "I_ACCEPT_PROVIDER_COST"
+# A fresh product-owner approval must set a unique opaque ID in a reviewed,
+# pushed commit. Reset it to None in the immediate post-run commit.
+ACTIVE_PAID_AUTHORIZATION_ID: str | None = None
 MAX_ALLOWED_BUDGET_NANO_USD = 500_000_000
 MAX_OUTPUT_TOKENS = 2_048
 MAX_PROVIDER_CALLS = 40
@@ -1474,7 +1477,49 @@ def _safe_output_path(raw_path: str | None) -> Path:
         candidate = VAR_ROOT / run_id / "semantic-storyboard-report.json"
     if candidate == VAR_ROOT or VAR_ROOT not in candidate.parents:
         raise ProbeRefusal("--output must resolve inside var/live-scene/evaluations")
+    if os.path.lexists(candidate):
+        raise ProbeRefusal("--output must not already exist")
     return candidate
+
+
+def _paid_authorization_root() -> Path:
+    raw_common_dir = _git("rev-parse", "--git-common-dir")
+    common_dir = Path(raw_common_dir)
+    if not common_dir.is_absolute():
+        common_dir = PROJECT_ROOT / common_dir
+    common_dir = common_dir.resolve()
+    if not common_dir.is_dir():
+        raise ProbeRefusal("shared paid authorization store is unavailable")
+    return common_dir / "murmur-paid-authorizations-v1"
+
+
+def _consume_paid_authorization(authorization_id: str | None, source: GitState) -> None:
+    if not ACTIVE_PAID_AUTHORIZATION_ID or authorization_id != ACTIVE_PAID_AUTHORIZATION_ID:
+        raise ProbeRefusal("live run requires a fresh source-pinned paid authorization")
+    authorization_root = _paid_authorization_root()
+    if os.path.lexists(authorization_root) and (
+        authorization_root.is_symlink() or not authorization_root.is_dir()
+    ):
+        raise ProbeRefusal("paid authorization store is unsafe")
+    authorization_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(authorization_root, 0o700)
+    authorization_sha256 = _sha256_text(authorization_id)
+    marker = authorization_root / f"{authorization_sha256}.consumed.json"
+    try:
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise ProbeRefusal("paid authorization was already consumed") from exc
+    payload = {
+        "authorizationIdSha256": authorization_sha256,
+        "consumedAt": datetime.now(UTC).isoformat(),
+        "sourceCommit": source.commit,
+    }
+    with os.fdopen(descriptor, "wb") as handle:
+        handle.write((json.dumps(payload, sort_keys=True) + "\n").encode("utf-8"))
+        handle.flush()
+        os.fsync(handle.fileno())
+    if stat.S_IMODE(marker.stat().st_mode) != 0o600:
+        raise ProbeRefusal("paid authorization permissions were not retained")
 
 
 def _report_keys(value: str) -> frozenset[str]:
@@ -1488,7 +1533,8 @@ _ATTESTATION_REPORT_KEYS = _report_keys(
 )
 _PRIVATE_REPORT_SHAPES = {
     "$": _report_keys(
-        "schemaVersion generatedAt sourceCommit branch upstream evidenceScope corpusSha256 "
+        "schemaVersion generatedAt sourceCommit branch upstream authorizationIdSha256 "
+        "evidenceScope corpusSha256 "
         "azureDeploymentAttestation postRunAzureDeploymentAttestation "
         "azureDeploymentAttestationFailureCode pricing limits preflightWorstCase reservations "
         "admittedReservedMaxCostUsd results latency metrics costEvidence"
@@ -1785,6 +1831,7 @@ def _expected_report_abort(
 class _PrivateReportEvidence:
     generated_at: datetime
     source: GitState
+    authorization_id: str
     deployment_attestation: AzureDeploymentAttestation
     post_run_attestation: AzureDeploymentAttestation | None
     attestation_failure_code: str | None
@@ -1813,6 +1860,8 @@ def _validate_private_report(
         type(report["schemaVersion"]) is not int
         or report["schemaVersion"] != 1
         or report["generatedAt"] != expected.generated_at.isoformat()
+        or not expected.authorization_id
+        or report["authorizationIdSha256"] != _sha256_text(expected.authorization_id)
         or report["corpusSha256"] != CORPUS_SHA256
         or not isinstance(report["sourceCommit"], str)
         or len(report["sourceCommit"]) != 40
@@ -2025,13 +2074,42 @@ def _validate_private_report_secret_absence(report: dict[str, object]) -> None:
             return tuple(leaf for child in value for leaf in string_leaves(child))
         return (value,) if isinstance(value, str) else ()
 
+    sensitive_name_parts = {
+        "KEY",
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "ENDPOINT",
+    }
+
+    def sensitive_environment_name(name: str) -> bool:
+        normalized = name.upper()
+        parts = {part for part in normalized.split("_") if part}
+        qualified_key_suffixes = (
+            "ACCESSKEY",
+            "ACCOUNTKEY",
+            "APIKEY",
+            "AUTHKEY",
+            "CLIENTKEY",
+            "ENCRYPTIONKEY",
+            "MASTERKEY",
+            "PRIVATEKEY",
+            "SECRETKEY",
+            "SERVICEKEY",
+            "SESSIONKEY",
+            "SIGNINGKEY",
+            "STORAGEKEY",
+            "SUBSCRIPTIONKEY",
+            "WEBHOOKKEY",
+        )
+        return bool(sensitive_name_parts & parts) or normalized.endswith(
+            ("SECRET", "TOKEN", "PASSWORD", "ENDPOINT", *qualified_key_suffixes)
+        )
+
     secret_values = {
         value
         for key, value in os.environ.items()
-        if len(value) >= 8
-        and any(
-            marker in key.upper() for marker in ("KEY", "SECRET", "TOKEN", "PASSWORD", "ENDPOINT")
-        )
+        if len(value) >= 8 and sensitive_environment_name(key)
     }
     private_values = secret_values | {case.prompt for case in CASES}
     if any(secret in leaf for leaf in string_leaves(report) for secret in private_values):
@@ -2052,7 +2130,11 @@ def _write_private_report(path: Path, payload: dict[str, object]) -> None:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, resolved)
+        try:
+            os.link(temporary, resolved)
+        except FileExistsError as exc:
+            raise ProbeRefusal("private report output already exists") from exc
+        temporary.unlink()
         os.chmod(resolved, 0o600)
     finally:
         if temporary.exists():
@@ -2107,8 +2189,13 @@ def _validate_args(args: argparse.Namespace) -> int:
         )
     if date.today() > PRICING_REVIEW_AFTER:
         raise ProbeRefusal("pinned Azure pricing snapshot requires review")
-    if not args.dry_run and args.acknowledge_paid_provider != ACKNOWLEDGEMENT:
-        raise ProbeRefusal("live run requires the exact provider-cost acknowledgement")
+    if not args.dry_run:
+        if not ACTIVE_PAID_AUTHORIZATION_ID:
+            raise ProbeRefusal("no fresh paid authorization is active")
+        if args.authorization_id != ACTIVE_PAID_AUTHORIZATION_ID:
+            raise ProbeRefusal("live run requires the exact fresh paid authorization")
+        if args.acknowledge_paid_provider != ACKNOWLEDGEMENT:
+            raise ProbeRefusal("live run requires the exact provider-cost acknowledgement")
     return max_cost
 
 
@@ -2421,6 +2508,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file")
     parser.add_argument("--output")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--authorization-id")
     parser.add_argument("--acknowledge-paid-provider")
     return parser
 
@@ -2463,6 +2551,7 @@ def main() -> int:
         endpoint, deployment_name = _configured_azure_target()
         deployment_attestation = _attest_azure_deployment(endpoint, deployment_name)
         client_factory = _provider_factory(deployment_attestation)
+        _consume_paid_authorization(args.authorization_id, source_before)
         pacer = DispatchPacer(args.request_start_interval_seconds)
         results, aborted_reason, provider_client_closed = asyncio.run(
             _run_schedule(
@@ -2514,6 +2603,7 @@ def main() -> int:
         expected_report_evidence = _PrivateReportEvidence(
             generated_at=generated_at,
             source=source_after,
+            authorization_id=args.authorization_id,
             deployment_attestation=deployment_attestation,
             post_run_attestation=post_run_attestation,
             attestation_failure_code=attestation_failure_code,
@@ -2530,6 +2620,7 @@ def main() -> int:
             "schemaVersion": 1,
             "generatedAt": generated_at.isoformat(),
             **source_after.sanitized(),
+            "authorizationIdSha256": _sha256_text(args.authorization_id),
             "evidenceScope": "provider_parser_router_compiler_verifier_canonical_sse",
             "corpusSha256": _corpus_sha256(),
             "azureDeploymentAttestation": deployment_attestation.sanitized(),
