@@ -46,6 +46,7 @@ MESSAGE_FRAMING_TOKEN_RESERVE = 2_048
 MIN_REQUEST_START_INTERVAL_SECONDS = 6.1
 DEFAULT_REQUEST_START_INTERVAL_SECONDS = 6.7
 AZURE_CLI_TIMEOUT_SECONDS = 90.0
+AZURE_ATTESTATION_TIMEOUT_SECONDS = 300.0
 AZURE_CLI_MAX_JSON_BYTES = 1_048_576
 GIT_TIMEOUT_SECONDS = 45.0
 MAX_ENABLED_AZURE_SUBSCRIPTIONS = 64
@@ -2214,7 +2215,10 @@ def _minimal_child_environment(*additional_names: str) -> dict[str, str]:
     return {name: os.environ[name] for name in inherited_names if name in os.environ}
 
 
-def _azure_cli_json(*args: str) -> object:
+def _azure_cli_json(
+    *args: str,
+    timeout_seconds: float = AZURE_CLI_TIMEOUT_SECONDS,
+) -> object:
     executable = shutil.which("az")
     if executable is None:
         raise ProbeRefusal("azure_cli_unavailable")
@@ -2235,7 +2239,7 @@ def _azure_cli_json(*args: str) -> object:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             env=environment,
-            timeout=AZURE_CLI_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise ProbeRefusal("azure_cli_command_failed") from exc
@@ -2309,8 +2313,32 @@ def _parse_account_binding(
 def _attest_azure_deployment(
     endpoint: str,
     deployment_name: str,
+    *,
+    overall_timeout_seconds: float = AZURE_ATTESTATION_TIMEOUT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
 ) -> AzureDeploymentAttestation:
     from murmur.core.config import normalize_azure_openai_endpoint
+
+    if not math.isfinite(overall_timeout_seconds) or overall_timeout_seconds <= 0:
+        raise ValueError("overall_timeout_seconds must be finite and positive")
+    deadline = clock() + overall_timeout_seconds
+
+    def query(*args: str) -> object:
+        remaining = deadline - clock()
+        if remaining <= 0:
+            raise ProbeRefusal("azure_deployment_attestation_timed_out")
+        try:
+            result = _azure_cli_json(
+                *args,
+                timeout_seconds=min(AZURE_CLI_TIMEOUT_SECONDS, remaining),
+            )
+        except ProbeRefusal:
+            if clock() >= deadline:
+                raise ProbeRefusal("azure_deployment_attestation_timed_out") from None
+            raise
+        if clock() >= deadline:
+            raise ProbeRefusal("azure_deployment_attestation_timed_out")
+        return result
 
     if deployment_name != EXPECTED_AZURE_DEPLOYMENT:
         raise ProbeRefusal("azure_deployment_attestation_mismatch")
@@ -2329,7 +2357,7 @@ def _attest_azure_deployment(
     if not endpoint_subdomain:
         raise ProbeRefusal("azure_endpoint_binding_invalid")
 
-    raw_subscriptions = _azure_cli_json(
+    raw_subscriptions = query(
         "account",
         "list",
         "--refresh",
@@ -2349,7 +2377,7 @@ def _attest_azure_deployment(
 
     matches: list[_AzureAccountBinding] = []
     for subscription_id in subscription_ids:
-        raw_accounts = _azure_cli_json(
+        raw_accounts = query(
             "cognitiveservices",
             "account",
             "list",
@@ -2376,7 +2404,7 @@ def _attest_azure_deployment(
         raise ProbeRefusal("azure_account_binding_not_unique")
     binding = matches[0]
 
-    raw_deployment = _azure_cli_json(
+    raw_deployment = query(
         "cognitiveservices",
         "account",
         "deployment",
@@ -2422,7 +2450,7 @@ def _attest_azure_deployment(
         or version_upgrade_option not in KNOWN_AZURE_VERSION_UPGRADE_OPTIONS
     ):
         raise ProbeRefusal("azure_deployment_attestation_mismatch")
-    return AzureDeploymentAttestation(
+    attestation = AzureDeploymentAttestation(
         deployment_name=deployment_name,
         model_format=EXPECTED_AZURE_MODEL_FORMAT,
         model_name=EXPECTED_AZURE_MODEL_NAME,
@@ -2436,6 +2464,9 @@ def _attest_azure_deployment(
         deployment_resource_id_sha256=_sha256_text(deployment_id),
         deployment_etag_sha256=_sha256_text(deployment_etag),
     )
+    if clock() >= deadline:
+        raise ProbeRefusal("azure_deployment_attestation_timed_out")
+    return attestation
 
 
 def _configured_azure_target() -> tuple[str, str]:

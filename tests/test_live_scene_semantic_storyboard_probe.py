@@ -8,6 +8,7 @@ import runpy
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -128,6 +129,7 @@ def _install_azure_inventory(
     accounts_by_subscription: dict[str, object] | None = None,
     deployment: object | None = None,
     fail_account_subscription: str | None = None,
+    on_call: Callable[[tuple[str, ...], float], None] | None = None,
 ) -> list[tuple[str, ...]]:
     if subscriptions is None:
         subscriptions = [AZURE_SUBSCRIPTION_ONE, AZURE_SUBSCRIPTION_TWO]
@@ -146,8 +148,10 @@ def _install_azure_inventory(
         deployment = _azure_deployment()
     calls: list[tuple[str, ...]] = []
 
-    def fake_azure_cli_json(*args: str) -> object:
+    def fake_azure_cli_json(*args: str, timeout_seconds: float) -> object:
         calls.append(args)
+        if on_call is not None:
+            on_call(args, timeout_seconds)
         if args[:2] == ("account", "list"):
             return subscriptions
         if args[:4] == ("cognitiveservices", "account", "deployment", "show"):
@@ -652,6 +656,122 @@ def test_azure_attestation_finds_a_custom_subdomain_in_the_second_subscription(
     assert deployment_call[deployment_call.index("--name") + 1] == AZURE_ACCOUNT_NAME
 
 
+def test_azure_attestation_uses_decreasing_budget_without_skipping_inventory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    timeouts: list[float] = []
+    durations = iter((80.0, 80.0, 80.0, 10.0))
+
+    def clock() -> float:
+        return now
+
+    def advance(_args: tuple[str, ...], timeout_seconds: float) -> None:
+        nonlocal now
+        timeouts.append(timeout_seconds)
+        now += next(durations)
+
+    calls = _install_azure_inventory(monkeypatch, on_call=advance)
+
+    attestation = PROBE["_attest_azure_deployment"](
+        AZURE_ENDPOINT,
+        PROBE["EXPECTED_AZURE_DEPLOYMENT"],
+        clock=clock,
+    )
+
+    assert attestation == _valid_attestation()
+    assert timeouts == pytest.approx([90.0, 90.0, 90.0, 60.0])
+    account_calls = [call for call in calls if call[:3] == ("cognitiveservices", "account", "list")]
+    assert [call[call.index("--subscription") + 1] for call in account_calls] == [
+        AZURE_SUBSCRIPTION_ONE,
+        AZURE_SUBSCRIPTION_TWO,
+    ]
+    assert calls[-1][:4] == ("cognitiveservices", "account", "deployment", "show")
+
+
+def test_azure_attestation_deadline_returns_no_partial_inventory_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subscriptions = [
+        AZURE_SUBSCRIPTION_ONE,
+        AZURE_SUBSCRIPTION_TWO,
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+        "55555555-5555-4555-8555-555555555555",
+    ]
+    accounts = {
+        AZURE_SUBSCRIPTION_ONE: [],
+        AZURE_SUBSCRIPTION_TWO: [_azure_account(AZURE_SUBSCRIPTION_TWO)],
+    }
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    def advance(_args: tuple[str, ...], _timeout_seconds: float) -> None:
+        nonlocal now
+        now += 40.0
+
+    calls = _install_azure_inventory(
+        monkeypatch,
+        subscriptions=subscriptions,
+        accounts_by_subscription=accounts,
+        on_call=advance,
+    )
+
+    with pytest.raises(
+        PROBE["ProbeRefusal"],
+        match="azure_deployment_attestation_timed_out",
+    ):
+        PROBE["_attest_azure_deployment"](
+            AZURE_ENDPOINT,
+            PROBE["EXPECTED_AZURE_DEPLOYMENT"],
+            overall_timeout_seconds=150.0,
+            clock=clock,
+        )
+
+    account_calls = [call for call in calls if call[:3] == ("cognitiveservices", "account", "list")]
+    assert [call[call.index("--subscription") + 1] for call in account_calls] == subscriptions[:3]
+    assert not any(
+        call[:4] == ("cognitiveservices", "account", "deployment", "show") for call in calls
+    )
+
+
+def test_azure_attestation_resets_budget_for_each_pre_post_style_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = 0.0
+    timeouts: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    def advance(_args: tuple[str, ...], timeout_seconds: float) -> None:
+        nonlocal now
+        timeouts.append(timeout_seconds)
+        now += 20.0
+
+    calls = _install_azure_inventory(monkeypatch, on_call=advance)
+
+    attest = PROBE["_attest_azure_deployment"]
+    first = attest(
+        AZURE_ENDPOINT,
+        PROBE["EXPECTED_AZURE_DEPLOYMENT"],
+        overall_timeout_seconds=100.0,
+        clock=clock,
+    )
+    second = attest(
+        AZURE_ENDPOINT,
+        PROBE["EXPECTED_AZURE_DEPLOYMENT"],
+        overall_timeout_seconds=100.0,
+        clock=clock,
+    )
+
+    assert first == second == _valid_attestation()
+    assert timeouts == pytest.approx([90.0, 80.0, 60.0, 40.0] * 2)
+    assert len(calls) == 8
+
+
 @pytest.mark.parametrize(
     "inventory",
     [
@@ -917,7 +1037,16 @@ def test_azure_cli_uses_bounded_noninteractive_secret_safe_invocation(
 
     monkeypatch.setattr(globals_["subprocess"], "run", fake_run)
 
-    assert PROBE["_azure_cli_json"]("account", "list", "--output", "json") == {}
+    assert (
+        PROBE["_azure_cli_json"](
+            "account",
+            "list",
+            "--output",
+            "json",
+            timeout_seconds=12.5,
+        )
+        == {}
+    )
     assert captured["command"] == [
         "/safe/bin/az",
         "account",
@@ -928,7 +1057,7 @@ def test_azure_cli_uses_bounded_noninteractive_secret_safe_invocation(
     assert captured["stdin"] is subprocess.DEVNULL
     assert captured["capture_output"] is True
     assert captured["check"] is False
-    assert captured["timeout"] == PROBE["AZURE_CLI_TIMEOUT_SECONDS"]
+    assert captured["timeout"] == 12.5
     environment = captured["env"]
     assert isinstance(environment, dict)
     assert environment["AZURE_CORE_COLLECT_TELEMETRY"] == "no"
