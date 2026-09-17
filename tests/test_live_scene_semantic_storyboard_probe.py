@@ -277,6 +277,50 @@ def _observation(
     )
 
 
+def _evidence_observation(
+    scheduled: Any,
+    *,
+    records: tuple[Any, ...] | None = None,
+    terminal: str | None = None,
+    decline_reason: str | None = None,
+    failure_code: str | None = None,
+    provider_call_count: int = 1,
+) -> Any:
+    case = scheduled.case
+    accepted = case.rubric.required_records if records is None else records
+    is_abstention = case.rubric.abstain_reason is not None
+    if terminal is None:
+        terminal = "declined" if is_abstention else "model_stop"
+    if terminal == "declined" and decline_reason is None:
+        decline_reason = case.rubric.abstain_reason
+    (
+        base_scene_sha256,
+        result_scene_sha256,
+        base_semantic_sha256,
+        result_semantic_sha256,
+        program_sha256,
+    ) = PROBE["_frontier_evidence"](case, accepted)
+    return PROBE["CaseObservation"](
+        case_id=case.case_id,
+        round_index=scheduled.round_index,
+        terminal=terminal,
+        accepted_records=accepted,
+        checkpoint_count=len(accepted),
+        decline_reason=decline_reason,
+        failure_code=failure_code,
+        base_scene_sha256=base_scene_sha256,
+        result_scene_sha256=result_scene_sha256,
+        base_semantic_sha256=base_semantic_sha256,
+        result_semantic_sha256=result_semantic_sha256,
+        program_sha256=program_sha256,
+        first_attempt_valid=terminal in {"model_stop", "declined"},
+        provider_call_count=provider_call_count,
+        certificate_chain_valid=terminal != "protocol_error",
+        first_checkpoint_ms=1.0 if accepted else None,
+        total_ms=2.0,
+    )
+
+
 def _passing_scores() -> list[Any]:
     return [
         PROBE["_score_case"](scheduled.case, _observation(scheduled))
@@ -1093,7 +1137,7 @@ def test_post_run_attestation_instability_is_reported_and_disqualifies_evidence(
                 PROBE["_messages_for_case"](scheduled.case),
                 max_tokens=PROBE["MAX_OUTPUT_TOKENS"],
             )
-            observation = _observation(scheduled)
+            observation = _evidence_observation(scheduled)
             results.append((observation, PROBE["_score_case"](scheduled.case, observation)))
         pacer.admission_count = len(schedule)
         return results, None, True
@@ -1919,6 +1963,260 @@ def test_case_report_redacts_prompt_messages_raw_chunks_and_private_errors() -> 
     assert secret not in serialized
     assert report["promptSha256"] == PROBE["_sha256_text"](secret)
     assert not {"prompt", "messages", "rawChunks", "error", "endpoint"} & set(report)
+
+
+def test_full_private_report_has_a_closed_recursive_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    validate_private_report = PROBE["_validate_private_report"]
+    report_evidence: list[Any] = []
+
+    def capture_validation(report: dict[str, object], *, expected: Any) -> None:
+        report_evidence.append(expected)
+        validate_private_report(report, expected=expected)
+
+    monkeypatch.setitem(
+        PROBE["main"].__globals__,
+        "_validate_private_report",
+        capture_validation,
+    )
+
+    async def passing_schedule(
+        schedule: tuple[Any, ...],
+        *,
+        ledger: Any,
+        pacer: Any,
+        **_kwargs: object,
+    ) -> Any:
+        results = []
+        for scheduled in schedule:
+            ledger.admit(
+                scheduled.reservation_id,
+                PROBE["_messages_for_case"](scheduled.case),
+                max_tokens=PROBE["MAX_OUTPUT_TOKENS"],
+            )
+            observation = _evidence_observation(scheduled)
+            results.append((observation, PROBE["_score_case"](scheduled.case, observation)))
+        pacer.admission_count = len(schedule)
+        return results, None, True
+
+    reports = _patch_live_main_after_preflight(
+        monkeypatch,
+        run_schedule=passing_schedule,
+        attest_azure_deployment=lambda _endpoint, _deployment: _valid_attestation(),
+    )
+
+    assert PROBE["main"]() == 0
+    assert len(reports) == 1
+    assert len(report_evidence) == 1
+    report = reports[0]
+    expected = report_evidence[0]
+    validate_private_report(report, expected=expected)
+    serialized = json.dumps(report, sort_keys=True)
+    assert all(case.prompt not in serialized for case in PROBE["CASES"])
+    assert "USER_PROMPT_JSON:" not in serialized
+    assert AZURE_ENDPOINT not in serialized
+    assert AZURE_ACCOUNT_ID not in serialized
+    assert AZURE_DEPLOYMENT_ID not in serialized
+    assert all(
+        PROBE["_sha256_text"](scheduled.case.prompt) in serialized
+        for scheduled in PROBE["SCHEDULE"]
+    )
+
+    mutations = (
+        (("results", 0), "rawChunks", ["PRIVATE_RAW_CHUNK_SENTINEL"]),
+        (("results", 0, "score"), "error", "PRIVATE_ERROR_SENTINEL"),
+        (("reservations", 0), "messages", ["PRIVATE_MESSAGE_SENTINEL"]),
+        (("azureDeploymentAttestation",), "endpoint", AZURE_ENDPOINT),
+        (("results", 0, "acceptedRecords", 0), "narration", "PRIVATE_NARRATION"),
+        (("results", 0), "failureCode", "PRIVATE_PROVIDER_ERROR_SENTINEL"),
+        (("pricing",), "sourceProjection", "PRIVATE_PROJECTION_SENTINEL"),
+        ((), "branch", ["PRIVATE_BRANCH_SENTINEL"]),
+        (("reservations", 0), "messageSha256", "b" * 64),
+        (("results", 0), "programSha256", "b" * 64),
+        (("results", 0), "providerCallCount", 0),
+        (("results", 0), "certificateChainValid", False),
+        (("results", 0), "totalMs", True),
+        (("results", 0, "score"), "rubric_passed", False),
+        (("metrics",), "providerCallCount", 39),
+        (("metrics",), "mandatoryCasesPassedBothRounds", False),
+        (("metrics",), "serverQualificationPassed", False),
+        (("pricing", "sourceProjection"), "encoding", "PRIVATE_ENCODING"),
+        (("limits",), "maxCostUsd", "0.400000000"),
+        ((), "postRunAzureDeploymentAttestation", None),
+    )
+    for path, key, value in mutations:
+        mutated = json.loads(json.dumps(report))
+        target = mutated
+        for part in path:
+            target = target[part]
+        target[key] = value
+        with pytest.raises(PROBE["ProbeRefusal"], match="private report"):
+            validate_private_report(mutated, expected=expected)
+
+    with pytest.raises(PROBE["ProbeRefusal"], match="private report"):
+        validate_private_report(
+            report,
+            expected=dataclasses.replace(expected, provider_client_closed=False),
+        )
+    changed_attestation = dataclasses.replace(
+        expected.deployment_attestation,
+        deployment_etag_sha256="f" * 64,
+    )
+    with pytest.raises(PROBE["ProbeRefusal"], match="private report"):
+        validate_private_report(
+            report,
+            expected=dataclasses.replace(
+                expected,
+                post_run_attestation=changed_attestation,
+                attestation_failure_code="azure_deployment_changed_during_run",
+            ),
+        )
+
+    monkeypatch.setenv("MURMUR_PRIVATE_TOKEN", "a" * 40)
+    with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):
+        validate_private_report(report, expected=expected)
+
+    for secret in ('PRIVATE"TOKEN_SENTINEL', "PRIVATE\\TOKEN_SENTINEL", "PRIVATE\nTOKEN_SENTINEL"):
+        monkeypatch.setenv("MURMUR_PRIVATE_TOKEN", secret)
+        with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):
+            PROBE["_validate_private_report_secret_absence"]({"allowedLeaf": secret})
+    with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):
+        PROBE["_validate_private_report_secret_absence"]({"allowedLeaf": PROBE["CASES"][0].prompt})
+
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.parametrize(
+    ("abort_kind", "executed_count", "aborted_reason", "provider_call_count"),
+    [
+        ("round_one_calibration", 1, "calibration_failed_round_1", 1),
+        ("round_two_calibration", 21, "calibration_failed_round_2", 21),
+        ("protocol_prefix", 5, "event_after_terminal", 5),
+        ("pre_provider_protocol", 5, "invalid_started_boundary", 4),
+        ("pre_provider_failure", 1, "calibration_failed_round_1", 0),
+    ],
+)
+def test_private_report_preserves_valid_aborted_prefixes(
+    abort_kind: str,
+    executed_count: int,
+    aborted_reason: str,
+    provider_call_count: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def aborted_schedule(
+        schedule: tuple[Any, ...],
+        *,
+        ledger: Any,
+        pacer: Any,
+        **_kwargs: object,
+    ) -> Any:
+        results = []
+        for index, scheduled in enumerate(schedule[:executed_count], start=1):
+            if not (
+                index == executed_count
+                and abort_kind in {"pre_provider_failure", "pre_provider_protocol"}
+            ):
+                ledger.admit(
+                    scheduled.reservation_id,
+                    PROBE["_messages_for_case"](scheduled.case),
+                    max_tokens=PROBE["MAX_OUTPUT_TOKENS"],
+                )
+            if index != executed_count:
+                observation = _evidence_observation(scheduled)
+            elif abort_kind == "protocol_prefix":
+                observation = _evidence_observation(
+                    scheduled,
+                    records=(LOWER,),
+                    terminal="protocol_error",
+                    failure_code=aborted_reason,
+                )
+            elif abort_kind == "pre_provider_protocol":
+                observation = _evidence_observation(
+                    scheduled,
+                    records=(),
+                    terminal="protocol_error",
+                    failure_code=aborted_reason,
+                    provider_call_count=0,
+                )
+            elif abort_kind == "pre_provider_failure":
+                observation = _evidence_observation(
+                    scheduled,
+                    records=(),
+                    terminal="failed",
+                    failure_code="context_too_large",
+                    provider_call_count=0,
+                )
+            else:
+                observation = _evidence_observation(scheduled, records=())
+            results.append((observation, PROBE["_score_case"](scheduled.case, observation)))
+        pacer.admission_count = executed_count
+        return results, aborted_reason, True
+
+    reports = _patch_live_main_after_preflight(
+        monkeypatch,
+        run_schedule=aborted_schedule,
+        attest_azure_deployment=lambda _endpoint, _deployment: _valid_attestation(),
+    )
+
+    assert PROBE["main"]() == 1
+    assert len(reports) == 1
+    report = reports[0]
+    assert len(report["results"]) == executed_count
+    assert report["metrics"]["abortedReason"] == aborted_reason
+    assert report["metrics"]["providerCallCount"] == provider_call_count
+    assert report["metrics"]["serverQualificationPassed"] is False
+    assert capsys.readouterr().err == ""
+
+
+def test_private_report_preserves_non_prefix_provider_admissions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async def schedule_with_local_failure(
+        schedule: tuple[Any, ...],
+        *,
+        ledger: Any,
+        pacer: Any,
+        **_kwargs: object,
+    ) -> Any:
+        results = []
+        for index, scheduled in enumerate(schedule):
+            if index == 1:
+                observation = _evidence_observation(
+                    scheduled,
+                    records=(),
+                    terminal="failed",
+                    failure_code="context_too_large",
+                    provider_call_count=0,
+                )
+            else:
+                ledger.admit(
+                    scheduled.reservation_id,
+                    PROBE["_messages_for_case"](scheduled.case),
+                    max_tokens=PROBE["MAX_OUTPUT_TOKENS"],
+                )
+                observation = _evidence_observation(scheduled)
+            results.append((observation, PROBE["_score_case"](scheduled.case, observation)))
+        pacer.admission_count = len(schedule)
+        return results, None, True
+
+    reports = _patch_live_main_after_preflight(
+        monkeypatch,
+        run_schedule=schedule_with_local_failure,
+        attest_azure_deployment=lambda _endpoint, _deployment: _valid_attestation(),
+    )
+
+    assert PROBE["main"]() == 1
+    assert len(reports) == 1
+    report = reports[0]
+    assert report["metrics"]["executedCaseCount"] == 40
+    assert report["metrics"]["providerCallCount"] == 39
+    assert report["metrics"]["accountingPassed"] is False
+    assert report["metrics"]["serverQualificationPassed"] is False
+    assert capsys.readouterr().err == ""
 
 
 def test_private_report_is_confined_atomic_and_mode_0600(

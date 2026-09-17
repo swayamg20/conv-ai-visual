@@ -439,6 +439,44 @@ def _pricing_meter_rows() -> list[dict[str, str]]:
     ]
 
 
+def _pricing_report() -> dict[str, object]:
+    return {
+        "profile": PRICING_PROFILE,
+        "effectiveStartDates": list(PRICING_EFFECTIVE_DATES),
+        "verifiedDate": PRICING_VERIFIED_DATE,
+        "reviewAfter": PRICING_REVIEW_AFTER.isoformat(),
+        "source": PRICING_SOURCE,
+        "sourceRowCount": PRICING_SOURCE_ROW_COUNT,
+        "sourceProjectionSha256": PRICING_SOURCE_PROJECTION_SHA256,
+        "sourceProjection": {
+            "fields": [
+                "armRegionName",
+                "currencyCode",
+                "effectiveStartDate",
+                "meterName",
+                "productName",
+                "retailPrice",
+                "skuName",
+                "type",
+                "unitOfMeasure",
+                "unitPrice",
+            ],
+            "rowSort": [
+                "skuName",
+                "armRegionName",
+                "effectiveStartDate",
+                "retailPrice",
+            ],
+            "encoding": "compact_sorted_key_json_without_trailing_newline",
+        },
+        "meterSummary": _pricing_meter_rows(),
+        "meterSummarySha256": PRICING_SNAPSHOT_SHA256,
+        "selectionRule": "maximum_retail_price_across_all_returned_global_meters",
+        "inputUsdPerMillionTokens": _format_usd_per_million_tokens(INPUT_NANO_USD_PER_TOKEN),
+        "outputUsdPerMillionTokens": _format_usd_per_million_tokens(OUTPUT_NANO_USD_PER_TOKEN),
+    }
+
+
 def _pricing_snapshot_sha256() -> str:
     return _sha256_text(_canonical_json(_pricing_meter_rows()))
 
@@ -520,6 +558,10 @@ class BudgetLedger:
     @property
     def admitted_count(self) -> int:
         return len(self._admitted)
+
+    @property
+    def admitted_reservation_ids(self) -> frozenset[str]:
+        return frozenset(self._admitted)
 
     @property
     def admitted_reserved_cost_nano_usd(self) -> int:
@@ -769,6 +811,52 @@ def _certified_frontier(case: EvaluationCase) -> tuple[object, object]:
     return scene, semantic
 
 
+def _frontier_evidence(
+    case: EvaluationCase,
+    accepted_records: tuple[RecordSpec, ...],
+) -> tuple[str, str, str, str, str]:
+    from murmur.live_scene.checkpoint_contracts import low_level_scene_sha256
+    from murmur.live_scene.semantic_storyboard_checkpoint_compiler import (
+        compile_certified_semantic_storyboard_checkpoint,
+    )
+    from murmur.live_scene.semantic_storyboard_contracts import (
+        semantic_storyboard_program_sha256,
+        semantic_storyboard_scene_sha256,
+    )
+    from murmur.live_scene.semantic_storyboard_routing import (
+        route_semantic_storyboard_record,
+    )
+    from murmur.live_scene.semantic_storyboard_verifier import (
+        verify_semantic_storyboard_frontier,
+    )
+
+    problem = _pydantic_problem(case.problem_spec)
+    base_scene, base_semantic = _certified_frontier(case)
+    scene, semantic = base_scene, base_semantic
+    for record in accepted_records:
+        beat = route_semantic_storyboard_record(
+            _pydantic_record(record),
+            problem_spec=problem,
+            semantic_scene=semantic,
+        )
+        transition = compile_certified_semantic_storyboard_checkpoint(
+            beat,
+            base_scene=scene,
+            base_semantic_scene=semantic,
+        )
+        scene = transition.result_scene
+        semantic = transition.result_semantic_scene
+        verify_semantic_storyboard_frontier(problem, scene, semantic)
+    component = semantic.components[0]
+    return (
+        low_level_scene_sha256(base_scene),
+        low_level_scene_sha256(scene),
+        semantic_storyboard_scene_sha256(base_semantic),
+        semantic_storyboard_scene_sha256(semantic),
+        semantic_storyboard_program_sha256(problem, component.accepted_records),
+    )
+
+
 def _messages_for_case(case: EvaluationCase) -> list[dict[str, str]]:
     from murmur.live_scene.semantic_storyboard_director import (
         build_semantic_storyboard_director_messages,
@@ -795,6 +883,42 @@ def _preflight_budget(
         [(scheduled.reservation_id, _messages_for_case(scheduled.case)) for scheduled in schedule]
     )
     return ledger
+
+
+def _preflight_report(
+    *,
+    mode: Literal["dry-run", "live"],
+    max_cost_nano_usd: int,
+    ledger: BudgetLedger,
+) -> dict[str, object]:
+    return {
+        "mode": mode,
+        "caseCount": len(CASES),
+        "roundCount": 2,
+        "scheduledProviderCalls": len(SCHEDULE),
+        "corpusSha256": _corpus_sha256(),
+        "pricingProfile": PRICING_PROFILE,
+        "maxCostUsd": _format_nano_usd(max_cost_nano_usd),
+        "reservedMaxCostUsd": _format_nano_usd(ledger.reserved_cost_nano_usd),
+        "reservedMaxInputTokens": sum(item.max_input_tokens for item in ledger.reservations),
+        "reservedMaxOutputTokens": sum(item.max_output_tokens for item in ledger.reservations),
+    }
+
+
+def _limits_report(
+    *,
+    max_cost_nano_usd: int,
+    max_tokens: int,
+    request_start_interval_seconds: float,
+) -> dict[str, object]:
+    return {
+        "maxCostUsd": _format_nano_usd(max_cost_nano_usd),
+        "maxOutputTokensPerCall": max_tokens,
+        "maxProviderCalls": MAX_PROVIDER_CALLS,
+        "requestStartIntervalSeconds": request_start_interval_seconds,
+        "sdkMaxRetries": 0,
+        "repairCalls": 0,
+    }
 
 
 def _wire_roundtrip(event: object, decoder: SemanticStoryboardSseDecoder) -> object:
@@ -1353,6 +1477,567 @@ def _safe_output_path(raw_path: str | None) -> Path:
     return candidate
 
 
+def _report_keys(value: str) -> frozenset[str]:
+    return frozenset(value.split())
+
+
+_ATTESTATION_REPORT_KEYS = _report_keys(
+    "deploymentName modelFormat modelName modelVersion skuName provisioningState "
+    "versionUpgradeOption enabledSubscriptionCount endpointHostSha256 "
+    "accountResourceIdSha256 deploymentResourceIdSha256 deploymentEtagSha256"
+)
+_PRIVATE_REPORT_SHAPES = {
+    "$": _report_keys(
+        "schemaVersion generatedAt sourceCommit branch upstream evidenceScope corpusSha256 "
+        "azureDeploymentAttestation postRunAzureDeploymentAttestation "
+        "azureDeploymentAttestationFailureCode pricing limits preflightWorstCase reservations "
+        "admittedReservedMaxCostUsd results latency metrics costEvidence"
+    ),
+    "$.azureDeploymentAttestation": _ATTESTATION_REPORT_KEYS,
+    "$.postRunAzureDeploymentAttestation": _ATTESTATION_REPORT_KEYS,
+    "$.pricing": _report_keys(
+        "profile effectiveStartDates verifiedDate reviewAfter source sourceRowCount "
+        "sourceProjectionSha256 sourceProjection meterSummary meterSummarySha256 selectionRule "
+        "inputUsdPerMillionTokens outputUsdPerMillionTokens"
+    ),
+    "$.pricing.sourceProjection": _report_keys("fields rowSort encoding"),
+    "$.pricing.meterSummary[]": _report_keys(
+        "direction skuName meterName unitOfMeasure observedRowCount minimumRetailPriceUsdPer1K "
+        "selectedMaximumRetailPriceUsdPer1K effectiveStartDates"
+    ),
+    "$.limits": _report_keys(
+        "maxCostUsd maxOutputTokensPerCall maxProviderCalls requestStartIntervalSeconds "
+        "sdkMaxRetries repairCalls"
+    ),
+    "$.preflightWorstCase": _report_keys(
+        "mode caseCount roundCount scheduledProviderCalls corpusSha256 pricingProfile maxCostUsd "
+        "reservedMaxCostUsd reservedMaxInputTokens reservedMaxOutputTokens"
+    ),
+    "$.reservations[]": _report_keys(
+        "reservationId messageSha256 maxInputTokens maxOutputTokens reservedMaxCostUsd"
+    ),
+    "$.results[]": _report_keys(
+        "caseId round promptSha256 terminal acceptedRecords checkpointCount declineReason "
+        "failureCode baseSceneSha256 resultSceneSha256 baseSemanticSha256 "
+        "resultSemanticSha256 programSha256 firstAttemptValid providerCallCount "
+        "certificateChainValid firstCheckpointMs totalMs score"
+    ),
+    "$.results[].score": _report_keys(
+        "case_id round_index safe_terminal first_attempt_valid forbidden_mutation rubric_passed"
+    ),
+    "$.results[].acceptedRecords[].reveal": _report_keys("v act conceptId"),
+    "$.results[].acceptedRecords[].trace": _report_keys("v act trajectoryId"),
+    "$.results[].acceptedRecords[].relate": _report_keys("v act claimId evidenceIds"),
+    "$.latency": _report_keys("medianFirstCheckpointMs maxFirstCheckpointMs"),
+    "$.metrics": _report_keys(
+        "scheduledCaseCount executedCaseCount safeCanonicalTerminalCount firstAttemptValidCount "
+        "rubricPassCount forbiddenMutationCount mandatoryCasesPassedBothRounds "
+        "negativeCasesPassedBothRounds reservationCount pacerAdmissionCount providerCallCount "
+        "sdkRetryCount repairCallCount providerClientClosed deploymentAttestationStable "
+        "accountingPassed abortedReason serverQualificationPassed"
+    ),
+}
+_PRIVATE_REPORT_LIST_PATHS = frozenset(
+    {
+        "$.pricing.effectiveStartDates",
+        "$.pricing.sourceProjection.fields",
+        "$.pricing.sourceProjection.rowSort",
+        "$.pricing.meterSummary",
+        "$.pricing.meterSummary[].effectiveStartDates",
+        "$.reservations",
+        "$.results",
+        "$.results[].acceptedRecords",
+        "$.results[].acceptedRecords[].evidenceIds",
+    }
+)
+_PRIVATE_REPORT_DYNAMIC_DICT_PATHS = frozenset({"$.results[].acceptedRecords[]"})
+_PRIVATE_REPORT_DICT_PATHS = frozenset(_PRIVATE_REPORT_SHAPES) | _PRIVATE_REPORT_DYNAMIC_DICT_PATHS
+
+
+def _validate_closed_report_shape(value: object, path: str = "$") -> None:
+    optional_null_dict = path == "$.postRunAzureDeploymentAttestation" and value is None
+    if (
+        path in _PRIVATE_REPORT_DICT_PATHS
+        and not isinstance(value, dict)
+        and not optional_null_dict
+    ):
+        raise ProbeRefusal("private report schema mismatch")
+    if path in _PRIVATE_REPORT_LIST_PATHS and not isinstance(value, list):
+        raise ProbeRefusal("private report schema mismatch")
+    if isinstance(value, dict):
+        shape_path = path
+        if path == "$.results[].acceptedRecords[]":
+            shape_path = f"{path}.{value.get('act', 'unknown')}"
+        expected = _PRIVATE_REPORT_SHAPES.get(shape_path)
+        if expected is None or frozenset(value) != expected:
+            raise ProbeRefusal("private report schema mismatch")
+        for key, child in value.items():
+            _validate_closed_report_shape(child, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        if path not in _PRIVATE_REPORT_LIST_PATHS:
+            raise ProbeRefusal("private report schema mismatch")
+        for child in value:
+            _validate_closed_report_shape(child, f"{path}[]")
+        return
+    if value is not None and type(value) not in {str, int, float, bool}:
+        raise ProbeRefusal("private report schema mismatch")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ProbeRefusal("private report schema mismatch")
+
+
+def _report_dict(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ProbeRefusal("private report schema mismatch")
+    return value
+
+
+def _report_list(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ProbeRefusal("private report schema mismatch")
+    return value
+
+
+def _valid_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _same_json(left: object, right: object) -> bool:
+    return _canonical_json(left) == _canonical_json(right)
+
+
+def _validate_attestation_report(attestation: dict[str, object]) -> None:
+    if (
+        attestation["deploymentName"] != EXPECTED_AZURE_DEPLOYMENT
+        or attestation["modelFormat"] != EXPECTED_AZURE_MODEL_FORMAT
+        or attestation["modelName"] != EXPECTED_AZURE_MODEL_NAME
+        or attestation["modelVersion"] != EXPECTED_AZURE_MODEL_VERSION
+        or attestation["skuName"] != EXPECTED_AZURE_SKU
+        or attestation["provisioningState"] != EXPECTED_AZURE_PROVISIONING_STATE
+        or attestation["versionUpgradeOption"] not in KNOWN_AZURE_VERSION_UPGRADE_OPTIONS
+        or type(attestation["enabledSubscriptionCount"]) is not int
+        or not 1 <= attestation["enabledSubscriptionCount"] <= MAX_ENABLED_AZURE_SUBSCRIPTIONS
+        or not all(
+            _valid_sha256(attestation[field])
+            for field in (
+                "endpointHostSha256",
+                "accountResourceIdSha256",
+                "deploymentResourceIdSha256",
+                "deploymentEtagSha256",
+            )
+        )
+    ):
+        raise ProbeRefusal("private report attestation mismatch")
+
+
+def _report_record(value: object) -> RecordSpec:
+    canonical = _canonical_json(_report_dict(value))
+    allowed = {
+        _canonical_json(record.canonical()): record
+        for record in (TL, TH, RF, CA, ERP, ERM, URP, URM, HA, LF)
+    }
+    try:
+        return allowed[canonical]
+    except KeyError as exc:
+        raise ProbeRefusal("private report result mismatch") from exc
+
+
+def _report_observation(
+    scheduled: ScheduledCase,
+    result: dict[str, object],
+    *,
+    allowed_declines: set[str],
+    service_failures: set[str],
+    protocol_failures: set[str],
+) -> tuple[CaseObservation, CaseScore]:
+    records = tuple(_report_record(record) for record in _report_list(result["acceptedRecords"]))
+    terminal = result["terminal"]
+    decline_reason = result["declineReason"]
+    failure_code = result["failureCode"]
+    first_checkpoint_ms = result["firstCheckpointMs"]
+    total_ms = result["totalMs"]
+    expected_first_attempt = terminal in {"model_stop", "declined"}
+    expected_certificate_state = terminal != "protocol_error"
+    terminal_state_valid = (
+        (
+            terminal in {"model_stop", "accepted_prefix"}
+            and decline_reason is None
+            and failure_code is None
+        )
+        or (
+            terminal == "declined"
+            and decline_reason in allowed_declines
+            and failure_code is None
+            and not records
+        )
+        or (
+            terminal == "failed"
+            and decline_reason is None
+            and failure_code in service_failures
+            and not records
+        )
+        or (
+            terminal == "protocol_error"
+            and decline_reason is None
+            and failure_code in protocol_failures
+        )
+    )
+    latency_valid = (
+        type(total_ms) is float
+        and math.isfinite(total_ms)
+        and total_ms >= 0
+        and (
+            first_checkpoint_ms is None
+            if not records
+            else type(first_checkpoint_ms) is float
+            and math.isfinite(first_checkpoint_ms)
+            and 0 <= first_checkpoint_ms <= total_ms
+        )
+    )
+    if (
+        result["caseId"] != scheduled.case.case_id
+        or type(result["round"]) is not int
+        or result["round"] != scheduled.round_index
+        or result["promptSha256"] != _sha256_text(scheduled.case.prompt)
+        or not terminal_state_valid
+        or type(result["checkpointCount"]) is not int
+        or result["checkpointCount"] != len(records)
+        or type(result["firstAttemptValid"]) is not bool
+        or result["firstAttemptValid"] is not expected_first_attempt
+        or type(result["providerCallCount"]) is not int
+        or result["providerCallCount"] not in {0, 1}
+        or (
+            result["providerCallCount"] == 0
+            and (terminal not in {"failed", "protocol_error"} or records)
+        )
+        or type(result["certificateChainValid"]) is not bool
+        or result["certificateChainValid"] is not expected_certificate_state
+        or (terminal == "accepted_prefix" and not records)
+        or not latency_valid
+    ):
+        raise ProbeRefusal("private report result mismatch")
+
+    try:
+        expected_hashes = _frontier_evidence(scheduled.case, records)
+    except Exception as exc:
+        raise ProbeRefusal("private report result mismatch") from exc
+    observed_hashes = tuple(
+        result[field]
+        for field in (
+            "baseSceneSha256",
+            "resultSceneSha256",
+            "baseSemanticSha256",
+            "resultSemanticSha256",
+            "programSha256",
+        )
+    )
+    if observed_hashes != expected_hashes:
+        raise ProbeRefusal("private report result mismatch")
+
+    observation = CaseObservation(
+        case_id=scheduled.case.case_id,
+        round_index=scheduled.round_index,
+        terminal=str(terminal),
+        accepted_records=records,
+        checkpoint_count=len(records),
+        decline_reason=decline_reason if isinstance(decline_reason, str) else None,
+        failure_code=failure_code if isinstance(failure_code, str) else None,
+        base_scene_sha256=str(result["baseSceneSha256"]),
+        result_scene_sha256=str(result["resultSceneSha256"]),
+        base_semantic_sha256=str(result["baseSemanticSha256"]),
+        result_semantic_sha256=str(result["resultSemanticSha256"]),
+        program_sha256=str(result["programSha256"]),
+        first_attempt_valid=expected_first_attempt,
+        provider_call_count=result["providerCallCount"],
+        certificate_chain_valid=expected_certificate_state,
+        first_checkpoint_ms=first_checkpoint_ms if isinstance(first_checkpoint_ms, float) else None,
+        total_ms=total_ms,
+    )
+    expected_score = _score_case(scheduled.case, observation)
+    if not _same_json(result["score"], expected_score.sanitized()):
+        raise ProbeRefusal("private report score mismatch")
+    return observation, expected_score
+
+
+def _expected_report_abort(
+    observed: list[tuple[ScheduledCase, CaseObservation, CaseScore]],
+) -> str | None:
+    final_index = len(observed) - 1
+    for index, (scheduled, observation, score) in enumerate(observed):
+        if observation.terminal == "protocol_error":
+            if index != final_index:
+                raise ProbeRefusal("private report abort mismatch")
+            return observation.failure_code
+        if scheduled.case.calibration and not score.rubric_passed:
+            if index != final_index:
+                raise ProbeRefusal("private report abort mismatch")
+            return f"calibration_failed_round_{scheduled.round_index}"
+    if len(observed) != len(SCHEDULE):
+        raise ProbeRefusal("private report abort mismatch")
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class _PrivateReportEvidence:
+    generated_at: datetime
+    source: GitState
+    deployment_attestation: AzureDeploymentAttestation
+    post_run_attestation: AzureDeploymentAttestation | None
+    attestation_failure_code: str | None
+    max_cost_nano_usd: int
+    max_tokens: int
+    request_start_interval_seconds: float
+    ledger: BudgetLedger
+    results: tuple[tuple[CaseObservation, CaseScore], ...]
+    aborted_reason: str | None
+    provider_client_closed: bool
+    pacer_admission_count: int
+
+
+def _validate_private_report(
+    report: dict[str, object],
+    *,
+    expected: _PrivateReportEvidence,
+) -> None:
+    from murmur.live_scene.semantic_storyboard_contracts import StoryboardAbstainReasonCode
+    from murmur.live_scene.semantic_storyboard_service_contracts import (
+        SemanticStoryboardFailureCode,
+    )
+
+    _validate_closed_report_shape(report)
+    if (
+        type(report["schemaVersion"]) is not int
+        or report["schemaVersion"] != 1
+        or report["generatedAt"] != expected.generated_at.isoformat()
+        or report["corpusSha256"] != CORPUS_SHA256
+        or not isinstance(report["sourceCommit"], str)
+        or len(report["sourceCommit"]) != 40
+        or not all(character in "0123456789abcdef" for character in report["sourceCommit"])
+        or not _same_json(
+            {field: report[field] for field in ("sourceCommit", "branch", "upstream")},
+            expected.source.sanitized(),
+        )
+        or expected.generated_at.tzinfo is None
+        or expected.generated_at.utcoffset() != UTC.utcoffset(expected.generated_at)
+        or report["evidenceScope"] != "provider_parser_router_compiler_verifier_canonical_sse"
+        or report["costEvidence"] != "conservative_reserved_upper_bound_not_billed_usage"
+        or report["azureDeploymentAttestationFailureCode"]
+        not in {None, "post_run_azure_attestation_failed", "azure_deployment_changed_during_run"}
+    ):
+        raise ProbeRefusal("private report identity mismatch")
+    attestation = _report_dict(report["azureDeploymentAttestation"])
+    post_attestation = report["postRunAzureDeploymentAttestation"]
+    expected_attestation = expected.deployment_attestation.sanitized()
+    expected_post_attestation = (
+        expected.post_run_attestation.sanitized()
+        if expected.post_run_attestation is not None
+        else None
+    )
+    _validate_attestation_report(attestation)
+    if post_attestation is not None:
+        _validate_attestation_report(_report_dict(post_attestation))
+    attestation_failure = expected.attestation_failure_code
+    if (
+        not _same_json(attestation, expected_attestation)
+        or not _same_json(post_attestation, expected_post_attestation)
+        or report["azureDeploymentAttestationFailureCode"] != attestation_failure
+        or (
+            attestation_failure is None
+            and expected.post_run_attestation != expected.deployment_attestation
+        )
+        or (
+            attestation_failure is None
+            and (post_attestation is None or not _same_json(attestation, post_attestation))
+        )
+        or (
+            attestation_failure == "post_run_azure_attestation_failed"
+            and post_attestation is not None
+        )
+        or (
+            attestation_failure == "azure_deployment_changed_during_run"
+            and (post_attestation is None or _same_json(attestation, post_attestation))
+        )
+    ):
+        raise ProbeRefusal("private report attestation mismatch")
+    deployment_attestation_stable = attestation_failure is None
+
+    pricing = _report_dict(report["pricing"])
+    limits = _report_dict(report["limits"])
+    preflight = _report_dict(report["preflightWorstCase"])
+    if not _same_json(pricing, _pricing_report()):
+        raise ProbeRefusal("private report provenance mismatch")
+    max_cost_nano_usd = expected.max_cost_nano_usd
+    request_interval = expected.request_start_interval_seconds
+    if (
+        not 0 < max_cost_nano_usd <= MAX_ALLOWED_BUDGET_NANO_USD
+        or expected.max_tokens != MAX_OUTPUT_TOKENS
+        or type(request_interval) is not float
+        or not math.isfinite(request_interval)
+        or request_interval < MIN_REQUEST_START_INTERVAL_SECONDS
+        or not _same_json(
+            limits,
+            _limits_report(
+                max_cost_nano_usd=max_cost_nano_usd,
+                max_tokens=expected.max_tokens,
+                request_start_interval_seconds=request_interval,
+            ),
+        )
+    ):
+        raise ProbeRefusal("private report accounting mismatch")
+    expected_ledger = _preflight_budget(max_cost_nano_usd=max_cost_nano_usd)
+    expected_provider_call_count = sum(
+        observation.provider_call_count for observation, _ in expected.results
+    )
+    expected_admitted_ids = frozenset(
+        scheduled.reservation_id
+        for scheduled, (observation, _) in zip(SCHEDULE, expected.results, strict=False)
+        if observation.provider_call_count == 1
+    )
+    reservation_cost_by_id = {
+        reservation.reservation_id: reservation.reserved_cost_nano_usd
+        for reservation in expected_ledger.reservations
+    }
+    if (
+        expected.ledger.max_cost_nano_usd != max_cost_nano_usd
+        or expected.ledger.max_tokens != expected.max_tokens
+        or expected.ledger.admitted_count != expected_provider_call_count
+        or expected.ledger.admitted_reservation_ids != expected_admitted_ids
+        or expected.ledger.admitted_reserved_cost_nano_usd
+        != sum(reservation_cost_by_id[item] for item in expected_admitted_ids)
+        or not _same_json(
+            [item.sanitized() for item in expected.ledger.reservations],
+            [item.sanitized() for item in expected_ledger.reservations],
+        )
+    ):
+        raise ProbeRefusal("private report accounting mismatch")
+    if not _same_json(
+        preflight,
+        _preflight_report(
+            mode="live",
+            max_cost_nano_usd=max_cost_nano_usd,
+            ledger=expected_ledger,
+        ),
+    ):
+        raise ProbeRefusal("private report provenance mismatch")
+
+    reservations = _report_list(report["reservations"])
+    results = _report_list(report["results"])
+    metrics = _report_dict(report["metrics"])
+    expected_reservations = [item.sanitized() for item in expected_ledger.reservations]
+    expected_results = [
+        observation.sanitized(_sha256_text(scheduled.case.prompt)) | {"score": score.sanitized()}
+        for scheduled, (observation, score) in zip(SCHEDULE, expected.results, strict=False)
+    ]
+    if (
+        not _same_json(reservations, expected_reservations)
+        or not _same_json(results, expected_results)
+        or not 1 <= len(expected.results) <= len(SCHEDULE)
+        or report["admittedReservedMaxCostUsd"]
+        != _format_nano_usd(expected.ledger.admitted_reserved_cost_nano_usd)
+    ):
+        raise ProbeRefusal("private report accounting mismatch")
+
+    allowed_declines = {reason.value for reason in StoryboardAbstainReasonCode}
+    service_failures = {code.value for code in SemanticStoryboardFailureCode}
+    protocol_failures = {
+        "sse_event_too_large",
+        "invalid_sse_record",
+        "empty_sse_data",
+        "invalid_storyboard_event",
+        "truncated_sse_record",
+        "wire_event_count_mismatch",
+        "event_after_terminal",
+        "generation_mismatch",
+        "invalid_started_boundary",
+        "missing_started_event",
+        "checkpoint_sequence_mismatch",
+        "checkpoint_base_mismatch",
+        "checkpoint_frontier_mismatch",
+        "certificate_chain_mismatch",
+        "model_checkpoint_missing_record",
+        "terminal_checkpoint_count_mismatch",
+        "decline_mutated_frontier",
+        "failure_mutated_frontier",
+        "unknown_event_type",
+        "missing_terminal_event",
+    }
+    observed: list[tuple[ScheduledCase, CaseObservation, CaseScore]] = []
+    for scheduled, raw_result in zip(SCHEDULE, results, strict=False):
+        result = _report_dict(raw_result)
+        observation, score = _report_observation(
+            scheduled,
+            result,
+            allowed_declines=allowed_declines,
+            service_failures=service_failures,
+            protocol_failures=protocol_failures,
+        )
+        observed.append((scheduled, observation, score))
+    aborted_reason = _expected_report_abort(observed)
+    if (
+        aborted_reason != expected.aborted_reason
+        or type(expected.provider_client_closed) is not bool
+        or type(expected.pacer_admission_count) is not int
+    ):
+        raise ProbeRefusal("private report metrics mismatch")
+    expected_metrics = _qualification_metrics(
+        expected.results,
+        reservation_count=len(expected_ledger.reservations),
+        pacer_admission_count=expected.pacer_admission_count,
+        provider_call_count=expected_provider_call_count,
+        sdk_retry_count=0,
+        repair_call_count=0,
+        provider_client_closed=expected.provider_client_closed,
+        deployment_attestation_stable=deployment_attestation_stable,
+        aborted_reason=expected.aborted_reason,
+    )
+    if not _same_json(metrics, expected_metrics):
+        raise ProbeRefusal("private report metrics mismatch")
+
+    first_checkpoint_samples = [
+        observation.first_checkpoint_ms
+        for observation, _ in expected.results
+        if observation.first_checkpoint_ms is not None
+    ]
+    expected_latency = {
+        "medianFirstCheckpointMs": (
+            round(statistics.median(first_checkpoint_samples), 3)
+            if first_checkpoint_samples
+            else None
+        ),
+        "maxFirstCheckpointMs": (
+            round(max(first_checkpoint_samples), 3) if first_checkpoint_samples else None
+        ),
+    }
+    if not _same_json(report["latency"], expected_latency):
+        raise ProbeRefusal("private report latency mismatch")
+    _validate_private_report_secret_absence(report)
+
+
+def _validate_private_report_secret_absence(report: dict[str, object]) -> None:
+    def string_leaves(value: object) -> tuple[str, ...]:
+        if isinstance(value, dict):
+            return tuple(leaf for child in value.values() for leaf in string_leaves(child))
+        if isinstance(value, list):
+            return tuple(leaf for child in value for leaf in string_leaves(child))
+        return (value,) if isinstance(value, str) else ()
+
+    secret_values = {
+        value
+        for key, value in os.environ.items()
+        if len(value) >= 8
+        and any(
+            marker in key.upper() for marker in ("KEY", "SECRET", "TOKEN", "PASSWORD", "ENDPOINT")
+        )
+    }
+    private_values = secret_values | {case.prompt for case in CASES}
+    if any(secret in leaf for leaf in string_leaves(report) for secret in private_values):
+        raise ProbeRefusal("private report contains configured secret material")
+
+
 def _write_private_report(path: Path, payload: dict[str, object]) -> None:
     resolved = path.resolve()
     if resolved == VAR_ROOT or VAR_ROOT not in resolved.parents:
@@ -1762,18 +2447,11 @@ def main() -> int:
             max_cost_nano_usd=max_cost_nano_usd,
             max_tokens=args.max_tokens,
         )
-        preflight_summary = {
-            "mode": "dry-run" if args.dry_run else "live",
-            "caseCount": len(CASES),
-            "roundCount": 2,
-            "scheduledProviderCalls": len(SCHEDULE),
-            "corpusSha256": _corpus_sha256(),
-            "pricingProfile": PRICING_PROFILE,
-            "maxCostUsd": _format_nano_usd(max_cost_nano_usd),
-            "reservedMaxCostUsd": _format_nano_usd(ledger.reserved_cost_nano_usd),
-            "reservedMaxInputTokens": sum(item.max_input_tokens for item in ledger.reservations),
-            "reservedMaxOutputTokens": sum(item.max_output_tokens for item in ledger.reservations),
-        }
+        preflight_summary = _preflight_report(
+            mode="dry-run" if args.dry_run else "live",
+            max_cost_nano_usd=max_cost_nano_usd,
+            ledger=ledger,
+        )
         print(json.dumps(preflight_summary, sort_keys=True), flush=True)
         if args.dry_run:
             return 0
@@ -1832,9 +2510,25 @@ def main() -> int:
             for observation, _ in results
             if observation.first_checkpoint_ms is not None
         ]
+        generated_at = datetime.now(UTC)
+        expected_report_evidence = _PrivateReportEvidence(
+            generated_at=generated_at,
+            source=source_after,
+            deployment_attestation=deployment_attestation,
+            post_run_attestation=post_run_attestation,
+            attestation_failure_code=attestation_failure_code,
+            max_cost_nano_usd=max_cost_nano_usd,
+            max_tokens=args.max_tokens,
+            request_start_interval_seconds=args.request_start_interval_seconds,
+            ledger=ledger,
+            results=tuple(results),
+            aborted_reason=aborted_reason,
+            provider_client_closed=provider_client_closed,
+            pacer_admission_count=pacer.admission_count,
+        )
         report = {
             "schemaVersion": 1,
-            "generatedAt": datetime.now(UTC).isoformat(),
+            "generatedAt": generated_at.isoformat(),
             **source_after.sanitized(),
             "evidenceScope": "provider_parser_router_compiler_verifier_canonical_sse",
             "corpusSha256": _corpus_sha256(),
@@ -1843,53 +2537,12 @@ def main() -> int:
                 post_run_attestation.sanitized() if post_run_attestation is not None else None
             ),
             "azureDeploymentAttestationFailureCode": attestation_failure_code,
-            "pricing": {
-                "profile": PRICING_PROFILE,
-                "effectiveStartDates": list(PRICING_EFFECTIVE_DATES),
-                "verifiedDate": PRICING_VERIFIED_DATE,
-                "reviewAfter": PRICING_REVIEW_AFTER.isoformat(),
-                "source": PRICING_SOURCE,
-                "sourceRowCount": PRICING_SOURCE_ROW_COUNT,
-                "sourceProjectionSha256": PRICING_SOURCE_PROJECTION_SHA256,
-                "sourceProjection": {
-                    "fields": [
-                        "armRegionName",
-                        "currencyCode",
-                        "effectiveStartDate",
-                        "meterName",
-                        "productName",
-                        "retailPrice",
-                        "skuName",
-                        "type",
-                        "unitOfMeasure",
-                        "unitPrice",
-                    ],
-                    "rowSort": [
-                        "skuName",
-                        "armRegionName",
-                        "effectiveStartDate",
-                        "retailPrice",
-                    ],
-                    "encoding": "compact_sorted_key_json_without_trailing_newline",
-                },
-                "meterSummary": _pricing_meter_rows(),
-                "meterSummarySha256": PRICING_SNAPSHOT_SHA256,
-                "selectionRule": "maximum_retail_price_across_all_returned_global_meters",
-                "inputUsdPerMillionTokens": _format_usd_per_million_tokens(
-                    INPUT_NANO_USD_PER_TOKEN
-                ),
-                "outputUsdPerMillionTokens": _format_usd_per_million_tokens(
-                    OUTPUT_NANO_USD_PER_TOKEN
-                ),
-            },
-            "limits": {
-                "maxCostUsd": _format_nano_usd(max_cost_nano_usd),
-                "maxOutputTokensPerCall": args.max_tokens,
-                "maxProviderCalls": MAX_PROVIDER_CALLS,
-                "requestStartIntervalSeconds": args.request_start_interval_seconds,
-                "sdkMaxRetries": 0,
-                "repairCalls": 0,
-            },
+            "pricing": _pricing_report(),
+            "limits": _limits_report(
+                max_cost_nano_usd=max_cost_nano_usd,
+                max_tokens=args.max_tokens,
+                request_start_interval_seconds=args.request_start_interval_seconds,
+            ),
             "preflightWorstCase": preflight_summary,
             "reservations": [item.sanitized() for item in ledger.reservations],
             "admittedReservedMaxCostUsd": _format_nano_usd(ledger.admitted_reserved_cost_nano_usd),
@@ -1907,6 +2560,7 @@ def main() -> int:
             "metrics": metrics,
             "costEvidence": "conservative_reserved_upper_bound_not_billed_usage",
         }
+        _validate_private_report(report, expected=expected_report_evidence)
         _write_private_report(output_path, report)
         final_summary = {
             "mode": "live",
