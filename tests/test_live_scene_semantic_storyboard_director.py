@@ -95,6 +95,51 @@ def test_prompt_states_the_noncomplementary_concept_restriction() -> None:
     assert "complementary_angles is selectable only" in messages[0]["content"]
 
 
+def test_prompt_requires_request_fidelity_before_record_selection() -> None:
+    system = build_semantic_storyboard_director_messages(
+        "Make the explanation clearer.",
+        _problem(),
+        _scene(),
+    )[0]["content"]
+
+    assert system.index("REQUEST FIDELITY AND ABSTENTION") < system.index("OUTPUT CONTRACT")
+    assert "Select only the new semantic teaching beats" in system
+    assert "Never substitute a generic lesson" in system
+    assert "unrequested catalog effect" in system
+    assert "If any essential part of the request conflicts" in system
+    assert 'Use "ambiguous_intent" when no unique supported teaching effect' in system
+    assert 'Use "already_present" when every clearly requested effect is already accepted' in system
+    assert 'Use "no_forward_progress" only when a clear supported request' in system
+
+
+def test_prompt_defines_the_supported_world_and_each_unsupported_boundary() -> None:
+    system = build_semantic_storyboard_director_messages(
+        "Compare the bound trajectories.",
+        _problem(),
+        _scene(),
+    )[0]["content"]
+
+    assert "both projectiles launch and land at the same ground height" in system
+    assert "fixed gravity" in system
+    assert "no wind, drag, or extra forces" in system
+    assert 'Use "unsupported_problem" when the request replaces the bound speed' in system
+    assert 'Use "unsupported_initial_condition" for a different launch height' in system
+    assert 'Use "unsupported_physics" for wind, drag, changed gravity' in system
+    assert 'Use "unsupported_intent" for raw drawing, coordinates, SVG' in system
+
+
+def test_prompt_treats_accepted_records_as_visible_relation_evidence() -> None:
+    system = build_semantic_storyboard_director_messages(
+        "Use the visible paths to compare their apexes.",
+        _problem(),
+        _scene(),
+    )[0]["content"]
+
+    assert "Accepted records are already visible and may satisfy evidence" in system
+    assert "lower_angle -> lower_trajectory" in system
+    assert "higher_angle -> higher_trajectory" in system
+
+
 def test_parser_emits_each_complete_non_abstain_record_across_arbitrary_chunks() -> None:
     payload = "\n".join(
         (
