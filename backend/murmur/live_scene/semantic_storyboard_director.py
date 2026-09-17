@@ -75,10 +75,13 @@ _DIRECTOR_SYSTEM_PROMPT = "\n".join(
         "certified accepted frontier.",
         "- Its record variants are permissions, not requests. Never emit a record merely "
         "because the manifest lists it.",
+        "- Array order is canonical serialization only. It carries no priority, recommendation, "
+        "or default lesson order.",
         "- readyNow=true means the exact record can legally follow the accepted frontier. "
         "readyNow=false lists the exact missingEvidenceIds.",
-        "- A not-ready record may follow only after the user explicitly requested records that "
-        "produce all missing evidence earlier in this same output.",
+        "- A not-ready record may follow only after earlier records in this same output produce "
+        "every missing evidence ID. Each producer must directly serve the user's clear supported "
+        "intent; never emit an unrelated prerequisite.",
         "OUTPUT CONTRACT (strict):",
         "- Output NDJSON only: one complete JSON object per line, with no other text.",
         "- Output from one through five records, then stop cleanly.",
@@ -112,7 +115,8 @@ _DIRECTOR_SYSTEM_PROMPT = "\n".join(
         "- Evidence IDs must be unique and ordered as lower_trajectory, higher_trajectory, "
         "range_formula, complementary_angles.",
         "- Never repeat an already accepted concept, trajectory, or claim.",
-        "- Never add prerequisite records implicitly. Emit only the requested atomic beats.",
+        "- Never assume missing evidence or rely on server expansion. Emit each request-serving "
+        "prerequisite as its own preceding atomic record.",
         "ABSTENTION POLICY:",
         "- Abstain must be the sole record in the complete stream.",
         "TRUST BOUNDARY:",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import combinations
 
 import pytest
 from murmur.live_scene.semantic_storyboard_contracts import (
@@ -19,7 +20,10 @@ from murmur.live_scene.semantic_storyboard_director import (
     SemanticStoryboardDirectorStreamParser,
     build_semantic_storyboard_director_messages,
 )
-from murmur.live_scene.semantic_storyboard_routing import route_semantic_storyboard_record
+from murmur.live_scene.semantic_storyboard_routing import (
+    SemanticStoryboardRoutingError,
+    route_semantic_storyboard_record,
+)
 
 
 def _problem() -> PairedProjectileComparisonSpecV1:
@@ -51,6 +55,101 @@ def _line(act: str, **fields: object) -> str:
 def _section_json(content: str, marker: str) -> object:
     lines = content.splitlines()
     return json.loads(lines[lines.index(marker) + 1])
+
+
+def _accepted_record(act: str, **fields: object) -> AcceptedSemanticStoryboardRecordV1:
+    record = SEMANTIC_STORYBOARD_RECORD_V1_ADAPTER.validate_python({"v": 1, "act": act, **fields})
+    assert record.act != "abstain"
+    return record
+
+
+def _catalog_variants(
+    problem: PairedProjectileComparisonSpecV1,
+) -> tuple[AcceptedSemanticStoryboardRecordV1, ...]:
+    variants = [_accepted_record("reveal", conceptId="range_formula")]
+    if problem.has_complementary_angles:
+        variants.append(_accepted_record("reveal", conceptId="complementary_angles"))
+    variants.extend(
+        (
+            _accepted_record("trace", trajectoryId="lower_angle"),
+            _accepted_record("trace", trajectoryId="higher_angle"),
+        )
+    )
+    if problem.has_complementary_angles:
+        variants.extend(
+            (
+                _accepted_record(
+                    "relate",
+                    claimId="equal_range",
+                    evidenceIds=["lower_trajectory", "higher_trajectory"],
+                ),
+                _accepted_record(
+                    "relate",
+                    claimId="equal_range",
+                    evidenceIds=["range_formula", "complementary_angles"],
+                ),
+            )
+        )
+    else:
+        variants.extend(
+            (
+                _accepted_record(
+                    "relate",
+                    claimId="unequal_range",
+                    evidenceIds=["lower_trajectory", "higher_trajectory"],
+                ),
+                _accepted_record(
+                    "relate",
+                    claimId="unequal_range",
+                    evidenceIds=["range_formula"],
+                ),
+            )
+        )
+    variants.extend(
+        (
+            _accepted_record(
+                "relate",
+                claimId="higher_apex",
+                evidenceIds=["lower_trajectory", "higher_trajectory"],
+            ),
+            _accepted_record(
+                "relate",
+                claimId="longer_flight",
+                evidenceIds=["lower_trajectory", "higher_trajectory"],
+            ),
+        )
+    )
+    return tuple(variants)
+
+
+def _record_effect_id(record: AcceptedSemanticStoryboardRecordV1) -> str:
+    canonical = record.model_dump(mode="json", by_alias=True)
+    target = canonical.get("conceptId") or canonical.get("trajectoryId") or canonical["claimId"]
+    return f"{record.act}:{target}"
+
+
+def _visible_evidence(
+    records: tuple[AcceptedSemanticStoryboardRecordV1, ...],
+) -> tuple[str, ...]:
+    produced: set[str] = set()
+    for record in records:
+        canonical = record.model_dump(mode="json", by_alias=True)
+        if canonical.get("conceptId") in {"range_formula", "complementary_angles"}:
+            produced.add(canonical["conceptId"])
+        if canonical.get("trajectoryId") == "lower_angle":
+            produced.add("lower_trajectory")
+        if canonical.get("trajectoryId") == "higher_angle":
+            produced.add("higher_trajectory")
+    return tuple(
+        evidence
+        for evidence in (
+            "lower_trajectory",
+            "higher_trajectory",
+            "range_formula",
+            "complementary_angles",
+        )
+        if evidence in produced
+    )
 
 
 def test_prompt_is_deterministic_catalog_only_and_excludes_certificate_frontier() -> None:
@@ -115,6 +214,7 @@ def test_prompt_requires_request_fidelity_before_record_selection() -> None:
 
     assert system.index("REQUEST FIDELITY AND ABSTENTION") < system.index("OUTPUT CONTRACT")
     assert "Select only the new semantic teaching beats" in system
+    assert "strictly necessary to answer" in system
     assert "Never substitute a generic lesson" in system
     assert "unrequested catalog effect" in system
     assert "If any essential part of the request conflicts" in system
@@ -149,6 +249,7 @@ def test_prompt_treats_accepted_records_as_visible_relation_evidence() -> None:
     assert "Accepted records are already visible and may satisfy evidence" in system
     assert "lower_angle -> lower_trajectory" in system
     assert "higher_angle -> higher_trajectory" in system
+    assert "Emit each request-serving prerequisite as its own preceding atomic record" in system
 
 
 def test_affordance_manifest_derives_visible_evidence_from_the_certified_frontier() -> None:
@@ -260,6 +361,79 @@ def test_affordance_manifest_is_independent_of_prompt_wording() -> None:
     assert _section_json(first, "CURRENT_STORYBOARD_AFFORDANCES_JSON:") == _section_json(
         second, "CURRENT_STORYBOARD_AFFORDANCES_JSON:"
     )
+    system = build_semantic_storyboard_director_messages(
+        "Explain the bound comparison.",
+        _problem(),
+        _scene(),
+    )[0]["content"]
+    assert "Array order is canonical serialization only" in system
+    assert "no priority, recommendation, or default lesson order" in system
+    assert "Each producer must directly serve the user's clear supported intent" in system
+
+
+def test_affordance_manifest_is_exact_across_every_reachable_frontier() -> None:
+    frontier_count = 0
+
+    for speed in (20, 25, 30):
+        for angles in combinations((30, 45, 60), 2):
+            problem = PairedProjectileComparisonSpecV1(speedMps=speed, anglesDeg=angles)
+            catalog = _catalog_variants(problem)
+
+            def walk(
+                accepted: tuple[AcceptedSemanticStoryboardRecordV1, ...],
+                *,
+                problem: PairedProjectileComparisonSpecV1 = problem,
+                catalog: tuple[AcceptedSemanticStoryboardRecordV1, ...] = catalog,
+            ) -> None:
+                nonlocal frontier_count
+                scene = _scene(problem, accepted)
+                content = build_semantic_storyboard_director_messages(
+                    "Continue the supported explanation.",
+                    problem,
+                    scene,
+                )[1]["content"]
+                manifest = _section_json(content, "CURRENT_STORYBOARD_AFFORDANCES_JSON:")
+                accepted_effects = tuple(_record_effect_id(record) for record in accepted)
+                accepted_effect_set = frozenset(accepted_effects)
+                visible = _visible_evidence(accepted)
+                expected_variants: list[dict[str, object]] = []
+                ready_records: list[AcceptedSemanticStoryboardRecordV1] = []
+
+                for candidate in catalog:
+                    if _record_effect_id(candidate) in accepted_effect_set:
+                        continue
+                    canonical = candidate.model_dump(mode="json", by_alias=True)
+                    required = tuple(canonical.get("evidenceIds", ()))
+                    missing = [evidence for evidence in required if evidence not in visible]
+                    expected_variants.append(
+                        {
+                            "record": canonical,
+                            "readyNow": not missing,
+                            "missingEvidenceIds": missing,
+                        }
+                    )
+                    try:
+                        route_semantic_storyboard_record(
+                            candidate,
+                            problem_spec=problem,
+                            semantic_scene=scene,
+                        )
+                    except SemanticStoryboardRoutingError:
+                        assert missing
+                    else:
+                        assert not missing
+                        ready_records.append(candidate)
+
+                assert manifest["acceptedEffectIds"] == list(accepted_effects)
+                assert manifest["visibleEvidenceIds"] == list(visible)
+                assert manifest["unusedApplicableRecordVariants"] == expected_variants
+                frontier_count += 1
+                for candidate in ready_records:
+                    walk((*accepted, candidate))
+
+            walk(())
+
+    assert frontier_count == 7_593
 
 
 def test_parser_emits_each_complete_non_abstain_record_across_arbitrary_chunks() -> None:
