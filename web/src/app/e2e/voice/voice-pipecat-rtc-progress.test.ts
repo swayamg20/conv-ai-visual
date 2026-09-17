@@ -2,13 +2,17 @@ import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 
+import { RELAY_GATEWAY_ATTESTATION_GLOBAL } from "./rtc-diagnostics";
+
 vi.mock("@playwright/test", () => {
   const playwrightTest = Object.assign(vi.fn(), { use: vi.fn() });
   return { expect: vi.fn(), test: playwrightTest };
 });
 
 import {
+  browserRelayGatewayAttested,
   buildProofTimeoutProgressCapsule,
+  chromiumSpkiPinAttested,
   PIPECAT_PROOF_WAIT_TIMEOUT_MS,
   PIPECAT_RUNNER_WATCHDOG_CONTRACT_MS,
   PIPECAT_SPEC_SETUP_MARGIN_MS,
@@ -16,7 +20,9 @@ import {
   PIPECAT_TERMINAL_CLEANUP_TIMEOUT_MS,
   PROOF_TIMEOUT_PROGRESS_MAX_BYTES,
   PROOF_TIMEOUT_PROGRESS_PREFIX,
+  relayCandidatePairAttested,
   serializeProofTimeoutProgressCapsule,
+  signalingSecretLabels,
 } from "../../../../e2e/voice-pipecat-rtc.spec";
 
 function timeoutSnapshot(): Parameters<typeof buildProofTimeoutProgressCapsule>[0] {
@@ -249,6 +255,133 @@ describe("Pipecat proof timeout progress capsule", () => {
     );
     expect(rendered).not.toMatch(
       /raw-|https?:\/\/|Bearer|candidate:|voice_call_id|trace_id|peer_reservation_id|local_samples|remote_samples|transitions|sdp|ice_servers/i
+    );
+  });
+});
+
+describe("Pipecat relay browser evidence contract", () => {
+  const selectedRelayPair = {
+    state: "succeeded",
+    nominated: true,
+    bytes_sent: 123,
+    bytes_received: 456,
+    current_round_trip_time_seconds: 0.01,
+    local: {
+      candidate_type: "relay",
+      protocol: "udp",
+      relay_protocol: "tls",
+    },
+    remote: {
+      candidate_type: "host",
+      protocol: "udp",
+      relay_protocol: null,
+    },
+  } as const;
+
+  it("accepts only the exact bidirectional relay/TLS candidate pair", () => {
+    expect(relayCandidatePairAttested(selectedRelayPair)).toBe(true);
+    expect(
+      relayCandidatePairAttested({
+        ...selectedRelayPair,
+        bytes_received: 0,
+      })
+    ).toBe(false);
+    expect(
+      relayCandidatePairAttested({
+        ...selectedRelayPair,
+        local: { ...selectedRelayPair.local, relay_protocol: "tcp" },
+      })
+    ).toBe(false);
+    expect(
+      relayCandidatePairAttested({
+        ...selectedRelayPair,
+        remote: {
+          ...selectedRelayPair.remote,
+          candidate_type: "srflx",
+        },
+      })
+    ).toBe(false);
+  });
+
+  it("attests one exact Chromium pin argument without returning its value", () => {
+    const pin = Buffer.alloc(32, 0x5a).toString("base64");
+    const exact = `--ignore-certificate-errors-spki-list=${pin}`;
+
+    expect(chromiumSpkiPinAttested(["--headless", exact], pin)).toBe(true);
+    for (const argumentsList of [
+      ["--headless"],
+      [exact, exact],
+      [exact, "--ignore-certificate-errors"],
+      [exact, "--allow-insecure-localhost"],
+    ]) {
+      expect(chromiumSpkiPinAttested(argumentsList, pin)).toBe(false);
+    }
+  });
+
+  it("accepts only the owned nonenumerable gateway API lifecycle", async () => {
+    const gatewayIpv4 = "172.28.0.1";
+    const propertyName = RELAY_GATEWAY_ATTESTATION_GLOBAL;
+    const page = {
+      evaluate: async (
+        callback: (argument: {
+          propertyName: string;
+          expectedIpv4: string;
+        }) => Promise<boolean>,
+        argument: { propertyName: string; expectedIpv4: string }
+      ) => callback(argument),
+    } as unknown as Parameters<typeof browserRelayGatewayAttested>[0];
+    const owned = Object.freeze((expected: string) =>
+      Promise.resolve(expected === gatewayIpv4)
+    );
+    Object.defineProperty(globalThis, propertyName, {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: owned,
+    });
+
+    await expect(browserRelayGatewayAttested(page, gatewayIpv4)).resolves.toBe(
+      true
+    );
+    await expect(
+      browserRelayGatewayAttested(page, "172.28.00.1")
+    ).resolves.toBe(false);
+
+    Object.defineProperty(globalThis, propertyName, {
+      configurable: true,
+      enumerable: true,
+      writable: false,
+      value: owned,
+    });
+    await expect(browserRelayGatewayAttested(page, gatewayIpv4)).resolves.toBe(
+      false
+    );
+
+    Object.defineProperty(globalThis, propertyName, {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: Object.freeze(() =>
+        Promise.reject(new Error("hostile raw gateway detail"))
+      ),
+    });
+    await expect(browserRelayGatewayAttested(page, gatewayIpv4)).resolves.toBe(
+      false
+    );
+    Reflect.deleteProperty(globalThis, propertyName);
+  });
+
+  it("detects every standard STUN and TURN URI without requiring slashes", () => {
+    for (const uri of [
+      "stun:relay.invalid:3478",
+      "stuns:relay.invalid:5349",
+      "turn:relay.invalid:3478?transport=udp",
+      "turns:relay.invalid:5349?transport=tcp",
+    ]) {
+      expect(signalingSecretLabels({ uri })).toContain("network URL");
+    }
+    expect(signalingSecretLabels({ gateway: "172.28.0.1" })).toContain(
+      "raw IPv4 address"
     );
   });
 });
