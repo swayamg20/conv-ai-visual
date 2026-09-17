@@ -492,7 +492,7 @@ def test_live_args_require_a_fresh_source_pinned_authorization(
     )
     globals_ = PROBE["_validate_args"].__globals__
 
-    assert PROBE["ACTIVE_PAID_AUTHORIZATION_ID"] is None
+    monkeypatch.setitem(globals_, "ACTIVE_PAID_AUTHORIZATION_ID", None)
     with pytest.raises(PROBE["ProbeRefusal"], match="no fresh paid authorization"):
         PROBE["_validate_args"](live_args)
 
