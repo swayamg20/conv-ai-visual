@@ -38,7 +38,7 @@ VAR_ROOT = (PROJECT_ROOT / "var" / "live-scene" / "evaluations").resolve()
 ACKNOWLEDGEMENT = "I_ACCEPT_PROVIDER_COST"
 # A fresh product-owner approval must set a unique opaque ID in a reviewed,
 # pushed commit. Reset it to None in the immediate post-run commit.
-ACTIVE_PAID_AUTHORIZATION_ID: str | None = None
+ACTIVE_PAID_AUTHORIZATION_ID: str | None = "gate18-8f9ad8dc-2f22-44d7-9a24-92b27f3c7cdf"
 MAX_ALLOWED_BUDGET_NANO_USD = 500_000_000
 MAX_OUTPUT_TOKENS = 2_048
 MAX_PROVIDER_CALLS = 40
