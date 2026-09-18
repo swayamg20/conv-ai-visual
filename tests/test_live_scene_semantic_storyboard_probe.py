@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import runpy
@@ -100,6 +101,9 @@ def _azure_deployment(
     model_name: str = "gpt-oss-120b",
     model_version: object = "1",
     sku_name: str = "GlobalStandard",
+    sku_capacity: object = 10,
+    current_capacity: object = 10,
+    rate_limits: object | None = None,
     state: str = "Succeeded",
     etag: object = AZURE_DEPLOYMENT_ETAG,
     version_upgrade_option: object = AZURE_VERSION_UPGRADE_OPTION,
@@ -107,11 +111,14 @@ def _azure_deployment(
     model: dict[str, object] = {"format": model_format, "name": model_name}
     if model_version is not _MISSING:
         model["version"] = model_version
+    sku: dict[str, object] = {"name": sku_name}
+    if sku_capacity is not _MISSING:
+        sku["capacity"] = sku_capacity
     deployment: dict[str, object] = {
         "id": deployment_id or f"{account_id}/deployments/{PROBE['EXPECTED_AZURE_DEPLOYMENT']}",
         "name": deployment_name,
         "type": deployment_type,
-        "sku": {"name": sku_name},
+        "sku": sku,
         "model": model,
         "state": state,
     }
@@ -119,6 +126,15 @@ def _azure_deployment(
         deployment["etag"] = etag
     if version_upgrade_option is not _MISSING:
         deployment["versionUpgradeOption"] = version_upgrade_option
+    if current_capacity is not _MISSING:
+        deployment["currentCapacity"] = current_capacity
+    if rate_limits is None:
+        deployment["rateLimits"] = [
+            {"key": "request", "count": 10, "renewalPeriod": 60},
+            {"key": "token", "count": 10_000, "renewalPeriod": 60},
+        ]
+    elif rate_limits is not _MISSING:
+        deployment["rateLimits"] = rate_limits
     return deployment
 
 
@@ -181,11 +197,36 @@ def _valid_attestation(endpoint: str = AZURE_ENDPOINT) -> Any:
         sku_name=PROBE["EXPECTED_AZURE_SKU"],
         provisioning_state=PROBE["EXPECTED_AZURE_PROVISIONING_STATE"],
         version_upgrade_option=AZURE_VERSION_UPGRADE_OPTION,
+        capacity_units=10,
+        request_limit_count=10,
+        request_limit_period_seconds=60,
+        token_limit_count=10_000,
+        token_limit_period_seconds=60,
         enabled_subscription_count=2,
         endpoint_host_sha256=PROBE["_sha256_text"](host),
         account_resource_id_sha256=PROBE["_sha256_text"](AZURE_ACCOUNT_ID),
         deployment_resource_id_sha256=PROBE["_sha256_text"](AZURE_DEPLOYMENT_ID),
         deployment_etag_sha256=PROBE["_sha256_text"](AZURE_DEPLOYMENT_ETAG),
+    )
+
+
+def _unlimited_dispatch_quota() -> Any:
+    return PROBE["DispatchQuota"](
+        request_count=1_000,
+        request_period_seconds=60,
+        token_count=100_000_000,
+        token_period_seconds=60,
+        minimum_start_interval_seconds=0.0,
+    )
+
+
+def _dispatch_reservation(reservation_id: str, token_count: int) -> Any:
+    return PROBE["Reservation"](
+        reservation_id=reservation_id,
+        message_sha256=SAFE_HASH,
+        max_input_tokens=token_count,
+        max_output_tokens=0,
+        reserved_cost_nano_usd=0,
     )
 
 
@@ -476,6 +517,149 @@ def test_one_nano_shortfall_refuses_the_whole_plan_before_any_admission() -> Non
         )
 
 
+@pytest.mark.parametrize(
+    ("quota", "charges", "expected_offsets"),
+    [
+        (
+            (2, 10, 1_000, 60),
+            [1, 1, 1, 1, 1],
+            (0.0, 1.0, 10.0, 11.0, 20.0),
+        ),
+        (
+            (100, 60, 10, 60),
+            [6, 4, 6],
+            (0.0, 1.0, 60.0),
+        ),
+        (
+            (2, 10, 10, 15),
+            [6, 4, 6],
+            (0.0, 1.0, 15.0),
+        ),
+        (
+            (100, 60, 10, 60),
+            [3, 3, 4, 7],
+            (0.0, 1.0, 2.0, 62.0),
+        ),
+    ],
+    ids=("request-window", "token-window", "both-windows", "multiple-token-evictions"),
+)
+def test_dispatch_preflight_plans_both_rolling_windows(
+    quota: tuple[int, int, int, int],
+    charges: list[int],
+    expected_offsets: tuple[float, ...],
+) -> None:
+    request_count, request_period, token_count, token_period = quota
+    dispatch_quota = PROBE["DispatchQuota"](
+        request_count=request_count,
+        request_period_seconds=request_period,
+        token_count=token_count,
+        token_period_seconds=token_period,
+        minimum_start_interval_seconds=1.0,
+    )
+    reservations = tuple(
+        _dispatch_reservation(f"reservation-{index}", charge)
+        for index, charge in enumerate(charges)
+    )
+
+    assert PROBE["_plan_dispatch_schedule"](reservations, dispatch_quota) == expected_offsets
+
+
+def test_dispatch_preflight_accepts_exact_token_limit_and_refuses_one_over() -> None:
+    quota = PROBE["DispatchQuota"](
+        request_count=10,
+        request_period_seconds=60,
+        token_count=10,
+        token_period_seconds=60,
+        minimum_start_interval_seconds=1.0,
+    )
+
+    assert PROBE["_plan_dispatch_schedule"]((_dispatch_reservation("exact", 10),), quota) == (0.0,)
+    with pytest.raises(PROBE["ProbeRefusal"], match="exceeds the attested token window"):
+        PROBE["_plan_dispatch_schedule"]((_dispatch_reservation("over", 11),), quota)
+
+
+@pytest.mark.asyncio
+async def test_runtime_pacer_matches_preflight_when_clock_advances_only_during_sleep() -> None:
+    quota = PROBE["DispatchQuota"](
+        request_count=2,
+        request_period_seconds=10,
+        token_count=10,
+        token_period_seconds=15,
+        minimum_start_interval_seconds=1.0,
+    )
+    reservations = tuple(
+        _dispatch_reservation(f"reservation-{index}", charge)
+        for index, charge in enumerate((6, 4, 6))
+    )
+    now = 0.0
+
+    def clock() -> float:
+        return now
+
+    async def sleeper(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    pacer = PROBE["DispatchPacer"](quota, clock=clock, sleeper=sleeper)
+    observed: list[float] = []
+    for reservation in reservations:
+        await pacer.admit(reservation)
+        observed.append(now)
+
+    assert tuple(observed) == PROBE["_plan_dispatch_schedule"](reservations, quota)
+    assert pacer.admission_count == len(reservations)
+
+
+@pytest.mark.asyncio
+async def test_runtime_pacer_rechecks_after_early_wake_before_admission() -> None:
+    quota = PROBE["DispatchQuota"](
+        request_count=1,
+        request_period_seconds=10,
+        token_count=100,
+        token_period_seconds=60,
+        minimum_start_interval_seconds=0.0,
+    )
+    now = 0.0
+    sleeps: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def early_sleeper(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += min(4.0, delay)
+
+    pacer = PROBE["DispatchPacer"](quota, clock=clock, sleeper=early_sleeper)
+    await pacer.admit(_dispatch_reservation("first", 1))
+    await pacer.admit(_dispatch_reservation("second", 1))
+
+    assert now == 10.0
+    assert sleeps == [10.0, 6.0, 2.0]
+    assert pacer.admission_count == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_pacer_cancellation_during_wait_records_no_admission() -> None:
+    quota = PROBE["DispatchQuota"](
+        request_count=1,
+        request_period_seconds=10,
+        token_count=100,
+        token_period_seconds=60,
+        minimum_start_interval_seconds=0.0,
+    )
+
+    async def cancel_wait(_delay: float) -> None:
+        raise asyncio.CancelledError
+
+    pacer = PROBE["DispatchPacer"](quota, clock=lambda: 0.0, sleeper=cancel_wait)
+    await pacer.admit(_dispatch_reservation("first", 1))
+    with pytest.raises(asyncio.CancelledError):
+        await pacer.admit(_dispatch_reservation("second", 1))
+
+    assert pacer.admission_count == 1
+
+
 def test_budget_parser_rejects_even_a_sub_nano_amount_above_fifty_cents() -> None:
     assert PROBE["_parse_budget_nano_usd"]("0.50") == 500_000_000
     with pytest.raises(PROBE["ProbeRefusal"], match=r"must not exceed USD 0\.50"):
@@ -590,6 +774,39 @@ def test_live_entrypoint_never_constructs_provider_when_preflight_refuses(
     assert provider_constructions == 0
 
 
+def test_dry_run_never_touches_azure_authorization_provider_or_report(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    globals_ = PROBE["main"].__globals__
+
+    def unexpected_call(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("dry-run crossed the live-provider boundary")
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(SCRIPT), "--max-cost-usd", "0.50", "--dry-run"],
+    )
+    monkeypatch.setitem(globals_, "_load_env_file", lambda _path: None)
+    for name in (
+        "_safe_output_path",
+        "_assert_clean_pushed_head",
+        "_configured_azure_target",
+        "_attest_azure_deployment",
+        "_provider_factory",
+        "_consume_paid_authorization",
+        "_run_schedule",
+        "_write_private_report",
+    ):
+        monkeypatch.setitem(globals_, name, unexpected_call)
+
+    assert PROBE["main"]() == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert json.loads(captured.out)["mode"] == "dry-run"
+
+
 def test_provider_factory_captures_the_attested_target_and_zero_sdk_retries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -656,6 +873,10 @@ def test_azure_attestation_finds_a_custom_subdomain_in_the_second_subscription(
     assert deployment_call[deployment_call.index("--subscription") + 1] == AZURE_SUBSCRIPTION_TWO
     assert deployment_call[deployment_call.index("--resource-group") + 1] == AZURE_RESOURCE_GROUP
     assert deployment_call[deployment_call.index("--name") + 1] == AZURE_ACCOUNT_NAME
+    projection = deployment_call[deployment_call.index("--query") + 1]
+    assert "sku.capacity" in projection
+    assert "properties.currentCapacity" in projection
+    assert "properties.rateLimits" in projection
 
 
 def test_azure_attestation_uses_decreasing_budget_without_skipping_inventory(
@@ -921,6 +1142,61 @@ def test_azure_attestation_rejects_invalid_account_identity_or_state(
         ("integer-model-version", _azure_deployment(model_version=1)),
         ("missing-model-version", _azure_deployment(model_version=_MISSING)),
         ("wrong-sku", _azure_deployment(sku_name="Standard")),
+        ("missing-capacity", _azure_deployment(sku_capacity=_MISSING)),
+        ("boolean-capacity", _azure_deployment(sku_capacity=True)),
+        ("zero-capacity", _azure_deployment(sku_capacity=0)),
+        ("negative-capacity", _azure_deployment(sku_capacity=-1)),
+        ("fractional-capacity", _azure_deployment(sku_capacity=1.5)),
+        ("non-finite-capacity", _azure_deployment(sku_capacity=float("inf"))),
+        ("missing-current-capacity", _azure_deployment(current_capacity=_MISSING)),
+        ("capacity-mismatch", _azure_deployment(current_capacity=9)),
+        ("rate-limits-not-list", _azure_deployment(rate_limits={})),
+        ("rate-limit-missing", _azure_deployment(rate_limits=[])),
+        (
+            "rate-limit-duplicate",
+            _azure_deployment(
+                rate_limits=[
+                    {"key": "request", "count": 10, "renewalPeriod": 60},
+                    {"key": "request", "count": 10, "renewalPeriod": 60},
+                ]
+            ),
+        ),
+        (
+            "rate-limit-unknown",
+            _azure_deployment(
+                rate_limits=[
+                    {"key": "request", "count": 10, "renewalPeriod": 60},
+                    {"key": "character", "count": 10_000, "renewalPeriod": 60},
+                ]
+            ),
+        ),
+        (
+            "rate-limit-zero-count",
+            _azure_deployment(
+                rate_limits=[
+                    {"key": "request", "count": 0, "renewalPeriod": 60},
+                    {"key": "token", "count": 10_000, "renewalPeriod": 60},
+                ]
+            ),
+        ),
+        (
+            "rate-limit-fractional-period",
+            _azure_deployment(
+                rate_limits=[
+                    {"key": "request", "count": 10, "renewalPeriod": 60.5},
+                    {"key": "token", "count": 10_000, "renewalPeriod": 60},
+                ]
+            ),
+        ),
+        (
+            "rate-limit-extra-field",
+            _azure_deployment(
+                rate_limits=[
+                    {"key": "request", "count": 10, "renewalPeriod": 60, "x": 1},
+                    {"key": "token", "count": 10_000, "renewalPeriod": 60},
+                ]
+            ),
+        ),
         ("not-ready", _azure_deployment(state="Creating")),
         ("missing-etag", _azure_deployment(etag=_MISSING)),
         ("empty-etag", _azure_deployment(etag="")),
@@ -1197,6 +1473,67 @@ def test_live_entrypoint_never_constructs_provider_after_attestation_refusal(
     assert not (tmp_path / "report.json").exists()
 
 
+def test_live_entrypoint_refuses_attested_token_shortfall_before_authorization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    globals_ = PROBE["main"].__globals__
+    crossed_boundaries: list[str] = []
+
+    def unexpected_call(name: str) -> Any:
+        def fail(*_args: object, **_kwargs: object) -> None:
+            crossed_boundaries.append(name)
+            pytest.fail(f"token preflight crossed {name}")
+
+        return fail
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--max-cost-usd",
+            "0.50",
+            "--authorization-id",
+            TEST_PAID_AUTHORIZATION_ID,
+            "--acknowledge-paid-provider",
+            PROBE["ACKNOWLEDGEMENT"],
+        ],
+    )
+    monkeypatch.setitem(globals_, "_load_env_file", lambda _path: None)
+    monkeypatch.setitem(globals_, "_validate_args", lambda _args: 500_000_000)
+    monkeypatch.setitem(globals_, "_safe_output_path", lambda _path: tmp_path / "report.json")
+    monkeypatch.setitem(
+        globals_,
+        "_assert_clean_pushed_head",
+        lambda *_args, **_kwargs: PROBE["GitState"]("a" * 40, "branch", "origin/branch"),
+    )
+    monkeypatch.setitem(
+        globals_,
+        "_configured_azure_target",
+        lambda: (AZURE_ENDPOINT, PROBE["EXPECTED_AZURE_DEPLOYMENT"]),
+    )
+    monkeypatch.setitem(
+        globals_,
+        "_attest_azure_deployment",
+        lambda _endpoint, _deployment: _valid_attestation(),
+    )
+    for name in (
+        "_provider_factory",
+        "_consume_paid_authorization",
+        "_run_schedule",
+        "_write_private_report",
+    ):
+        monkeypatch.setitem(globals_, name, unexpected_call(name))
+
+    assert PROBE["main"]() == 2
+    captured = capsys.readouterr()
+    assert crossed_boundaries == []
+    assert "one provider reservation exceeds the attested token window" in captured.err
+    assert not (tmp_path / "report.json").exists()
+
+
 def _patch_live_main_after_preflight(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1239,6 +1576,7 @@ def _patch_live_main_after_preflight(
         lambda: (AZURE_ENDPOINT, PROBE["EXPECTED_AZURE_DEPLOYMENT"]),
     )
     monkeypatch.setitem(globals_, "_attest_azure_deployment", attest_azure_deployment)
+    monkeypatch.setitem(globals_, "_plan_dispatch_schedule", lambda _reservations, _quota: ())
     monkeypatch.setitem(globals_, "_provider_factory", lambda _attestation: lambda: object())
     monkeypatch.setitem(globals_, "_consume_paid_authorization", lambda _id, _source: None)
     monkeypatch.setitem(globals_, "_run_schedule", run_schedule)
@@ -1391,6 +1729,11 @@ def test_azure_attestation_report_contains_only_safe_model_metadata_and_hashes(
         "skuName",
         "provisioningState",
         "versionUpgradeOption",
+        "capacityUnits",
+        "requestLimitCount",
+        "requestLimitPeriodSeconds",
+        "tokenLimitCount",
+        "tokenLimitPeriodSeconds",
         "enabledSubscriptionCount",
         "endpointHostSha256",
         "accountResourceIdSha256",
@@ -2103,13 +2446,82 @@ async def test_calibration_failure_stops_after_first_case_of_its_round(
         PROBE["SCHEDULE"],
         ledger=ledger,
         client_factory=_Delegate,
-        pacer=PROBE["DispatchPacer"](0),
+        pacer=PROBE["DispatchPacer"](_unlimited_dispatch_quota()),
     )
 
     assert len(results) == expected_calls
     assert len(calls) == expected_calls
     assert aborted_reason == f"calibration_failed_round_{failed_round}"
     assert provider_client_closed is True
+
+
+@pytest.mark.asyncio
+async def test_schedule_paces_actual_stream_starts_after_slow_source_guard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    schedule = (
+        _scheduled(1, "lower_path_only"),
+        _scheduled(1, "higher_path_only"),
+    )
+    ledger = PROBE["_preflight_budget"](max_cost_nano_usd=500_000_000)
+    now = 0.0
+    guard_delays = iter((9.0, 0.0))
+    stream_started_at: list[float] = []
+
+    def clock() -> float:
+        return now
+
+    async def sleeper(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    def source_guard() -> None:
+        nonlocal now
+        now += next(guard_delays)
+
+    class TimedDelegate:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.close_calls = 0
+            self.streams = [
+                _FakeStream([_ndjson(LOWER)]),
+                _FakeStream([_ndjson(HIGHER)]),
+            ]
+
+        def stream(self, *_args: object, **_kwargs: object) -> _FakeStream:
+            stream_started_at.append(now)
+            stream = self.streams[self.calls]
+            self.calls += 1
+            return stream
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    quota = PROBE["DispatchQuota"](
+        request_count=1,
+        request_period_seconds=10,
+        token_count=100_000_000,
+        token_period_seconds=60,
+        minimum_start_interval_seconds=0.0,
+    )
+    pacer = PROBE["DispatchPacer"](quota, clock=clock, sleeper=sleeper)
+    delegate = TimedDelegate()
+    monkeypatch.setitem(PROBE["_run_schedule"].__globals__, "SCHEDULE", schedule)
+
+    results, aborted_reason, provider_client_closed = await PROBE["_run_schedule"](
+        schedule,
+        ledger=ledger,
+        client_factory=lambda: delegate,
+        pacer=pacer,
+        source_guard=source_guard,
+    )
+
+    assert len(results) == len(schedule)
+    assert aborted_reason is None
+    assert provider_client_closed is True
+    assert stream_started_at == [9.0, 19.0]
+    assert pacer.admission_count == ledger.admitted_count == delegate.calls == 2
+    assert delegate.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -2160,7 +2572,7 @@ async def test_schedule_retires_failed_transport_before_next_case_without_retry(
         schedule,
         ledger=ledger,
         client_factory=factory,
-        pacer=PROBE["DispatchPacer"](0),
+        pacer=PROBE["DispatchPacer"](_unlimited_dispatch_quota()),
     )
 
     first, second = (observation for observation, _score in results)
@@ -2220,7 +2632,7 @@ async def test_schedule_refuses_next_admission_when_failed_transport_cannot_clos
         schedule,
         ledger=ledger,
         client_factory=factory,
-        pacer=PROBE["DispatchPacer"](0),
+        pacer=PROBE["DispatchPacer"](_unlimited_dispatch_quota()),
     )
 
     assert len(results) == 1
@@ -2260,7 +2672,7 @@ async def test_cleanup_failure_is_observed_and_disqualifies_the_run(
         PROBE["SCHEDULE"],
         ledger=ledger,
         client_factory=lambda: delegate,
-        pacer=PROBE["DispatchPacer"](0),
+        pacer=PROBE["DispatchPacer"](_unlimited_dispatch_quota()),
     )
 
     assert len(results) == 1
@@ -2389,6 +2801,7 @@ def test_full_private_report_has_a_closed_recursive_schema(
     assert len(report_evidence) == 1
     report = reports[0]
     expected = report_evidence[0]
+    assert report["schemaVersion"] == 3
     validate_private_report(report, expected=expected)
     serialized = json.dumps(report, sort_keys=True)
     assert all(case.prompt not in serialized for case in PROBE["CASES"])
@@ -2454,6 +2867,17 @@ def test_full_private_report_has_a_closed_recursive_schema(
                 attestation_failure_code="azure_deployment_changed_during_run",
             ),
         )
+    for field, value in (
+        ("capacityUnits", 11),
+        ("requestLimitCount", 11),
+        ("requestLimitPeriodSeconds", 61),
+        ("tokenLimitCount", 20_000),
+        ("tokenLimitPeriodSeconds", 61),
+    ):
+        mutated = json.loads(json.dumps(report))
+        mutated["azureDeploymentAttestation"][field] = value
+        with pytest.raises(PROBE["ProbeRefusal"], match="private report"):
+            validate_private_report(mutated, expected=expected)
 
     monkeypatch.setenv("MURMUR_PRIVATE_TOKEN", "a" * 40)
     with pytest.raises(PROBE["ProbeRefusal"], match="configured secret material"):

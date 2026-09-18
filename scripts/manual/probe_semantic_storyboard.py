@@ -26,7 +26,7 @@ from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_FLOOR, Decimal, InvalidOperation
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -535,6 +535,10 @@ class Reservation:
     max_output_tokens: int
     reserved_cost_nano_usd: int
 
+    @property
+    def dispatch_token_count(self) -> int:
+        return self.max_input_tokens + self.max_output_tokens
+
     def sanitized(self) -> dict[str, object]:
         return {
             "reservationId": self.reservation_id,
@@ -570,6 +574,12 @@ class BudgetLedger:
     @property
     def admitted_reserved_cost_nano_usd(self) -> int:
         return sum(self._by_id[item].reserved_cost_nano_usd for item in self._admitted)
+
+    def reservation_for(self, reservation_id: str) -> Reservation:
+        try:
+            return self._by_id[reservation_id]
+        except KeyError as exc:
+            raise ProbeRefusal("provider request had no preflight reservation") from exc
 
     def plan_all(self, plans: Sequence[tuple[str, list[dict[str, str]]]]) -> None:
         if self.reservations:
@@ -694,28 +704,159 @@ class _ProviderFailureCapturingStream:
             await close()
 
 
+@dataclass(frozen=True, slots=True)
+class DispatchQuota:
+    """One attested request window and one attested token window."""
+
+    request_count: int
+    request_period_seconds: int
+    token_count: int
+    token_period_seconds: int
+    minimum_start_interval_seconds: float
+
+    def __post_init__(self) -> None:
+        integer_fields = (
+            self.request_count,
+            self.request_period_seconds,
+            self.token_count,
+            self.token_period_seconds,
+        )
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in integer_fields
+        ):
+            raise ValueError("dispatch quota values must be positive integers")
+        if (
+            isinstance(self.minimum_start_interval_seconds, bool)
+            or not isinstance(self.minimum_start_interval_seconds, int | float)
+            or not math.isfinite(self.minimum_start_interval_seconds)
+            or self.minimum_start_interval_seconds < 0
+        ):
+            raise ValueError("minimum dispatch interval must be finite and non-negative")
+
+
+def _earliest_dispatch_time(
+    *,
+    now: float,
+    last_started_at: float | None,
+    prior_admissions: Sequence[tuple[float, int]],
+    dispatch_token_count: int,
+    quota: DispatchQuota,
+) -> float:
+    """Return the earliest safe start under both rolling windows."""
+
+    if not math.isfinite(now) or now < 0:
+        raise ValueError("dispatch clock must be finite and non-negative")
+    if (
+        isinstance(dispatch_token_count, bool)
+        or not isinstance(dispatch_token_count, int)
+        or dispatch_token_count <= 0
+    ):
+        raise ValueError("dispatch token count must be a positive integer")
+    if dispatch_token_count > quota.token_count:
+        raise ProbeRefusal("one provider reservation exceeds the attested token window")
+
+    candidate = now
+    if last_started_at is not None:
+        candidate = max(candidate, last_started_at + quota.minimum_start_interval_seconds)
+
+    while True:
+        request_admissions = [
+            started_at
+            for started_at, _tokens in prior_admissions
+            if started_at + quota.request_period_seconds > candidate
+        ]
+        token_admissions = [
+            (started_at, tokens)
+            for started_at, tokens in prior_admissions
+            if started_at + quota.token_period_seconds > candidate
+        ]
+        required_times: list[float] = []
+        if len(request_admissions) >= quota.request_count:
+            expirations = sorted(
+                started_at + quota.request_period_seconds for started_at in request_admissions
+            )
+            required_times.append(expirations[len(request_admissions) - quota.request_count])
+
+        active_tokens = sum(tokens for _started_at, tokens in token_admissions)
+        if active_tokens + dispatch_token_count > quota.token_count:
+            remaining_tokens = active_tokens
+            for started_at, tokens in sorted(token_admissions):
+                remaining_tokens -= tokens
+                if remaining_tokens + dispatch_token_count <= quota.token_count:
+                    required_times.append(started_at + quota.token_period_seconds)
+                    break
+
+        if not required_times:
+            return candidate
+        next_candidate = max(candidate, *required_times)
+        if next_candidate <= candidate:
+            raise ProbeRefusal("dispatch quota calculation made no forward progress")
+        candidate = next_candidate
+
+
+def _plan_dispatch_schedule(
+    reservations: Sequence[Reservation],
+    quota: DispatchQuota,
+) -> tuple[float, ...]:
+    """Simulate the densest safe schedule before any provider construction."""
+
+    admissions: list[tuple[float, int]] = []
+    offsets: list[float] = []
+    last_started_at: float | None = None
+    for reservation in reservations:
+        started_at = _earliest_dispatch_time(
+            now=0.0,
+            last_started_at=last_started_at,
+            prior_admissions=admissions,
+            dispatch_token_count=reservation.dispatch_token_count,
+            quota=quota,
+        )
+        admissions.append((started_at, reservation.dispatch_token_count))
+        offsets.append(started_at)
+        last_started_at = started_at
+    return tuple(offsets)
+
+
 class DispatchPacer:
-    """Serialize request starts under the audited ten-requests/minute limit."""
+    """Admit starts against the same attested windows used by preflight."""
 
     def __init__(
         self,
-        interval_seconds: float,
+        quota: DispatchQuota,
         *,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], Any] = asyncio.sleep,
     ) -> None:
-        self.interval_seconds = interval_seconds
+        if not isinstance(quota, DispatchQuota):
+            raise TypeError("quota must be a DispatchQuota")
+        self.quota = quota
         self._clock = clock
         self._sleeper = sleeper
         self._last_started_at: float | None = None
+        self._admissions: list[tuple[float, int]] = []
         self.admission_count = 0
 
-    async def admit(self) -> None:
-        if self._last_started_at is not None:
-            delay = self.interval_seconds - (self._clock() - self._last_started_at)
+    async def admit(self, reservation: Reservation) -> None:
+        if not isinstance(reservation, Reservation):
+            raise TypeError("reservation must be a Reservation")
+        while True:
+            now = self._clock()
+            started_at = _earliest_dispatch_time(
+                now=now,
+                last_started_at=self._last_started_at,
+                prior_admissions=self._admissions,
+                dispatch_token_count=reservation.dispatch_token_count,
+                quota=self.quota,
+            )
+            delay = started_at - now
             if delay > 0:
                 await self._sleeper(delay)
-        self._last_started_at = self._clock()
+                continue
+            break
+        admitted_at = self._clock()
+        self._last_started_at = admitted_at
+        self._admissions.append((admitted_at, reservation.dispatch_token_count))
         self.admission_count += 1
 
 
@@ -1316,7 +1457,7 @@ async def _run_schedule(
     provider_client_closed = True
     try:
         for index, scheduled in enumerate(schedule):
-            await pacer.admit()
+            reservation = ledger.reservation_for(scheduled.reservation_id)
             if source_guard is not None:
                 source_guard()
             wrapper = SingleCallBudgetedClient(delegate, ledger, scheduled.reservation_id)
@@ -1324,6 +1465,7 @@ async def _run_schedule(
                 client=wrapper,
                 max_tokens=max_tokens,
                 timeout_seconds=timeout_seconds,
+                before_provider_dispatch=partial(pacer.admit, reservation),
             )
             observation = await _run_case(
                 scheduled,
@@ -1461,6 +1603,11 @@ class AzureDeploymentAttestation:
     sku_name: str
     provisioning_state: str
     version_upgrade_option: str
+    capacity_units: int
+    request_limit_count: int
+    request_limit_period_seconds: int
+    token_limit_count: int
+    token_limit_period_seconds: int
     enabled_subscription_count: int
     endpoint_host_sha256: str
     account_resource_id_sha256: str
@@ -1476,6 +1623,11 @@ class AzureDeploymentAttestation:
             "skuName": self.sku_name,
             "provisioningState": self.provisioning_state,
             "versionUpgradeOption": self.version_upgrade_option,
+            "capacityUnits": self.capacity_units,
+            "requestLimitCount": self.request_limit_count,
+            "requestLimitPeriodSeconds": self.request_limit_period_seconds,
+            "tokenLimitCount": self.token_limit_count,
+            "tokenLimitPeriodSeconds": self.token_limit_period_seconds,
             "enabledSubscriptionCount": self.enabled_subscription_count,
             "endpointHostSha256": self.endpoint_host_sha256,
             "accountResourceIdSha256": self.account_resource_id_sha256,
@@ -1604,7 +1756,8 @@ def _report_keys(value: str) -> frozenset[str]:
 
 _ATTESTATION_REPORT_KEYS = _report_keys(
     "deploymentName modelFormat modelName modelVersion skuName provisioningState "
-    "versionUpgradeOption enabledSubscriptionCount endpointHostSha256 "
+    "versionUpgradeOption capacityUnits requestLimitCount requestLimitPeriodSeconds "
+    "tokenLimitCount tokenLimitPeriodSeconds enabledSubscriptionCount endpointHostSha256 "
     "accountResourceIdSha256 deploymentResourceIdSha256 deploymentEtagSha256"
 )
 _PRIVATE_REPORT_SHAPES = {
@@ -1741,6 +1894,16 @@ def _validate_attestation_report(attestation: dict[str, object]) -> None:
         or attestation["skuName"] != EXPECTED_AZURE_SKU
         or attestation["provisioningState"] != EXPECTED_AZURE_PROVISIONING_STATE
         or attestation["versionUpgradeOption"] not in KNOWN_AZURE_VERSION_UPGRADE_OPTIONS
+        or any(
+            type(attestation[field]) is not int or attestation[field] <= 0
+            for field in (
+                "capacityUnits",
+                "requestLimitCount",
+                "requestLimitPeriodSeconds",
+                "tokenLimitCount",
+                "tokenLimitPeriodSeconds",
+            )
+        )
         or type(attestation["enabledSubscriptionCount"]) is not int
         or not 1 <= attestation["enabledSubscriptionCount"] <= MAX_ENABLED_AZURE_SUBSCRIPTIONS
         or not all(
@@ -1971,7 +2134,7 @@ def _validate_private_report(
     _validate_closed_report_shape(report)
     if (
         type(report["schemaVersion"]) is not int
-        or report["schemaVersion"] != 2
+        or report["schemaVersion"] != 3
         or report["generatedAt"] != expected.generated_at.isoformat()
         or not expected.authorization_id
         or report["authorizationIdSha256"] != _sha256_text(expected.authorization_id)
@@ -2377,6 +2540,41 @@ def _canonical_subscription_id(raw_value: object) -> str:
         raise ProbeRefusal("azure_subscription_inventory_invalid") from exc
 
 
+def _positive_json_integer(value: object) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(value)
+        or value <= 0
+        or int(value) != value
+    ):
+        raise ProbeRefusal("azure_deployment_attestation_mismatch")
+    return int(value)
+
+
+def _parse_azure_rate_limits(raw_limits: object) -> dict[str, tuple[int, int]]:
+    if not isinstance(raw_limits, list) or len(raw_limits) != 2:
+        raise ProbeRefusal("azure_deployment_attestation_mismatch")
+    parsed: dict[str, tuple[int, int]] = {}
+    for raw_limit in raw_limits:
+        if not isinstance(raw_limit, dict) or set(raw_limit) != {
+            "key",
+            "count",
+            "renewalPeriod",
+        }:
+            raise ProbeRefusal("azure_deployment_attestation_mismatch")
+        key = raw_limit["key"]
+        if key not in {"request", "token"} or key in parsed:
+            raise ProbeRefusal("azure_deployment_attestation_mismatch")
+        parsed[key] = (
+            _positive_json_integer(raw_limit["count"]),
+            _positive_json_integer(raw_limit["renewalPeriod"]),
+        )
+    if set(parsed) != {"request", "token"}:
+        raise ProbeRefusal("azure_deployment_attestation_mismatch")
+    return parsed
+
+
 def _parse_account_binding(
     account: object,
     *,
@@ -2534,8 +2732,10 @@ def _attest_azure_deployment(
         deployment_name,
         "--only-show-errors",
         "--query",
-        "{id:id,etag:etag,name:name,type:type,sku:sku,model:properties.model,"
-        "state:properties.provisioningState,"
+        "{id:id,etag:etag,name:name,type:type,"
+        "sku:{name:sku.name,capacity:sku.capacity},model:properties.model,"
+        "state:properties.provisioningState,currentCapacity:properties.currentCapacity,"
+        "rateLimits:properties.rateLimits[].{key:key,count:count,renewalPeriod:renewalPeriod},"
         "versionUpgradeOption:properties.versionUpgradeOption}",
         "--output",
         "json",
@@ -2546,8 +2746,15 @@ def _attest_azure_deployment(
     deployment_etag = raw_deployment.get("etag")
     model = raw_deployment.get("model")
     sku = raw_deployment.get("sku")
+    current_capacity = raw_deployment.get("currentCapacity")
+    raw_rate_limits = raw_deployment.get("rateLimits")
     version_upgrade_option = raw_deployment.get("versionUpgradeOption")
     expected_deployment_id = f"{binding.account_resource_id}/deployments/{deployment_name}"
+    configured_capacity = _positive_json_integer(
+        sku.get("capacity") if isinstance(sku, dict) else None
+    )
+    effective_capacity = _positive_json_integer(current_capacity)
+    rate_limits = _parse_azure_rate_limits(raw_rate_limits)
     if (
         deployment_id != expected_deployment_id
         or not isinstance(deployment_etag, str)
@@ -2560,6 +2767,7 @@ def _attest_azure_deployment(
         or model.get("version") != EXPECTED_AZURE_MODEL_VERSION
         or not isinstance(sku, dict)
         or sku.get("name") != EXPECTED_AZURE_SKU
+        or configured_capacity != effective_capacity
         or raw_deployment.get("state") != EXPECTED_AZURE_PROVISIONING_STATE
         or not isinstance(version_upgrade_option, str)
         or version_upgrade_option not in KNOWN_AZURE_VERSION_UPGRADE_OPTIONS
@@ -2573,6 +2781,11 @@ def _attest_azure_deployment(
         sku_name=EXPECTED_AZURE_SKU,
         provisioning_state=EXPECTED_AZURE_PROVISIONING_STATE,
         version_upgrade_option=version_upgrade_option,
+        capacity_units=configured_capacity,
+        request_limit_count=rate_limits["request"][0],
+        request_limit_period_seconds=rate_limits["request"][1],
+        token_limit_count=rate_limits["token"][0],
+        token_limit_period_seconds=rate_limits["token"][1],
         enabled_subscription_count=len(subscription_ids),
         endpoint_host_sha256=_sha256_text(endpoint_host),
         account_resource_id_sha256=_sha256_text(binding.account_resource_id),
@@ -2617,6 +2830,14 @@ def _provider_factory(attestation: AzureDeploymentAttestation) -> Callable[[], o
         or attestation.sku_name != EXPECTED_AZURE_SKU
         or attestation.provisioning_state != EXPECTED_AZURE_PROVISIONING_STATE
         or attestation.version_upgrade_option not in KNOWN_AZURE_VERSION_UPGRADE_OPTIONS
+        or min(
+            attestation.capacity_units,
+            attestation.request_limit_count,
+            attestation.request_limit_period_seconds,
+            attestation.token_limit_count,
+            attestation.token_limit_period_seconds,
+        )
+        <= 0
         or not (1 <= attestation.enabled_subscription_count <= MAX_ENABLED_AZURE_SUBSCRIPTIONS)
         or attestation.endpoint_host_sha256 != _sha256_text(endpoint_host)
     ):
@@ -2639,6 +2860,20 @@ def _provider_factory(attestation: AzureDeploymentAttestation) -> Callable[[], o
         )
 
     return construct_attested_client
+
+
+def _dispatch_quota_from_attestation(
+    attestation: AzureDeploymentAttestation,
+    *,
+    minimum_start_interval_seconds: float,
+) -> DispatchQuota:
+    return DispatchQuota(
+        request_count=attestation.request_limit_count,
+        request_period_seconds=attestation.request_limit_period_seconds,
+        token_count=attestation.token_limit_count,
+        token_period_seconds=attestation.token_limit_period_seconds,
+        minimum_start_interval_seconds=minimum_start_interval_seconds,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -2696,9 +2931,14 @@ def main() -> int:
             logging.getLogger(logger_name).setLevel(logging.CRITICAL)
         endpoint, deployment_name = _configured_azure_target()
         deployment_attestation = _attest_azure_deployment(endpoint, deployment_name)
+        dispatch_quota = _dispatch_quota_from_attestation(
+            deployment_attestation,
+            minimum_start_interval_seconds=args.request_start_interval_seconds,
+        )
+        _plan_dispatch_schedule(ledger.reservations, dispatch_quota)
         client_factory = _provider_factory(deployment_attestation)
         _consume_paid_authorization(args.authorization_id, source_before)
-        pacer = DispatchPacer(args.request_start_interval_seconds)
+        pacer = DispatchPacer(dispatch_quota)
         results, aborted_reason, provider_client_closed = asyncio.run(
             _run_schedule(
                 SCHEDULE,
@@ -2763,7 +3003,7 @@ def main() -> int:
             pacer_admission_count=pacer.admission_count,
         )
         report = {
-            "schemaVersion": 2,
+            "schemaVersion": 3,
             "generatedAt": generated_at.isoformat(),
             **source_after.sanitized(),
             "authorizationIdSha256": _sha256_text(args.authorization_id),
