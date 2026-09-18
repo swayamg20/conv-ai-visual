@@ -628,6 +628,13 @@ class SingleCallBudgetedClient:
         self._ledger = ledger
         self._reservation_id = reservation_id
         self.call_count = 0
+        self.provider_failure_kind: str | None = None
+
+    def _capture_provider_failure(self, error: BaseException) -> None:
+        from murmur.core.provider_errors import LLMProviderError
+
+        if isinstance(error, LLMProviderError):
+            self.provider_failure_kind = error.kind.value
 
     def stream(
         self,
@@ -647,12 +654,44 @@ class SingleCallBudgetedClient:
             max_tokens=max_tokens,
         )
         self.call_count = 1
-        return self._delegate.stream(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            **kwargs,
-        )
+        try:
+            upstream = self._delegate.stream(
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+        except BaseException as error:
+            self._capture_provider_failure(error)
+            raise
+        return _ProviderFailureCapturingStream(upstream, self)
+
+
+class _ProviderFailureCapturingStream:
+    """Retain only a closed provider category while forwarding one private stream."""
+
+    def __init__(
+        self, upstream: AsyncIterator[str | bytes], owner: SingleCallBudgetedClient
+    ) -> None:
+        self._upstream = upstream
+        self._owner = owner
+
+    def __aiter__(self) -> _ProviderFailureCapturingStream:
+        return self
+
+    async def __anext__(self) -> str | bytes:
+        try:
+            return await anext(self._upstream)
+        except StopAsyncIteration:
+            raise
+        except BaseException as error:
+            self._owner._capture_provider_failure(error)
+            raise
+
+    async def aclose(self) -> None:
+        close = getattr(self._upstream, "aclose", None)
+        if close is not None:
+            await close()
 
 
 class DispatchPacer:
@@ -955,6 +994,7 @@ class CaseObservation:
     checkpoint_count: int
     decline_reason: str | None
     failure_code: str | None
+    provider_failure_kind: str | None
     base_scene_sha256: str
     result_scene_sha256: str
     base_semantic_sha256: str
@@ -976,6 +1016,7 @@ class CaseObservation:
             "checkpointCount": self.checkpoint_count,
             "declineReason": self.decline_reason,
             "failureCode": self.failure_code,
+            "providerFailureKind": self.provider_failure_kind,
             "baseSceneSha256": self.base_scene_sha256,
             "resultSceneSha256": self.result_scene_sha256,
             "baseSemanticSha256": self.base_semantic_sha256,
@@ -1074,7 +1115,9 @@ async def _run_case(
         SemanticStoryboardDirectorRequestV1,
     )
     from murmur.live_scene.semantic_storyboard_service_contracts import (
+        SemanticStoryboardAcceptedPrefixCause,
         SemanticStoryboardCompletionReason,
+        SemanticStoryboardFailureCode,
         SemanticStoryboardSceneCheckpointEventV1,
         SemanticStoryboardSceneStreamCompletedEventV1,
         SemanticStoryboardSceneStreamDeclinedEventV1,
@@ -1107,6 +1150,7 @@ async def _run_case(
     terminal: str | None = None
     decline_reason: str | None = None
     failure_code: str | None = None
+    accepted_prefix_cause: str | None = None
     first_checkpoint_ms: float | None = None
     expected_previous_head = base_semantic.certificate_head_sha256
     protocol_error_code: str | None = None
@@ -1160,6 +1204,11 @@ async def _run_case(
                     ):
                         raise ProbeProtocolError("terminal_checkpoint_count_mismatch")
                     terminal = event.reason_code.value
+                    accepted_prefix_cause = (
+                        event.accepted_prefix_cause.value
+                        if event.accepted_prefix_cause is not None
+                        else None
+                    )
                     continue
                 if isinstance(event, SemanticStoryboardSceneStreamDeclinedEventV1):
                     if records or event.final_revision != base_scene.revision:
@@ -1192,6 +1241,19 @@ async def _run_case(
     observed_terminal = "protocol_error" if protocol_error_code is not None else terminal
     if observed_terminal is None:
         raise AssertionError("storyboard probe omitted its terminal classification")
+    provider_failure_kind = client.provider_failure_kind
+    if provider_failure_kind is None:
+        if (
+            failure_code == SemanticStoryboardFailureCode.PROVIDER_TIMEOUT.value
+            or accepted_prefix_cause == SemanticStoryboardAcceptedPrefixCause.PROVIDER_TIMEOUT.value
+        ):
+            provider_failure_kind = "timeout"
+        elif (
+            failure_code == SemanticStoryboardFailureCode.PROVIDER_RATE_LIMITED.value
+            or accepted_prefix_cause
+            == SemanticStoryboardAcceptedPrefixCause.PROVIDER_RATE_LIMITED.value
+        ):
+            provider_failure_kind = "rate_limited"
     return CaseObservation(
         case_id=case.case_id,
         round_index=scheduled.round_index,
@@ -1200,6 +1262,7 @@ async def _run_case(
         checkpoint_count=len(records),
         decline_reason=None if protocol_error_code is not None else decline_reason,
         failure_code=protocol_error_code or failure_code,
+        provider_failure_kind=(None if protocol_error_code is not None else provider_failure_kind),
         base_scene_sha256=base_scene_hash,
         result_scene_sha256=low_level_scene_sha256(current_scene),
         base_semantic_sha256=base_semantic_hash,
@@ -1247,11 +1310,12 @@ async def _run_schedule(
 
     if schedule != SCHEDULE:
         raise ProbeRefusal("live run requires the exact pinned forty-case schedule")
-    delegate = client_factory()
+    delegate: object | None = client_factory()
     results: list[tuple[CaseObservation, CaseScore]] = []
     aborted_reason: str | None = None
+    provider_client_closed = True
     try:
-        for scheduled in schedule:
+        for index, scheduled in enumerate(schedule):
             await pacer.admit()
             if source_guard is not None:
                 source_guard()
@@ -1285,8 +1349,19 @@ async def _run_schedule(
             if scheduled.case.calibration and not score.rubric_passed:
                 aborted_reason = f"calibration_failed_round_{scheduled.round_index}"
                 break
+            if observation.provider_failure_kind in {"timeout", "connection"} and index + 1 < len(
+                schedule
+            ):
+                retired = delegate
+                delegate = None
+                provider_client_closed = await _close_delegate(retired)
+                if not provider_client_closed:
+                    aborted_reason = "provider_transport_retirement_failed"
+                    break
+                delegate = client_factory()
     finally:
-        provider_client_closed = await _close_delegate(delegate)
+        if delegate is not None:
+            provider_client_closed = await _close_delegate(delegate) and provider_client_closed
     return results, aborted_reason, provider_client_closed
 
 
@@ -1565,7 +1640,7 @@ _PRIVATE_REPORT_SHAPES = {
     ),
     "$.results[]": _report_keys(
         "caseId round promptSha256 terminal acceptedRecords checkpointCount declineReason "
-        "failureCode baseSceneSha256 resultSceneSha256 baseSemanticSha256 "
+        "failureCode providerFailureKind baseSceneSha256 resultSceneSha256 baseSemanticSha256 "
         "resultSemanticSha256 programSha256 firstAttemptValid providerCallCount "
         "certificateChainValid firstCheckpointMs totalMs score"
     ),
@@ -1705,10 +1780,14 @@ def _report_observation(
     terminal = result["terminal"]
     decline_reason = result["declineReason"]
     failure_code = result["failureCode"]
+    provider_failure_kind = result["providerFailureKind"]
     first_checkpoint_ms = result["firstCheckpointMs"]
     total_ms = result["totalMs"]
     expected_first_attempt = terminal in {"model_stop", "declined"}
     expected_certificate_state = terminal != "protocol_error"
+    from murmur.core.provider_errors import LLMProviderFailureKind
+
+    closed_provider_failure_kinds = {kind.value for kind in LLMProviderFailureKind}
     terminal_state_valid = (
         (
             terminal in {"model_stop", "accepted_prefix"}
@@ -1764,6 +1843,28 @@ def _report_observation(
         or type(result["certificateChainValid"]) is not bool
         or result["certificateChainValid"] is not expected_certificate_state
         or (terminal == "accepted_prefix" and not records)
+        or (
+            provider_failure_kind is not None
+            and (
+                provider_failure_kind not in closed_provider_failure_kinds
+                or result["providerCallCount"] != 1
+                or terminal not in {"failed", "accepted_prefix"}
+                or (
+                    terminal == "failed"
+                    and (
+                        (provider_failure_kind == "timeout" and failure_code != "provider_timeout")
+                        or (
+                            provider_failure_kind == "rate_limited"
+                            and failure_code != "provider_rate_limited"
+                        )
+                        or (
+                            provider_failure_kind not in {"timeout", "rate_limited"}
+                            and failure_code != "provider_error"
+                        )
+                    )
+                )
+            )
+        )
         or not latency_valid
     ):
         raise ProbeRefusal("private report result mismatch")
@@ -1793,6 +1894,9 @@ def _report_observation(
         checkpoint_count=len(records),
         decline_reason=decline_reason if isinstance(decline_reason, str) else None,
         failure_code=failure_code if isinstance(failure_code, str) else None,
+        provider_failure_kind=(
+            provider_failure_kind if isinstance(provider_failure_kind, str) else None
+        ),
         base_scene_sha256=str(result["baseSceneSha256"]),
         result_scene_sha256=str(result["resultSceneSha256"]),
         base_semantic_sha256=str(result["baseSemanticSha256"]),
@@ -1812,6 +1916,8 @@ def _report_observation(
 
 def _expected_report_abort(
     observed: list[tuple[ScheduledCase, CaseObservation, CaseScore]],
+    *,
+    provider_client_closed: bool,
 ) -> str | None:
     final_index = len(observed) - 1
     for index, (scheduled, observation, score) in enumerate(observed):
@@ -1824,6 +1930,12 @@ def _expected_report_abort(
                 raise ProbeRefusal("private report abort mismatch")
             return f"calibration_failed_round_{scheduled.round_index}"
     if len(observed) != len(SCHEDULE):
+        if (
+            observed
+            and not provider_client_closed
+            and observed[-1][1].provider_failure_kind in {"timeout", "connection"}
+        ):
+            return "provider_transport_retirement_failed"
         raise ProbeRefusal("private report abort mismatch")
     return None
 
@@ -1859,7 +1971,7 @@ def _validate_private_report(
     _validate_closed_report_shape(report)
     if (
         type(report["schemaVersion"]) is not int
-        or report["schemaVersion"] != 1
+        or report["schemaVersion"] != 2
         or report["generatedAt"] != expected.generated_at.isoformat()
         or not expected.authorization_id
         or report["authorizationIdSha256"] != _sha256_text(expected.authorization_id)
@@ -2026,7 +2138,10 @@ def _validate_private_report(
             protocol_failures=protocol_failures,
         )
         observed.append((scheduled, observation, score))
-    aborted_reason = _expected_report_abort(observed)
+    aborted_reason = _expected_report_abort(
+        observed,
+        provider_client_closed=expected.provider_client_closed,
+    )
     if (
         aborted_reason != expected.aborted_reason
         or type(expected.provider_client_closed) is not bool
@@ -2648,7 +2763,7 @@ def main() -> int:
             pacer_admission_count=pacer.admission_count,
         )
         report = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "generatedAt": generated_at.isoformat(),
             **source_after.sanitized(),
             "authorizationIdSha256": _sha256_text(args.authorization_id),

@@ -268,6 +268,7 @@ def _observation(
         accepted_records=tuple(accepted),
         decline_reason=abstain_reason,
         failure_code=None,
+        provider_failure_kind=None,
         checkpoint_count=len(accepted),
         base_scene_sha256=SAFE_HASH,
         result_scene_sha256=CHANGED_HASH if mutate else SAFE_HASH,
@@ -313,6 +314,7 @@ def _evidence_observation(
         checkpoint_count=len(accepted),
         decline_reason=decline_reason,
         failure_code=failure_code,
+        provider_failure_kind=None,
         base_scene_sha256=base_scene_sha256,
         result_scene_sha256=result_scene_sha256,
         base_semantic_sha256=base_semantic_sha256,
@@ -1719,6 +1721,39 @@ async def test_real_service_lifecycle_is_scored_from_canonical_verified_frontier
 
 
 @pytest.mark.asyncio
+async def test_probe_preserves_private_connection_kind_behind_generic_public_terminal() -> None:
+    from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
+    from murmur.live_scene.semantic_storyboard_service import SemanticStoryboardService
+
+    scheduled = _scheduled(1, "lower_path_only")
+    ledger = PROBE["_preflight_budget"](max_cost_nano_usd=500_000_000)
+    delegate = _StreamingDelegate([LLMProviderError(LLMProviderFailureKind.CONNECTION)])
+    client = PROBE["SingleCallBudgetedClient"](
+        delegate,
+        ledger,
+        scheduled.reservation_id,
+    )
+
+    observation = await PROBE["_run_case"](
+        scheduled,
+        service=SemanticStoryboardService(client=client),
+        client=client,
+    )
+
+    assert observation.terminal == "failed"
+    assert observation.failure_code == "provider_error"
+    assert observation.provider_failure_kind == "connection"
+    assert observation.provider_call_count == delegate.calls == client.call_count == 1
+    assert delegate.stream_instance.close_calls == 1
+    serialized = json.dumps(
+        observation.sanitized(PROBE["_sha256_text"](scheduled.case.prompt)),
+        sort_keys=True,
+    )
+    assert '"providerFailureKind": "connection"' in serialized
+    assert "LLMProviderError" not in serialized
+
+
+@pytest.mark.asyncio
 async def test_probe_rejects_an_event_after_a_terminal() -> None:
     from murmur.live_scene.semantic_storyboard_service_contracts import (
         SemanticStoryboardSceneStreamDeclinedEventV1,
@@ -2078,6 +2113,124 @@ async def test_calibration_failure_stops_after_first_case_of_its_round(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["timeout", "connection"])
+async def test_schedule_retires_failed_transport_before_next_case_without_retry(
+    failure_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
+
+    schedule = (
+        _scheduled(1, "lower_path_only"),
+        _scheduled(1, "higher_path_only"),
+    )
+    ledger = PROBE["_preflight_budget"](max_cost_nano_usd=500_000_000)
+    events: list[str] = []
+
+    class RetirableDelegate(_StreamingDelegate):
+        def __init__(self, label: str, items: list[object]) -> None:
+            super().__init__(items)
+            self.label = label
+            self.close_calls = 0
+
+        def stream(self, *args: object, **kwargs: object) -> _FakeStream:
+            events.append(f"stream:{self.label}")
+            return super().stream(*args, **kwargs)
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            events.append(f"close:{self.label}")
+
+    typed_kind = LLMProviderFailureKind(failure_kind)
+    delegates = [
+        RetirableDelegate("failed", [LLMProviderError(typed_kind)]),
+        RetirableDelegate("healthy", [_ndjson(HIGHER)]),
+    ]
+    constructed: list[RetirableDelegate] = []
+
+    def factory() -> RetirableDelegate:
+        delegate = delegates[len(constructed)]
+        constructed.append(delegate)
+        events.append(f"construct:{delegate.label}")
+        return delegate
+
+    monkeypatch.setitem(PROBE["_run_schedule"].__globals__, "SCHEDULE", schedule)
+
+    results, aborted_reason, provider_client_closed = await PROBE["_run_schedule"](
+        schedule,
+        ledger=ledger,
+        client_factory=factory,
+        pacer=PROBE["DispatchPacer"](0),
+    )
+
+    first, second = (observation for observation, _score in results)
+    assert aborted_reason is None
+    assert provider_client_closed is True
+    assert first.provider_failure_kind == failure_kind
+    assert second.provider_failure_kind is None
+    assert second.terminal == "model_stop"
+    assert [item.provider_call_count for item in (first, second)] == [1, 1]
+    assert ledger.admitted_count == 2
+    assert [delegate.calls for delegate in delegates] == [1, 1]
+    assert [delegate.close_calls for delegate in delegates] == [1, 1]
+    assert events == [
+        "construct:failed",
+        "stream:failed",
+        "close:failed",
+        "construct:healthy",
+        "stream:healthy",
+        "close:healthy",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_schedule_refuses_next_admission_when_failed_transport_cannot_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
+
+    schedule = (
+        _scheduled(1, "lower_path_only"),
+        _scheduled(1, "higher_path_only"),
+    )
+    ledger = PROBE["_preflight_budget"](max_cost_nano_usd=500_000_000)
+    factory_calls = 0
+
+    class UnclosableDelegate(_StreamingDelegate):
+        def __init__(self) -> None:
+            super().__init__([LLMProviderError(LLMProviderFailureKind.CONNECTION)])
+            self.close_calls = 0
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+            raise RuntimeError("PRIVATE_CLOSE_SENTINEL")
+
+    delegate = UnclosableDelegate()
+
+    def factory() -> UnclosableDelegate:
+        nonlocal factory_calls
+        factory_calls += 1
+        if factory_calls > 1:
+            raise AssertionError("replacement must not be created after failed cleanup")
+        return delegate
+
+    monkeypatch.setitem(PROBE["_run_schedule"].__globals__, "SCHEDULE", schedule)
+
+    results, aborted_reason, provider_client_closed = await PROBE["_run_schedule"](
+        schedule,
+        ledger=ledger,
+        client_factory=factory,
+        pacer=PROBE["DispatchPacer"](0),
+    )
+
+    assert len(results) == 1
+    assert aborted_reason == "provider_transport_retirement_failed"
+    assert provider_client_closed is False
+    assert factory_calls == delegate.calls == delegate.close_calls == 1
+    assert ledger.admitted_count == 1
+
+
+@pytest.mark.asyncio
 async def test_cleanup_failure_is_observed_and_disqualifies_the_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2257,6 +2410,7 @@ def test_full_private_report_has_a_closed_recursive_schema(
         (("azureDeploymentAttestation",), "endpoint", AZURE_ENDPOINT),
         (("results", 0, "acceptedRecords", 0), "narration", "PRIVATE_NARRATION"),
         (("results", 0), "failureCode", "PRIVATE_PROVIDER_ERROR_SENTINEL"),
+        (("results", 0), "providerFailureKind", "PRIVATE_PROVIDER_KIND_SENTINEL"),
         (("pricing",), "sourceProjection", "PRIVATE_PROJECTION_SENTINEL"),
         ((), "branch", ["PRIVATE_BRANCH_SENTINEL"]),
         (("reservations", 0), "messageSha256", "b" * 64),
