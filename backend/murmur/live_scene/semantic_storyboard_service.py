@@ -81,6 +81,10 @@ class SemanticStoryboardDirectorClient(Protocol):
 
 
 SemanticStoryboardDirectorClientFactory: TypeAlias = Callable[[], SemanticStoryboardDirectorClient]
+SemanticStoryboardBeforeProviderDispatch: TypeAlias = Callable[
+    [SemanticStoryboardDirectorRequestV1, list[dict[str, str]], int],
+    Awaitable[None],
+]
 
 _FAILURE_MESSAGES = {
     SemanticStoryboardFailureCode.SEMANTIC_BASE_MISMATCH: (
@@ -420,6 +424,7 @@ class SemanticStoryboardService:
         max_tokens: int = DEFAULT_SEMANTIC_STORYBOARD_DIRECTOR_MAX_TOKENS,
         timeout_seconds: float = DEFAULT_SEMANTIC_STORYBOARD_TIMEOUT_SECONDS,
         before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
+        before_director_dispatch: SemanticStoryboardBeforeProviderDispatch | None = None,
     ) -> None:
         if client is not None and client_factory is not None:
             raise ValueError("provide at most one of client or client_factory")
@@ -442,6 +447,8 @@ class SemanticStoryboardService:
             raise ValueError("timeout_seconds must be finite and positive")
         if before_provider_dispatch is not None and not callable(before_provider_dispatch):
             raise TypeError("before_provider_dispatch must be callable")
+        if before_director_dispatch is not None and not callable(before_director_dispatch):
+            raise TypeError("before_director_dispatch must be callable")
         self._client = client
         self._client_factory = client_factory
         self._clock = clock
@@ -451,6 +458,7 @@ class SemanticStoryboardService:
         )
         self._timeout_seconds = float(timeout_seconds)
         self._before_provider_dispatch = before_provider_dispatch
+        self._before_director_dispatch = before_director_dispatch
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
             DEFAULT_ASYNC_RESOURCE_CLOSE_TIMEOUT_SECONDS,
@@ -604,7 +612,18 @@ class SemanticStoryboardService:
         parser = SemanticStoryboardDirectorStreamParser()
         try:
             try:
-                if self._before_provider_dispatch is not None:
+                if self._before_director_dispatch is not None:
+                    try:
+                        await self._before_director_dispatch(
+                            request,
+                            messages,
+                            self._max_tokens,
+                        )
+                    except (asyncio.CancelledError, SceneAdmissionError):
+                        raise
+                    except Exception:
+                        raise _CandidateRejected(_INTERNAL_ERROR) from None
+                elif self._before_provider_dispatch is not None:
                     try:
                         await self._before_provider_dispatch()
                     except (asyncio.CancelledError, SceneAdmissionError):
@@ -718,6 +737,7 @@ class SemanticStoryboardService:
 __all__ = [
     "DEFAULT_SEMANTIC_STORYBOARD_DIRECTOR_MAX_TOKENS",
     "DEFAULT_SEMANTIC_STORYBOARD_TIMEOUT_SECONDS",
+    "SemanticStoryboardBeforeProviderDispatch",
     "SemanticStoryboardDirectorClient",
     "SemanticStoryboardDirectorClientFactory",
     "SemanticStoryboardService",

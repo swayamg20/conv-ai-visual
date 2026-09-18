@@ -249,6 +249,72 @@ async def test_director_streams_each_certified_record_from_one_zero_temperature_
 
 
 @pytest.mark.asyncio
+async def test_contextual_director_hook_receives_verified_request_and_messages() -> None:
+    anchor = await _anchor()
+    request = _director_request(anchor, prompt="Keep this exact direction.")
+    order: list[str] = []
+    client = _Client([_Stream([_trace(StoryboardTrajectoryId.LOWER_ANGLE)])], order)
+
+    async def generic_hook() -> None:
+        raise AssertionError("the generic hook must not own a contextual Director dispatch")
+
+    async def contextual_hook(
+        observed_request: SemanticStoryboardDirectorRequestV1,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+    ) -> None:
+        order.append("contextual")
+        assert observed_request is request
+        assert max_tokens == 2_048
+        assert len(messages) == 2
+        assert 'USER_PROMPT_JSON:"Keep this exact direction."' in messages[1]["content"]
+
+    events = await _collect(
+        SemanticStoryboardService(
+            client,
+            before_provider_dispatch=generic_hook,
+            before_director_dispatch=contextual_hook,
+        ),
+        request,
+    )
+
+    assert order == ["contextual", "stream"]
+    assert len(_checkpoints(events)) == 1
+
+
+@pytest.mark.asyncio
+async def test_contextual_director_rejection_precedes_factory_resolution() -> None:
+    anchor = await _anchor()
+    factory_calls = 0
+
+    def factory() -> _Client:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _Client([_Stream([])])
+
+    async def reject(
+        _request: SemanticStoryboardDirectorRequestV1,
+        _messages: list[dict[str, str]],
+        _max_tokens: int,
+    ) -> None:
+        raise SceneAdmissionError("provider_rate_limited", "private contextual detail")
+
+    events = await _collect(
+        SemanticStoryboardService(
+            client_factory=factory,
+            before_director_dispatch=reject,
+        ),
+        _director_request(anchor),
+    )
+
+    assert factory_calls == 0
+    terminal = events[-1]
+    assert isinstance(terminal, SemanticStoryboardSceneStreamFailedEventV1)
+    assert terminal.code is SemanticStoryboardFailureCode.PROVIDER_RATE_LIMITED
+    assert "private contextual detail" not in repr(events)
+
+
+@pytest.mark.asyncio
 async def test_complete_record_is_yielded_before_provider_eof_and_disconnect_closes_once() -> None:
     anchor = await _anchor()
     stream = _HangingStream(_trace(StoryboardTrajectoryId.LOWER_ANGLE))

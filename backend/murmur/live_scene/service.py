@@ -114,7 +114,10 @@ from murmur.live_scene.semantic_service_contracts import (
     SemanticSceneStreamEvent,
 )
 from murmur.live_scene.semantic_storyboard_requests import SemanticStoryboardRequestV1
-from murmur.live_scene.semantic_storyboard_service import SemanticStoryboardService
+from murmur.live_scene.semantic_storyboard_service import (
+    SemanticStoryboardBeforeProviderDispatch,
+    SemanticStoryboardService,
+)
 from murmur.live_scene.semantic_storyboard_service_contracts import (
     SemanticStoryboardSceneStreamEventV1,
 )
@@ -1368,6 +1371,9 @@ class SceneAuthoringService:
         max_tokens: int = 4_096,
         timeout_seconds: float = 20.0,
         before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
+        semantic_storyboard_before_provider_dispatch: (
+            SemanticStoryboardBeforeProviderDispatch | None
+        ) = None,
     ) -> None:
         if (client is None) == (client_factory is None):
             raise ValueError("provide exactly one of client or client_factory")
@@ -1398,6 +1404,10 @@ class SceneAuthoringService:
             raise ValueError("timeout_seconds must be finite and positive")
         if before_provider_dispatch is not None and not callable(before_provider_dispatch):
             raise TypeError("before_provider_dispatch must be callable")
+        if semantic_storyboard_before_provider_dispatch is not None and not callable(
+            semantic_storyboard_before_provider_dispatch
+        ):
+            raise TypeError("semantic_storyboard_before_provider_dispatch must be callable")
 
         self._client = client
         self._client_factory = client_factory
@@ -1429,6 +1439,7 @@ class SceneAuthoringService:
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
             before_provider_dispatch=before_provider_dispatch,
+            before_director_dispatch=semantic_storyboard_before_provider_dispatch,
         )
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
