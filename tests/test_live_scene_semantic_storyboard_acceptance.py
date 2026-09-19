@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import stat
 import sys
 from collections.abc import AsyncIterator, Callable
@@ -631,7 +632,11 @@ def test_private_credential_files_require_regular_mode_0600(
     env_file = tmp_path / "acceptance.env"
     env_file.write_text("GATE18_TEST_VALUE=loaded\n", encoding="utf-8")
     env_file.chmod(0o600)
+    monkeypatch.delenv("GATE18_TEST_VALUE", raising=False)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
     assert acceptance._validate_private_env_file(str(env_file)) == env_file.resolve()
+    assert os.environ["GATE18_TEST_VALUE"] == "loaded"
+    assert os.environ["PYTHON_DOTENV_DISABLED"] == "1"
     env_file.chmod(0o644)
     with pytest.raises(acceptance.AcceptanceRefusal, match="0600"):
         acceptance._validate_private_env_file(str(env_file))
@@ -658,3 +663,21 @@ def test_private_credential_files_require_regular_mode_0600(
     monkeypatch.setenv("FIREBASE_SERVICE_ACCOUNT_PATH", str(firebase_link))
     with pytest.raises(acceptance.AcceptanceRefusal, match="unsafe"):
         acceptance._validate_firebase_credentials()
+
+
+def test_private_env_load_failure_restores_dotenv_suppression(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    env_file = tmp_path / "empty.env"
+    env_file.write_text("", encoding="utf-8")
+    env_file.chmod(0o600)
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+
+    with pytest.raises(
+        acceptance.paid_probe.ProbeRefusal,
+        match="did not provide any values",
+    ):
+        acceptance._validate_private_env_file(str(env_file))
+
+    assert os.environ["PYTHON_DOTENV_DISABLED"] == "1"

@@ -583,7 +583,14 @@ def _validate_private_env_file(raw_path: str) -> Path:
         raise AcceptanceRefusal("--env-file must name a regular non-symlink file")
     if stat.S_IMODE(path.stat().st_mode) != 0o600:
         raise AcceptanceRefusal("--env-file must be owner-only mode 0600")
-    paid_probe._load_env_file(str(path))
+    dotenv_disabled = os.environ.pop("PYTHON_DOTENV_DISABLED", None)
+    try:
+        paid_probe._load_env_file(str(path))
+    finally:
+        if dotenv_disabled is None:
+            os.environ.pop("PYTHON_DOTENV_DISABLED", None)
+        else:
+            os.environ["PYTHON_DOTENV_DISABLED"] = dotenv_disabled
     return path
 
 
