@@ -33,6 +33,13 @@ from murmur.live_scene.projectile_motion_service_contracts import (
 )
 from murmur.live_scene.semantic_contracts import VisualActAbstainReason
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
+from murmur.live_scene.semantic_storyboard_requests import SemanticStoryboardRequestV1
+from murmur.live_scene.semantic_storyboard_service_contracts import (
+    SemanticStoryboardFailureCode,
+    SemanticStoryboardSceneStreamEventV1,
+    SemanticStoryboardSceneStreamFailedEventV1,
+    SemanticStoryboardSceneStreamStartedEventV1,
+)
 
 AUTHENTICATED_USER = {
     "id": "choreography-user",
@@ -71,6 +78,17 @@ def _projectile_request_body() -> dict[str, object]:
         "baseSemanticScene": {"revision": 0, "components": []},
         "routingMode": "reflex",
         "requestedRoute": {"intent": "advance", "targetStage": "setup"},
+    }
+
+
+def _storyboard_request_body() -> dict[str, object]:
+    return {
+        "protocol": "projectile_comparison_storyboard_v1",
+        "problemSpec": {"v": 1, "speedMps": 20, "anglesDeg": [30, 60]},
+        "generation": 14,
+        "baseScene": {"revision": 0, "nodes": []},
+        "baseSemanticScene": {"revision": 0, "components": []},
+        "routingMode": "reflex",
     }
 
 
@@ -113,11 +131,31 @@ def _projectile_events() -> tuple[ProjectileChoreographySceneStreamEventV1, ...]
     )
 
 
+def _storyboard_events() -> tuple[SemanticStoryboardSceneStreamEventV1, ...]:
+    return (
+        SemanticStoryboardSceneStreamStartedEventV1(
+            generation=14,
+            attempt=1,
+            base_revision=0,
+        ),
+        SemanticStoryboardSceneStreamFailedEventV1(
+            generation=14,
+            attempt=1,
+            base_revision=0,
+            code=SemanticStoryboardFailureCode.STORYBOARD_INTEGRITY_ERROR,
+            message="The storyboard could not be certified safely.",
+            last_accepted_revision=0,
+            retryable=False,
+        ),
+    )
+
+
 class FakeChoreographyService:
     def __init__(self) -> None:
         self.requests: list[SemanticLiveSceneRequest] = []
         self.parametric_requests: list[ParametricChoreographyRequestV3] = []
         self.projectile_requests: list[ProjectileMotionRequestV1] = []
+        self.storyboard_requests: list[SemanticStoryboardRequestV1] = []
         self.semantic_calls = 0
 
     async def stream_routed_choreography_events(
@@ -144,10 +182,38 @@ class FakeChoreographyService:
         for event in _projectile_events():
             yield event
 
+    async def stream_semantic_storyboard_events(
+        self,
+        request: SemanticStoryboardRequestV1,
+    ) -> AsyncIterator[SemanticStoryboardSceneStreamEventV1]:
+        self.storyboard_requests.append(request)
+        for event in _storyboard_events():
+            yield event
+
     async def stream_routed_semantic_events(self, _request: object) -> AsyncIterator[object]:
         self.semantic_calls += 1
         if False:
             yield None
+
+
+class _ClosingStoryboardEvents:
+    def __init__(self) -> None:
+        self._events = iter(_storyboard_events())
+        self.closed = False
+
+    def __aiter__(self) -> "_ClosingStoryboardEvents":
+        return self
+
+    async def __anext__(self) -> SemanticStoryboardSceneStreamEventV1:
+        if self.closed:
+            raise StopAsyncIteration
+        try:
+            return next(self._events)
+        except StopIteration:
+            raise StopAsyncIteration from None
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 class RecordingAdmission(SceneAuthoringAdmission):
@@ -189,6 +255,18 @@ def _payloads(response_text: str) -> list[dict[str, Any]]:
     return [
         json.loads(block.removeprefix("data: ")) for block in response_text.split("\n\n") if block
     ]
+
+
+@pytest.mark.asyncio
+async def test_storyboard_encoder_closes_upstream_on_consumer_abort() -> None:
+    events = _ClosingStoryboardEvents()
+    encoded = live_scenes._encode_semantic_storyboard_scene_events(events)
+
+    first = await anext(encoded)
+    assert first.startswith('data: {"type":"semantic_storyboard_scene_stream_started"')
+    await encoded.aclose()
+
+    assert events.closed is True
 
 
 def test_product_choreography_stream_requires_authentication() -> None:
@@ -245,6 +323,23 @@ def test_product_projectile_choreography_stream_requires_authentication() -> Non
     assert service.requests == []
     assert service.parametric_requests == []
     assert service.projectile_requests == []
+    assert admission.identities == []
+
+
+def test_product_storyboard_stream_requires_authentication() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_storyboard_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 401
+    assert service.storyboard_requests == []
     assert admission.identities == []
 
 
@@ -330,6 +425,57 @@ def test_product_projectile_choreography_uses_v1_service_and_encoder() -> None:
     assert admission.identities == [AUTHENTICATED_USER["id"]]
 
 
+def test_product_storyboard_uses_exact_service_and_encoder() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, authenticated=True, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_storyboard_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert [event["type"] for event in _payloads(response.text)] == [
+        "semantic_storyboard_scene_stream_started",
+        "semantic_storyboard_scene_stream_failed",
+    ]
+    assert service.requests == []
+    assert service.parametric_requests == []
+    assert service.projectile_requests == []
+    assert len(service.storyboard_requests) == 1
+    assert (
+        service.storyboard_requests[0].model_dump(mode="json", by_alias=True)
+        == _storyboard_request_body()
+    )
+    assert admission.identities == [AUTHENTICATED_USER["id"]]
+
+
+def test_product_storyboard_rejects_noncanonical_nested_wire_keys() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    body = _storyboard_request_body()
+    body["problemSpec"] = {
+        "v": 1,
+        "speed_mps": 20,
+        "anglesDeg": [30, 60],
+    }
+    client = _client(service, authenticated=True, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=body,
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 422
+    assert service.storyboard_requests == []
+    assert admission.identities == []
+
+
 def test_missing_protocol_remains_the_exact_v2_request() -> None:
     service = FakeChoreographyService()
     client = _client(service, authenticated=True)
@@ -353,6 +499,7 @@ def test_missing_protocol_remains_the_exact_v2_request() -> None:
     [
         (_parametric_request_body(), "parametric_choreography_v999"),
         (_projectile_request_body(), "projectile_choreography_v999"),
+        (_storyboard_request_body(), "projectile_comparison_storyboard_v999"),
     ],
 )
 def test_unknown_protocol_is_not_reinterpreted_as_v2(
@@ -472,6 +619,29 @@ def test_choreography_lab_dispatches_projectile_v1_on_guarded_loopback(monkeypat
     assert admission.identities == [live_scenes._DEVELOPMENT_SCENE_LAB_IDENTITY]
 
 
+def test_choreography_lab_dispatches_storyboard_on_guarded_loopback(monkeypatch) -> None:
+    monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
+    monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
+    service = FakeChoreographyService()
+    admission = RecordingAdmission()
+    client = _client(service, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/lab/choreography/stream",
+            json=_storyboard_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 200
+    assert [event["type"] for event in _payloads(response.text)] == [
+        "semantic_storyboard_scene_stream_started",
+        "semantic_storyboard_scene_stream_failed",
+    ]
+    assert len(service.storyboard_requests) == 1
+    assert admission.identities == [live_scenes._DEVELOPMENT_SCENE_LAB_IDENTITY]
+
+
 def test_choreography_lab_rejects_non_loopback_before_admission(monkeypatch) -> None:
     monkeypatch.setenv("MURMUR_SCENE_LAB", "1")
     monkeypatch.setattr(live_scenes.config, "MURMUR_ENVIRONMENT", "development")
@@ -510,4 +680,21 @@ def test_choreography_capacity_rejection_happens_before_service_call() -> None:
     assert service.requests == []
     assert service.parametric_requests == []
     assert service.projectile_requests == []
+    assert admission.identities == [AUTHENTICATED_USER["id"]]
+
+
+def test_storyboard_admission_rejection_happens_before_service_call() -> None:
+    service = FakeChoreographyService()
+    admission = RecordingAdmission(reject=True)
+    client = _client(service, authenticated=True, admission=admission)
+    try:
+        response = client.post(
+            "/api/live-scenes/choreography/stream",
+            json=_storyboard_request_body(),
+        )
+    finally:
+        client.close()
+
+    assert response.status_code == 429
+    assert service.storyboard_requests == []
     assert admission.identities == [AUTHENTICATED_USER["id"]]

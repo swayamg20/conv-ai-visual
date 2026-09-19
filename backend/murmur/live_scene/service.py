@@ -113,6 +113,14 @@ from murmur.live_scene.semantic_service_contracts import (
     SemanticSceneStreamDeclinedEvent,
     SemanticSceneStreamEvent,
 )
+from murmur.live_scene.semantic_storyboard_requests import SemanticStoryboardRequestV1
+from murmur.live_scene.semantic_storyboard_service import (
+    SemanticStoryboardBeforeProviderDispatch,
+    SemanticStoryboardService,
+)
+from murmur.live_scene.semantic_storyboard_service_contracts import (
+    SemanticStoryboardSceneStreamEventV1,
+)
 from murmur.live_scene.semantic_stream_parser import (
     TeachingBeatStreamError,
     TeachingBeatStreamParser,
@@ -1363,6 +1371,9 @@ class SceneAuthoringService:
         max_tokens: int = 4_096,
         timeout_seconds: float = 20.0,
         before_provider_dispatch: Callable[[], Awaitable[None]] | None = None,
+        semantic_storyboard_before_provider_dispatch: (
+            SemanticStoryboardBeforeProviderDispatch | None
+        ) = None,
     ) -> None:
         if (client is None) == (client_factory is None):
             raise ValueError("provide exactly one of client or client_factory")
@@ -1393,6 +1404,10 @@ class SceneAuthoringService:
             raise ValueError("timeout_seconds must be finite and positive")
         if before_provider_dispatch is not None and not callable(before_provider_dispatch):
             raise TypeError("before_provider_dispatch must be callable")
+        if semantic_storyboard_before_provider_dispatch is not None and not callable(
+            semantic_storyboard_before_provider_dispatch
+        ):
+            raise TypeError("semantic_storyboard_before_provider_dispatch must be callable")
 
         self._client = client
         self._client_factory = client_factory
@@ -1416,6 +1431,15 @@ class SceneAuthoringService:
             max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
             before_provider_dispatch=before_provider_dispatch,
+        )
+        self._semantic_storyboard = SemanticStoryboardService(
+            client=client,
+            client_factory=client_factory,
+            clock=clock,
+            max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds,
+            before_provider_dispatch=before_provider_dispatch,
+            before_director_dispatch=semantic_storyboard_before_provider_dispatch,
         )
         self._cleanup_timeout_seconds = min(
             self._timeout_seconds,
@@ -2020,6 +2044,14 @@ class SceneAuthoringService:
         """Delegate exact Gate 1.7 requests to the focused projectile service."""
 
         return self._projectile_motion.stream_events(request)
+
+    def stream_semantic_storyboard_events(
+        self,
+        request: SemanticStoryboardRequestV1,
+    ) -> AsyncIterator[SemanticStoryboardSceneStreamEventV1]:
+        """Delegate exact Gate 1.8 requests to the focused storyboard service."""
+
+        return self._semantic_storyboard.stream_events(request)
 
     async def stream_routed_semantic_events(
         self,

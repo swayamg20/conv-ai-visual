@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 from murmur.live_scene.parametric_choreography_requests import (
     CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER,
@@ -14,6 +16,11 @@ from murmur.live_scene.projectile_motion_requests import (
     ProjectileMotionReflexRequestV1,
 )
 from murmur.live_scene.semantic_service_contracts import SemanticLiveSceneRequest
+from murmur.live_scene.semantic_storyboard_requests import (
+    PROJECTILE_COMPARISON_STORYBOARD_PROTOCOL,
+    SemanticStoryboardDirectorRequestV1,
+    SemanticStoryboardReflexRequestV1,
+)
 from pydantic import ValidationError
 
 
@@ -60,6 +67,42 @@ def _projectile_director() -> dict[str, object]:
     payload["routingMode"] = "director"
     payload.pop("requestedRoute")
     payload["prompt"] = "Teach the first projectile checkpoint."
+    return payload
+
+
+def _storyboard_reflex() -> dict[str, object]:
+    return {
+        "protocol": PROJECTILE_COMPARISON_STORYBOARD_PROTOCOL,
+        "problemSpec": {"v": 1, "speedMps": 20, "anglesDeg": [30, 60]},
+        "generation": 5,
+        "baseScene": {"revision": 0, "nodes": []},
+        "baseSemanticScene": {"revision": 0, "components": []},
+        "routingMode": "reflex",
+    }
+
+
+def _storyboard_director() -> dict[str, object]:
+    payload = _storyboard_reflex()
+    payload.update(
+        {
+            "routingMode": "director",
+            "prompt": "Trace the lower arc first.",
+            "baseScene": {"revision": 1, "nodes": []},
+            "baseSemanticScene": {
+                "revision": 1,
+                "components": [
+                    {
+                        "v": 1,
+                        "kind": "projectile_comparison_storyboard",
+                        "id": "projectile-comparison",
+                        "problemSpec": payload["problemSpec"],
+                        "acceptedRecords": [],
+                    }
+                ],
+                "certificateHeadSha256": "a" * 64,
+            },
+        }
+    )
     return payload
 
 
@@ -168,11 +211,64 @@ def test_top_level_dispatch_accepts_exact_projectile_protocol_modes(
 
 
 @pytest.mark.parametrize(
+    ("payload", "expected_type"),
+    [
+        (_storyboard_reflex(), SemanticStoryboardReflexRequestV1),
+        (_storyboard_director(), SemanticStoryboardDirectorRequestV1),
+    ],
+)
+def test_top_level_dispatch_accepts_exact_storyboard_protocol_modes(
+    payload: dict[str, object],
+    expected_type: type[SemanticStoryboardReflexRequestV1 | SemanticStoryboardDirectorRequestV1],
+) -> None:
+    decoded = CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER.validate_python(payload)
+
+    assert isinstance(decoded, expected_type)
+    assert decoded.model_dump(mode="json", by_alias=True) == payload
+
+
+@pytest.mark.parametrize(
+    ("path", "canonical_key", "python_key"),
+    [
+        ((), "routingMode", "routing_mode"),
+        (("problemSpec",), "speedMps", "speed_mps"),
+        (("baseScene",), "revision", "base_revision"),
+        (
+            ("baseSemanticScene",),
+            "certificateHeadSha256",
+            "certificate_head_sha256",
+        ),
+        (
+            ("baseSemanticScene", "components", 0),
+            "acceptedRecords",
+            "accepted_records",
+        ),
+    ],
+)
+def test_top_level_storyboard_arm_rejects_python_names_at_every_wire_layer(
+    path: tuple[str | int, ...],
+    canonical_key: str,
+    python_key: str,
+) -> None:
+    payload = deepcopy(_storyboard_director())
+    target: object = payload
+    for segment in path:
+        target = target[segment]  # type: ignore[index]
+    assert isinstance(target, dict)
+    target[python_key] = target.pop(canonical_key)
+
+    with pytest.raises(ValidationError):
+        CHOREOGRAPHY_LIVE_SCENE_REQUEST_ADAPTER.validate_python(payload)
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {**_projectile_reflex(), "protocol": "projectile_choreography_v99"},
         {key: value for key, value in _projectile_reflex().items() if key != "protocol"},
         {**_projectile_reflex(), "problemText": "x² + 8x = 20"},
+        {**_storyboard_reflex(), "protocol": "projectile_comparison_storyboard_v2"},
+        {**_storyboard_reflex(), "prompt": "Reflex must remain provider-free."},
         {
             **_reflex(),
             "problemSpec": {"v": 1, "speedMps": 20, "angleDeg": 45},
