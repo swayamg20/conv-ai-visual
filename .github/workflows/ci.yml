@@ -7,6 +7,7 @@ on:
       - "codex/gate15-*"
       - "codex/gate16-*"
       - "codex/gate17-*"
+      - "codex/gate18-*"
   pull_request:
   workflow_dispatch:
 
@@ -284,6 +285,65 @@ jobs:
         with:
           name: projectile-motion-${{ github.run_id }}-${{ github.run_attempt }}
           path: var/projectile-motion-e2e/
+          if-no-files-found: error
+          retention-days: 7
+
+  semantic_storyboard:
+    name: Provider-free semantic storyboard proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SEMANTIC_STORYBOARD_EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out exact semantic storyboard source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Test semantic storyboard artifact validation
+        run: npm run test:semantic-storyboard-artifacts
+
+      - name: Prepare semantic storyboard artifacts
+        run: npm run prepare:semantic-storyboard-artifacts
+
+      - name: Run accelerated semantic storyboard proof
+        run: npm run e2e:semantic-storyboard
+
+      - name: Capture normal-speed semantic storyboard proof
+        run: npm run e2e:semantic-storyboard:capture
+
+      - name: Run authenticated semantic storyboard product smoke
+        run: npm run e2e:semantic-storyboard:product-smoke
+
+      - name: Finalize semantic storyboard artifact manifest
+        run: npm run finalize:semantic-storyboard-artifacts
+
+      - name: Validate semantic storyboard artifacts
+        run: npm run validate:semantic-storyboard-artifacts
+
+      - name: Upload semantic storyboard proof artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: semantic-storyboard-${{ github.run_id }}-${{ github.run_attempt }}
+          path: var/semantic-storyboard-e2e/
           if-no-files-found: error
           retention-days: 7
 

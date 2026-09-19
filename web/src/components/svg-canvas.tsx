@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -14,6 +15,11 @@ import rough from "roughjs";
 import type { RoughSVG } from "roughjs/bin/svg";
 
 import { saveCanvasImage } from "@/features/canvas/export-image";
+import {
+  computeExactCameraClipInsets,
+  exactCameraClipPath,
+  type RenderedSvgViewport,
+} from "@/features/canvas/exact-camera-clip";
 import {
   normalizeOperation,
   normalizeTeachingSteps,
@@ -59,6 +65,11 @@ function sequenceFocus(steps: TeachingStep[]): { x: number; y: number } | null {
   };
 }
 
+function computedBorderWidth(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
   (
     {
@@ -69,6 +80,7 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       viewportInteractionLocked = false,
       reducedMotion = false,
       choreographyPlaybackRate = 1,
+      exactCameraClip = false,
     },
     ref,
   ) => {
@@ -82,6 +94,31 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
     const isPlayingRef = useRef(false);
     const [, forceRender] = useState(0);
     const paletteRef = useRef(getCanvasPalette());
+    const cameraPoseRef = useRef({
+      v: 1 as const,
+      x: 0,
+      y: 0,
+      width,
+      height,
+    });
+    const renderedViewportRef = useRef<RenderedSvgViewport | null>(null);
+    const applyExactCameraClip = useCallback(
+      (pose = cameraPoseRef.current): void => {
+        cameraPoseRef.current = pose;
+        const svg = svgRef.current;
+        if (!svg) return;
+        if (!exactCameraClip) {
+          svg.style.removeProperty("clip-path");
+          return;
+        }
+        const rendered = renderedViewportRef.current;
+        if (!rendered) return;
+        svg.style.clipPath = exactCameraClipPath(
+          computeExactCameraClipInsets(rendered, pose),
+        );
+      },
+      [exactCameraClip],
+    );
     const {
       animateViewport,
       applyViewBox,
@@ -105,7 +142,65 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
       width,
       height,
       interactionLocked: viewportInteractionLocked,
+      onViewportPoseWrite: exactCameraClip ? applyExactCameraClip : undefined,
     });
+
+    useLayoutEffect(() => {
+      const svg = svgRef.current;
+      if (!svg) return;
+      if (!exactCameraClip) {
+        renderedViewportRef.current = null;
+        svg.style.removeProperty("clip-path");
+        return;
+      }
+      cameraPoseRef.current = readViewport();
+
+      const measure = (): void => {
+        const bounds = svg.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0) return;
+        const style = getComputedStyle(svg);
+        // CSSOM client metrics are integer longs. Use them only as fallbacks so
+        // fractional responsive layouts cannot leave a sub-pixel camera leak.
+        const fallbackRight = Math.max(
+          0,
+          bounds.width - svg.clientLeft - svg.clientWidth,
+        );
+        const fallbackBottom = Math.max(
+          0,
+          bounds.height - svg.clientTop - svg.clientHeight,
+        );
+        const left = computedBorderWidth(style.borderLeftWidth, svg.clientLeft);
+        const top = computedBorderWidth(style.borderTopWidth, svg.clientTop);
+        const right = computedBorderWidth(
+          style.borderRightWidth,
+          fallbackRight,
+        );
+        const bottom = computedBorderWidth(
+          style.borderBottomWidth,
+          fallbackBottom,
+        );
+        const clientWidth = bounds.width - left - right;
+        const clientHeight = bounds.height - top - bottom;
+        if (clientWidth <= 0 || clientHeight <= 0) return;
+        renderedViewportRef.current = {
+          borderBoxWidth: bounds.width,
+          borderBoxHeight: bounds.height,
+          clientLeft: left,
+          clientTop: top,
+          clientWidth,
+          clientHeight,
+        };
+        applyExactCameraClip();
+      };
+      measure();
+
+      if (typeof ResizeObserver !== "function") return;
+      const observer = new ResizeObserver((entries) => {
+        if (entries.some((candidate) => candidate.target === svg)) measure();
+      });
+      observer.observe(svg);
+      return () => observer.disconnect();
+    }, [applyExactCameraClip, exactCameraClip, height, readViewport, width]);
 
     useEffect(() => {
       const refreshPalette = () => {
@@ -735,6 +830,8 @@ export const SVGCanvas = forwardRef<SVGCanvasHandle, SVGCanvasProps>(
           width={width}
           height={height}
           viewBox={`0 0 ${width} ${height}`}
+          preserveAspectRatio="xMidYMid meet"
+          data-exact-camera-clip={exactCameraClip ? "true" : undefined}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}

@@ -3,9 +3,10 @@
 import json
 import logging
 from collections.abc import AsyncGenerator
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from murmur.core.async_cleanup import close_async_resource
+from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
 from murmur.llm.base import LLMClient
 from murmur.tools.contracts import ToolCall
 
@@ -15,6 +16,49 @@ logger = logging.getLogger(__name__)
 async def _close_provider_resource(resource: object | None) -> None:
     if not await close_async_resource(resource):
         logger.warning("OpenAI provider resource cleanup did not finish cleanly")
+
+
+def _normalized_provider_error(error: Exception) -> LLMProviderError | None:
+    """Classify OpenAI SDK failures without retaining provider text or response data."""
+
+    from openai import (
+        APIConnectionError,
+        APIStatusError,
+        APITimeoutError,
+        OpenAIError,
+    )
+
+    if isinstance(error, APITimeoutError):
+        kind = LLMProviderFailureKind.TIMEOUT
+    elif isinstance(error, APIConnectionError):
+        kind = LLMProviderFailureKind.CONNECTION
+    elif isinstance(error, APIStatusError):
+        if error.status_code == 429:
+            kind = LLMProviderFailureKind.RATE_LIMITED
+        elif error.status_code == 401:
+            kind = LLMProviderFailureKind.AUTHENTICATION
+        elif error.status_code == 403:
+            kind = LLMProviderFailureKind.PERMISSION
+        elif error.status_code in {408, 504}:
+            kind = LLMProviderFailureKind.TIMEOUT
+        elif error.status_code in {400, 404, 409, 422}:
+            kind = LLMProviderFailureKind.INVALID_REQUEST
+        elif error.status_code >= 500:
+            kind = LLMProviderFailureKind.SERVER
+        else:
+            kind = LLMProviderFailureKind.UNKNOWN
+    elif isinstance(error, OpenAIError):
+        kind = LLMProviderFailureKind.UNKNOWN
+    else:
+        return None
+    return LLMProviderError(kind)
+
+
+def _raise_provider_error(operation: str, error: LLMProviderError) -> NoReturn:
+    """Raise only an already-sanitized error outside the SDK exception frame."""
+
+    logger.error("OpenAI %s failed (%s)", operation, error.kind.value)
+    raise error from None
 
 
 class OpenAIClient(LLMClient):
@@ -85,6 +129,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> str:
         """Non-streaming completion."""
+        provider_error: LLMProviderError | None = None
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -93,9 +138,12 @@ class OpenAIClient(LLMClient):
                 **self._request_params(max_tokens, kwargs),
             )
             return (response.choices[0].message.content or "").strip()
-        except Exception as e:
-            logger.exception(f"OpenAI completion error: {e}")
-            raise
+        except Exception as error:
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI completion failed (unclassified)")
+                raise
+        _raise_provider_error("completion", provider_error)
 
     async def stream(
         self,
@@ -106,6 +154,7 @@ class OpenAIClient(LLMClient):
     ) -> AsyncGenerator[str, None]:
         """Streaming completion."""
         stream = None
+        provider_error: LLMProviderError | None = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -118,11 +167,15 @@ class OpenAIClient(LLMClient):
             async for chunk in stream:
                 if chunk.choices and chunk.choices[0].delta.content:
                     yield chunk.choices[0].delta.content
-        except Exception as e:
-            logger.exception(f"OpenAI stream error: {e}")
-            raise
+        except Exception as error:
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI stream failed (unclassified)")
+                raise
         finally:
             await _close_provider_resource(stream)
+        if provider_error is not None:
+            _raise_provider_error("stream", provider_error)
 
     async def complete_with_tools(
         self,
@@ -133,6 +186,7 @@ class OpenAIClient(LLMClient):
         **kwargs,
     ) -> Any:
         """Non-streaming completion with tools."""
+        provider_error: LLMProviderError | None = None
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -142,9 +196,12 @@ class OpenAIClient(LLMClient):
                 **self._request_params(max_tokens, kwargs),
             )
             return response
-        except Exception as e:
-            logger.exception(f"OpenAI completion with tools error: {e}")
-            raise
+        except Exception as error:
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI completion with tools failed (unclassified)")
+                raise
+        _raise_provider_error("completion with tools", provider_error)
 
     async def stream_with_tools(
         self,
@@ -156,6 +213,7 @@ class OpenAIClient(LLMClient):
     ) -> AsyncGenerator[Any, None]:
         """Streaming completion with tools."""
         stream = None
+        provider_error: LLMProviderError | None = None
         try:
             stream = await self.client.chat.completions.create(
                 model=self.model,
@@ -168,11 +226,15 @@ class OpenAIClient(LLMClient):
 
             async for chunk in stream:
                 yield chunk
-        except Exception as e:
-            logger.exception(f"OpenAI stream with tools error: {e}")
-            raise
+        except Exception as error:
+            provider_error = _normalized_provider_error(error)
+            if provider_error is None:
+                logger.error("OpenAI stream with tools failed (unclassified)")
+                raise
         finally:
             await _close_provider_resource(stream)
+        if provider_error is not None:
+            _raise_provider_error("stream with tools", provider_error)
 
     async def aclose(self) -> None:
         """Close the owned OpenAI-compatible HTTP client."""
