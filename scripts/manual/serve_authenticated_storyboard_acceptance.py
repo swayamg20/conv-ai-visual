@@ -39,7 +39,9 @@ from scripts.manual import probe_semantic_storyboard as paid_probe  # noqa: E402
 
 VAR_ROOT = (PROJECT_ROOT / "var" / "live-scene" / "evaluations").resolve()
 
-ACTIVE_LIVE_ACCEPTANCE_AUTHORIZATION_ID: str | None = None
+ACTIVE_LIVE_ACCEPTANCE_AUTHORIZATION_ID: str | None = (
+    "gate18-live-e67042cb-5a56-4173-8e90-196649f7db32"
+)
 AUTHORIZED_MAX_COST_NANO_USD = 10_000_000
 MAX_PROVIDER_CALLS = 2
 MAX_OUTPUT_TOKENS = paid_probe.MAX_OUTPUT_TOKENS
