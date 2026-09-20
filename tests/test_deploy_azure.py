@@ -455,6 +455,29 @@ def test_key_vault_writer_reconciles_an_accepted_delete_timeout(
     deploy._revoke_key_vault_write(KEY_VAULT_ID, assignment, attempts=1)
 
 
+def test_deployment_lock_show_uses_the_blob_show_name_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[str] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> object:
+        observed.extend(command)
+        return {"name": "azure-pilot.lock", "type": "BlockBlob"}
+
+    monkeypatch.setattr(deploy, "_run_json", fake_run)
+
+    deploy._show_deployment_lock_blob(
+        account_name="murmurlockaccount",
+        container_name="deployment-locks",
+        blob_name="azure-pilot.lock",
+        subscription_id=SUBSCRIPTION_ID,
+    )
+
+    assert "--name" in observed
+    assert observed[observed.index("--name") + 1] == "azure-pilot.lock"
+    assert "--blob-name" not in observed
+
+
 def test_deployment_lease_reconciles_accepted_acquire_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
