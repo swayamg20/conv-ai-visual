@@ -107,7 +107,8 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
     secrets: list[dict[str, str]] = []
     volumes: list[dict[str, str]] = []
     mounts: list[dict[str, str]] = []
-    identity_id = "/subscriptions/sub/resourceGroups/rg/providers/identity"
+    identity_id = "/subscriptions/sub/resourcegroups/rg/providers/identity"
+    reference_identity_id = "/subscriptions/sub/resourceGroups/rg/providers/identity"
     if backend:
         env.extend(
             (
@@ -124,7 +125,7 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
             {
                 "name": secret_name,
                 "keyVaultUrl": f"https://murmur-vault.vault.azure.net/secrets/{secret_name}",
-                "identity": identity_id,
+                "identity": reference_identity_id,
                 **({"value": AZURE_KEY} if inline_secret and index == 0 else {}),
             }
             for index, secret_name in enumerate(
@@ -151,7 +152,9 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                 "registries": [
                     {
                         "server": "murmurregistry.azurecr.io",
-                        "identity": identity_id,
+                        "identity": reference_identity_id,
+                        "username": "",
+                        "passwordSecretRef": "",
                     }
                 ],
                 "ingress": {
@@ -546,6 +549,18 @@ def test_inspect_backend_refuses_inline_secret(monkeypatch: pytest.MonkeyPatch) 
         deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
 
     assert AZURE_KEY not in str(raised.value)
+
+
+def test_inspect_backend_refuses_registry_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _container_app(backend=True)
+    registry = app["properties"]["configuration"]["registries"][0]  # type: ignore[index]
+    registry["username"] = "unexpected-user"  # type: ignore[index]
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="identity-based ACR pull"):
+        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
 
 
 def test_inspect_backend_refuses_ephemeral_database_path(

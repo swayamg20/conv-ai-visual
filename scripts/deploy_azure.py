@@ -226,6 +226,16 @@ def _require_revision_name(value: str, label: str) -> str:
     return value
 
 
+def _same_azure_resource_id(left: object, right: object) -> bool:
+    """Compare Azure resource IDs using Azure's case-insensitive semantics."""
+
+    return (
+        isinstance(left, str)
+        and isinstance(right, str)
+        and left.rstrip("/").casefold() == right.rstrip("/").casefold()
+    )
+
+
 def _validate_https_url(value: str, label: str) -> str:
     try:
         parsed = urllib.parse.urlsplit(value)
@@ -1157,7 +1167,7 @@ def _inspect_app(
     if not isinstance(raw_identities, dict) or len(raw_identities) != 1:
         raise DeploymentRefusal(f"Container App {name} identity assignment is invalid")
     identity_id = next(iter(raw_identities))
-    if not isinstance(identity_id, str) or not identity_id.startswith("/subscriptions/"):
+    if not isinstance(identity_id, str) or not identity_id.casefold().startswith("/subscriptions/"):
         raise DeploymentRefusal(f"Container App {name} identity resource ID is invalid")
     properties = app.get("properties")
     if not isinstance(properties, dict):
@@ -1201,9 +1211,9 @@ def _inspect_app(
     if (
         not isinstance(registry, dict)
         or registry.get("server") != registry_server
-        or registry.get("identity") != identity_id
-        or "username" in registry
-        or "passwordSecretRef" in registry
+        or not _same_azure_resource_id(registry.get("identity"), identity_id)
+        or registry.get("username") not in {None, ""}
+        or registry.get("passwordSecretRef") not in {None, ""}
     ):
         raise DeploymentRefusal(f"Container App {name} does not use identity-based ACR pull")
     env = _env_map(container)
@@ -1242,7 +1252,7 @@ def _inspect_app(
             if (
                 not isinstance(key_vault_url, str)
                 or not isinstance(identity, str)
-                or identity != identity_id
+                or not _same_azure_resource_id(identity, identity_id)
             ):
                 raise DeploymentRefusal(f"Container App {name} Key Vault reference is incomplete")
             parsed = urllib.parse.urlsplit(key_vault_url)
