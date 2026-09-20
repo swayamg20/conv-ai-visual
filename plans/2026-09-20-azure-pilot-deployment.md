@@ -37,6 +37,7 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - The first backend revision exited before serving because Mem0 initializes client metadata below the process home and the non-root container user intentionally had no home directory. The image remains non-root but now creates and owns `/home/murmur`, giving third-party initialization a bounded writable location.
 - Restarting a newly created revision before its first replica became ready caused Container Apps to overlap two backend replicas during SQLite schema initialization, producing a real `database is locked` failure despite the steady-state `maxReplicas: 1` contract. Deployment now lets the immutable new revision start once; restart persistence is tested only after the app is healthy and quiescent.
 - After all replicas were terminated, Azure Files still returned `database is locked` for a single process creating the first table. The share contained only a zero-byte bootstrap file, which was removed with no user data loss. The persistent-SQLite design was rejected rather than weakened with unsafe lock suppression.
+- ACR completed both immutable image builds but its registry endpoint briefly failed during the immediate manifest lookup. Digest resolution now has a small bounded retry window; it still refuses to deploy unless the final value is a valid `sha256` digest.
 
 ## Decision Log
 

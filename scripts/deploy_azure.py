@@ -789,25 +789,33 @@ def _acr_build(
         timeout_seconds=3600,
         operation=f"build ACR image {repository}",
     )
-    digest = _run_command(
-        [
-            "az",
-            "acr",
-            "repository",
-            "show",
-            "--name",
-            registry_name,
-            "--image",
-            f"{repository}:{release_sha}",
-            "--query",
-            "digest",
-            "--output",
-            "tsv",
-            "--only-show-errors",
-        ],
-        timeout_seconds=60,
-        operation=f"resolve ACR image digest {repository}",
-    ).strip()
+    digest = ""
+    for attempt in range(5):
+        try:
+            digest = _run_command(
+                [
+                    "az",
+                    "acr",
+                    "repository",
+                    "show",
+                    "--name",
+                    registry_name,
+                    "--image",
+                    f"{repository}:{release_sha}",
+                    "--query",
+                    "digest",
+                    "--output",
+                    "tsv",
+                    "--only-show-errors",
+                ],
+                timeout_seconds=60,
+                operation=f"resolve ACR image digest {repository}",
+            ).strip()
+            break
+        except DeploymentRefusal:
+            if attempt == 4:
+                raise
+            time.sleep(2**attempt)
     if not _IMAGE_DIGEST.fullmatch(digest):
         raise DeploymentRefusal(f"ACR returned an invalid image digest for {repository}")
     return digest

@@ -411,17 +411,23 @@ def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
     context = tmp_path / "context"
     context.mkdir()
     observed: list[str] = []
+    digest_attempts = 0
 
     def fake_run(command: Any, **kwargs: Any) -> str:
+        nonlocal digest_attempts
         if command[1:3] == ["acr", "build"]:
             observed.extend(command)
             assert kwargs["operation"] == "build ACR image murmur-api"
             assert kwargs["cwd"] == context
             return ""
         assert command[1:4] == ["acr", "repository", "show"]
+        digest_attempts += 1
+        if digest_attempts == 1:
+            raise deploy.DeploymentRefusal("transient registry lookup")
         return f"{DIGEST}\n"
 
     monkeypatch.setattr(deploy, "_run_command", fake_run)
+    monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
 
     digest = deploy._acr_build(
         registry_name="murmurregistry",
@@ -437,6 +443,7 @@ def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
     assert observed[observed.index("--platform") + 1] == "linux/amd64"
     assert observed[-1] == "."
     assert digest == DIGEST
+    assert digest_attempts == 2
     assert AZURE_KEY not in observed
     assert PRIVATE_KEY not in observed
 
