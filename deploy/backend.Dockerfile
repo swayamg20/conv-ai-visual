@@ -22,8 +22,7 @@ RUN groupadd --gid 10001 murmur \
     && chown murmur:murmur /data
 
 COPY requirements.txt ./requirements.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python -m pip install --require-hashes --no-deps -r requirements.txt
+RUN python -m pip install --require-hashes --no-deps -r requirements.txt
 
 COPY --chown=murmur:murmur backend ./backend
 COPY --chown=murmur:murmur main.py ./main.py

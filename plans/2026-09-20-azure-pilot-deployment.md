@@ -32,6 +32,7 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - The enabled subscription already supports Container Apps in Central India, but no Murmur resource group or hosting resource exists. The existing Container Apps environment belongs to AgentRelay and will not be reused.
 - The first foundation deployment failed before completion because the current Key Vault API rejects an explicit `enablePurgeProtection: false`; omitting that optional property preserves the intended default and makes the template portable.
 - Azure Container Apps retains the submitted image reference, so a git-SHA tag alone is not an immutable deployment postcondition. The driver resolves each completed ACR build to its manifest digest and the application template deploys `repository@sha256:...`, while the full git SHA remains explicit release metadata.
+- Azure ACR Quick Build currently uses the classic Docker builder for this registry, so a BuildKit-only `RUN --mount=type=cache` instruction fails before dependency installation. The backend image uses the same hash-locked install without the optional cache mount; correctness is unchanged and remote layer caching still applies.
 
 ## Decision Log
 
