@@ -20,10 +20,7 @@ param frontendAppName string = 'murmur-web'
 
 var uniqueSuffix = uniqueString(subscription().id, resourceGroup().id)
 var registryName = 'murmur${uniqueSuffix}'
-var storageAccountName = 'murmur${uniqueSuffix}'
 var keyVaultName = 'murmur-${uniqueSuffix}-kv'
-var dataShareName = 'murmur-data'
-var environmentStorageName = 'murmur-data'
 
 var acrPullRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -114,50 +111,6 @@ resource keyVaultRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageAccountName
-  location: location
-  kind: 'StorageV2'
-  sku: {
-    name: 'Standard_LRS'
-  }
-  properties: {
-    accessTier: 'Hot'
-    allowBlobPublicAccess: false
-    allowSharedKeyAccess: true
-    minimumTlsVersion: 'TLS1_2'
-    publicNetworkAccess: 'Enabled'
-    supportsHttpsTrafficOnly: true
-  }
-}
-
-resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01' = {
-  name: 'default'
-  parent: storage
-}
-
-resource dataShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
-  name: dataShareName
-  parent: fileService
-  properties: {
-    accessTier: 'TransactionOptimized'
-    shareQuota: 5
-  }
-}
-
-resource environmentStorage 'Microsoft.App/managedEnvironments/storages@2024-03-01' = {
-  name: environmentStorageName
-  parent: environment
-  properties: {
-    azureFile: {
-      accountKey: storage.listKeys().keys[0].value
-      accountName: storage.name
-      accessMode: 'ReadWrite'
-      shareName: dataShare.name
-    }
-  }
-}
-
 output environmentId string = environment.id
 output environmentName string = environment.name
 output environmentDefaultDomain string = environment.properties.defaultDomain
@@ -169,7 +122,5 @@ output registryLoginServer string = registry.properties.loginServer
 output keyVaultId string = keyVault.id
 output keyVaultName string = keyVault.name
 output keyVaultUri string = keyVault.properties.vaultUri
-output storageAccountName string = storage.name
-output environmentStorageName string = environmentStorage.name
 output backendUrl string = 'https://${backendAppName}.${environment.properties.defaultDomain}'
 output frontendUrl string = 'https://${frontendAppName}.${environment.properties.defaultDomain}'

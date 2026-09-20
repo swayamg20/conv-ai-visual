@@ -7,7 +7,6 @@ param environmentName string = 'murmur-pilot-env'
 param identityName string = 'murmur-pilot-identity'
 param backendAppName string = 'murmur-api'
 param frontendAppName string = 'murmur-web'
-param environmentStorageName string = 'murmur-data'
 
 @description('Immutable backend image including its full registry host and manifest digest.')
 param backendImage string
@@ -115,11 +114,11 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               name: 'MURMUR_DATA_DIR'
-              value: '/data'
+              value: '/home/murmur/data'
             }
             {
               name: 'MURMUR_SQLITE_JOURNAL_MODE'
-              value: 'DELETE'
+              value: 'WAL'
             }
             {
               name: 'ALLOWED_CORS_ORIGINS'
@@ -231,12 +230,6 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
             cpu: json('0.5')
             memory: '1Gi'
           }
-          volumeMounts: [
-            {
-              mountPath: '/data'
-              volumeName: 'murmur-data'
-            }
-          ]
         }
       ]
       scale: {
@@ -253,13 +246,6 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
           }
         ]
       }
-      volumes: [
-        {
-          name: 'murmur-data'
-          storageName: environmentStorageName
-          storageType: 'AzureFile'
-        }
-      ]
     }
   }
 }

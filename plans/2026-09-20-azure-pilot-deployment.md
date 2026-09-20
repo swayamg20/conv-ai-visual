@@ -4,7 +4,7 @@
 
 This plan deploys the real Murmur web application and API, rather than only using an Azure-hosted language model from a developer laptop. A user will receive an HTTPS frontend URL, sign in with the existing Firebase project, open the real-time storyboard experience, and send authenticated requests to an HTTPS FastAPI backend. The backend will call the already-qualified `murmur-gpt-oss-120b` Azure model without exposing its key to the browser.
 
-This is a deliberately bounded single-replica pilot for the visual product. It deploys the Next.js frontend and the FastAPI backend to Azure Container Apps in Central India. It does not claim that the separate voice-media pipeline is production-qualified on Container Apps. Durable multi-replica production remains a later PostgreSQL and distributed-admission milestone.
+This is a deliberately bounded single-replica, non-durable pilot for the visual product. It deploys the Next.js frontend and the FastAPI backend to Azure Container Apps in Central India. It does not claim that the separate voice-media pipeline is production-qualified on Container Apps, and stored agents or history may reset when the backend scales down or is redeployed. Durable use remains a PostgreSQL and distributed-admission milestone.
 
 ## Progress
 
@@ -16,10 +16,10 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - [x] 2026-09-20 13:08 IST: Added reproducible non-root backend/frontend images and validated both Azure Bicep templates.
 - [x] 2026-09-20 13:42 IST: Added a redaction-safe deployment driver that imports existing local credentials into Key Vault and never prints them.
 - [x] 2026-09-20 13:42 IST: Passed deployment-driver lint, formatting, 21 focused tests, Python compilation, both Bicep builds, and diff checks. Earlier application checks passed 239 backend checks plus the complete 1,298-test frontend suite and production build; local container execution remains unavailable because Docker Desktop is stopped, so Azure ACR performs the image builds.
-- [ ] Commit and push coherent milestones to `codex/azure-app-deployment`. First application-readiness commit `87aa7d0` is pushed; infrastructure/deployment and live-evidence commits remain.
-- [ ] Provision the isolated `murmur-pilot-rg` Azure resources and build immutable images from the accepted commit. The tagged Central India foundation resources are live and healthy; the ACR builds and digest-pinned application revisions remain.
-- [ ] Add the deployed frontend hostname to Firebase Authentication authorized domains.
-- [ ] Verify HTTPS health, readiness, CORS, persistence across an API revision restart, authenticated UI loading, and the Gate 1.8 request path without an unbudgeted model corpus.
+- [x] 2026-09-20 14:30 IST: Committed and pushed application readiness, reproducible infrastructure, ACR compatibility, Azure metadata normalization, non-root runtime-home, and safe rollout fixes to `codex/azure-app-deployment`.
+- [ ] Provision the isolated `murmur-pilot-rg` Azure resources and build immutable images from the accepted commit. The Central India foundation, both Container Apps, and digest-pinned images exist; the final local-SQLite revision and live acceptance remain.
+- [x] 2026-09-20 14:30 IST: Added the deployed frontend hostname to Firebase Authentication authorized domains through the Identity Toolkit Admin API and confirmed the returned configuration.
+- [ ] Verify HTTPS health, readiness, CORS, authenticated UI loading, and the Gate 1.8 request path without an unbudgeted model corpus. Persistence is explicitly out of scope for this low-cost pilot after Azure Files incompatibility was proven live.
 - [ ] Open, review, and merge the deployment pull request, then prove the live revision corresponds to merged `main`.
 
 ## Surprises & Discoveries
@@ -28,7 +28,7 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - `web/src/hooks/use-chat.ts` and `web/src/hooks/use-webrtc.ts` defaulted directly to `http://localhost:8000`; cloud users of `/canvas` and `/session/[agentId]` would therefore call their own machines even though the storyboard route already used `NEXT_PUBLIC_API_URL`.
 - Firebase Admin accepted only a local credential-file path. Azure managed identity is not a Google credential, so the existing service-account JSON must be injected as an Azure Key Vault-backed secret rather than baked into an image.
 - The production scene runtime has process-local request admission, while the more precise 12,000-token-per-minute reservation lives in the manual Gate 1.8 harness. The pilot must run one worker and one replica with conservative scene limits.
-- SQLite currently enables write-ahead logging. SQLite documents that WAL does not work over a network filesystem, while Container Apps persistent storage is an Azure Files mount. The pilot therefore needs an explicit rollback-journal setting and a one-replica invariant. PostgreSQL is required before horizontal scale.
+- SQLite on the SMB-backed Azure Files mount failed with `database is locked` on a fresh zero-byte database even after all other replicas were terminated. Rollback journaling does not make this storage/database pairing safe. The low-cost visual pilot now uses local ephemeral SQLite with WAL; PostgreSQL is required for any durable deployment.
 - The enabled subscription already supports Container Apps in Central India, but no Murmur resource group or hosting resource exists. The existing Container Apps environment belongs to AgentRelay and will not be reused.
 - The first foundation deployment failed before completion because the current Key Vault API rejects an explicit `enablePurgeProtection: false`; omitting that optional property preserves the intended default and makes the template portable.
 - Azure Container Apps retains the submitted image reference, so a git-SHA tag alone is not an immutable deployment postcondition. The driver resolves each completed ACR build to its manifest digest and the application template deploys `repository@sha256:...`, while the full git SHA remains explicit release metadata.
@@ -36,6 +36,7 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - The Container Apps control plane serializes the same managed-identity resource ID with different casing in the app identity map and its ACR/Key Vault references, and emits empty registry credential fields. Verification therefore compares Azure resource IDs case-insensitively and rejects non-empty credentials instead of rejecting Azure's normalized representation.
 - The first backend revision exited before serving because Mem0 initializes client metadata below the process home and the non-root container user intentionally had no home directory. The image remains non-root but now creates and owns `/home/murmur`, giving third-party initialization a bounded writable location.
 - Restarting a newly created revision before its first replica became ready caused Container Apps to overlap two backend replicas during SQLite schema initialization, producing a real `database is locked` failure despite the steady-state `maxReplicas: 1` contract. Deployment now lets the immutable new revision start once; restart persistence is tested only after the app is healthy and quiescent.
+- After all replicas were terminated, Azure Files still returned `database is locked` for a single process creating the first table. The share contained only a zero-byte bootstrap file, which was removed with no user data loss. The persistent-SQLite design was rejected rather than weakened with unsafe lock suppression.
 
 ## Decision Log
 
@@ -44,14 +45,14 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - 2026-09-20, Codex: Use Azure Container Registry with a shared user-assigned identity and `AcrPull`, rather than registry passwords in app configuration.
 - 2026-09-20, Codex: Store the Azure model key and Firebase service-account JSON in Azure Key Vault. Container Apps reads versionless Key Vault references through the managed identity, so secrets do not enter source control, image layers, or normal deployment output.
 - 2026-09-20, Codex: Keep the pilot at one Uvicorn worker and `maxReplicas: 1`. Start with `minReplicas: 0` to bound idle compute cost; the first request may cold-start. Raise the backend minimum to one only after latency and recurring cost are explicitly accepted.
-- 2026-09-20, Codex: Persist the pilot SQLite database on Azure Files with rollback journaling, never WAL, and prove data survives a revision restart. This is a bounded pilot compromise, not the multi-replica database architecture.
+- 2026-09-20, Codex: Do not run SQLite on Azure Files. For the cost-bounded visual acceptance pilot, keep SQLite local and ephemeral and clearly surface the limitation; add managed PostgreSQL before relying on stored agents, history, restart persistence, or multiple replicas.
 - 2026-09-20, Codex: Configure the qualified Azure model for chat and scenes, cap scene output at 2,048 tokens, and set global/per-user concurrency to one. Production scene dispatch starts at one per minute until token-window admission is promoted from the acceptance harness.
 - 2026-09-20, Codex: Deployment acceptance covers authenticated text/visual operation. Voice transport qualification stays in the separate voice track because Container Apps HTTP ingress is not proof of browser WebRTC/TURN behavior.
 - 2026-09-20, Codex: Build a git-SHA tag for traceability but deploy its resolved ACR manifest digest. A rerun can therefore never silently move the bytes behind a live Container Apps revision.
 
 ## Outcomes & Retrospective
 
-No Azure application resources have been created yet. This section will be updated with the deployed URLs, immutable image tags, verification evidence, recurring-cost posture, and any remaining limitations after acceptance.
+The isolated Azure foundation, ACR images, Key Vault references, Firebase authorized domain, and both Container Apps now exist. Live acceptance is still pending a healthy revision after replacing the rejected Azure Files/SQLite pairing with local ephemeral storage.
 
 ## Context and Orientation
 
@@ -59,19 +60,19 @@ No Azure application resources have been created yet. This section will be updat
 
 `web/` is a Next.js 16 application. `web/src/lib/api.ts` owns the configured API base URL and `web/src/lib/firebase.ts` owns the public Firebase browser configuration. The public Firebase values and backend URL are compiled into the Next.js browser bundle at image-build time; they are not server-only runtime settings. `web/src/features/live-scene/live-semantic-storyboard.tsx` is the Gate 1.8 product surface.
 
-`infra/azure/` will contain Bicep templates for the resource group contents. The foundation will create a Log Analytics workspace, Container Apps environment, Basic Azure Container Registry, Key Vault, storage account and Azure Files share, and a user-assigned identity with narrowly scoped pull and secret-read roles. Application templates will create the public backend and frontend Container Apps. `scripts/deploy_azure.py` will orchestrate repeatable deployment without emitting secret values.
+`infra/azure/` contains Bicep templates for the resource group contents. The foundation creates a Log Analytics workspace, Container Apps environment, Basic Azure Container Registry, Key Vault, and a user-assigned identity with narrowly scoped pull and secret-read roles. Application templates create the public backend and frontend Container Apps. `scripts/deploy_azure.py` orchestrates repeatable deployment without emitting secret values.
 
-The resource names with non-global scope are `murmur-pilot-env`, `murmur-api`, `murmur-web`, `murmur-pilot-identity`, and `murmur-data`. Globally unique Key Vault, registry, and storage names are derived deterministically from the active subscription and resource-group identity rather than hand-entered.
+The resource names with non-global scope are `murmur-pilot-env`, `murmur-api`, `murmur-web`, and `murmur-pilot-identity`. Globally unique Key Vault and registry names are derived deterministically from the active subscription and resource-group identity rather than hand-entered.
 
 ## Plan of Work
 
-First, make the application deployable without changing its user-facing contracts. The frontend will use one API-origin constant everywhere and emit a compact standalone Next.js server image. The backend will accept Firebase service-account JSON directly from a secret environment variable while retaining the local path option, expose shallow liveness and dependency-aware readiness endpoints, and allow rollback journaling for the mounted pilot database. Focused tests will lock these behaviors.
+First, make the application deployable without changing its user-facing contracts. The frontend uses one API-origin constant everywhere and emits a compact standalone Next.js server image. The backend accepts Firebase service-account JSON directly from a secret environment variable while retaining the local path option, exposes shallow liveness and dependency-aware readiness endpoints, and uses local SQLite only for this non-durable pilot. Focused tests lock these behaviors.
 
-Second, add least-privilege infrastructure and images. Both images will use pinned runtime families, non-root users, deterministic lockfiles, and one application process. Bicep will create an isolated Central India environment, Key Vault references, managed-identity registry pulls, HTTPS-only ingress, explicit probes, scale-to-zero minimums, one-replica maximums, and the Azure Files volume. No provider credential will be a Bicep plain-text parameter or image build argument.
+Second, add least-privilege infrastructure and images. Both images use pinned runtime families, non-root users, deterministic lockfiles, and one application process. Bicep creates an isolated Central India environment, Key Vault references, managed-identity registry pulls, HTTPS-only ingress, explicit probes, scale-to-zero minimums, and one-replica maximums. No provider credential is a Bicep plain-text parameter or image build argument.
 
 Third, add a deployment driver. It will validate Azure login, required CLI capabilities, the current git state, and local environment files. It will deploy the foundation, import only the required credential values into Key Vault, remotely build the backend, discover the backend HTTPS origin, remotely build the frontend with public Firebase settings and that API origin, deploy both apps, configure exact backend CORS, and emit only resource names, URLs, revisions, and health results. It will refuse dirty or unpushed source by default and use the full git SHA as each image tag.
 
-Fourth, validate locally and in Azure. Local checks will cover Python lint/tests, frontend lint/types/tests/build, Docker builds, and Bicep compilation plus `what-if`. Azure checks will prove healthy revisions, exact CORS, no plaintext app secrets, one-replica limits, mounted persistence, and successful authenticated page loading. Adding the frontend domain to Firebase authorized domains is part of deployment, not a manual afterthought. Paid Azure model output is not exercised beyond an explicitly bounded acceptance call.
+Fourth, validate locally and in Azure. Local checks cover Python lint/tests, frontend lint/types/tests/build, Docker builds, and Bicep compilation plus `what-if`. Azure checks prove healthy revisions, exact CORS, no plaintext app secrets, one-replica limits, the explicit ephemeral-database posture, and successful authenticated page loading. Adding the frontend domain to Firebase authorized domains is part of deployment, not a manual afterthought. Paid Azure model output is not exercised beyond an explicitly bounded acceptance call.
 
 Finally, commit and push each coherent milestone, open a pull request, run the complete CI suite, review the diff and live evidence, merge, rebuild or retag from the merge SHA, and verify that the public apps report the merged revision.
 
@@ -101,7 +102,7 @@ Run read-only live verification:
 
     uv run python scripts/deploy_azure.py verify
 
-The driver must print the frontend URL, backend URL, immutable git SHA, active revision names, health status, persistence proof status, Firebase-domain status, and scale settings. It must never print an Azure key, Firebase private key, registry credential, storage key, bearer token, or connection string.
+The driver must print the frontend URL, backend URL, immutable git SHA, active revision names, health status, database durability posture, Firebase-domain status, and scale settings. It must never print an Azure key, Firebase private key, registry credential, bearer token, or connection string.
 
 ## Validation and Acceptance
 
@@ -111,7 +112,7 @@ The branch passes backend lint and tests plus frontend lint, type checking, test
 
 The backend public URL returns HTTP 200 from `/healthz` and `/readyz` over HTTPS. The readiness endpoint proves database access and validates required Firebase and Azure model configuration without making a paid model request or revealing configuration. An `OPTIONS` request from the exact frontend origin receives the expected CORS allow-origin header, while an unrelated origin does not.
 
-Azure reports one active revision per app, `maxReplicas` equal to one, no inline secret values for provider credentials, Key Vault references owned by the managed identity, and images tagged with a full accepted git SHA. The backend database is on the mounted share and a harmless persisted sentinel survives a backend revision restart. SQLite reports a rollback journal rather than WAL.
+Azure reports one active revision per app, `maxReplicas` equal to one, no inline secret values for provider credentials, Key Vault references owned by the managed identity, and digest-pinned images carrying the full accepted git SHA. The backend database is local SQLite with WAL and no shared volume; acceptance must state that its data can reset on scale-down or deployment and cannot be treated as durable.
 
 The frontend public URL loads over HTTPS, its browser bundle calls the Azure backend rather than localhost, and the existing Firebase user can reach `/canvas/storyboard`. The hostname is present in Firebase Authentication authorized domains. The storyboard UI can form an authenticated request and render the safe initial state. A live model beat is run only under a separately recorded strict call and cost bound.
 

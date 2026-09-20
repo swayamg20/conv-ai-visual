@@ -117,8 +117,8 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                     "name": "FIREBASE_SERVICE_ACCOUNT_JSON",
                     "secretRef": "firebase-service-account-json",
                 },
-                {"name": "MURMUR_DATA_DIR", "value": "/data"},
-                {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "DELETE"},
+                {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
+                {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
             )
         )
         secrets = [
@@ -131,10 +131,6 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
             for index, secret_name in enumerate(
                 ("azure-openai-api-key", "firebase-service-account-json")
             )
-        ]
-        mounts = [{"mountPath": "/data", "volumeName": "murmur-data"}]
-        volumes = [
-            {"name": "murmur-data", "storageName": "murmur-data", "storageType": "AzureFile"}
         ]
     return {
         "name": name,
@@ -532,7 +528,7 @@ def test_https_verification_checks_readiness_and_both_cors_directions(
     assert all("openai" not in url for url in health_urls)
 
 
-def test_inspect_backend_validates_scale_probes_mount_and_key_vault(
+def test_inspect_backend_validates_scale_probes_local_database_and_key_vault(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: _container_app(backend=True))
@@ -571,19 +567,18 @@ def test_inspect_backend_refuses_registry_credentials(
         deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
 
 
-def test_inspect_backend_refuses_ephemeral_database_path(
+def test_inspect_backend_refuses_shared_database_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _container_app(backend=True)
     container = app["properties"]["template"]["containers"][0]  # type: ignore[index]
-    container["env"] = [  # type: ignore[index]
-        item
-        for item in container["env"]
-        if item.get("name") != "MURMUR_DATA_DIR"  # type: ignore[index,union-attr]
-    ]
+    data_dir = next(  # type: ignore[union-attr]
+        item for item in container["env"] if item.get("name") == "MURMUR_DATA_DIR"
+    )
+    data_dir["value"] = "/data"
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
 
-    with pytest.raises(deploy.DeploymentRefusal, match="not rooted on /data"):
+    with pytest.raises(deploy.DeploymentRefusal, match="isolated local pilot storage"):
         deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
 
 

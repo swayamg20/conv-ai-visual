@@ -4,4 +4,4 @@
 
 Use `scripts/deploy_azure.py`; it validates git provenance, imports secrets without printing them, performs the builds, deploys both apps, and verifies the live result. Do not pass provider credentials as command-line arguments or Bicep parameters.
 
-The pilot is intentionally limited to one backend process and one replica. SQLite is mounted from Azure Files with rollback journaling. Move to PostgreSQL plus migrations and distributed admission before raising the replica maximum.
+The low-cost visual pilot is intentionally limited to one backend process and one replica. Its SQLite database is local and ephemeral because SQLite locking is not safe on the SMB-backed Azure Files mount. Stored agents and history can reset on scale-down or deployment; move to PostgreSQL plus migrations before treating data as durable or raising the replica maximum.

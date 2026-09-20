@@ -55,7 +55,6 @@ REQUIRED_PROVIDERS = (
     "Microsoft.KeyVault",
     "Microsoft.ManagedIdentity",
     "Microsoft.OperationalInsights",
-    "Microsoft.Storage",
 )
 
 REQUIRED_FRONTEND_KEYS = (
@@ -1241,26 +1240,14 @@ def _inspect_app(
         if len(vault_names) != 1:
             raise DeploymentRefusal(f"Container App {name} uses inconsistent Key Vaults")
         key_vault_name = vault_names.pop()
-        if env.get("MURMUR_DATA_DIR", {}).get("value") != "/data":
-            raise DeploymentRefusal(f"Container App {name} database is not rooted on /data")
-        if env.get("MURMUR_SQLITE_JOURNAL_MODE", {}).get("value") != "DELETE":
-            raise DeploymentRefusal(f"Container App {name} is not using rollback journaling")
-        mounts = container.get("volumeMounts")
-        volumes = template.get("volumes")
-        if not isinstance(mounts, list) or not any(
-            isinstance(item, dict)
-            and item.get("mountPath") == "/data"
-            and item.get("volumeName") == "murmur-data"
-            for item in mounts
-        ):
-            raise DeploymentRefusal(f"Container App {name} persistent mount is missing")
-        if not isinstance(volumes, list) or not any(
-            isinstance(item, dict)
-            and item.get("name") == "murmur-data"
-            and item.get("storageType") == "AzureFile"
-            for item in volumes
-        ):
-            raise DeploymentRefusal(f"Container App {name} Azure Files volume is missing")
+        if env.get("MURMUR_DATA_DIR", {}).get("value") != "/home/murmur/data":
+            raise DeploymentRefusal(
+                f"Container App {name} is not using isolated local pilot storage"
+            )
+        if env.get("MURMUR_SQLITE_JOURNAL_MODE", {}).get("value") != "WAL":
+            raise DeploymentRefusal(f"Container App {name} local SQLite is not using WAL")
+        if container.get("volumeMounts"):
+            raise DeploymentRefusal(f"Container App {name} unexpectedly mounts shared storage")
     else:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/healthz"}
 
@@ -1373,8 +1360,8 @@ def _print_verification(backend: AppInspection, frontend: AppInspection) -> None
     print(f"frontend_scale: {frontend.min_replicas}..{frontend.max_replicas}")
     print(f"frontend_probes: {','.join(frontend.probe_types)}")
     print("key_vault_references: versionless and enabled")
-    print("persistence_configuration: Azure Files mounted; SQLite rollback journal configured")
-    print("persistence_restart_proof: not_run_use_manual_acceptance_step")
+    print("database_configuration: local ephemeral SQLite; PostgreSQL required for durability")
+    print("persistence_restart_proof: not_applicable_ephemeral_pilot")
     print("paid_model_calls: 0")
 
 
