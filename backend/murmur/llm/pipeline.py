@@ -47,6 +47,7 @@ class LLMPipeline(ToolConversationMixin):
         enable_memory: bool = True,
         canvas_mode: bool = False,
         canvas_system_prompt: str | None = None,
+        transport_max_retries: int | None = None,
     ):
         """
         Initialize LLM pipeline with memory.
@@ -63,14 +64,22 @@ class LLMPipeline(ToolConversationMixin):
             enable_memory: Whether to enable memory layers
             canvas_mode: Whether canvas visual mode is enabled (uses canvas for all responses)
             canvas_system_prompt: Custom canvas mode prompt (uses default if not provided)
+            transport_max_retries: Optional SDK-level HTTP retry ceiling
         """
         self.provider = provider or config.LLM_PROVIDER
         self.api_key = api_key  # Can be None, factory will get from config
         self.model = model  # Can be None, factory will get from config
+        self.transport_max_retries = transport_max_retries
 
         # Create LLM client using factory
+        client_options = {}
+        if transport_max_retries is not None:
+            client_options["transport_max_retries"] = transport_max_retries
         self.client: LLMClient = create_llm_client(
-            provider=self.provider, api_key=self.api_key, model=self.model
+            provider=self.provider,
+            api_key=self.api_key,
+            model=self.model,
+            **client_options,
         )
 
         self.user_id = user_id
@@ -424,7 +433,15 @@ class LLMPipeline(ToolConversationMixin):
         if provider == self.provider and model is None:
             return  # No change needed
         self.provider = provider
-        self.client = create_llm_client(provider, api_key, model)
+        client_options = {}
+        if self.transport_max_retries is not None:
+            client_options["transport_max_retries"] = self.transport_max_retries
+        self.client = create_llm_client(
+            provider=provider,
+            api_key=api_key,
+            model=model,
+            **client_options,
+        )
 
     def get_last_call_metrics(self) -> dict | None:
         """Get timing and tool call data from the most recent chat_with_tools_stream call."""

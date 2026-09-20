@@ -13,6 +13,8 @@ from sqlmodel import Session, SQLModel, create_engine
 SOURCE_ROOT = Path(__file__).resolve().parents[3]
 DATABASE_URL_ENV = "MURMUR_DATABASE_URL"
 DATA_DIR_ENV = "MURMUR_DATA_DIR"
+SQLITE_JOURNAL_MODE_ENV = "MURMUR_SQLITE_JOURNAL_MODE"
+_ALLOWED_SQLITE_JOURNAL_MODES = frozenset({"DELETE", "WAL"})
 
 
 def _default_data_dir() -> Path:
@@ -40,6 +42,16 @@ def get_database_url() -> str:
         return configured_url
 
     return f"sqlite:///{_resolve_data_dir() / 'murmur.db'}"
+
+
+def get_sqlite_journal_mode() -> str:
+    """Return the explicitly bounded journal mode for file-backed SQLite."""
+
+    journal_mode = os.getenv(SQLITE_JOURNAL_MODE_ENV, "WAL").strip().upper()
+    if journal_mode not in _ALLOWED_SQLITE_JOURNAL_MODES:
+        allowed = ", ".join(sorted(_ALLOWED_SQLITE_JOURNAL_MODES))
+        raise ValueError(f"{SQLITE_JOURNAL_MODE_ENV} must be one of: {allowed}")
+    return journal_mode
 
 
 def create_database_engine(database_url: str | None = None) -> Engine:
@@ -70,7 +82,12 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
         # In-memory databases cannot use WAL. File-backed local databases can.
         database_path = cursor.execute("PRAGMA database_list").fetchone()[2]
         if database_path:
-            cursor.execute("PRAGMA journal_mode=WAL")
+            requested_journal_mode = get_sqlite_journal_mode()
+            applied_journal_mode = cursor.execute(
+                f"PRAGMA journal_mode={requested_journal_mode}"
+            ).fetchone()[0]
+            if str(applied_journal_mode).upper() != requested_journal_mode:
+                raise RuntimeError("SQLite did not apply the configured journal mode")
             cursor.execute("PRAGMA synchronous=NORMAL")
     finally:
         cursor.close()

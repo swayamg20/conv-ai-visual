@@ -4,6 +4,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useAudio } from "./use-audio";
 import { useVAD, VAD_PRESETS } from "./use-vad";
 import { playReadySound, playDisconnectSound, playErrorSound } from "@/lib/sounds";
+import { resolveApiBase } from "@/lib/api-base";
 import { getAuthHeaders } from "@/lib/firebase";
 import type { CanvasOperation } from "@/features/canvas/types";
 import type { SDLSequenceEndReason } from "@/features/canvas/sequence-lifecycle";
@@ -71,7 +72,7 @@ interface UseWebRTCOptions {
 
 export function useWebRTC(options: UseWebRTCOptions = {}) {
   const {
-    apiUrl = "http://localhost:8000",
+    apiUrl: requestedApiUrl,
     canvasMode = false,
     agentId,
     sessionId,
@@ -89,6 +90,7 @@ export function useWebRTC(options: UseWebRTCOptions = {}) {
     onLog,
     onStateChange,
   } = options;
+  const apiUrl = resolveApiBase(requestedApiUrl);
 
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [pipelineState, setPipelineState] = useState<PipelineState>("idle");

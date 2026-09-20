@@ -1,0 +1,15 @@
+# Azure pilot deployment
+
+`foundation.bicep` creates the isolated shared resources for the Murmur pilot. `apps.bicep` deploys the immutable backend and frontend images after the required credential values have been written to the generated Key Vault.
+
+The apps use separate managed identities. The backend identity can pull its image and read the two Key Vault secrets. The frontend identity is pull-only and cannot read backend credentials.
+
+Use `scripts/deploy_azure.py`; it validates git provenance, imports secrets without printing them, performs the builds, deploys both apps, and verifies the live result. Set `MURMUR_AZURE_SUBSCRIPTION_ID` and `MURMUR_AZURE_TENANT_ID` to the exact GUIDs for the intended target (or pass their equivalent CLI flags); the driver refuses a different active Azure account. Do not pass provider credentials as command-line arguments or Bicep parameters.
+
+The deployer refuses any unrecognized direct Key Vault writer assignment for its operator. It grants itself secret-write access only around staging and post-health finalization, then reconciles removal of the exact temporary assignment in all exit paths. A renewable, finite lease on a private Azure Blob serializes the credential, build, and application transaction across machines; a second deploy refuses while the lease is held, and a crashed deploy recovers by lease expiry. Image builds use unique, unguessable tags before resolving immutable digests, so releases cannot race on a shared source-SHA tag.
+
+`FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH` must point to a dedicated Firebase Authentication Viewer credential. Before writing it, the driver asks Google Cloud IAM for the credential's effective Firebase Authentication permissions across the documented Firebase Authentication permission set and requires exactly `firebaseauth.configs.get` and `firebaseauth.users.get`. The active `firebase-runtime-service-account-json` value is the only Google credential referenced by the deployed app. `FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH` is optional, must identify a different principal and key, and is used only by the local deploy process when the Container Apps hostname is not already authorized.
+
+Each backend revision references the exact two staged Key Vault versions rather than mutable latest values. Rotation is finalized only after the new backend is healthy and every older revision has zero replicas in a terminal inactive state. Finalization leaves exactly the selected runtime and Azure model-key versions enabled, and disables every version of the legacy `firebase-service-account-json` secret. Disabled versions remain recoverable to privileged Azure operators; this process does not revoke or delete the corresponding Google service-account key.
+
+The low-cost visual pilot is intentionally limited to one backend process and one replica. Its SQLite database is local and ephemeral because SQLite locking is not safe on the SMB-backed Azure Files mount. Stored agents and history can reset on scale-down or deployment; move to PostgreSQL plus migrations before treating data as durable or raising the replica maximum.

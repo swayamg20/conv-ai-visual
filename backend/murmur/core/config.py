@@ -1,6 +1,7 @@
 """Environment-backed application configuration."""
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -8,6 +9,9 @@ from urllib.parse import urlsplit
 from dotenv import load_dotenv
 
 from murmur.live_scene.contracts import MAX_SCENE_MODEL_OUTPUT_TOKENS
+
+MAX_CHAT_TOOL_ROUNDS = 10
+MAX_CHAT_TRANSPORT_RETRIES = 2
 
 
 def default_env_path() -> Path:
@@ -27,6 +31,17 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
     if not value:
         return list(default)
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def normalize_release_sha(value: str | None) -> str | None:
+    """Normalize an optional Git object ID used only for deployment provenance."""
+
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,64}", normalized):
+        raise ValueError("MURMUR_RELEASE_SHA must be 7 to 64 hexadecimal characters")
+    return normalized
 
 
 def normalize_azure_openai_endpoint(endpoint: str) -> str:
@@ -140,6 +155,15 @@ class Config:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.7"))
     LLM_MAX_TOKENS: Optional[int] = (
         int(os.getenv("LLM_MAX_TOKENS")) if os.getenv("LLM_MAX_TOKENS") else None
+    )
+    MURMUR_CHAT_GLOBAL_CONCURRENCY: int = int(os.getenv("MURMUR_CHAT_GLOBAL_CONCURRENCY", "4"))
+    MURMUR_CHAT_PER_USER_CONCURRENCY: int = int(os.getenv("MURMUR_CHAT_PER_USER_CONCURRENCY", "1"))
+    MURMUR_CHAT_REQUESTS_PER_MINUTE: int = int(os.getenv("MURMUR_CHAT_REQUESTS_PER_MINUTE", "10"))
+    MURMUR_CHAT_MAX_TOOL_ROUNDS: int = int(os.getenv("MURMUR_CHAT_MAX_TOOL_ROUNDS", "10"))
+    MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES: Optional[int] = (
+        int(os.getenv("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES"))
+        if os.getenv("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES")
+        else None
     )
     # Gate 1 live-scene authoring can be tuned independently while inheriting
     # the existing LLM selection when no scene-specific override is supplied.
@@ -341,8 +365,10 @@ EXAMPLE — "Explain the Pythagorean theorem":
     TTS_FALLBACK_TO_KOKORO: bool = os.getenv("TTS_FALLBACK_TO_KOKORO", "true").lower() == "true"
     # Firebase Auth
     FIREBASE_SERVICE_ACCOUNT_PATH: Optional[str] = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    FIREBASE_SERVICE_ACCOUNT_JSON: Optional[str] = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     FIREBASE_PROJECT_ID: Optional[str] = os.getenv("FIREBASE_PROJECT_ID")
 
+    MURMUR_RELEASE_SHA: Optional[str] = normalize_release_sha(os.getenv("MURMUR_RELEASE_SHA"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
 
@@ -425,6 +451,31 @@ EXAMPLE — "Explain the Pythagorean theorem":
         if cls.MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE <= 0:
             raise ValueError(
                 "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE must be greater than zero"
+            )
+        if cls.MURMUR_CHAT_GLOBAL_CONCURRENCY <= 0:
+            raise ValueError("MURMUR_CHAT_GLOBAL_CONCURRENCY must be greater than zero")
+        if not 1 <= cls.MURMUR_CHAT_PER_USER_CONCURRENCY <= cls.MURMUR_CHAT_GLOBAL_CONCURRENCY:
+            raise ValueError(
+                "MURMUR_CHAT_PER_USER_CONCURRENCY must be between 1 and the global limit"
+            )
+        if cls.MURMUR_CHAT_REQUESTS_PER_MINUTE <= 0:
+            raise ValueError("MURMUR_CHAT_REQUESTS_PER_MINUTE must be greater than zero")
+        if (
+            isinstance(cls.MURMUR_CHAT_MAX_TOOL_ROUNDS, bool)
+            or not isinstance(cls.MURMUR_CHAT_MAX_TOOL_ROUNDS, int)
+            or not 1 <= cls.MURMUR_CHAT_MAX_TOOL_ROUNDS <= MAX_CHAT_TOOL_ROUNDS
+        ):
+            raise ValueError(
+                f"MURMUR_CHAT_MAX_TOOL_ROUNDS must be between 1 and {MAX_CHAT_TOOL_ROUNDS}"
+            )
+        if cls.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES is not None and (
+            isinstance(cls.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES, bool)
+            or not isinstance(cls.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES, int)
+            or not 0 <= cls.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES <= MAX_CHAT_TRANSPORT_RETRIES
+        ):
+            raise ValueError(
+                "MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES must be between "
+                f"0 and {MAX_CHAT_TRANSPORT_RETRIES}"
             )
 
         # Validate TTS configuration

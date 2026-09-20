@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CanvasOperation } from "@/features/canvas/types";
 import type { SDLScene } from "@/lib/scene-kit";
+import { resolveApiBase } from "@/lib/api-base";
 import { getAuthHeaders } from "@/lib/firebase";
 
 export interface Message {
@@ -29,7 +30,8 @@ interface UseChatOptions {
 }
 
 export function useChat(options: UseChatOptions = {}) {
-  const { apiUrl = "http://localhost:8000", canvasMode = false, agentId, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
+  const { apiUrl: requestedApiUrl, canvasMode = false, agentId, sessionId: externalSessionId, onCanvasUpdate, onSDLScene } = options;
+  const apiUrl = resolveApiBase(requestedApiUrl);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);

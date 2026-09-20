@@ -6,7 +6,7 @@ from fastapi import Depends, Request
 
 from murmur.api.authentication import FirebaseAuthenticationUnavailable, get_current_user
 from murmur.api.errors import ApiError
-from murmur.chat import ChatService
+from murmur.chat import ChatAdmission, ChatService
 from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
 from murmur.persistence.models import AgentModel
 from murmur.persistence.repositories.identities import AgentRepo
@@ -65,6 +65,13 @@ def get_chat_service(request: Request) -> ChatService:
 
 
 ChatServiceDependency = Annotated[ChatService, Depends(get_chat_service)]
+
+
+def get_chat_admission(request: Request) -> ChatAdmission:
+    return cast(ChatAdmission, request.app.state.chat_admission)
+
+
+ChatAdmissionDependency = Annotated[ChatAdmission, Depends(get_chat_admission)]
 
 
 def get_scene_authoring_service(request: Request) -> SceneAuthoringService:

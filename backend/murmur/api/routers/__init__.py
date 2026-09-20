@@ -6,6 +6,7 @@ from murmur.api.routers import (
     agents,
     auth,
     chat,
+    health,
     live_scenes,
     observability,
     resources,
@@ -14,6 +15,7 @@ from murmur.api.routers import (
 )
 
 api_router = APIRouter()
+api_router.include_router(health.router)
 api_router.include_router(auth.router)
 api_router.include_router(agents.router)
 api_router.include_router(resources.router)

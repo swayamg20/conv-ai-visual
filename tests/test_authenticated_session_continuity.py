@@ -48,7 +48,13 @@ class _FakeLLMClient:
         return "ok"
 
 
-async def _fake_chat_with_tools_stream(self, user_message, temperature=None, max_tokens=None):
+async def _fake_chat_with_tools_stream(
+    self,
+    user_message,
+    temperature=None,
+    max_tokens=None,
+    max_tool_rounds=None,
+):
     context = await self.get_context(user_message, include_canvas=False)
     system_prompt = context[0]["content"] if context else ""
     if "Previous session summaries:" in system_prompt:

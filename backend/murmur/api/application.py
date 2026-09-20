@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from murmur.api.errors import ApiError, api_error_handler, domain_error_handler
 from murmur.api.routers import api_router
 from murmur.canvas.state import register_canvas_tool
-from murmur.chat import ChatService
+from murmur.chat import ChatAdmission, ChatService
 from murmur.core import MurmurError
 from murmur.core.config import config
 from murmur.live_scene import (
@@ -49,6 +49,7 @@ def create_application(
     *,
     runtime: RuntimeRegistry | None = None,
     chat_service: ChatService | None = None,
+    chat_admission: ChatAdmission | None = None,
     voice_service: VoiceService | None = None,
     voice_bootstrap_service: VoiceBootstrapper | None = None,
     scene_authoring_service: SceneAuthoringService | None = None,
@@ -58,6 +59,11 @@ def create_application(
     """Build the HTTP application around an explicit runtime owner."""
     runtime = runtime or RuntimeRegistry()
     chat_service = chat_service or ChatService(runtime)
+    chat_admission = chat_admission or ChatAdmission(
+        global_limit=config.MURMUR_CHAT_GLOBAL_CONCURRENCY,
+        per_user_limit=config.MURMUR_CHAT_PER_USER_CONCURRENCY,
+        requests_per_minute=config.MURMUR_CHAT_REQUESTS_PER_MINUTE,
+    )
     voice_service = voice_service or VoiceService(runtime)
     voice_bootstrap_service = voice_bootstrap_service or create_default_voice_bootstrap_service()
     if scene_authoring_service is None:
@@ -123,6 +129,7 @@ def create_application(
     app = FastAPI(lifespan=lifespan)
     app.state.runtime = runtime
     app.state.chat_service = chat_service
+    app.state.chat_admission = chat_admission
     app.state.voice_service = voice_service
     app.state.voice_bootstrap_service = voice_bootstrap_service
     app.state.scene_authoring_service = scene_authoring_service

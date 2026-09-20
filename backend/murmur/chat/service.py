@@ -22,6 +22,7 @@ from murmur.core import (
     ResourceNotFoundError,
     ServiceInitializationError,
 )
+from murmur.core.async_cleanup import close_async_resource
 from murmur.core.config import config
 from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.identities import AgentRepo
@@ -146,6 +147,7 @@ class ChatService:
                     canvas_system_prompt=(
                         agent_config.prompt if agent_config.canvas_enabled else None
                     ),
+                    transport_max_retries=config.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES,
                 )
                 ready_resources = agent_config.ready_resources
             else:
@@ -160,6 +162,7 @@ class ChatService:
                     enable_memory=True,
                     canvas_mode=True,
                     canvas_system_prompt=config.LLM_MATH_TUTOR_PROMPT,
+                    transport_max_retries=config.MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES,
                 )
 
             if pipeline.memory and agent_id:
@@ -231,12 +234,14 @@ class ChatService:
             pipeline.set_animation_callback(animation_events.append)
             yield {"type": "session", "session_id": turn.session_id}
 
+            model_stream = pipeline.chat_with_tools_stream(
+                turn.message,
+                temperature=config.LLM_TEMPERATURE,
+                max_tokens=config.LLM_MAX_TOKENS,
+                max_tool_rounds=config.MURMUR_CHAT_MAX_TOOL_ROUNDS,
+            )
             try:
-                async for chunk in pipeline.chat_with_tools_stream(
-                    turn.message,
-                    temperature=config.LLM_TEMPERATURE,
-                    max_tokens=config.LLM_MAX_TOKENS,
-                ):
+                async for chunk in model_stream:
                     self.runtime.touch_chat(turn.session_id)
                     for event in self._drain_queued_events(canvas_events, animation_events):
                         yield event
@@ -250,6 +255,8 @@ class ChatService:
                 logger.exception("Chat stream error: %s", exc)
                 self._save_stream_error(turn, exc)
                 yield {"type": "error", "message": str(exc)}
+            finally:
+                await close_async_resource(model_stream)
 
     @staticmethod
     def _drain_queued_events(
