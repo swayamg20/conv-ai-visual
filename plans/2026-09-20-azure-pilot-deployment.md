@@ -20,6 +20,7 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - [x] 2026-09-20 14:59 IST: Provisioned the isolated `murmur-pilot-rg` Azure resources and deployed digest-pinned backend and frontend images from commit `706a60e` to healthy revisions `murmur-api--0000003` and `murmur-web--0000003`.
 - [x] 2026-09-20 14:30 IST: Added the deployed frontend hostname to Firebase Authentication authorized domains through the Identity Toolkit Admin API and confirmed the returned configuration.
 - [x] 2026-09-20 14:59 IST: Verified public HTTPS liveness, dependency-aware readiness, exact frontend CORS, release SHA, probes, one-replica limits, Key Vault references, and both public browser routes with zero paid model calls. The landing and sign-in pages render, and unauthenticated `/canvas/storyboard` access redirects to `/login` as designed.
+- [x] 2026-09-20 17:01 IST: Closed the pre-merge frontend credential-isolation blocker with separate managed identities, exact foundation identity checks, frontend Key Vault RBAC checks, and regression coverage. Upgraded Next.js to 16.3.5 and eliminated all production dependency audit findings.
 - [ ] Complete one user-authenticated Azure browser pass through `/canvas/storyboard` without pressing the model-backed continue action. Persistence is explicitly out of scope for this low-cost pilot after Azure Files incompatibility was proven live.
 - [ ] Open, review, and merge the deployment pull request, then prove the live revision corresponds to merged `main`.
 
@@ -40,12 +41,14 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - After all replicas were terminated, Azure Files still returned `database is locked` for a single process creating the first table. The share contained only a zero-byte bootstrap file, which was removed with no user data loss. The persistent-SQLite design was rejected rather than weakened with unsafe lock suppression.
 - ACR completed both immutable image builds but its registry endpoint briefly failed during the immediate manifest lookup. Digest resolution now has a small bounded retry window; it still refuses to deploy unless the final value is a valid `sha256` digest.
 - The Container Apps API can briefly report the previous `latestReadyRevisionName` while a new `latestRevisionName` starts. Verification now distinguishes those fields, probes the expected SHA over HTTPS, then refuses success unless the current revision is the one Azure reports ready.
+- Pre-merge review found that using one managed identity for both apps let the frontend request Key Vault data-plane access even though it had no secret reference. The frontend now has a separate ACR-pull-only identity; verification rejects shared identities and any frontend secret wiring.
+- The public image used Next.js 16.3.0 and a vulnerable Sharp transitive dependency. Moving to Next.js 16.3.5 plus the compatible lockfile updates cleared `npm audit --omit=dev` with no production findings.
 
 ## Decision Log
 
 - 2026-09-20, Codex: Use two Azure Container Apps, one for Next.js and one for FastAPI. This matches the current server-rendered Next.js build and gives both applications managed HTTPS ingress without rewriting the frontend for static export.
 - 2026-09-20, Codex: Create a separate `murmur-pilot-rg` and `murmur-pilot-env` in Central India. Product isolation is worth the small setup overhead; AgentRelay resources remain untouched.
-- 2026-09-20, Codex: Use Azure Container Registry with a shared user-assigned identity and `AcrPull`, rather than registry passwords in app configuration.
+- 2026-09-20, Codex: Use separate backend and frontend user-assigned identities for Azure Container Registry pulls. Only the backend identity receives Key Vault secret-read access; the public frontend identity is pull-only.
 - 2026-09-20, Codex: Store the Azure model key and Firebase service-account JSON in Azure Key Vault. Container Apps reads versionless Key Vault references through the managed identity, so secrets do not enter source control, image layers, or normal deployment output.
 - 2026-09-20, Codex: Keep the pilot at one Uvicorn worker and `maxReplicas: 1`. Start with `minReplicas: 0` to bound idle compute cost; the first request may cold-start. Raise the backend minimum to one only after latency and recurring cost are explicitly accepted.
 - 2026-09-20, Codex: Do not run SQLite on Azure Files. For the cost-bounded visual acceptance pilot, keep SQLite local and ephemeral and clearly surface the limitation; add managed PostgreSQL before relying on stored agents, history, restart persistence, or multiple replicas.
@@ -65,9 +68,9 @@ The pilot is intentionally non-durable: backend SQLite lives on local ephemeral 
 
 `web/` is a Next.js 16 application. `web/src/lib/api.ts` owns the configured API base URL and `web/src/lib/firebase.ts` owns the public Firebase browser configuration. The public Firebase values and backend URL are compiled into the Next.js browser bundle at image-build time; they are not server-only runtime settings. `web/src/features/live-scene/live-semantic-storyboard.tsx` is the Gate 1.8 product surface.
 
-`infra/azure/` contains Bicep templates for the resource group contents. The foundation creates a Log Analytics workspace, Container Apps environment, Basic Azure Container Registry, Key Vault, and a user-assigned identity with narrowly scoped pull and secret-read roles. Application templates create the public backend and frontend Container Apps. `scripts/deploy_azure.py` orchestrates repeatable deployment without emitting secret values.
+`infra/azure/` contains Bicep templates for the resource group contents. The foundation creates a Log Analytics workspace, Container Apps environment, Basic Azure Container Registry, Key Vault, a backend identity with pull and secret-read roles, and a separate pull-only frontend identity. Application templates create the public backend and frontend Container Apps. `scripts/deploy_azure.py` orchestrates repeatable deployment without emitting secret values.
 
-The resource names with non-global scope are `murmur-pilot-env`, `murmur-api`, `murmur-web`, and `murmur-pilot-identity`. Globally unique Key Vault and registry names are derived deterministically from the active subscription and resource-group identity rather than hand-entered.
+The resource names with non-global scope are `murmur-pilot-env`, `murmur-api`, `murmur-web`, `murmur-pilot-identity`, and `murmur-web-identity`. Globally unique Key Vault and registry names are derived deterministically from the active subscription and resource-group identity rather than hand-entered.
 
 ## Plan of Work
 

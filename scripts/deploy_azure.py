@@ -9,6 +9,7 @@ ignored dotenv files from entering an ACR build context.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import math
 import os
@@ -83,6 +84,7 @@ _AZURE_RESOURCE_NAME = re.compile(r"[a-zA-Z0-9._()\-]{1,90}\Z")
 _CONTAINER_APP_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}[a-z0-9]\Z")
 _AZURE_LOCATION = re.compile(r"[a-z0-9]{2,32}\Z")
 _REGISTRY_NAME = re.compile(r"[a-z0-9]{5,50}\Z")
+_ROLE_DEFINITION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _MAX_DOTENV_BYTES = 256 * 1024
 _MAX_FIREBASE_JSON_BYTES = 24 * 1024
@@ -559,6 +561,33 @@ def _deployment_outputs(
         command.append("--parameters")
         command.extend(f"{key}={value}" for key, value in parameters.items())
     outputs = _run_json(command, timeout_seconds=1800, operation=f"deploy {deployment_name}")
+    if not isinstance(outputs, dict):
+        raise DeploymentRefusal(f"{deployment_name} returned invalid outputs")
+    return outputs
+
+
+def _existing_deployment_outputs(
+    *, resource_group: str, deployment_name: str
+) -> Mapping[str, object]:
+    outputs = _run_json(
+        [
+            "az",
+            "deployment",
+            "group",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            deployment_name,
+            "--query",
+            "properties.outputs",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect {deployment_name}",
+    )
     if not isinstance(outputs, dict):
         raise DeploymentRefusal(f"{deployment_name} returned invalid outputs")
     return outputs
@@ -1259,6 +1288,11 @@ def _inspect_app(
             raise DeploymentRefusal(f"Container App {name} unexpectedly mounts shared storage")
     else:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/healthz"}
+        frontend_secrets = configuration.get("secrets")
+        if frontend_secrets is not None and frontend_secrets != []:
+            raise DeploymentRefusal(f"Container App {name} unexpectedly has secret configuration")
+        if any("secretRef" in item for item in env.values()):
+            raise DeploymentRefusal(f"Container App {name} unexpectedly consumes a secret")
 
     probe_types = _probe_types(container, expected_paths, expected_port)
     latest_revision = properties.get("latestRevisionName")
@@ -1287,6 +1321,24 @@ def _inspect_app(
 
 
 def _verify_key_vault_metadata(vault_name: str) -> None:
+    rbac_enabled = _run_json(
+        [
+            "az",
+            "keyvault",
+            "show",
+            "--name",
+            vault_name,
+            "--query",
+            "properties.enableRbacAuthorization",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect Key Vault authorization mode",
+    )
+    if rbac_enabled is not True:
+        raise DeploymentRefusal("Key Vault is not using Azure RBAC authorization")
     metadata = _run_json(
         [
             "az",
@@ -1316,11 +1368,94 @@ def _verify_key_vault_metadata(vault_name: str) -> None:
         raise DeploymentRefusal("Key Vault is missing required enabled secrets")
 
 
+def _permission_grants(permission: Mapping[str, object], action: str, *, data_plane: bool) -> bool:
+    grant_key = "dataActions" if data_plane else "actions"
+    deny_key = "notDataActions" if data_plane else "notActions"
+    grants = permission.get(grant_key, [])
+    denies = permission.get(deny_key, [])
+    if not isinstance(grants, list) or not isinstance(denies, list):
+        raise DeploymentRefusal("Azure role definition permissions are invalid")
+    if any(not isinstance(item, str) for item in [*grants, *denies]):
+        raise DeploymentRefusal("Azure role definition permissions are invalid")
+    normalized_action = action.casefold()
+    granted = any(fnmatch.fnmatchcase(normalized_action, pattern.casefold()) for pattern in grants)
+    denied = any(fnmatch.fnmatchcase(normalized_action, pattern.casefold()) for pattern in denies)
+    return granted and not denied
+
+
+def _verify_frontend_key_vault_boundary(*, frontend_principal_id: str, key_vault_id: str) -> None:
+    role_ids = _run_json(
+        [
+            "az",
+            "role",
+            "assignment",
+            "list",
+            "--assignee-object-id",
+            frontend_principal_id,
+            "--scope",
+            key_vault_id,
+            "--include-inherited",
+            "--include-groups",
+            "--fill-principal-name",
+            "false",
+            "--fill-role-definition-name",
+            "false",
+            "--query",
+            "[].roleDefinitionId",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect frontend Key Vault role assignments",
+    )
+    if not isinstance(role_ids, list) or any(not isinstance(item, str) for item in role_ids):
+        raise DeploymentRefusal("frontend Key Vault role assignments are invalid")
+
+    secret_read = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
+    role_assignment_write = "Microsoft.Authorization/roleAssignments/write"
+    for raw_role_id in sorted(set(role_ids)):
+        role_id = raw_role_id.rsplit("/", 1)[-1].casefold()
+        if not _ROLE_DEFINITION_ID.fullmatch(role_id):
+            raise DeploymentRefusal("frontend Key Vault role assignment is invalid")
+        permissions = _run_json(
+            [
+                "az",
+                "role",
+                "definition",
+                "list",
+                "--name",
+                role_id,
+                "--query",
+                "[0].permissions",
+                "--output",
+                "json",
+                "--only-show-errors",
+            ],
+            timeout_seconds=60,
+            operation="inspect frontend Key Vault role definition",
+        )
+        if not isinstance(permissions, list) or any(
+            not isinstance(item, dict) for item in permissions
+        ):
+            raise DeploymentRefusal("frontend Key Vault role definition is invalid")
+        if any(
+            _permission_grants(item, secret_read, data_plane=True)
+            or _permission_grants(item, role_assignment_write, data_plane=False)
+            for item in permissions
+        ):
+            raise DeploymentRefusal("frontend identity can access or grant Key Vault secrets")
+
+
 def verify_live(
     *,
     resource_group: str,
     backend_app: str,
     frontend_app: str,
+    expected_backend_identity_id: str,
+    expected_frontend_identity_id: str,
+    frontend_identity_principal_id: str,
+    key_vault_id: str,
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
 ) -> tuple[AppInspection, AppInspection]:
@@ -1343,6 +1478,12 @@ def verify_live(
     )
     backend = _inspect_app(resource_group, backend_app, backend=True)
     frontend = _inspect_app(resource_group, frontend_app, backend=False)
+    if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
+        raise DeploymentRefusal("frontend and backend must use separate managed identities")
+    if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
+        raise DeploymentRefusal("backend does not use the foundation managed identity")
+    if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
+        raise DeploymentRefusal("frontend does not use the foundation managed identity")
     if backend.release_sha != frontend.release_sha:
         raise DeploymentRefusal("frontend and backend image revisions do not match")
     if expected_sha is not None and backend.release_sha != expected_sha:
@@ -1350,6 +1491,10 @@ def verify_live(
     if not backend.key_vault_name:
         raise DeploymentRefusal("backend has no verified Key Vault reference")
     _verify_key_vault_metadata(backend.key_vault_name)
+    _verify_frontend_key_vault_boundary(
+        frontend_principal_id=frontend_identity_principal_id,
+        key_vault_id=key_vault_id,
+    )
     _verify_https(
         backend.url,
         frontend.url,
@@ -1358,6 +1503,12 @@ def verify_live(
     )
     backend = _inspect_app(resource_group, backend_app, backend=True)
     frontend = _inspect_app(resource_group, frontend_app, backend=False)
+    if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
+        raise DeploymentRefusal("frontend and backend must use separate managed identities")
+    if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
+        raise DeploymentRefusal("backend does not use the foundation managed identity")
+    if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
+        raise DeploymentRefusal("frontend does not use the foundation managed identity")
     for app in (backend, frontend):
         if app.latest_ready_revision != app.latest_revision:
             raise DeploymentRefusal(
@@ -1422,6 +1573,9 @@ def deploy(args: argparse.Namespace) -> int:
         raise DeploymentRefusal("foundation returned an inconsistent registry login server")
     key_vault_name = _output_value(foundation, "keyVaultName")
     key_vault_id = _output_value(foundation, "keyVaultId")
+    backend_identity_id = _output_value(foundation, "identityId")
+    frontend_identity_id = _output_value(foundation, "frontendIdentityId")
+    frontend_identity_principal_id = _output_value(foundation, "frontendIdentityPrincipalId")
     default_domain = _output_value(foundation, "environmentDefaultDomain")
     backend_url = _validate_container_app_url(
         f"https://{backend_app}.{default_domain}", "derived backend URL"
@@ -1510,6 +1664,10 @@ def deploy(args: argparse.Namespace) -> int:
         resource_group=resource_group,
         backend_app=backend_app,
         frontend_app=frontend_app,
+        expected_backend_identity_id=backend_identity_id,
+        expected_frontend_identity_id=frontend_identity_id,
+        frontend_identity_principal_id=frontend_identity_principal_id,
+        key_vault_id=key_vault_id,
         expected_sha=revision.sha,
         health_timeout_seconds=args.health_timeout_seconds,
     )
@@ -1532,10 +1690,18 @@ def verify(args: argparse.Namespace) -> int:
         ).strip()
     if not _FULL_SHA.fullmatch(expected_sha):
         raise DeploymentRefusal("expected release SHA is not a full git SHA")
+    foundation = _existing_deployment_outputs(
+        resource_group=resource_group,
+        deployment_name=FOUNDATION_DEPLOYMENT,
+    )
     backend, frontend = verify_live(
         resource_group=resource_group,
         backend_app=backend_app,
         frontend_app=frontend_app,
+        expected_backend_identity_id=_output_value(foundation, "identityId"),
+        expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
+        frontend_identity_principal_id=_output_value(foundation, "frontendIdentityPrincipalId"),
+        key_vault_id=_output_value(foundation, "keyVaultId"),
         expected_sha=expected_sha,
         health_timeout_seconds=args.health_timeout_seconds,
     )

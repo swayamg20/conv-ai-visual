@@ -5,6 +5,7 @@ param location string = resourceGroup().location
 
 param environmentName string = 'murmur-pilot-env'
 param identityName string = 'murmur-pilot-identity'
+param frontendIdentityName string = 'murmur-web-identity'
 param backendAppName string = 'murmur-api'
 param frontendAppName string = 'murmur-web'
 
@@ -40,6 +41,10 @@ resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: identityName
+}
+
+resource frontendIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
+  name: frontendIdentityName
 }
 
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' existing = {
@@ -256,7 +261,7 @@ resource frontend 'Microsoft.App/containerApps@2024-03-01' = {
   identity: {
     type: 'UserAssigned'
     userAssignedIdentities: {
-      '${identity.id}': {}
+      '${frontendIdentity.id}': {}
     }
   }
   properties: {
@@ -277,7 +282,7 @@ resource frontend 'Microsoft.App/containerApps@2024-03-01' = {
       }
       registries: [
         {
-          identity: identity.id
+          identity: frontendIdentity.id
           server: registry.properties.loginServer
         }
       ]

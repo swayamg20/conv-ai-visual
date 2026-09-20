@@ -6,8 +6,11 @@ param location string = resourceGroup().location
 @description('Name of the Container Apps managed environment.')
 param environmentName string = 'murmur-pilot-env'
 
-@description('Name of the shared user-assigned identity.')
+@description('Name of the backend user-assigned identity with ACR pull and Key Vault access.')
 param identityName string = 'murmur-pilot-identity'
+
+@description('Name of the frontend user-assigned identity with ACR pull access only.')
+param frontendIdentityName string = 'murmur-web-identity'
 
 @description('Name of the Log Analytics workspace.')
 param logWorkspaceName string = 'murmur-pilot-logs'
@@ -62,6 +65,11 @@ resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' 
   location: location
 }
 
+resource frontendIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
+  name: frontendIdentityName
+  location: location
+}
+
 resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: registryName
   location: location
@@ -80,6 +88,16 @@ resource registryPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: registry
   properties: {
     principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: acrPullRoleDefinitionId
+  }
+}
+
+resource frontendRegistryPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+  name: guid(registry.id, frontendIdentity.id, acrPullRoleDefinitionId)
+  scope: registry
+  properties: {
+    principalId: frontendIdentity.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: acrPullRoleDefinitionId
   }
@@ -116,6 +134,8 @@ output environmentName string = environment.name
 output environmentDefaultDomain string = environment.properties.defaultDomain
 output identityId string = identity.id
 output identityPrincipalId string = identity.properties.principalId
+output frontendIdentityId string = frontendIdentity.id
+output frontendIdentityPrincipalId string = frontendIdentity.properties.principalId
 output registryId string = registry.id
 output registryName string = registry.name
 output registryLoginServer string = registry.properties.loginServer
