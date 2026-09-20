@@ -14,6 +14,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import stat
 import subprocess
@@ -85,6 +86,10 @@ _CONTAINER_APP_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}[a-z0-9]\Z")
 _AZURE_LOCATION = re.compile(r"[a-z0-9]{2,32}\Z")
 _REGISTRY_NAME = re.compile(r"[a-z0-9]{5,50}\Z")
 _ROLE_DEFINITION_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
+_AZURE_GUID = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _MAX_DOTENV_BYTES = 256 * 1024
 _MAX_FIREBASE_JSON_BYTES = 24 * 1024
@@ -437,9 +442,11 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
     )
 
 
-def _validate_azure_session() -> None:
+def _validate_azure_session(*, subscription_id: str, tenant_id: str) -> None:
     if shutil.which("az") is None:
         raise DeploymentRefusal("Azure CLI is not installed")
+    if not _AZURE_GUID.fullmatch(subscription_id) or not _AZURE_GUID.fullmatch(tenant_id):
+        raise DeploymentRefusal("expected Azure subscription and tenant IDs must be GUIDs")
     account = _run_json(
         ["az", "account", "show", "--output", "json", "--only-show-errors"],
         timeout_seconds=30,
@@ -447,6 +454,11 @@ def _validate_azure_session() -> None:
     )
     if not isinstance(account, dict) or account.get("state") != "Enabled":
         raise DeploymentRefusal("active Azure subscription is not enabled")
+    if (
+        str(account.get("id", "")).casefold() != subscription_id.casefold()
+        or str(account.get("tenantId", "")).casefold() != tenant_id.casefold()
+    ):
+        raise DeploymentRefusal("active Azure account does not match the pinned deployment target")
     _run_command(
         ["az", "bicep", "version", "--only-show-errors"],
         timeout_seconds=60,
@@ -633,7 +645,7 @@ def _current_principal() -> tuple[str, str]:
     return object_id, azure_type
 
 
-def _grant_key_vault_write(key_vault_id: str) -> None:
+def _grant_key_vault_write(key_vault_id: str) -> str | None:
     object_id, principal_type = _current_principal()
     existing = _run_json(
         [
@@ -661,8 +673,8 @@ def _grant_key_vault_write(key_vault_id: str) -> None:
     if not isinstance(existing, list):
         raise DeploymentRefusal("Azure returned invalid Key Vault role-assignment metadata")
     if existing:
-        return
-    _run_command(
+        return None
+    assignment_id = _run_command(
         [
             "az",
             "role",
@@ -677,11 +689,45 @@ def _grant_key_vault_write(key_vault_id: str) -> None:
             "--scope",
             key_vault_id,
             "--only-show-errors",
+            "--query",
+            "id",
+            "--output",
+            "tsv",
+        ],
+        operation="grant deployer Key Vault secret-write access",
+    ).strip()
+    expected_fragment = "/providers/microsoft.authorization/roleassignments/"
+    if expected_fragment not in assignment_id.casefold():
+        raise DeploymentRefusal("Azure returned an invalid Key Vault role-assignment ID")
+    return assignment_id
+
+
+def _revoke_key_vault_write(assignment_id: str) -> None:
+    _run_command(
+        [
+            "az",
+            "role",
+            "assignment",
+            "delete",
+            "--ids",
+            assignment_id,
+            "--only-show-errors",
             "--output",
             "none",
         ],
-        operation="grant deployer Key Vault secret-write access",
+        timeout_seconds=60,
+        operation="revoke temporary deployer Key Vault secret-write access",
     )
+
+
+@contextmanager
+def _temporary_key_vault_write(key_vault_id: str) -> Iterator[None]:
+    assignment_id = _grant_key_vault_write(key_vault_id)
+    try:
+        yield
+    finally:
+        if assignment_id is not None:
+            _revoke_key_vault_write(assignment_id)
 
 
 @contextmanager
@@ -792,6 +838,7 @@ def _acr_build(
     context: Path,
     build_args: Mapping[str, str],
 ) -> str:
+    build_tag = f"{release_sha}-{secrets.token_hex(8)}"
     command = [
         "az",
         "acr",
@@ -799,7 +846,7 @@ def _acr_build(
         "--registry",
         registry_name,
         "--image",
-        f"{repository}:{release_sha}",
+        f"{repository}:{build_tag}",
         "--file",
         dockerfile,
         "--platform",
@@ -831,7 +878,7 @@ def _acr_build(
                     "--name",
                     registry_name,
                     "--image",
-                    f"{repository}:{release_sha}",
+                    f"{repository}:{build_tag}",
                     "--query",
                     "digest",
                     "--output",
@@ -1320,8 +1367,35 @@ def _inspect_app(
     )
 
 
-def _verify_key_vault_metadata(vault_name: str) -> None:
-    rbac_enabled = _run_json(
+def _inspect_managed_identity(identity_id: str) -> str:
+    identity = _run_json(
+        [
+            "az",
+            "identity",
+            "show",
+            "--ids",
+            identity_id,
+            "--query",
+            "{id:id,principalId:principalId}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect frontend managed identity",
+    )
+    if not isinstance(identity, dict) or not _same_azure_resource_id(
+        identity.get("id"), identity_id
+    ):
+        raise DeploymentRefusal("frontend managed identity metadata is invalid")
+    principal_id = identity.get("principalId")
+    if not isinstance(principal_id, str) or not _AZURE_GUID.fullmatch(principal_id):
+        raise DeploymentRefusal("frontend managed identity principal is invalid")
+    return principal_id
+
+
+def _verify_key_vault_metadata(vault_name: str) -> str:
+    vault = _run_json(
         [
             "az",
             "keyvault",
@@ -1329,7 +1403,7 @@ def _verify_key_vault_metadata(vault_name: str) -> None:
             "--name",
             vault_name,
             "--query",
-            "properties.enableRbacAuthorization",
+            "{id:id,name:name,rbac:properties.enableRbacAuthorization}",
             "--output",
             "json",
             "--only-show-errors",
@@ -1337,7 +1411,12 @@ def _verify_key_vault_metadata(vault_name: str) -> None:
         timeout_seconds=60,
         operation="inspect Key Vault authorization mode",
     )
-    if rbac_enabled is not True:
+    if not isinstance(vault, dict) or vault.get("name") != vault_name:
+        raise DeploymentRefusal("backend Key Vault metadata is invalid")
+    vault_id = vault.get("id")
+    if not isinstance(vault_id, str) or not vault_id.casefold().startswith("/subscriptions/"):
+        raise DeploymentRefusal("backend Key Vault resource ID is invalid")
+    if vault.get("rbac") is not True:
         raise DeploymentRefusal("Key Vault is not using Azure RBAC authorization")
     metadata = _run_json(
         [
@@ -1366,6 +1445,7 @@ def _verify_key_vault_metadata(vault_name: str) -> None:
     required = {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME}
     if not required.issubset(enabled):
         raise DeploymentRefusal("Key Vault is missing required enabled secrets")
+    return vault_id
 
 
 def _permission_grants(permission: Mapping[str, object], action: str, *, data_plane: bool) -> bool:
@@ -1384,37 +1464,41 @@ def _permission_grants(permission: Mapping[str, object], action: str, *, data_pl
 
 
 def _verify_frontend_key_vault_boundary(*, frontend_principal_id: str, key_vault_id: str) -> None:
-    role_ids = _run_json(
-        [
-            "az",
-            "role",
-            "assignment",
-            "list",
-            "--assignee-object-id",
-            frontend_principal_id,
-            "--scope",
-            key_vault_id,
-            "--include-inherited",
-            "--include-groups",
-            "--fill-principal-name",
-            "false",
-            "--fill-role-definition-name",
-            "false",
-            "--query",
-            "[].roleDefinitionId",
-            "--output",
-            "json",
-            "--only-show-errors",
-        ],
-        timeout_seconds=60,
-        operation="inspect frontend Key Vault role assignments",
-    )
-    if not isinstance(role_ids, list) or any(not isinstance(item, str) for item in role_ids):
-        raise DeploymentRefusal("frontend Key Vault role assignments are invalid")
+    role_ids: set[str] = set()
+    for secret_name in (AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME):
+        secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
+        result = _run_json(
+            [
+                "az",
+                "role",
+                "assignment",
+                "list",
+                "--assignee-object-id",
+                frontend_principal_id,
+                "--scope",
+                secret_scope,
+                "--include-inherited",
+                "--include-groups",
+                "--fill-principal-name",
+                "false",
+                "--fill-role-definition-name",
+                "false",
+                "--query",
+                "[].roleDefinitionId",
+                "--output",
+                "json",
+                "--only-show-errors",
+            ],
+            timeout_seconds=60,
+            operation=f"inspect frontend access to Key Vault secret {secret_name}",
+        )
+        if not isinstance(result, list) or any(not isinstance(item, str) for item in result):
+            raise DeploymentRefusal("frontend Key Vault role assignments are invalid")
+        role_ids.update(result)
 
     secret_read = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
     role_assignment_write = "Microsoft.Authorization/roleAssignments/write"
-    for raw_role_id in sorted(set(role_ids)):
+    for raw_role_id in sorted(role_ids):
         role_id = raw_role_id.rsplit("/", 1)[-1].casefold()
         if not _ROLE_DEFINITION_ID.fullmatch(role_id):
             raise DeploymentRefusal("frontend Key Vault role assignment is invalid")
@@ -1454,12 +1538,14 @@ def verify_live(
     frontend_app: str,
     expected_backend_identity_id: str,
     expected_frontend_identity_id: str,
-    frontend_identity_principal_id: str,
+    expected_frontend_identity_principal_id: str,
     key_vault_id: str,
+    subscription_id: str,
+    tenant_id: str,
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
 ) -> tuple[AppInspection, AppInspection]:
-    _validate_azure_session()
+    _validate_azure_session(subscription_id=subscription_id, tenant_id=tenant_id)
     _run_command(
         [
             "az",
@@ -1484,16 +1570,25 @@ def verify_live(
         raise DeploymentRefusal("backend does not use the foundation managed identity")
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
+    if not isinstance(frontend.identity_id, str):
+        raise DeploymentRefusal("frontend managed identity resource ID is unavailable")
+    frontend_principal_id = _inspect_managed_identity(frontend.identity_id)
+    if frontend_principal_id.casefold() != expected_frontend_identity_principal_id.casefold():
+        raise DeploymentRefusal(
+            "frontend identity principal does not match the foundation deployment"
+        )
     if backend.release_sha != frontend.release_sha:
         raise DeploymentRefusal("frontend and backend image revisions do not match")
     if expected_sha is not None and backend.release_sha != expected_sha:
         raise DeploymentRefusal("live applications do not match the expected release SHA")
     if not backend.key_vault_name:
         raise DeploymentRefusal("backend has no verified Key Vault reference")
-    _verify_key_vault_metadata(backend.key_vault_name)
+    live_key_vault_id = _verify_key_vault_metadata(backend.key_vault_name)
+    if not _same_azure_resource_id(live_key_vault_id, key_vault_id):
+        raise DeploymentRefusal("backend Key Vault does not match the foundation deployment")
     _verify_frontend_key_vault_boundary(
-        frontend_principal_id=frontend_identity_principal_id,
-        key_vault_id=key_vault_id,
+        frontend_principal_id=frontend_principal_id,
+        key_vault_id=live_key_vault_id,
     )
     _verify_https(
         backend.url,
@@ -1547,7 +1642,10 @@ def deploy(args: argparse.Namespace) -> int:
         raise DeploymentRefusal("the isolated pilot must be deployed in Central India")
     revision = validate_source_revision()
     inputs = load_deployment_inputs(args.backend_env, args.frontend_env)
-    _validate_azure_session()
+    _validate_azure_session(
+        subscription_id=args.subscription_id,
+        tenant_id=args.tenant_id,
+    )
 
     print(f"Deploying immutable release {revision.sha}")
     print("Registering required Azure providers")
@@ -1595,17 +1693,17 @@ def deploy(args: argparse.Namespace) -> int:
         raise DeploymentRefusal("derived frontend URL does not match foundation output")
 
     print("Importing server credentials into Azure Key Vault")
-    _grant_key_vault_write(key_vault_id)
-    _write_key_vault_secret(
-        vault_name=key_vault_name,
-        secret_name=AZURE_KEY_SECRET_NAME,
-        payload=inputs.azure_openai_key.encode("utf-8"),
-    )
-    _write_key_vault_secret(
-        vault_name=key_vault_name,
-        secret_name=FIREBASE_SECRET_NAME,
-        payload=inputs.firebase_json_bytes(),
-    )
+    with _temporary_key_vault_write(key_vault_id):
+        _write_key_vault_secret(
+            vault_name=key_vault_name,
+            secret_name=AZURE_KEY_SECRET_NAME,
+            payload=inputs.azure_openai_key.encode("utf-8"),
+        )
+        _write_key_vault_secret(
+            vault_name=key_vault_name,
+            secret_name=FIREBASE_SECRET_NAME,
+            payload=inputs.firebase_json_bytes(),
+        )
 
     print("Building backend image from the accepted git archive")
     backend_digest = _build_backend(registry_name, revision.sha)
@@ -1666,8 +1764,10 @@ def deploy(args: argparse.Namespace) -> int:
         frontend_app=frontend_app,
         expected_backend_identity_id=backend_identity_id,
         expected_frontend_identity_id=frontend_identity_id,
-        frontend_identity_principal_id=frontend_identity_principal_id,
+        expected_frontend_identity_principal_id=frontend_identity_principal_id,
         key_vault_id=key_vault_id,
+        subscription_id=args.subscription_id,
+        tenant_id=args.tenant_id,
         expected_sha=revision.sha,
         health_timeout_seconds=args.health_timeout_seconds,
     )
@@ -1700,8 +1800,12 @@ def verify(args: argparse.Namespace) -> int:
         frontend_app=frontend_app,
         expected_backend_identity_id=_output_value(foundation, "identityId"),
         expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
-        frontend_identity_principal_id=_output_value(foundation, "frontendIdentityPrincipalId"),
+        expected_frontend_identity_principal_id=_output_value(
+            foundation, "frontendIdentityPrincipalId"
+        ),
         key_vault_id=_output_value(foundation, "keyVaultId"),
+        subscription_id=args.subscription_id,
+        tenant_id=args.tenant_id,
         expected_sha=expected_sha,
         health_timeout_seconds=args.health_timeout_seconds,
     )
@@ -1720,6 +1824,18 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--backend-app", default=DEFAULT_BACKEND_APP)
         command.add_argument("--frontend-app", default=DEFAULT_FRONTEND_APP)
         command.add_argument("--health-timeout-seconds", type=float, default=300)
+        command.add_argument(
+            "--subscription-id",
+            default=os.getenv("MURMUR_AZURE_SUBSCRIPTION_ID"),
+            required=not bool(os.getenv("MURMUR_AZURE_SUBSCRIPTION_ID")),
+            help="Exact Azure subscription GUID expected for this deployment.",
+        )
+        command.add_argument(
+            "--tenant-id",
+            default=os.getenv("MURMUR_AZURE_TENANT_ID"),
+            required=not bool(os.getenv("MURMUR_AZURE_TENANT_ID")),
+            help="Exact Azure tenant GUID expected for this deployment.",
+        )
 
     deploy_parser = subparsers.add_parser("deploy", help="Provision and verify the pilot.")
     add_live_arguments(deploy_parser)

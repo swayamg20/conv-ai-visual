@@ -36,6 +36,8 @@ BACKEND_IDENTITY_ID = "/subscriptions/sub/resourceGroups/rg/providers/backend"
 FRONTEND_IDENTITY_ID = "/subscriptions/sub/resourceGroups/rg/providers/frontend"
 FRONTEND_IDENTITY_PRINCIPAL_ID = "11111111-1111-1111-1111-111111111111"
 KEY_VAULT_ID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault"
+SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222"
+TENANT_ID = "33333333-3333-3333-3333-333333333333"
 
 
 def _service_account(project_id: str = "firebase-project") -> dict[str, str]:
@@ -252,6 +254,45 @@ def test_command_failure_never_includes_captured_output(
     assert PRIVATE_KEY not in str(raised.value)
 
 
+def test_validate_azure_session_refuses_a_different_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deploy.shutil, "which", lambda _command: "/opt/homebrew/bin/az")
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: {
+            "state": "Enabled",
+            "id": "44444444-4444-4444-4444-444444444444",
+            "tenantId": TENANT_ID,
+        },
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="pinned deployment target"):
+        deploy._validate_azure_session(
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
+        )
+
+
+def test_temporary_key_vault_role_is_revoked_after_a_failed_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assignment_id = (
+        "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/"
+        "55555555-5555-5555-5555-555555555555"
+    )
+    revoked: list[str] = []
+    monkeypatch.setattr(deploy, "_grant_key_vault_write", lambda _vault: assignment_id)
+    monkeypatch.setattr(deploy, "_revoke_key_vault_write", revoked.append)
+
+    with pytest.raises(RuntimeError, match="write failed"):
+        with deploy._temporary_key_vault_write(KEY_VAULT_ID):
+            raise RuntimeError("write failed")
+
+    assert revoked == [assignment_id]
+
+
 def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -436,6 +477,7 @@ def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
 
     monkeypatch.setattr(deploy, "_run_command", fake_run)
     monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(deploy.secrets, "token_hex", lambda _length: "unique1234567890")
 
     digest = deploy._acr_build(
         registry_name="murmurregistry",
@@ -449,6 +491,7 @@ def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
     assert "--no-logs" not in observed
     assert "--no-wait" not in observed
     assert observed[observed.index("--platform") + 1] == "linux/amd64"
+    assert observed[observed.index("--image") + 1] == f"murmur-api:{SHA}-unique1234567890"
     assert observed[-1] == "."
     assert digest == DIGEST
     assert digest_attempts == 2
@@ -680,7 +723,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         lambda: deploy.SourceRevision(SHA, "codex/deploy", "origin", "refs/heads/codex/deploy"),
     )
     monkeypatch.setattr(deploy, "load_deployment_inputs", lambda *_args: inputs)
-    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: None)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_register_providers", lambda: calls.append(("providers", None)))
     monkeypatch.setattr(
         deploy,
@@ -740,6 +783,8 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         backend_env=backend_env,
         frontend_env=frontend_env,
         health_timeout_seconds=1,
+        subscription_id=SUBSCRIPTION_ID,
+        tenant_id=TENANT_ID,
     )
     assert deploy.deploy(args) == expected_result
 
@@ -774,7 +819,10 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
     frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
     observed: list[str] = []
-    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: observed.append("azure"))
+    boundary: dict[str, str] = {}
+    monkeypatch.setattr(
+        deploy, "_validate_azure_session", lambda **_kwargs: observed.append("azure")
+    )
     monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         deploy,
@@ -784,12 +832,17 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     monkeypatch.setattr(
         deploy,
         "_verify_key_vault_metadata",
-        lambda _vault: observed.append("key-vault-metadata"),
+        lambda _vault: observed.append("key-vault-metadata") or KEY_VAULT_ID,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_managed_identity",
+        lambda _identity: FRONTEND_IDENTITY_PRINCIPAL_ID,
     )
     monkeypatch.setattr(
         deploy,
         "_verify_frontend_key_vault_boundary",
-        lambda **_kwargs: observed.append("identity-boundary"),
+        lambda **kwargs: (boundary.update(kwargs), observed.append("identity-boundary")),
     )
     monkeypatch.setattr(
         deploy,
@@ -803,13 +856,19 @@ def test_verify_live_performs_only_metadata_and_health_checks(
         frontend_app="murmur-web",
         expected_backend_identity_id=BACKEND_IDENTITY_ID,
         expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
-        frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+        expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
         key_vault_id=KEY_VAULT_ID,
+        subscription_id=SUBSCRIPTION_ID,
+        tenant_id=TENANT_ID,
     )
 
     assert live_backend == backend_inspection
     assert live_frontend == frontend_inspection
     assert observed == ["azure", "key-vault-metadata", "identity-boundary", "https"]
+    assert boundary == {
+        "frontend_principal_id": FRONTEND_IDENTITY_PRINCIPAL_ID,
+        "key_vault_id": KEY_VAULT_ID,
+    }
 
 
 def test_verify_live_rejects_latest_revision_that_is_not_ready(
@@ -820,14 +879,19 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
         latest_ready_revision="murmur-api--previous",
     )
     frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
-    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: None)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
         lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
     )
-    monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: None)
+    monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: KEY_VAULT_ID)
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_managed_identity",
+        lambda _identity: FRONTEND_IDENTITY_PRINCIPAL_ID,
+    )
     monkeypatch.setattr(deploy, "_verify_frontend_key_vault_boundary", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_verify_https", lambda *_args, **_kwargs: None)
 
@@ -838,8 +902,10 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
-            frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+            expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
         )
 
 
@@ -851,7 +917,7 @@ def test_verify_live_rejects_shared_frontend_and_backend_identity(
         _inspection("murmur-web", FRONTEND_URL, backend=False),
         identity_id=backend_inspection.identity_id,
     )
-    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: None)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         deploy,
@@ -866,8 +932,10 @@ def test_verify_live_rejects_shared_frontend_and_backend_identity(
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
-            frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+            expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
         )
 
 
@@ -879,7 +947,7 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
         _inspection("murmur-web", FRONTEND_URL, backend=False),
         identity_id="/subscriptions/sub/resourceGroups/rg/providers/rogue",
     )
-    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: None)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
     monkeypatch.setattr(
         deploy,
@@ -894,21 +962,36 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
-            frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+            expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
         )
 
 
-def test_frontend_key_vault_boundary_rejects_secret_read_role(
+@pytest.mark.parametrize(
+    "protected_secret",
+    (deploy.AZURE_KEY_SECRET_NAME, deploy.FIREBASE_SECRET_NAME),
+)
+def test_frontend_key_vault_boundary_rejects_secret_read_role_at_each_secret_scope(
     monkeypatch: pytest.MonkeyPatch,
+    protected_secret: str,
 ) -> None:
     role_id = "4633458b-17de-408a-b874-0445c86b69e6"
+    observed_scopes: list[str] = []
 
     def fake_run_json(command: list[str], **_kwargs: Any) -> object:
         if command[1:4] == ["role", "assignment", "list"]:
-            return [
-                f"/subscriptions/sub/providers/Microsoft.Authorization/roleDefinitions/{role_id}"
-            ]
+            scope = command[command.index("--scope") + 1]
+            observed_scopes.append(scope)
+            assert "--include-inherited" in command
+            assert "--include-groups" in command
+            if scope.endswith(f"/secrets/{protected_secret}"):
+                return [
+                    "/subscriptions/sub/providers/Microsoft.Authorization/"
+                    f"roleDefinitions/{role_id}"
+                ]
+            return []
         if command[1:4] == ["role", "definition", "list"]:
             return [
                 {
@@ -928,6 +1011,80 @@ def test_frontend_key_vault_boundary_rejects_secret_read_role(
             key_vault_id=KEY_VAULT_ID,
         )
 
+    assert observed_scopes == [
+        f"{KEY_VAULT_ID}/secrets/{deploy.AZURE_KEY_SECRET_NAME}",
+        f"{KEY_VAULT_ID}/secrets/{deploy.FIREBASE_SECRET_NAME}",
+    ]
+
+
+def test_verify_live_rejects_stale_frontend_principal_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
+    frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_app",
+        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_managed_identity",
+        lambda _identity: "66666666-6666-6666-6666-666666666666",
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="principal does not match"):
+        deploy.verify_live(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            frontend_app="murmur-web",
+            expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
+            expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
+        )
+
+
+def test_verify_live_rejects_stale_key_vault_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
+    frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_app",
+        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_managed_identity",
+        lambda _identity: FRONTEND_IDENTITY_PRINCIPAL_ID,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_verify_key_vault_metadata",
+        lambda _vault: f"{KEY_VAULT_ID}-different",
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="Key Vault does not match"):
+        deploy.verify_live(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            frontend_app="murmur-web",
+            expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
+            expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            subscription_id=SUBSCRIPTION_ID,
+            tenant_id=TENANT_ID,
+        )
+
 
 def test_main_redacts_unexpected_exception_text(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
@@ -937,7 +1094,20 @@ def test_main_redacts_unexpected_exception_text(
 
     monkeypatch.setattr(deploy, "verify", fail)
 
-    assert deploy.main(["verify", "--health-timeout-seconds", "1"]) == 1
+    assert (
+        deploy.main(
+            [
+                "verify",
+                "--health-timeout-seconds",
+                "1",
+                "--subscription-id",
+                SUBSCRIPTION_ID,
+                "--tenant-id",
+                TENANT_ID,
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     assert AZURE_KEY not in captured.err
     assert PRIVATE_KEY not in captured.err
