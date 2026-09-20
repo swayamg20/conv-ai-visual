@@ -2841,7 +2841,7 @@ def _verify_old_revisions_inactive(
             and current["replicas"] >= 1
             and current.get("healthState") == "Healthy"
             and current.get("provisioningState") == "Provisioned"
-            and current.get("runningState") == "Running"
+            and current.get("runningState") in {"Running", "RunningAtMaxScale"}
         )
         old_ready = all(
             item["active"] is False
