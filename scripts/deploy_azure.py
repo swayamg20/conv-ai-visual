@@ -21,11 +21,13 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Iterator, Mapping, Sequence
+import uuid
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -45,10 +47,35 @@ FOUNDATION_DEPLOYMENT = "murmur-foundation"
 APPS_DEPLOYMENT = "murmur-apps"
 
 AZURE_KEY_SECRET_NAME = "azure-openai-api-key"
-FIREBASE_SECRET_NAME = "firebase-service-account-json"
+FIREBASE_SECRET_NAME = "firebase-runtime-service-account-json"
+LEGACY_FIREBASE_SECRET_NAME = "firebase-service-account-json"
 KEY_VAULT_WRITER_ROLE = "Key Vault Secrets Officer"
+KEY_VAULT_ROTATION_TAG = "murmurRotationId"
+KEY_VAULT_SECRETS_USER_ROLE_ID = "4633458b-17de-408a-b874-0445c86b69e6"
+KEY_VAULT_SECRETS_OFFICER_ROLE_ID = "b86a8fe4-44ce-4948-aee5-eccb2c155cd7"
+KEY_VAULT_WRITER_ASSIGNMENT_NAMESPACE = uuid.UUID("c95619d1-bf33-4f50-a725-c7679f69307d")
+KEY_VAULT_WRITER_DESCRIPTION = "Temporary Murmur deployment secret writer"
+DEPLOYMENT_LEASE_SECONDS = 60
+DEPLOYMENT_LEASE_RENEW_SECONDS = 20
 IDENTITY_TOOLKIT_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
 IDENTITY_TOOLKIT_CONFIG_ROOT = "https://identitytoolkit.googleapis.com/admin/v2"
+RESOURCE_MANAGER_ROOT = "https://cloudresourcemanager.googleapis.com/v1"
+FIREBASE_AUTH_PERMISSION_UNIVERSE = (
+    "firebaseauth.configs.create",
+    "firebaseauth.configs.get",
+    "firebaseauth.configs.getHashConfig",
+    "firebaseauth.configs.getSecret",
+    "firebaseauth.configs.update",
+    "firebaseauth.users.create",
+    "firebaseauth.users.createSession",
+    "firebaseauth.users.delete",
+    "firebaseauth.users.get",
+    "firebaseauth.users.sendEmail",
+    "firebaseauth.users.update",
+)
+EXPECTED_FIREBASE_RUNTIME_AUTH_PERMISSIONS = frozenset(
+    ("firebaseauth.configs.get", "firebaseauth.users.get")
+)
 
 REQUIRED_PROVIDERS = (
     "Microsoft.App",
@@ -140,6 +167,50 @@ class FirebaseDomainResult:
 
 
 @dataclass(frozen=True)
+class KeyVaultSecretVersion:
+    version: str
+    enabled: bool
+    rotation_id: str | None
+
+
+@dataclass(frozen=True)
+class RoleAssignmentMetadata:
+    id: str
+    scope: str
+    principal_id: str
+    role_definition_id: str
+    description: str | None
+
+
+class DeploymentLease:
+    def __init__(
+        self, *, account_name: str, container_name: str, blob_name: str, lease_id: str
+    ) -> None:
+        self.account_name = account_name
+        self.container_name = container_name
+        self.blob_name = blob_name
+        self.lease_id = lease_id
+        self._lock = threading.Lock()
+        self._last_renewal = time.monotonic()
+        self._failure: str | None = None
+
+    def mark_renewed(self) -> None:
+        with self._lock:
+            self._last_renewal = time.monotonic()
+
+    def mark_lost(self) -> None:
+        with self._lock:
+            self._failure = "Azure deployment lease renewal failed"
+
+    def assert_healthy(self) -> None:
+        with self._lock:
+            failure = self._failure
+            age = time.monotonic() - self._last_renewal
+        if failure is not None or age >= DEPLOYMENT_LEASE_SECONDS:
+            raise DeploymentRefusal(failure or "Azure deployment lease renewal is stale")
+
+
+@dataclass(frozen=True)
 class AppInspection:
     name: str
     url: str
@@ -155,6 +226,7 @@ class AppInspection:
     max_replicas: int
     probe_types: tuple[str, ...]
     key_vault_name: str | None = None
+    key_vault_secret_versions: tuple[tuple[str, str], ...] = ()
     identity_id: str | None = None
 
 
@@ -208,6 +280,314 @@ def _run_json(
     except (json.JSONDecodeError, TypeError):
         label = operation or _operation_label(command)
         raise DeploymentRefusal(f"{label} returned invalid JSON") from None
+
+
+def _validate_storage_name(value: str, label: str, pattern: str) -> str:
+    if re.fullmatch(pattern, value) is None:
+        raise DeploymentRefusal(f"foundation returned an invalid {label}")
+    return value
+
+
+def _blob_args(
+    *, account_name: str, container_name: str, blob_name: str, subscription_id: str
+) -> list[str]:
+    return [
+        "--account-name",
+        account_name,
+        "--container-name",
+        container_name,
+        "--blob-name",
+        blob_name,
+        "--subscription",
+        subscription_id,
+        "--auth-mode",
+        "login",
+        "--only-show-errors",
+    ]
+
+
+def _show_deployment_lock_blob(
+    *, account_name: str, container_name: str, blob_name: str, subscription_id: str
+) -> None:
+    observed = _run_json(
+        [
+            "az",
+            "storage",
+            "blob",
+            "show",
+            *_blob_args(
+                account_name=account_name,
+                container_name=container_name,
+                blob_name=blob_name,
+                subscription_id=subscription_id,
+            ),
+            "--query",
+            "{name:name,type:properties.blobType}",
+            "--output",
+            "json",
+        ],
+        timeout_seconds=30,
+        operation="inspect Azure deployment lock blob",
+    )
+    if observed != {"name": blob_name, "type": "BlockBlob"}:
+        raise DeploymentRefusal("Azure deployment lock anchor is not a block blob")
+
+
+def _ensure_deployment_lock_blob(
+    *,
+    account_name: str,
+    container_name: str,
+    blob_name: str,
+    subscription_id: str,
+    attempts: int = 12,
+) -> None:
+    if attempts < 1:
+        raise DeploymentRefusal("Azure deployment lock checks require positive attempts")
+    for attempt in range(attempts):
+        try:
+            _run_command(
+                [
+                    "az",
+                    "storage",
+                    "blob",
+                    "upload",
+                    "--account-name",
+                    account_name,
+                    "--container-name",
+                    container_name,
+                    "--name",
+                    blob_name,
+                    "--subscription",
+                    subscription_id,
+                    "--data",
+                    "{}",
+                    "--type",
+                    "block",
+                    "--overwrite",
+                    "false",
+                    "--auth-mode",
+                    "login",
+                    "--only-show-errors",
+                    "--output",
+                    "none",
+                ],
+                timeout_seconds=30,
+                operation="create Azure deployment lock blob",
+            )
+        except DeploymentRefusal:
+            pass
+        try:
+            # Existing anchors and accepted-write timeouts are safe only after exact readback.
+            _show_deployment_lock_blob(
+                account_name=account_name,
+                container_name=container_name,
+                blob_name=blob_name,
+                subscription_id=subscription_id,
+            )
+            return
+        except DeploymentRefusal:
+            if attempt + 1 == attempts:
+                raise DeploymentRefusal(
+                    "Azure deployment lock blob setup did not become available"
+                ) from None
+            time.sleep(min(2**attempt, 10))
+
+
+def _lease_command(
+    action: str,
+    *,
+    account_name: str,
+    container_name: str,
+    blob_name: str,
+    lease_id: str,
+    subscription_id: str,
+) -> list[str]:
+    command = ["az", "storage", "blob", "lease", action]
+    command.extend(
+        _blob_args(
+            account_name=account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            subscription_id=subscription_id,
+        )
+    )
+    if action == "acquire":
+        command.extend(
+            ["--lease-duration", str(DEPLOYMENT_LEASE_SECONDS), "--proposed-lease-id", lease_id]
+        )
+    else:
+        command.extend(["--lease-id", lease_id])
+    command.extend(["--output", "none" if action == "release" else "tsv"])
+    return command
+
+
+def _renew_deployment_lease(
+    *,
+    account_name: str,
+    container_name: str,
+    blob_name: str,
+    lease_id: str,
+    subscription_id: str,
+) -> None:
+    returned = _run_command(
+        _lease_command(
+            "renew",
+            account_name=account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            lease_id=lease_id,
+            subscription_id=subscription_id,
+        ),
+        timeout_seconds=20,
+        operation="renew Azure deployment lease",
+    ).strip()
+    if returned != lease_id:
+        raise DeploymentRefusal("Azure deployment lease renewal returned a different lease")
+
+
+def _acquire_deployment_lease(
+    *,
+    account_name: str,
+    container_name: str,
+    blob_name: str,
+    lease_id: str,
+    subscription_id: str,
+) -> None:
+    try:
+        returned = _run_command(
+            _lease_command(
+                "acquire",
+                account_name=account_name,
+                container_name=container_name,
+                blob_name=blob_name,
+                lease_id=lease_id,
+                subscription_id=subscription_id,
+            ),
+            timeout_seconds=20,
+            operation="acquire Azure deployment lease",
+        ).strip()
+    except DeploymentRefusal:
+        # A timeout may be accepted. Repeating acquire with the same proposed ID
+        # is the only safe ownership reconciliation and never breaks another lease.
+        try:
+            returned = _run_command(
+                _lease_command(
+                    "acquire",
+                    account_name=account_name,
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    lease_id=lease_id,
+                    subscription_id=subscription_id,
+                ),
+                timeout_seconds=20,
+                operation="reconcile Azure deployment lease acquisition",
+            ).strip()
+        except DeploymentRefusal:
+            raise DeploymentRefusal(
+                "Azure deployment lease is unavailable or held by another deployment"
+            ) from None
+        if returned != lease_id:
+            raise DeploymentRefusal(
+                "Azure deployment lease reconciliation returned a different lease"
+            ) from None
+        return
+    if returned != lease_id:
+        raise DeploymentRefusal("Azure deployment lease acquisition returned a different lease")
+
+
+def _release_deployment_lease(
+    *,
+    account_name: str,
+    container_name: str,
+    blob_name: str,
+    lease_id: str,
+    subscription_id: str,
+) -> None:
+    _run_command(
+        _lease_command(
+            "release",
+            account_name=account_name,
+            container_name=container_name,
+            blob_name=blob_name,
+            lease_id=lease_id,
+            subscription_id=subscription_id,
+        ),
+        timeout_seconds=20,
+        operation="release Azure deployment lease",
+    )
+
+
+@contextmanager
+def _deployment_blob_lease(
+    *, account_name: str, container_name: str, blob_name: str, subscription_id: str
+) -> Iterator[DeploymentLease]:
+    account_name = _validate_storage_name(
+        account_name, "deployment-lock account", r"[a-z0-9]{3,24}"
+    )
+    container_name = _validate_storage_name(
+        container_name, "deployment-lock container", r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])?"
+    )
+    blob_name = _validate_storage_name(blob_name, "deployment-lock blob", r"[A-Za-z0-9._-]{1,128}")
+    _ensure_deployment_lock_blob(
+        account_name=account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        subscription_id=subscription_id,
+    )
+    lease_id = str(uuid.uuid4())
+    _acquire_deployment_lease(
+        account_name=account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        lease_id=lease_id,
+        subscription_id=subscription_id,
+    )
+    lease = DeploymentLease(
+        account_name=account_name,
+        container_name=container_name,
+        blob_name=blob_name,
+        lease_id=lease_id,
+    )
+    stop = threading.Event()
+
+    def renew() -> None:
+        while not stop.wait(DEPLOYMENT_LEASE_RENEW_SECONDS):
+            try:
+                _renew_deployment_lease(
+                    account_name=account_name,
+                    container_name=container_name,
+                    blob_name=blob_name,
+                    lease_id=lease_id,
+                    subscription_id=subscription_id,
+                )
+            except DeploymentRefusal:
+                lease.mark_lost()
+                return
+            lease.mark_renewed()
+
+    worker = threading.Thread(target=renew, name="murmur-azure-lease", daemon=True)
+    worker.start()
+    body_failed = False
+    try:
+        yield lease
+        lease.assert_healthy()
+    except BaseException:
+        body_failed = True
+        raise
+    finally:
+        stop.set()
+        worker.join(timeout=25)
+        try:
+            _release_deployment_lease(
+                account_name=account_name,
+                container_name=container_name,
+                blob_name=blob_name,
+                lease_id=lease_id,
+                subscription_id=subscription_id,
+            )
+        except DeploymentRefusal:
+            if not body_failed:
+                raise
 
 
 def _require_safe_resource_name(value: str, label: str) -> str:
@@ -581,7 +961,7 @@ def _deployment_outputs(
     resource_group: str,
     deployment_name: str,
     template: Path,
-    parameters: Mapping[str, str],
+    parameters: Mapping[str, object],
 ) -> Mapping[str, object]:
     command = [
         "az",
@@ -602,7 +982,10 @@ def _deployment_outputs(
     ]
     if parameters:
         command.append("--parameters")
-        command.extend(f"{key}={value}" for key, value in parameters.items())
+        command.extend(
+            f"{key}={'true' if value is True else 'false' if value is False else value}"
+            for key, value in parameters.items()
+        )
     outputs = _run_json(command, timeout_seconds=1800, operation=f"deploy {deployment_name}")
     if not isinstance(outputs, dict):
         raise DeploymentRefusal(f"{deployment_name} returned invalid outputs")
@@ -676,24 +1059,37 @@ def _current_principal() -> tuple[str, str]:
     return object_id, azure_type
 
 
-def _grant_key_vault_write(key_vault_id: str) -> str | None:
-    object_id, principal_type = _current_principal()
-    existing = _run_json(
+def _writer_assignment_name(key_vault_id: str, object_id: str) -> str:
+    return str(
+        uuid.uuid5(
+            KEY_VAULT_WRITER_ASSIGNMENT_NAMESPACE,
+            f"{key_vault_id.rstrip('/').casefold()}|{object_id.casefold()}",
+        )
+    )
+
+
+def _role_definition_guid(value: object) -> str:
+    if not isinstance(value, str):
+        raise DeploymentRefusal("Azure returned invalid role-assignment metadata")
+    role_id = value.rstrip("/").rsplit("/", 1)[-1].casefold()
+    if not _ROLE_DEFINITION_ID.fullmatch(role_id):
+        raise DeploymentRefusal("Azure returned invalid role-assignment metadata")
+    return role_id
+
+
+def _direct_key_vault_writer_assignments(key_vault_id: str) -> tuple[RoleAssignmentMetadata, ...]:
+    raw = _run_json(
         [
             "az",
             "role",
             "assignment",
             "list",
-            "--assignee-object-id",
-            object_id,
-            "--role",
-            KEY_VAULT_WRITER_ROLE,
             "--scope",
             key_vault_id,
             "--fill-principal-name",
             "false",
             "--query",
-            "[].id",
+            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description}",
             "--output",
             "json",
             "--only-show-errors",
@@ -701,64 +1097,197 @@ def _grant_key_vault_write(key_vault_id: str) -> str | None:
         timeout_seconds=60,
         operation="inspect deployer Key Vault secret-write access",
     )
-    if not isinstance(existing, list):
+    if not isinstance(raw, list):
         raise DeploymentRefusal("Azure returned invalid Key Vault role-assignment metadata")
-    if existing:
-        return None
-    assignment_id = _run_command(
-        [
-            "az",
-            "role",
-            "assignment",
-            "create",
-            "--assignee-object-id",
-            object_id,
-            "--assignee-principal-type",
-            principal_type,
-            "--role",
-            KEY_VAULT_WRITER_ROLE,
-            "--scope",
-            key_vault_id,
-            "--only-show-errors",
-            "--query",
-            "id",
-            "--output",
-            "tsv",
-        ],
-        operation="grant deployer Key Vault secret-write access",
-    ).strip()
-    expected_fragment = "/providers/microsoft.authorization/roleassignments/"
-    if expected_fragment not in assignment_id.casefold():
-        raise DeploymentRefusal("Azure returned an invalid Key Vault role-assignment ID")
-    return assignment_id
+    assignments: list[RoleAssignmentMetadata] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise DeploymentRefusal("Azure returned invalid Key Vault role-assignment metadata")
+        role_id = _role_definition_guid(item.get("roleDefinitionId"))
+        scope = item.get("scope")
+        if role_id != KEY_VAULT_SECRETS_OFFICER_ROLE_ID or not _same_azure_resource_id(
+            scope, key_vault_id
+        ):
+            continue
+        assignment_id = item.get("id")
+        principal_id = item.get("principalId")
+        description = item.get("description")
+        if (
+            not isinstance(assignment_id, str)
+            or not isinstance(principal_id, str)
+            or not _AZURE_GUID.fullmatch(principal_id)
+            or (description is not None and not isinstance(description, str))
+        ):
+            raise DeploymentRefusal("Azure returned invalid Key Vault role-assignment metadata")
+        assignments.append(
+            RoleAssignmentMetadata(
+                id=assignment_id,
+                scope=scope,
+                principal_id=principal_id,
+                role_definition_id=role_id,
+                description=description,
+            )
+        )
+    return tuple(assignments)
 
 
-def _revoke_key_vault_write(assignment_id: str) -> None:
-    _run_command(
-        [
-            "az",
-            "role",
-            "assignment",
-            "delete",
-            "--ids",
-            assignment_id,
-            "--only-show-errors",
-            "--output",
-            "none",
-        ],
-        timeout_seconds=60,
-        operation="revoke temporary deployer Key Vault secret-write access",
+def _expected_writer_assignment(key_vault_id: str, *, object_id: str) -> RoleAssignmentMetadata:
+    assignment_name = _writer_assignment_name(key_vault_id, object_id)
+    return RoleAssignmentMetadata(
+        id=(
+            f"{key_vault_id.rstrip('/')}/providers/Microsoft.Authorization/"
+            f"roleAssignments/{assignment_name}"
+        ),
+        scope=key_vault_id.rstrip("/"),
+        principal_id=object_id,
+        role_definition_id=KEY_VAULT_SECRETS_OFFICER_ROLE_ID,
+        description=KEY_VAULT_WRITER_DESCRIPTION,
     )
 
 
+def _same_writer_assignment(
+    actual: RoleAssignmentMetadata, expected: RoleAssignmentMetadata
+) -> bool:
+    return (
+        _same_azure_resource_id(actual.id, expected.id)
+        and _same_azure_resource_id(actual.scope, expected.scope)
+        and actual.principal_id.casefold() == expected.principal_id.casefold()
+        and actual.role_definition_id == expected.role_definition_id
+        and actual.description == expected.description
+    )
+
+
+def _await_writer_assignment(
+    key_vault_id: str,
+    *,
+    expected: RoleAssignmentMetadata,
+    present: bool,
+    attempts: int = 8,
+) -> None:
+    for attempt in range(attempts):
+        matches = [
+            assignment
+            for assignment in _direct_key_vault_writer_assignments(key_vault_id)
+            if _same_azure_resource_id(assignment.id, expected.id)
+        ]
+        if not matches and not present:
+            return
+        if len(matches) == 1 and present:
+            if not _same_writer_assignment(matches[0], expected):
+                raise DeploymentRefusal("temporary Key Vault writer metadata is ambiguous")
+            return
+        if len(matches) > 1:
+            raise DeploymentRefusal("temporary Key Vault writer metadata is ambiguous")
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 8))
+    state = "appear" if present else "disappear"
+    raise DeploymentRefusal(f"temporary Key Vault writer assignment did not {state}")
+
+
+def _grant_key_vault_write(
+    key_vault_id: str,
+    *,
+    principal: tuple[str, str] | None = None,
+) -> RoleAssignmentMetadata:
+    object_id, principal_type = principal or _current_principal()
+    if _direct_key_vault_writer_assignments(key_vault_id):
+        raise DeploymentRefusal(
+            "deployer already has a direct Key Vault Secrets Officer assignment; "
+            "remove or separately review it before deployment"
+        )
+    expected = _expected_writer_assignment(key_vault_id, object_id=object_id)
+    try:
+        _run_command(
+            [
+                "az",
+                "role",
+                "assignment",
+                "create",
+                "--name",
+                expected.id.rsplit("/", 1)[-1],
+                "--assignee-object-id",
+                object_id,
+                "--assignee-principal-type",
+                principal_type,
+                "--role",
+                KEY_VAULT_WRITER_ROLE,
+                "--scope",
+                key_vault_id,
+                "--description",
+                KEY_VAULT_WRITER_DESCRIPTION,
+                "--only-show-errors",
+                "--output",
+                "none",
+            ],
+            timeout_seconds=60,
+            operation="grant deployer Key Vault secret-write access",
+        )
+    except DeploymentRefusal:
+        # A create timeout can be accepted; the exact deterministic assignment is proof.
+        _await_writer_assignment(key_vault_id, expected=expected, present=True)
+        return expected
+    _await_writer_assignment(key_vault_id, expected=expected, present=True)
+    return expected
+
+
+def _revoke_key_vault_write(
+    key_vault_id: str,
+    assignment: RoleAssignmentMetadata,
+    *,
+    attempts: int = 8,
+) -> None:
+    _await_writer_assignment(key_vault_id, expected=assignment, present=True, attempts=1)
+    for attempt in range(attempts):
+        try:
+            _run_command(
+                [
+                    "az",
+                    "role",
+                    "assignment",
+                    "delete",
+                    "--ids",
+                    assignment.id,
+                    "--only-show-errors",
+                    "--output",
+                    "none",
+                ],
+                timeout_seconds=60,
+                operation="revoke temporary deployer Key Vault secret-write access",
+            )
+        except DeploymentRefusal:
+            pass
+        try:
+            _await_writer_assignment(key_vault_id, expected=assignment, present=False, attempts=1)
+            return
+        except DeploymentRefusal:
+            current = [
+                item
+                for item in _direct_key_vault_writer_assignments(key_vault_id)
+                if _same_azure_resource_id(item.id, assignment.id)
+            ]
+            if len(current) != 1 or not _same_writer_assignment(current[0], assignment):
+                raise DeploymentRefusal(
+                    "temporary Key Vault writer metadata is ambiguous"
+                ) from None
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 8))
+    raise DeploymentRefusal("temporary Key Vault writer assignment remains after cleanup")
+
+
 @contextmanager
-def _temporary_key_vault_write(key_vault_id: str) -> Iterator[None]:
-    assignment_id = _grant_key_vault_write(key_vault_id)
+def _temporary_key_vault_write(
+    key_vault_id: str,
+    *,
+    principal: tuple[str, str] | None = None,
+    mutation_guard: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    if mutation_guard is not None:
+        mutation_guard()
+    assignment = _grant_key_vault_write(key_vault_id, principal=principal)
     try:
         yield
     finally:
-        if assignment_id is not None:
-            _revoke_key_vault_write(assignment_id)
+        _revoke_key_vault_write(key_vault_id, assignment)
 
 
 @contextmanager
@@ -787,50 +1316,68 @@ def _write_key_vault_secret(
     secret_name: str,
     payload: bytes,
     attempts: int = 32,
+    mutation_guard: Callable[[], None] | None = None,
 ) -> str:
-    secret_id = ""
+    if attempts < 1:
+        raise DeploymentRefusal("Key Vault reconciliation attempts must be positive")
+    _await_key_vault_data_plane_access(vault_name=vault_name, attempts=attempts)
+    rotation_id = secrets.token_hex(16)
+    secret_id: str | None = None
     with _secure_temp_file(payload, suffix=".secret") as path:
-        for attempt in range(attempts):
-            try:
-                secret_id = _run_command(
-                    [
-                        "az",
-                        "keyvault",
-                        "secret",
-                        "set",
-                        "--vault-name",
-                        vault_name,
-                        "--name",
-                        secret_name,
-                        "--file",
-                        str(path),
-                        "--encoding",
-                        "utf-8",
-                        "--only-show-errors",
-                        "--query",
-                        "id",
-                        "--output",
-                        "tsv",
-                    ],
-                    timeout_seconds=60,
-                    operation=f"write Key Vault secret {secret_name}",
-                )
-                break
-            except DeploymentRefusal:
-                if attempt + 1 == attempts:
-                    raise
-                time.sleep(min(2**attempt, 10))
-    current_version = _key_vault_secret_version(
-        secret_id.strip(),
+        if mutation_guard is not None:
+            mutation_guard()
+        try:
+            secret_id = _run_command(
+                [
+                    "az",
+                    "keyvault",
+                    "secret",
+                    "set",
+                    "--vault-name",
+                    vault_name,
+                    "--name",
+                    secret_name,
+                    "--file",
+                    str(path),
+                    "--encoding",
+                    "utf-8",
+                    "--tags",
+                    f"{KEY_VAULT_ROTATION_TAG}={rotation_id}",
+                    "--only-show-errors",
+                    "--query",
+                    "id",
+                    "--output",
+                    "tsv",
+                ],
+                timeout_seconds=60,
+                operation=f"write Key Vault secret {secret_name}",
+            ).strip()
+        except DeploymentRefusal:
+            # The service may have accepted the write even when the CLI timed out.
+            # Never issue a second write blindly: reconcile by the unique, non-secret tag.
+            secret_id = None
+
+    try:
+        returned_version = (
+            _key_vault_secret_version(
+                secret_id,
+                vault_name=vault_name,
+                secret_name=secret_name,
+            )
+            if secret_id
+            else None
+        )
+    except DeploymentRefusal:
+        # A malformed or truncated CLI response is reconciled from metadata using
+        # the same unique tag; it never triggers a second write.
+        returned_version = None
+    return _await_staged_key_vault_secret(
         vault_name=vault_name,
         secret_name=secret_name,
+        rotation_id=rotation_id,
+        returned_version=returned_version,
+        attempts=attempts,
     )
-    _disable_previous_secret_versions(
-        vault_name=vault_name,
-        secret_name=secret_name,
-        current_version=current_version,
-    )
-    return current_version
 
 
 def _key_vault_secret_version(
@@ -854,12 +1401,41 @@ def _key_vault_secret_version(
     return path_parts[2]
 
 
-def _disable_previous_secret_versions(
+def _parse_key_vault_secret_version(
+    item: object,
     *,
     vault_name: str,
     secret_name: str,
-    current_version: str,
-) -> None:
+) -> KeyVaultSecretVersion:
+    if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+        raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+    enabled = item.get("enabled")
+    if not isinstance(enabled, bool):
+        raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+    raw_tags = item.get("tags")
+    if raw_tags is None:
+        tags: Mapping[str, object] = {}
+    elif isinstance(raw_tags, dict):
+        tags = raw_tags
+    else:
+        raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+    rotation_id = tags.get(KEY_VAULT_ROTATION_TAG)
+    if rotation_id is not None and not isinstance(rotation_id, str):
+        raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+    return KeyVaultSecretVersion(
+        version=_key_vault_secret_version(
+            item["id"],
+            vault_name=vault_name,
+            secret_name=secret_name,
+        ),
+        enabled=enabled,
+        rotation_id=rotation_id,
+    )
+
+
+def _list_key_vault_secret_versions(
+    *, vault_name: str, secret_name: str
+) -> tuple[KeyVaultSecretVersion, ...]:
     versions = _run_json(
         [
             "az",
@@ -871,7 +1447,7 @@ def _disable_previous_secret_versions(
             "--name",
             secret_name,
             "--query",
-            "[].{id:id,enabled:attributes.enabled}",
+            "[].{id:id,enabled:attributes.enabled,tags:tags}",
             "--output",
             "json",
             "--only-show-errors",
@@ -879,18 +1455,179 @@ def _disable_previous_secret_versions(
         timeout_seconds=60,
         operation=f"inspect Key Vault secret versions for {secret_name}",
     )
-    if not isinstance(versions, list):
+    if not isinstance(versions, list) or not versions:
         raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
-    for item in versions:
-        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
-            raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
-        version = _key_vault_secret_version(
-            item["id"],
+    parsed = tuple(
+        sorted(
+            (
+                _parse_key_vault_secret_version(
+                    item,
+                    vault_name=vault_name,
+                    secret_name=secret_name,
+                )
+                for item in versions
+            ),
+            key=lambda item: item.version.casefold(),
+        )
+    )
+    normalized = [item.version.casefold() for item in parsed]
+    if len(normalized) != len(set(normalized)):
+        raise DeploymentRefusal("Azure returned duplicate Key Vault secret versions")
+    return parsed
+
+
+def _current_key_vault_secret_version(
+    *, vault_name: str, secret_name: str
+) -> KeyVaultSecretVersion:
+    item = _run_json(
+        [
+            "az",
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            vault_name,
+            "--name",
+            secret_name,
+            "--query",
+            "{id:id,enabled:attributes.enabled,tags:tags}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect current Key Vault secret version for {secret_name}",
+    )
+    return _parse_key_vault_secret_version(
+        item,
+        vault_name=vault_name,
+        secret_name=secret_name,
+    )
+
+
+def _await_key_vault_data_plane_access(*, vault_name: str, attempts: int) -> None:
+    for attempt in range(attempts):
+        try:
+            ids = _run_json(
+                [
+                    "az",
+                    "keyvault",
+                    "secret",
+                    "list",
+                    "--vault-name",
+                    vault_name,
+                    "--maxresults",
+                    "1",
+                    "--query",
+                    "[].id",
+                    "--output",
+                    "json",
+                    "--only-show-errors",
+                ],
+                timeout_seconds=60,
+                operation="confirm deployer Key Vault data-plane access",
+            )
+            if not isinstance(ids, list) or any(not isinstance(item, str) for item in ids):
+                raise DeploymentRefusal("Azure returned invalid Key Vault access metadata")
+            return
+        except DeploymentRefusal:
+            if attempt + 1 == attempts:
+                raise DeploymentRefusal(
+                    "deployer Key Vault data-plane access did not become available"
+                ) from None
+            time.sleep(min(2**attempt, 10))
+
+
+def _await_staged_key_vault_secret(
+    *,
+    vault_name: str,
+    secret_name: str,
+    rotation_id: str,
+    returned_version: str | None,
+    attempts: int,
+) -> str:
+    for attempt in range(attempts):
+        try:
+            versions = _list_key_vault_secret_versions(
+                vault_name=vault_name,
+                secret_name=secret_name,
+            )
+            matches = [item for item in versions if item.rotation_id == rotation_id]
+            if len(matches) > 1:
+                raise DeploymentRefusal(
+                    "Key Vault contains multiple versions for one rotation attempt"
+                )
+            if len(matches) == 1:
+                selected = matches[0]
+                if returned_version is not None and (
+                    selected.version.casefold() != returned_version.casefold()
+                ):
+                    raise DeploymentRefusal("Key Vault write response does not match readback")
+                current = _current_key_vault_secret_version(
+                    vault_name=vault_name,
+                    secret_name=secret_name,
+                )
+                if (
+                    current.version.casefold() == selected.version.casefold()
+                    and current.enabled
+                    and current.rotation_id == rotation_id
+                    and selected.enabled
+                ):
+                    return selected.version
+        except DeploymentRefusal:
+            if attempt + 1 == attempts:
+                raise
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    raise DeploymentRefusal(
+        "Key Vault secret write could not be reconciled; no duplicate write was attempted"
+    )
+
+
+def _stable_key_vault_rotation_snapshot(
+    *,
+    vault_name: str,
+    secret_name: str,
+    current_version: str,
+    attempts: int,
+) -> tuple[KeyVaultSecretVersion, ...]:
+    for attempt in range(attempts):
+        before = _list_key_vault_secret_versions(
             vault_name=vault_name,
             secret_name=secret_name,
         )
-        if version.casefold() == current_version.casefold() or item.get("enabled") is False:
-            continue
+        current = _current_key_vault_secret_version(
+            vault_name=vault_name,
+            secret_name=secret_name,
+        )
+        after = _list_key_vault_secret_versions(
+            vault_name=vault_name,
+            secret_name=secret_name,
+        )
+        if current.version.casefold() != current_version.casefold():
+            raise DeploymentRefusal("Key Vault current secret changed before rotation finalization")
+        if not current.enabled:
+            raise DeploymentRefusal("selected Key Vault secret version is not enabled")
+        selected = [item for item in after if item.version.casefold() == current_version.casefold()]
+        if len(selected) != 1 or not selected[0].enabled:
+            raise DeploymentRefusal("selected Key Vault secret version is missing or disabled")
+        if before == after:
+            return after
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    raise DeploymentRefusal("Key Vault secret-version listing did not stabilize")
+
+
+def _disable_key_vault_secret_version(
+    *,
+    vault_name: str,
+    secret_name: str,
+    version: str,
+    mutation_guard: Callable[[], None] | None = None,
+) -> None:
+    if mutation_guard is not None:
+        mutation_guard()
+    try:
         _run_command(
             [
                 "az",
@@ -912,6 +1649,149 @@ def _disable_previous_secret_versions(
             timeout_seconds=60,
             operation=f"disable retired Key Vault secret version for {secret_name}",
         )
+    except DeploymentRefusal:
+        # A timeout may follow an accepted mutation. Exact readback in the caller
+        # determines whether the version was actually disabled.
+        pass
+
+
+def _finalize_key_vault_secret_rotation(
+    *,
+    vault_name: str,
+    secret_name: str,
+    current_version: str,
+    attempts: int = 8,
+    mutation_guard: Callable[[], None] | None = None,
+) -> None:
+    if attempts < 1:
+        raise DeploymentRefusal("Key Vault reconciliation attempts must be positive")
+    snapshot = _stable_key_vault_rotation_snapshot(
+        vault_name=vault_name,
+        secret_name=secret_name,
+        current_version=current_version,
+        attempts=attempts,
+    )
+    expected_versions = {item.version.casefold() for item in snapshot}
+    for item in snapshot:
+        if item.version.casefold() == current_version.casefold() or not item.enabled:
+            continue
+        _disable_key_vault_secret_version(
+            vault_name=vault_name,
+            secret_name=secret_name,
+            version=item.version,
+            mutation_guard=mutation_guard,
+        )
+
+    for attempt in range(attempts):
+        final = _list_key_vault_secret_versions(
+            vault_name=vault_name,
+            secret_name=secret_name,
+        )
+        current = _current_key_vault_secret_version(
+            vault_name=vault_name,
+            secret_name=secret_name,
+        )
+        if {item.version.casefold() for item in final} != expected_versions:
+            raise DeploymentRefusal(
+                "Key Vault secret versions changed during rotation finalization"
+            )
+        selected = [item for item in final if item.version.casefold() == current_version.casefold()]
+        if (
+            current.version.casefold() != current_version.casefold()
+            or not current.enabled
+            or len(selected) != 1
+            or not selected[0].enabled
+        ):
+            raise DeploymentRefusal("selected Key Vault secret version changed during finalization")
+        if all(
+            not item.enabled
+            for item in final
+            if item.version.casefold() != current_version.casefold()
+        ):
+            return
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    raise DeploymentRefusal("retired Key Vault secret versions remain enabled")
+
+
+def _legacy_key_vault_secret_exists(*, vault_name: str) -> bool:
+    names = _run_json(
+        [
+            "az",
+            "keyvault",
+            "secret",
+            "list",
+            "--vault-name",
+            vault_name,
+            "--query",
+            f"[?name=='{LEGACY_FIREBASE_SECRET_NAME}'].name",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect legacy Firebase Key Vault secret",
+    )
+    if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
+        raise DeploymentRefusal("Azure returned invalid legacy secret metadata")
+    normalized = [name.casefold() for name in names]
+    expected = LEGACY_FIREBASE_SECRET_NAME.casefold()
+    if any(name != expected for name in normalized) or len(normalized) > 1:
+        raise DeploymentRefusal("Azure returned invalid legacy secret metadata")
+    return normalized == [expected]
+
+
+def _retire_legacy_firebase_secret(
+    *,
+    vault_name: str,
+    attempts: int = 8,
+    mutation_guard: Callable[[], None] | None = None,
+) -> str:
+    if attempts < 1:
+        raise DeploymentRefusal("Key Vault reconciliation attempts must be positive")
+    if not _legacy_key_vault_secret_exists(vault_name=vault_name):
+        return "not_present"
+
+    snapshot: tuple[KeyVaultSecretVersion, ...] | None = None
+    for attempt in range(attempts):
+        before = _list_key_vault_secret_versions(
+            vault_name=vault_name,
+            secret_name=LEGACY_FIREBASE_SECRET_NAME,
+        )
+        after = _list_key_vault_secret_versions(
+            vault_name=vault_name,
+            secret_name=LEGACY_FIREBASE_SECRET_NAME,
+        )
+        if before == after:
+            snapshot = after
+            break
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    if snapshot is None:
+        raise DeploymentRefusal("legacy Firebase secret-version listing did not stabilize")
+
+    expected_versions = {item.version.casefold() for item in snapshot}
+    for item in snapshot:
+        if item.enabled:
+            _disable_key_vault_secret_version(
+                vault_name=vault_name,
+                secret_name=LEGACY_FIREBASE_SECRET_NAME,
+                version=item.version,
+                mutation_guard=mutation_guard,
+            )
+
+    for attempt in range(attempts):
+        final = _list_key_vault_secret_versions(
+            vault_name=vault_name,
+            secret_name=LEGACY_FIREBASE_SECRET_NAME,
+        )
+        if {item.version.casefold() for item in final} != expected_versions:
+            raise DeploymentRefusal("legacy Firebase secret versions changed during retirement")
+        if all(not item.enabled for item in final):
+            return "disabled_recoverable"
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    raise DeploymentRefusal("legacy Firebase secret versions remain enabled")
 
 
 def _extract_git_archive(archive_path: Path, destination: Path) -> None:
@@ -1078,6 +1958,62 @@ def _firebase_access_token(service_account: Mapping[str, object]) -> str:
     return token
 
 
+def _resource_manager_request(
+    url: str,
+    token: str,
+    payload: Mapping[str, object],
+) -> Mapping[str, object]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read(512 * 1024)
+    except urllib.error.HTTPError as exc:
+        raise DeploymentRefusal(f"Google Cloud Resource Manager returned HTTP {exc.code}") from None
+    except (OSError, urllib.error.URLError):
+        raise DeploymentRefusal("Google Cloud Resource Manager was unavailable") from None
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        raise DeploymentRefusal("Google Cloud Resource Manager returned invalid JSON") from None
+    if not isinstance(result, dict):
+        raise DeploymentRefusal("Google Cloud Resource Manager returned invalid data")
+    return result
+
+
+def _verify_firebase_runtime_authority(
+    service_account: Mapping[str, object],
+    project_id: str,
+) -> None:
+    token = _firebase_access_token(service_account)
+    project = urllib.parse.quote(project_id, safe="")
+    result = _resource_manager_request(
+        f"{RESOURCE_MANAGER_ROOT}/projects/{project}:testIamPermissions",
+        token,
+        {"permissions": list(FIREBASE_AUTH_PERMISSION_UNIVERSE)},
+    )
+    permissions = result.get("permissions")
+    if not isinstance(permissions, list) or any(
+        not isinstance(permission, str) for permission in permissions
+    ):
+        raise DeploymentRefusal("Firebase runtime permission attestation is invalid")
+    if len(permissions) != len(set(permissions)):
+        raise DeploymentRefusal("Firebase runtime permission attestation is invalid")
+    if frozenset(permissions) != EXPECTED_FIREBASE_RUNTIME_AUTH_PERMISSIONS:
+        raise DeploymentRefusal(
+            "Firebase runtime principal does not have the exact required Firebase "
+            "Authentication permission subset; non-Authentication authority is not attested"
+        )
+
+
 def _identity_toolkit_request(
     method: str,
     url: str,
@@ -1121,6 +2057,7 @@ def _configure_firebase_domain(
     frontend_url: str,
     *,
     domain_admin_service_account: Mapping[str, object] | None = None,
+    mutation_guard: Callable[[], None] | None = None,
 ) -> FirebaseDomainResult:
     parsed = urllib.parse.urlsplit(_validate_container_app_url(frontend_url, "frontend URL"))
     assert parsed.hostname is not None
@@ -1141,6 +2078,8 @@ def _configure_firebase_domain(
     admin_token = _firebase_access_token(domain_admin_service_account)
     domains = [*raw_domains, hostname]
     update_url = f"{config_url}?{urllib.parse.urlencode({'updateMask': 'authorizedDomains'})}"
+    if mutation_guard is not None:
+        mutation_guard()
     updated = _identity_toolkit_request(
         "PATCH",
         update_url,
@@ -1417,6 +2356,7 @@ def _inspect_app(
         raise DeploymentRefusal(f"Container App {name} release metadata is not a full git SHA")
 
     key_vault_name: str | None = None
+    key_vault_secret_versions: tuple[tuple[str, str], ...] = ()
     if backend:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/readyz"}
         for env_name, secret_ref in (
@@ -1436,7 +2376,13 @@ def _inspect_app(
             for item in secrets
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         }
+        expected_secret_names = {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME}
+        if set(by_name) != expected_secret_names:
+            raise DeploymentRefusal(
+                f"Container App {name} Key Vault references are outside the deployment contract"
+            )
         vault_names: set[str] = set()
+        observed_versions: list[tuple[str, str]] = []
         for secret_name in (AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME):
             item = by_name.get(secret_name)
             if not isinstance(item, dict) or "value" in item:
@@ -1454,17 +2400,27 @@ def _inspect_app(
                 parsed.scheme != "https"
                 or not parsed.hostname
                 or not parsed.hostname.endswith(".vault.azure.net")
-                or parsed.path != f"/secrets/{secret_name}"
+                or len(parsed.path.strip("/").split("/")) != 3
                 or parsed.query
                 or parsed.fragment
             ):
                 raise DeploymentRefusal(
-                    f"Container App {name} Key Vault reference is not versionless"
+                    f"Container App {name} Key Vault reference is not version-pinned"
                 )
+            path_parts = parsed.path.strip("/").split("/")
+            if path_parts[:2] != [
+                "secrets",
+                secret_name,
+            ] or not _KEY_VAULT_SECRET_VERSION.fullmatch(path_parts[2]):
+                raise DeploymentRefusal(
+                    f"Container App {name} Key Vault reference is not version-pinned"
+                )
+            observed_versions.append((secret_name, path_parts[2].casefold()))
             vault_names.add(parsed.hostname.removesuffix(".vault.azure.net"))
         if len(vault_names) != 1:
             raise DeploymentRefusal(f"Container App {name} uses inconsistent Key Vaults")
         key_vault_name = vault_names.pop()
+        key_vault_secret_versions = tuple(observed_versions)
         if env.get("MURMUR_DATA_DIR", {}).get("value") != "/home/murmur/data":
             raise DeploymentRefusal(
                 f"Container App {name} is not using isolated local pilot storage"
@@ -1503,6 +2459,7 @@ def _inspect_app(
         max_replicas=max_replicas,
         probe_types=probe_types,
         key_vault_name=key_vault_name,
+        key_vault_secret_versions=key_vault_secret_versions,
         identity_id=identity_id,
     )
 
@@ -1603,72 +2560,300 @@ def _permission_grants(permission: Mapping[str, object], action: str, *, data_pl
     return granted and not denied
 
 
+def _key_vault_assignments_at_secret(
+    *, principal_id: str, key_vault_id: str, secret_name: str
+) -> tuple[tuple[str, str], ...]:
+    secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
+    result = _run_json(
+        [
+            "az",
+            "role",
+            "assignment",
+            "list",
+            "--assignee-object-id",
+            principal_id,
+            "--scope",
+            secret_scope,
+            "--include-inherited",
+            "--include-groups",
+            "--fill-principal-name",
+            "false",
+            "--fill-role-definition-name",
+            "false",
+            "--query",
+            "[].{scope:scope,roleDefinitionId:roleDefinitionId}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect managed-identity access to Key Vault secret {secret_name}",
+    )
+    if not isinstance(result, list):
+        raise DeploymentRefusal("managed-identity Key Vault role assignments are invalid")
+    assignments: list[tuple[str, str]] = []
+    for item in result:
+        if not isinstance(item, dict) or not isinstance(item.get("scope"), str):
+            raise DeploymentRefusal("managed-identity Key Vault role assignments are invalid")
+        assignments.append((item["scope"], _role_definition_guid(item.get("roleDefinitionId"))))
+    return tuple(assignments)
+
+
+def _role_permissions(role_id: str) -> tuple[Mapping[str, object], ...]:
+    permissions = _run_json(
+        [
+            "az",
+            "role",
+            "definition",
+            "list",
+            "--name",
+            role_id,
+            "--query",
+            "[0].permissions",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect managed-identity Key Vault role definition",
+    )
+    if not isinstance(permissions, list) or any(not isinstance(item, dict) for item in permissions):
+        raise DeploymentRefusal("managed-identity Key Vault role definition is invalid")
+    return tuple(permissions)
+
+
+def _security_relevant_key_vault_assignments(
+    assignments: Sequence[tuple[str, str]],
+    *,
+    permission_cache: dict[str, tuple[Mapping[str, object], ...]],
+) -> tuple[tuple[str, str], ...]:
+    secret_read = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
+    role_assignment_write = "Microsoft.Authorization/roleAssignments/write"
+    relevant: list[tuple[str, str]] = []
+    for scope, role_id in assignments:
+        permissions = permission_cache.get(role_id)
+        if permissions is None:
+            permissions = _role_permissions(role_id)
+            permission_cache[role_id] = permissions
+        if any(
+            _permission_grants(item, secret_read, data_plane=True)
+            or _permission_grants(item, role_assignment_write, data_plane=False)
+            for item in permissions
+        ):
+            relevant.append((scope, role_id))
+    return tuple(relevant)
+
+
 def _verify_frontend_key_vault_boundary(*, frontend_principal_id: str, key_vault_id: str) -> None:
-    role_ids: set[str] = set()
+    permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
+    for secret_name in (
+        AZURE_KEY_SECRET_NAME,
+        FIREBASE_SECRET_NAME,
+        LEGACY_FIREBASE_SECRET_NAME,
+    ):
+        assignments = _key_vault_assignments_at_secret(
+            principal_id=frontend_principal_id,
+            key_vault_id=key_vault_id,
+            secret_name=secret_name,
+        )
+        if _security_relevant_key_vault_assignments(assignments, permission_cache=permission_cache):
+            raise DeploymentRefusal("frontend identity can access or grant Key Vault secrets")
+
+
+def _verify_backend_key_vault_boundary(*, backend_principal_id: str, key_vault_id: str) -> None:
+    permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
     for secret_name in (AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME):
         secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
-        result = _run_json(
+        assignments = _key_vault_assignments_at_secret(
+            principal_id=backend_principal_id,
+            key_vault_id=key_vault_id,
+            secret_name=secret_name,
+        )
+        relevant = _security_relevant_key_vault_assignments(
+            assignments, permission_cache=permission_cache
+        )
+        if (
+            len(relevant) != 1
+            or not _same_azure_resource_id(relevant[0][0], secret_scope)
+            or relevant[0][1] != KEY_VAULT_SECRETS_USER_ROLE_ID
+        ):
+            raise DeploymentRefusal(
+                "backend Key Vault access is not limited to the intended secret scope"
+            )
+
+    legacy_assignments = _key_vault_assignments_at_secret(
+        principal_id=backend_principal_id,
+        key_vault_id=key_vault_id,
+        secret_name=LEGACY_FIREBASE_SECRET_NAME,
+    )
+    if _security_relevant_key_vault_assignments(
+        legacy_assignments, permission_cache=permission_cache
+    ):
+        raise DeploymentRefusal("backend identity can access the legacy Firebase secret")
+
+
+def _retire_legacy_backend_vault_read(
+    *,
+    backend_principal_id: str,
+    key_vault_id: str,
+    mutation_guard: Callable[[], None],
+    attempts: int = 8,
+) -> None:
+    def legacy_assignments() -> tuple[str, ...]:
+        raw = _run_json(
             [
                 "az",
                 "role",
                 "assignment",
                 "list",
                 "--assignee-object-id",
-                frontend_principal_id,
+                backend_principal_id,
                 "--scope",
-                secret_scope,
-                "--include-inherited",
-                "--include-groups",
+                key_vault_id,
                 "--fill-principal-name",
                 "false",
-                "--fill-role-definition-name",
-                "false",
                 "--query",
-                "[].roleDefinitionId",
+                "[].{id:id,scope:scope,roleDefinitionId:roleDefinitionId,description:description}",
                 "--output",
                 "json",
                 "--only-show-errors",
             ],
             timeout_seconds=60,
-            operation=f"inspect frontend access to Key Vault secret {secret_name}",
+            operation="inspect legacy backend Key Vault role assignment",
         )
-        if not isinstance(result, list) or any(not isinstance(item, str) for item in result):
-            raise DeploymentRefusal("frontend Key Vault role assignments are invalid")
-        role_ids.update(result)
+        if not isinstance(raw, list):
+            raise DeploymentRefusal("legacy backend Key Vault role metadata is invalid")
+        ids: list[str] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise DeploymentRefusal("legacy backend Key Vault role metadata is invalid")
+            if (
+                _same_azure_resource_id(item.get("scope"), key_vault_id)
+                and _role_definition_guid(item.get("roleDefinitionId"))
+                == KEY_VAULT_SECRETS_USER_ROLE_ID
+            ):
+                assignment_id = item.get("id")
+                if not isinstance(assignment_id, str) or item.get("description") not in {None, ""}:
+                    raise DeploymentRefusal("legacy backend Key Vault role metadata is ambiguous")
+                ids.append(assignment_id)
+        return tuple(ids)
 
-    secret_read = "Microsoft.KeyVault/vaults/secrets/getSecret/action"
-    role_assignment_write = "Microsoft.Authorization/roleAssignments/write"
-    for raw_role_id in sorted(role_ids):
-        role_id = raw_role_id.rsplit("/", 1)[-1].casefold()
-        if not _ROLE_DEFINITION_ID.fullmatch(role_id):
-            raise DeploymentRefusal("frontend Key Vault role assignment is invalid")
-        permissions = _run_json(
+    current = legacy_assignments()
+    if not current:
+        return
+    if len(current) != 1:
+        raise DeploymentRefusal("legacy backend Key Vault role metadata is ambiguous")
+    assignment_id = current[0]
+    for attempt in range(attempts):
+        mutation_guard()
+        try:
+            _run_command(
+                [
+                    "az",
+                    "role",
+                    "assignment",
+                    "delete",
+                    "--ids",
+                    assignment_id,
+                    "--only-show-errors",
+                    "--output",
+                    "none",
+                ],
+                timeout_seconds=60,
+                operation="remove legacy vault-wide backend secret access",
+            )
+        except DeploymentRefusal:
+            pass
+        current = legacy_assignments()
+        if not current:
+            return
+        if current != (assignment_id,):
+            raise DeploymentRefusal("legacy backend Key Vault role metadata changed during removal")
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 8))
+    raise DeploymentRefusal("legacy vault-wide backend secret access remains assigned")
+
+
+def _verify_old_revisions_inactive(
+    *,
+    resource_group: str,
+    app_name: str,
+    current_revision: str,
+    attempts: int = 30,
+) -> None:
+    if attempts < 1:
+        raise DeploymentRefusal("Container App revision checks require positive attempts")
+    expected = current_revision.casefold()
+    for attempt in range(attempts):
+        revisions = _run_json(
             [
                 "az",
-                "role",
-                "definition",
+                "containerapp",
+                "revision",
                 "list",
+                "--resource-group",
+                resource_group,
                 "--name",
-                role_id,
+                app_name,
+                "--all",
                 "--query",
-                "[0].permissions",
+                (
+                    "[].{name:name,active:properties.active,replicas:properties.replicas,"
+                    "healthState:properties.healthState,"
+                    "provisioningState:properties.provisioningState,"
+                    "runningState:properties.runningState}"
+                ),
                 "--output",
                 "json",
                 "--only-show-errors",
             ],
             timeout_seconds=60,
-            operation="inspect frontend Key Vault role definition",
+            operation=f"inspect Container App revisions for {app_name}",
         )
-        if not isinstance(permissions, list) or any(
-            not isinstance(item, dict) for item in permissions
-        ):
-            raise DeploymentRefusal("frontend Key Vault role definition is invalid")
-        if any(
-            _permission_grants(item, secret_read, data_plane=True)
-            or _permission_grants(item, role_assignment_write, data_plane=False)
-            for item in permissions
-        ):
-            raise DeploymentRefusal("frontend identity can access or grant Key Vault secrets")
+        if not isinstance(revisions, list) or not revisions:
+            raise DeploymentRefusal("Azure returned invalid Container App revision metadata")
+        states: dict[str, Mapping[str, object]] = {}
+        for item in revisions:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("name"), str)
+                or not item["name"]
+                or not isinstance(item.get("active"), bool)
+                or not isinstance(item.get("replicas"), int)
+                or isinstance(item.get("replicas"), bool)
+                or item["replicas"] < 0
+            ):
+                raise DeploymentRefusal("Azure returned invalid Container App revision metadata")
+            normalized = item["name"].casefold()
+            if normalized in states:
+                raise DeploymentRefusal("Azure returned duplicate Container App revisions")
+            states[normalized] = item
+        current = states.get(expected)
+        if current is None:
+            raise DeploymentRefusal("verified backend revision is missing")
+        current_ready = (
+            current["active"] is True
+            and current["replicas"] >= 1
+            and current.get("healthState") == "Healthy"
+            and current.get("provisioningState") == "Provisioned"
+            and current.get("runningState") == "Running"
+        )
+        old_ready = all(
+            item["active"] is False
+            and item["replicas"] == 0
+            # Fully inactive ACA revisions may omit these fields. Azure also
+            # reports Provisioned + Stopped after deactivation; replicas==0 and
+            # runningState==Stopped are the terminal workload proof in that case.
+            and item.get("provisioningState") in {None, "Deprovisioned", "Provisioned"}
+            and item.get("runningState") in {None, "Stopped"}
+            for name, item in states.items()
+            if name != expected
+        )
+        if current_ready and old_ready:
+            return
+        if attempt + 1 < attempts:
+            time.sleep(min(2**attempt, 10))
+    raise DeploymentRefusal("Container App revisions did not reach a safe terminal cutover state")
 
 
 def verify_live(
@@ -1677,14 +2862,21 @@ def verify_live(
     backend_app: str,
     frontend_app: str,
     expected_backend_identity_id: str,
+    expected_backend_identity_principal_id: str,
     expected_frontend_identity_id: str,
     expected_frontend_identity_principal_id: str,
     key_vault_id: str,
     subscription_id: str,
     tenant_id: str,
+    expected_secret_versions: Mapping[str, str],
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
 ) -> tuple[AppInspection, AppInspection]:
+    if set(expected_secret_versions) != {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME} or any(
+        not isinstance(version, str) or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
+        for version in expected_secret_versions.values()
+    ):
+        raise DeploymentRefusal("expected Key Vault secret versions are invalid")
     _validate_azure_session(subscription_id=subscription_id, tenant_id=tenant_id)
     _run_command(
         [
@@ -1708,6 +2900,10 @@ def verify_live(
         raise DeploymentRefusal("frontend and backend must use separate managed identities")
     if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
         raise DeploymentRefusal("backend does not use the foundation managed identity")
+    if dict(backend.key_vault_secret_versions) != {
+        name: version.casefold() for name, version in expected_secret_versions.items()
+    }:
+        raise DeploymentRefusal("backend does not reference the expected secret versions")
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
     if not isinstance(frontend.identity_id, str):
@@ -1730,6 +2926,10 @@ def verify_live(
         frontend_principal_id=frontend_principal_id,
         key_vault_id=live_key_vault_id,
     )
+    _verify_backend_key_vault_boundary(
+        backend_principal_id=expected_backend_identity_principal_id,
+        key_vault_id=live_key_vault_id,
+    )
     _verify_https(
         backend.url,
         frontend.url,
@@ -1742,6 +2942,10 @@ def verify_live(
         raise DeploymentRefusal("frontend and backend must use separate managed identities")
     if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
         raise DeploymentRefusal("backend does not use the foundation managed identity")
+    if dict(backend.key_vault_secret_versions) != {
+        name: version.casefold() for name, version in expected_secret_versions.items()
+    }:
+        raise DeploymentRefusal("backend secret versions changed during health verification")
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
     for app in (backend, frontend):
@@ -1767,10 +2971,44 @@ def _print_verification(backend: AppInspection, frontend: AppInspection) -> None
     print(f"frontend_revision: {frontend.latest_revision}")
     print(f"frontend_scale: {frontend.min_replicas}..{frontend.max_replicas}")
     print(f"frontend_probes: {','.join(frontend.probe_types)}")
-    print("key_vault_references: versionless and enabled")
+    print("key_vault_references: version-pinned and enabled")
     print("database_configuration: local ephemeral SQLite; PostgreSQL required for durability")
     print("persistence_restart_proof: not_applicable_ephemeral_pilot")
     print("paid_model_calls: 0")
+
+
+def _verify_rotation_postcondition(
+    *, vault_name: str, secret_name: str, current_version: str, attempts: int = 8
+) -> None:
+    snapshot = _stable_key_vault_rotation_snapshot(
+        vault_name=vault_name,
+        secret_name=secret_name,
+        current_version=current_version,
+        attempts=attempts,
+    )
+    if any(
+        item.enabled and item.version.casefold() != current_version.casefold() for item in snapshot
+    ):
+        raise DeploymentRefusal("retired Key Vault secret versions remain enabled")
+
+
+def _verify_legacy_secret_postcondition(*, vault_name: str) -> str:
+    if not _legacy_key_vault_secret_exists(vault_name=vault_name):
+        return "not_present"
+    before = _list_key_vault_secret_versions(
+        vault_name=vault_name, secret_name=LEGACY_FIREBASE_SECRET_NAME
+    )
+    after = _list_key_vault_secret_versions(
+        vault_name=vault_name, secret_name=LEGACY_FIREBASE_SECRET_NAME
+    )
+    if before != after or any(item.enabled for item in after):
+        raise DeploymentRefusal("legacy Firebase secret is not stably disabled")
+    return "disabled_recoverable"
+
+
+def _assert_no_key_vault_writer(key_vault_id: str) -> None:
+    if _direct_key_vault_writer_assignments(key_vault_id):
+        raise DeploymentRefusal("temporary Key Vault writer assignment remains present")
 
 
 def deploy(args: argparse.Namespace) -> int:
@@ -1786,6 +3024,11 @@ def deploy(args: argparse.Namespace) -> int:
         subscription_id=args.subscription_id,
         tenant_id=args.tenant_id,
     )
+    _verify_firebase_runtime_authority(
+        inputs.firebase_runtime_service_account,
+        inputs.firebase_project_id,
+    )
+    deployment_principal = _current_principal()
 
     print(f"Deploying immutable release {revision.sha}")
     print("Registering required Azure providers")
@@ -1801,6 +3044,9 @@ def deploy(args: argparse.Namespace) -> int:
             "location": location,
             "backendAppName": backend_app,
             "frontendAppName": frontend_app,
+            "deploymentPrincipalObjectId": deployment_principal[0],
+            "deploymentPrincipalType": deployment_principal[1],
+            "grantBackendSecretRead": False,
         },
     )
     registry_name = _output_value(foundation, "registryName")
@@ -1812,6 +3058,7 @@ def deploy(args: argparse.Namespace) -> int:
     key_vault_name = _output_value(foundation, "keyVaultName")
     key_vault_id = _output_value(foundation, "keyVaultId")
     backend_identity_id = _output_value(foundation, "identityId")
+    backend_identity_principal_id = _output_value(foundation, "identityPrincipalId")
     frontend_identity_id = _output_value(foundation, "frontendIdentityId")
     frontend_identity_principal_id = _output_value(foundation, "frontendIdentityPrincipalId")
     default_domain = _output_value(foundation, "environmentDefaultDomain")
@@ -1831,87 +3078,176 @@ def deploy(args: argparse.Namespace) -> int:
     )
     if frontend_url_from_domain != expected_foundation_frontend_url:
         raise DeploymentRefusal("derived frontend URL does not match foundation output")
+    lock_account = _output_value(foundation, "deploymentLockStorageAccountName")
+    lock_container = _output_value(foundation, "deploymentLockContainerName")
+    lock_blob = _output_value(foundation, "deploymentLockBlobName")
 
-    print("Importing server credentials into Azure Key Vault")
-    with _temporary_key_vault_write(key_vault_id):
-        _write_key_vault_secret(
+    with (
+        _deployment_blob_lease(
+            account_name=lock_account,
+            container_name=lock_container,
+            blob_name=lock_blob,
+            subscription_id=args.subscription_id,
+        ) as lease,
+        _temporary_key_vault_write(
+            key_vault_id,
+            principal=deployment_principal,
+            mutation_guard=lease.assert_healthy,
+        ),
+    ):
+        print("Staging server credentials in Azure Key Vault")
+        azure_key_version = _write_key_vault_secret(
             vault_name=key_vault_name,
             secret_name=AZURE_KEY_SECRET_NAME,
             payload=inputs.azure_openai_key.encode("utf-8"),
+            mutation_guard=lease.assert_healthy,
         )
-        _write_key_vault_secret(
+        firebase_version = _write_key_vault_secret(
             vault_name=key_vault_name,
             secret_name=FIREBASE_SECRET_NAME,
             payload=inputs.firebase_runtime_json_bytes(),
+            mutation_guard=lease.assert_healthy,
+        )
+        lease.assert_healthy()
+        secured_foundation = _deployment_outputs(
+            resource_group=resource_group,
+            deployment_name=FOUNDATION_DEPLOYMENT,
+            template=FOUNDATION_TEMPLATE,
+            parameters={
+                "location": location,
+                "backendAppName": backend_app,
+                "frontendAppName": frontend_app,
+                "deploymentPrincipalObjectId": deployment_principal[0],
+                "deploymentPrincipalType": deployment_principal[1],
+                "grantBackendSecretRead": True,
+            },
+        )
+        for output_name, expected_value in (
+            ("keyVaultId", key_vault_id),
+            ("identityId", backend_identity_id),
+            ("identityPrincipalId", backend_identity_principal_id),
+            ("deploymentLockStorageAccountName", lock_account),
+            ("deploymentLockContainerName", lock_container),
+            ("deploymentLockBlobName", lock_blob),
+        ):
+            if (
+                _output_value(secured_foundation, output_name).casefold()
+                != expected_value.casefold()
+            ):
+                raise DeploymentRefusal("foundation outputs changed during secured deployment")
+        _retire_legacy_backend_vault_read(
+            backend_principal_id=backend_identity_principal_id,
+            key_vault_id=key_vault_id,
+            mutation_guard=lease.assert_healthy,
+        )
+        _verify_backend_key_vault_boundary(
+            backend_principal_id=backend_identity_principal_id,
+            key_vault_id=key_vault_id,
         )
 
-    print("Building backend image from the accepted git archive")
-    backend_digest = _build_backend(registry_name, revision.sha)
-    print("Building frontend image against the derived backend origin")
-    frontend_digest = _build_frontend(
-        registry_name,
-        revision.sha,
-        backend_url,
-        inputs.frontend_public,
-    )
-
-    backend_image = f"{registry_login_server}/murmur-api@{backend_digest}"
-    frontend_image = f"{registry_login_server}/murmur-web@{frontend_digest}"
-    print("Deploying immutable Container Apps revisions")
-    app_outputs = _deployment_outputs(
-        resource_group=resource_group,
-        deployment_name=APPS_DEPLOYMENT,
-        template=APPS_TEMPLATE,
-        parameters={
-            "location": location,
-            "backendAppName": backend_app,
-            "frontendAppName": frontend_app,
-            "backendImage": backend_image,
-            "frontendImage": frontend_image,
-            "releaseSha": revision.sha,
-            "azureOpenAiEndpoint": inputs.azure_openai_endpoint,
-            "azureOpenAiDeployment": inputs.azure_openai_deployment,
-            "firebaseProjectId": inputs.firebase_project_id,
-        },
-    )
-    live_backend_url = _validate_container_app_url(
-        _output_value(app_outputs, "backendUrl"), "deployed backend URL"
-    )
-    frontend_url = _validate_container_app_url(
-        _output_value(app_outputs, "frontendUrl"), "deployed frontend URL"
-    )
-    if live_backend_url != backend_url:
-        raise DeploymentRefusal("deployed backend URL changed after the frontend build")
-    if frontend_url != frontend_url_from_domain:
-        raise DeploymentRefusal("deployed frontend URL changed after foundation provisioning")
-
-    try:
-        firebase_domain = _configure_firebase_domain(
-            inputs.firebase_runtime_service_account,
-            inputs.firebase_project_id,
-            frontend_url,
-            domain_admin_service_account=inputs.firebase_domain_admin_service_account,
+        lease.assert_healthy()
+        print("Building backend image from the accepted git archive")
+        backend_digest = _build_backend(registry_name, revision.sha)
+        lease.assert_healthy()
+        print("Building frontend image against the derived backend origin")
+        frontend_digest = _build_frontend(
+            registry_name, revision.sha, backend_url, inputs.frontend_public
         )
-    except DeploymentRefusal:
-        firebase_domain = FirebaseDomainResult(
-            status="not_configured_check_service_account_iam",
-            hostname=urllib.parse.urlsplit(frontend_url).hostname or "unavailable",
+        lease.assert_healthy()
+        backend_image = f"{registry_login_server}/murmur-api@{backend_digest}"
+        frontend_image = f"{registry_login_server}/murmur-web@{frontend_digest}"
+        print("Deploying immutable Container Apps revisions")
+        app_outputs = _deployment_outputs(
+            resource_group=resource_group,
+            deployment_name=APPS_DEPLOYMENT,
+            template=APPS_TEMPLATE,
+            parameters={
+                "location": location,
+                "backendAppName": backend_app,
+                "frontendAppName": frontend_app,
+                "backendImage": backend_image,
+                "frontendImage": frontend_image,
+                "releaseSha": revision.sha,
+                "azureOpenAiEndpoint": inputs.azure_openai_endpoint,
+                "azureOpenAiDeployment": inputs.azure_openai_deployment,
+                "firebaseProjectId": inputs.firebase_project_id,
+                "azureOpenAiSecretVersion": azure_key_version,
+                "firebaseRuntimeSecretVersion": firebase_version,
+            },
         )
-    print(f"firebase_authorized_domain: {firebase_domain.status}")
+        live_backend_url = _validate_container_app_url(
+            _output_value(app_outputs, "backendUrl"), "deployed backend URL"
+        )
+        frontend_url = _validate_container_app_url(
+            _output_value(app_outputs, "frontendUrl"), "deployed frontend URL"
+        )
+        if _output_value(app_outputs, "azureOpenAiSecretVersion") != azure_key_version or (
+            _output_value(app_outputs, "firebaseRuntimeSecretVersion") != firebase_version
+        ):
+            raise DeploymentRefusal("apps deployment changed the staged secret versions")
+        if live_backend_url != backend_url:
+            raise DeploymentRefusal("deployed backend URL changed after the frontend build")
+        if frontend_url != frontend_url_from_domain:
+            raise DeploymentRefusal("deployed frontend URL changed after foundation provisioning")
 
-    backend, frontend = verify_live(
-        resource_group=resource_group,
-        backend_app=backend_app,
-        frontend_app=frontend_app,
-        expected_backend_identity_id=backend_identity_id,
-        expected_frontend_identity_id=frontend_identity_id,
-        expected_frontend_identity_principal_id=frontend_identity_principal_id,
-        key_vault_id=key_vault_id,
-        subscription_id=args.subscription_id,
-        tenant_id=args.tenant_id,
-        expected_sha=revision.sha,
-        health_timeout_seconds=args.health_timeout_seconds,
-    )
+        lease.assert_healthy()
+        try:
+            firebase_domain = _configure_firebase_domain(
+                inputs.firebase_runtime_service_account,
+                inputs.firebase_project_id,
+                frontend_url,
+                domain_admin_service_account=inputs.firebase_domain_admin_service_account,
+                mutation_guard=lease.assert_healthy,
+            )
+        except DeploymentRefusal:
+            firebase_domain = FirebaseDomainResult(
+                status="not_configured_check_service_account_iam",
+                hostname=urllib.parse.urlsplit(frontend_url).hostname or "unavailable",
+            )
+        print(f"firebase_authorized_domain: {firebase_domain.status}")
+
+        backend, frontend = verify_live(
+            resource_group=resource_group,
+            backend_app=backend_app,
+            frontend_app=frontend_app,
+            expected_backend_identity_id=backend_identity_id,
+            expected_backend_identity_principal_id=backend_identity_principal_id,
+            expected_frontend_identity_id=frontend_identity_id,
+            expected_frontend_identity_principal_id=frontend_identity_principal_id,
+            key_vault_id=key_vault_id,
+            subscription_id=args.subscription_id,
+            tenant_id=args.tenant_id,
+            expected_secret_versions={
+                AZURE_KEY_SECRET_NAME: azure_key_version,
+                FIREBASE_SECRET_NAME: firebase_version,
+            },
+            expected_sha=revision.sha,
+            health_timeout_seconds=args.health_timeout_seconds,
+        )
+        _verify_old_revisions_inactive(
+            resource_group=resource_group,
+            app_name=backend_app,
+            current_revision=backend.latest_revision,
+        )
+        print("Finalizing Key Vault rotation after backend health and revision retirement")
+        _finalize_key_vault_secret_rotation(
+            vault_name=key_vault_name,
+            secret_name=AZURE_KEY_SECRET_NAME,
+            current_version=azure_key_version,
+            mutation_guard=lease.assert_healthy,
+        )
+        _finalize_key_vault_secret_rotation(
+            vault_name=key_vault_name,
+            secret_name=FIREBASE_SECRET_NAME,
+            current_version=firebase_version,
+            mutation_guard=lease.assert_healthy,
+        )
+        legacy_firebase_secret = _retire_legacy_firebase_secret(
+            vault_name=key_vault_name,
+            mutation_guard=lease.assert_healthy,
+        )
+    _assert_no_key_vault_writer(key_vault_id)
+    print(f"legacy_firebase_secret: {legacy_firebase_secret}")
     _print_verification(backend, frontend)
     if firebase_domain.status.startswith("not_configured"):
         print(f"firebase_hostname_requiring_manual_authorization: {firebase_domain.hostname}")
@@ -1935,21 +3271,61 @@ def verify(args: argparse.Namespace) -> int:
         resource_group=resource_group,
         deployment_name=FOUNDATION_DEPLOYMENT,
     )
-    backend, frontend = verify_live(
+    apps = _existing_deployment_outputs(
         resource_group=resource_group,
-        backend_app=backend_app,
-        frontend_app=frontend_app,
-        expected_backend_identity_id=_output_value(foundation, "identityId"),
-        expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
-        expected_frontend_identity_principal_id=_output_value(
-            foundation, "frontendIdentityPrincipalId"
-        ),
-        key_vault_id=_output_value(foundation, "keyVaultId"),
-        subscription_id=args.subscription_id,
-        tenant_id=args.tenant_id,
-        expected_sha=expected_sha,
-        health_timeout_seconds=args.health_timeout_seconds,
+        deployment_name=APPS_DEPLOYMENT,
     )
+    secret_versions = {
+        AZURE_KEY_SECRET_NAME: _output_value(apps, "azureOpenAiSecretVersion"),
+        FIREBASE_SECRET_NAME: _output_value(apps, "firebaseRuntimeSecretVersion"),
+    }
+    key_vault_id = _output_value(foundation, "keyVaultId")
+    key_vault_name = _output_value(foundation, "keyVaultName")
+    deployment_principal = _current_principal()
+    with (
+        _deployment_blob_lease(
+            account_name=_output_value(foundation, "deploymentLockStorageAccountName"),
+            container_name=_output_value(foundation, "deploymentLockContainerName"),
+            blob_name=_output_value(foundation, "deploymentLockBlobName"),
+            subscription_id=args.subscription_id,
+        ) as lease,
+        _temporary_key_vault_write(
+            key_vault_id,
+            principal=deployment_principal,
+            mutation_guard=lease.assert_healthy,
+        ),
+    ):
+        backend, frontend = verify_live(
+            resource_group=resource_group,
+            backend_app=backend_app,
+            frontend_app=frontend_app,
+            expected_backend_identity_id=_output_value(foundation, "identityId"),
+            expected_backend_identity_principal_id=_output_value(foundation, "identityPrincipalId"),
+            expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
+            expected_frontend_identity_principal_id=_output_value(
+                foundation, "frontendIdentityPrincipalId"
+            ),
+            key_vault_id=key_vault_id,
+            subscription_id=args.subscription_id,
+            tenant_id=args.tenant_id,
+            expected_secret_versions=secret_versions,
+            expected_sha=expected_sha,
+            health_timeout_seconds=args.health_timeout_seconds,
+        )
+        _verify_old_revisions_inactive(
+            resource_group=resource_group,
+            app_name=backend_app,
+            current_revision=backend.latest_revision,
+        )
+        for secret_name, version in secret_versions.items():
+            _verify_rotation_postcondition(
+                vault_name=key_vault_name,
+                secret_name=secret_name,
+                current_version=version,
+            )
+        _verify_legacy_secret_postcondition(vault_name=key_vault_name)
+        lease.assert_healthy()
+    _assert_no_key_vault_writer(key_vault_id)
     _print_verification(backend, frontend)
     return 0
 

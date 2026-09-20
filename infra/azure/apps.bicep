@@ -29,6 +29,16 @@ param azureOpenAiDeployment string = 'murmur-gpt-oss-120b'
 @description('Firebase project used by browser and backend authentication.')
 param firebaseProjectId string
 
+@description('Exact Key Vault version containing the Azure OpenAI key for this release.')
+@minLength(32)
+@maxLength(32)
+param azureOpenAiSecretVersion string
+
+@description('Exact Key Vault version containing the Firebase runtime credential for this release.')
+@minLength(32)
+@maxLength(32)
+param firebaseRuntimeSecretVersion string
+
 var uniqueSuffix = uniqueString(subscription().id, resourceGroup().id)
 var registryName = 'murmur${uniqueSuffix}'
 var keyVaultName = 'murmur-${uniqueSuffix}-kv'
@@ -89,13 +99,13 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
       secrets: [
         {
           identity: identity.id
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-openai-api-key'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-openai-api-key/${azureOpenAiSecretVersion}'
           name: 'azure-openai-api-key'
         }
         {
           identity: identity.id
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/firebase-service-account-json'
-          name: 'firebase-service-account-json'
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/firebase-runtime-service-account-json/${firebaseRuntimeSecretVersion}'
+          name: 'firebase-runtime-service-account-json'
         }
       ]
     }
@@ -175,7 +185,7 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
             }
             {
               name: 'FIREBASE_SERVICE_ACCOUNT_JSON'
-              secretRef: 'firebase-service-account-json'
+              secretRef: 'firebase-runtime-service-account-json'
             }
             {
               name: 'MURMUR_SCENE_ENABLED'
@@ -399,3 +409,5 @@ output backendUrl string = backendUrl
 output frontendUrl string = frontendUrl
 output backendLatestRevisionName string = backend.properties.latestRevisionName
 output frontendLatestRevisionName string = frontend.properties.latestRevisionName
+output azureOpenAiSecretVersion string = azureOpenAiSecretVersion
+output firebaseRuntimeSecretVersion string = firebaseRuntimeSecretVersion

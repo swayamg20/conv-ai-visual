@@ -41,6 +41,13 @@ FRONTEND_IDENTITY_PRINCIPAL_ID = "11111111-1111-1111-1111-111111111111"
 KEY_VAULT_ID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault"
 SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222"
 TENANT_ID = "33333333-3333-3333-3333-333333333333"
+BACKEND_IDENTITY_PRINCIPAL_ID = "44444444-4444-4444-4444-444444444444"
+AZURE_KEY_VERSION = "a" * 32
+FIREBASE_VERSION = "b" * 32
+SECRET_VERSIONS = {
+    deploy.AZURE_KEY_SECRET_NAME: AZURE_KEY_VERSION,
+    deploy.FIREBASE_SECRET_NAME: FIREBASE_VERSION,
+}
 
 
 def _service_account(
@@ -108,6 +115,20 @@ def _output(value: str) -> dict[str, object]:
     return {"type": "String", "value": value}
 
 
+def _secret_version(
+    secret_name: str,
+    version: str,
+    *,
+    enabled: bool,
+    rotation_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        "id": f"https://murmur-vault.vault.azure.net/secrets/{secret_name}/{version}",
+        "enabled": enabled,
+        "tags": ({deploy.KEY_VAULT_ROTATION_TAG: rotation_id} if rotation_id is not None else None),
+    }
+
+
 def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, object]:
     name = "murmur-api" if backend else "murmur-web"
     fqdn = (
@@ -137,7 +158,7 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                 {"name": "AZURE_OPENAI_API_KEY", "secretRef": "azure-openai-api-key"},
                 {
                     "name": "FIREBASE_SERVICE_ACCOUNT_JSON",
-                    "secretRef": "firebase-service-account-json",
+                    "secretRef": deploy.FIREBASE_SECRET_NAME,
                 },
                 {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
                 {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
@@ -146,12 +167,15 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
         secrets = [
             {
                 "name": secret_name,
-                "keyVaultUrl": f"https://murmur-vault.vault.azure.net/secrets/{secret_name}",
+                "keyVaultUrl": (
+                    f"https://murmur-vault.vault.azure.net/secrets/{secret_name}/"
+                    f"{SECRET_VERSIONS[secret_name]}"
+                ),
                 "identity": reference_identity_id,
                 **({"value": AZURE_KEY} if inline_secret and index == 0 else {}),
             }
             for index, secret_name in enumerate(
-                ("azure-openai-api-key", "firebase-service-account-json")
+                (deploy.AZURE_KEY_SECRET_NAME, deploy.FIREBASE_SECRET_NAME)
             )
         ]
     return {
@@ -216,6 +240,7 @@ def _inspection(name: str, url: str, *, backend: bool) -> deploy.AppInspection:
         max_replicas=1,
         probe_types=("Liveness", "Readiness", "Startup"),
         key_vault_name="murmur-vault" if backend else None,
+        key_vault_secret_versions=(tuple(SECRET_VERSIONS.items()) if backend else ()),
         identity_id=BACKEND_IDENTITY_ID if backend else FRONTEND_IDENTITY_ID,
     )
 
@@ -324,15 +349,154 @@ def test_temporary_key_vault_role_is_revoked_after_a_failed_write(
         "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/"
         "55555555-5555-5555-5555-555555555555"
     )
-    revoked: list[str] = []
-    monkeypatch.setattr(deploy, "_grant_key_vault_write", lambda _vault: assignment_id)
-    monkeypatch.setattr(deploy, "_revoke_key_vault_write", revoked.append)
+    assignment = deploy.RoleAssignmentMetadata(
+        id=assignment_id,
+        scope=KEY_VAULT_ID,
+        principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
+        role_definition_id=deploy.KEY_VAULT_SECRETS_OFFICER_ROLE_ID,
+        description=deploy.KEY_VAULT_WRITER_DESCRIPTION,
+    )
+    revoked: list[tuple[str, deploy.RoleAssignmentMetadata]] = []
+    monkeypatch.setattr(
+        deploy,
+        "_grant_key_vault_write",
+        lambda _vault, **_kwargs: assignment,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_revoke_key_vault_write",
+        lambda vault, value: revoked.append((vault, value)),
+    )
 
     with pytest.raises(RuntimeError, match="write failed"):
         with deploy._temporary_key_vault_write(KEY_VAULT_ID):
             raise RuntimeError("write failed")
 
-    assert revoked == [assignment_id]
+    assert revoked == [(KEY_VAULT_ID, assignment)]
+
+
+def test_key_vault_writer_refuses_a_preexisting_direct_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy, "_current_principal", lambda: (BACKEND_IDENTITY_PRINCIPAL_ID, "User")
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: [
+            {
+                "id": (
+                    "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/"
+                    "55555555-5555-5555-5555-555555555555"
+                ),
+                "scope": KEY_VAULT_ID,
+                "principalId": BACKEND_IDENTITY_PRINCIPAL_ID,
+                "roleDefinitionId": deploy.KEY_VAULT_SECRETS_OFFICER_ROLE_ID,
+                "description": None,
+            }
+        ],
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="already has a direct"):
+        deploy._grant_key_vault_write(KEY_VAULT_ID)
+
+
+def test_key_vault_writer_reconciles_an_accepted_create_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    principal = (BACKEND_IDENTITY_PRINCIPAL_ID, "User")
+    expected = deploy._expected_writer_assignment(
+        KEY_VAULT_ID, object_id=BACKEND_IDENTITY_PRINCIPAL_ID
+    )
+    snapshots: list[object] = [
+        [],
+        [
+            {
+                "id": expected.id,
+                "scope": expected.scope,
+                "principalId": expected.principal_id,
+                "roleDefinitionId": expected.role_definition_id,
+                "description": expected.description,
+            }
+        ],
+    ]
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: snapshots.pop(0))
+    monkeypatch.setattr(
+        deploy,
+        "_run_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(deploy.DeploymentRefusal("timeout")),
+    )
+
+    assert deploy._grant_key_vault_write(KEY_VAULT_ID, principal=principal) == expected
+
+
+def test_key_vault_writer_reconciles_an_accepted_delete_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assignment = deploy._expected_writer_assignment(
+        KEY_VAULT_ID, object_id=BACKEND_IDENTITY_PRINCIPAL_ID
+    )
+    present = {
+        "id": assignment.id,
+        "scope": assignment.scope,
+        "principalId": assignment.principal_id,
+        "roleDefinitionId": assignment.role_definition_id,
+        "description": assignment.description,
+    }
+    snapshots: list[object] = [[present], []]
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: snapshots.pop(0))
+    monkeypatch.setattr(
+        deploy,
+        "_run_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(deploy.DeploymentRefusal("timeout")),
+    )
+
+    deploy._revoke_key_vault_write(KEY_VAULT_ID, assignment, attempts=1)
+
+
+def test_deployment_lease_reconciles_accepted_acquire_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_id = "55555555-5555-5555-5555-555555555555"
+    calls = 0
+
+    def fake_run(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise deploy.DeploymentRefusal("timeout")
+        return lease_id
+
+    monkeypatch.setattr(deploy, "_run_command", fake_run)
+
+    deploy._acquire_deployment_lease(
+        account_name="murmurlockaccount",
+        container_name="deployment-locks",
+        blob_name="azure-pilot.lock",
+        lease_id=lease_id,
+        subscription_id=SUBSCRIPTION_ID,
+    )
+    assert calls == 2
+
+
+def test_deployment_lease_refuses_an_unconfirmed_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_command",
+        lambda *args, **kwargs: (_ for _ in ()).throw(deploy.DeploymentRefusal("conflict")),
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="held by another deployment"):
+        deploy._acquire_deployment_lease(
+            account_name="murmurlockaccount",
+            container_name="deployment-locks",
+            blob_name="azure-pilot.lock",
+            lease_id="55555555-5555-5555-5555-555555555555",
+            subscription_id=SUBSCRIPTION_ID,
+        )
 
 
 def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
@@ -341,11 +505,9 @@ def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
     observed: dict[str, object] = {}
     current_version = "a" * 32
     previous_version = "b" * 32
+    rotation_id = "rotation-id"
 
     def fake_run(command: Any, **kwargs: Any) -> str:
-        if "set-attributes" in command:
-            observed["disabled_version"] = command[command.index("--version") + 1]
-            return ""
         path = Path(command[command.index("--file") + 1])
         observed["path"] = path
         observed["payload"] = path.read_text(encoding="utf-8")
@@ -356,27 +518,35 @@ def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
             f"https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/{current_version}\n"
         )
 
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        if "list-versions" in command:
+            return [
+                _secret_version(
+                    "azure-openai-api-key",
+                    current_version,
+                    enabled=True,
+                    rotation_id=rotation_id,
+                ),
+                _secret_version(
+                    "azure-openai-api-key",
+                    previous_version,
+                    enabled=True,
+                ),
+            ]
+        if "show" in command:
+            return _secret_version(
+                "azure-openai-api-key",
+                current_version,
+                enabled=True,
+                rotation_id=rotation_id,
+            )
+        if "list" in command:
+            return []
+        raise AssertionError(command)
+
     monkeypatch.setattr(deploy, "_run_command", fake_run)
-    monkeypatch.setattr(
-        deploy,
-        "_run_json",
-        lambda *args, **kwargs: [
-            {
-                "id": (
-                    "https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/"
-                    f"{current_version}"
-                ),
-                "enabled": True,
-            },
-            {
-                "id": (
-                    "https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/"
-                    f"{previous_version}"
-                ),
-                "enabled": True,
-            },
-        ],
-    )
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+    monkeypatch.setattr(deploy.secrets, "token_hex", lambda _length: rotation_id)
 
     written_version = deploy._write_key_vault_secret(
         vault_name="murmur-vault",
@@ -390,9 +560,301 @@ def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
     assert observed["payload"] == AZURE_KEY
     assert AZURE_KEY not in command
     assert command[-4:] == ("--query", "id", "--output", "tsv")
+    assert command[command.index("--tags") + 1] == (
+        f"{deploy.KEY_VAULT_ROTATION_TAG}={rotation_id}"
+    )
     assert not observed["path"].exists()
     assert written_version == current_version
-    assert observed["disabled_version"] == previous_version
+    assert "disabled_version" not in observed
+
+
+def test_key_vault_secret_reconciles_an_accepted_write_timeout_without_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_version = "a" * 32
+    rotation_id = "rotation-id"
+    writes = 0
+
+    def fake_run(command: Any, **_kwargs: Any) -> str:
+        nonlocal writes
+        assert "secret" in command and "set" in command
+        writes += 1
+        raise deploy.DeploymentRefusal("simulated timeout")
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        if "list-versions" in command:
+            return [
+                _secret_version(
+                    "azure-openai-api-key",
+                    current_version,
+                    enabled=True,
+                    rotation_id=rotation_id,
+                )
+            ]
+        if "show" in command:
+            return _secret_version(
+                "azure-openai-api-key",
+                current_version,
+                enabled=True,
+                rotation_id=rotation_id,
+            )
+        if "list" in command:
+            return []
+        raise AssertionError(command)
+
+    monkeypatch.setattr(deploy, "_run_command", fake_run)
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+    monkeypatch.setattr(deploy.secrets, "token_hex", lambda _length: rotation_id)
+
+    written_version = deploy._write_key_vault_secret(
+        vault_name="murmur-vault",
+        secret_name="azure-openai-api-key",
+        payload=AZURE_KEY.encode(),
+        attempts=1,
+    )
+
+    assert written_version == current_version
+    assert writes == 1
+
+
+def test_key_vault_secret_rejects_multiple_versions_for_one_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rotation_id = "rotation-id"
+    versions = [
+        _secret_version(
+            "azure-openai-api-key",
+            "a" * 32,
+            enabled=True,
+            rotation_id=rotation_id,
+        ),
+        _secret_version(
+            "azure-openai-api-key",
+            "b" * 32,
+            enabled=True,
+            rotation_id=rotation_id,
+        ),
+    ]
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: versions)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="multiple versions"):
+        deploy._await_staged_key_vault_secret(
+            vault_name="murmur-vault",
+            secret_name="azure-openai-api-key",
+            rotation_id=rotation_id,
+            returned_version=None,
+            attempts=1,
+        )
+
+
+def test_key_vault_version_listing_rejects_empty_and_missing_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: [])
+
+    with pytest.raises(deploy.DeploymentRefusal, match=r"invalid.*metadata"):
+        deploy._list_key_vault_secret_versions(
+            vault_name="murmur-vault",
+            secret_name="azure-openai-api-key",
+        )
+
+
+def test_key_vault_rotation_rejects_listing_without_selected_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_version = "a" * 32
+    previous_version = "b" * 32
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        if "list-versions" in command:
+            return [_secret_version("azure-openai-api-key", previous_version, enabled=True)]
+        if "show" in command:
+            return _secret_version("azure-openai-api-key", selected_version, enabled=True)
+        raise AssertionError(command)
+
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="missing or disabled"):
+        deploy._stable_key_vault_rotation_snapshot(
+            vault_name="murmur-vault",
+            secret_name="azure-openai-api-key",
+            current_version=selected_version,
+            attempts=1,
+        )
+
+
+def test_key_vault_rotation_rejects_an_unstable_version_listing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_version = "a" * 32
+    previous_version = "b" * 32
+    list_calls = 0
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        nonlocal list_calls
+        if "list-versions" in command:
+            list_calls += 1
+            result = [_secret_version("azure-openai-api-key", selected_version, enabled=True)]
+            if list_calls == 2:
+                result.append(
+                    _secret_version("azure-openai-api-key", previous_version, enabled=True)
+                )
+            return result
+        if "show" in command:
+            return _secret_version("azure-openai-api-key", selected_version, enabled=True)
+        raise AssertionError(command)
+
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="did not stabilize"):
+        deploy._stable_key_vault_rotation_snapshot(
+            vault_name="murmur-vault",
+            secret_name="azure-openai-api-key",
+            current_version=selected_version,
+            attempts=1,
+        )
+
+
+def test_key_vault_rotation_finalizes_only_after_exact_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_version = "a" * 32
+    previous_version = "b" * 32
+    state = {current_version: True, previous_version: True}
+    disabled: list[str] = []
+
+    def versions() -> list[dict[str, object]]:
+        return [
+            _secret_version("azure-openai-api-key", version, enabled=enabled)
+            for version, enabled in state.items()
+        ]
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        if "list-versions" in command:
+            return versions()
+        if "show" in command:
+            return _secret_version(
+                "azure-openai-api-key", current_version, enabled=state[current_version]
+            )
+        raise AssertionError(command)
+
+    def fake_run(command: Any, **_kwargs: Any) -> str:
+        version = command[command.index("--version") + 1]
+        disabled.append(version)
+        state[version] = False
+        return ""
+
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+    monkeypatch.setattr(deploy, "_run_command", fake_run)
+
+    deploy._finalize_key_vault_secret_rotation(
+        vault_name="murmur-vault",
+        secret_name="azure-openai-api-key",
+        current_version=current_version,
+        attempts=1,
+    )
+
+    assert state == {current_version: True, previous_version: False}
+    assert disabled == [previous_version]
+
+
+def test_key_vault_rotation_refuses_concurrent_new_version_without_disabling_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_version = "a" * 32
+    previous_version = "b" * 32
+    concurrent_version = "c" * 32
+    list_calls = 0
+    show_calls = 0
+    disabled: list[str] = []
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        nonlocal list_calls, show_calls
+        if "list-versions" in command:
+            list_calls += 1
+            result = [
+                _secret_version("azure-openai-api-key", selected_version, enabled=True),
+                _secret_version("azure-openai-api-key", previous_version, enabled=True),
+            ]
+            if list_calls >= 3:
+                result.append(
+                    _secret_version("azure-openai-api-key", concurrent_version, enabled=True)
+                )
+            return result
+        if "show" in command:
+            show_calls += 1
+            version = selected_version if show_calls == 1 else concurrent_version
+            return _secret_version("azure-openai-api-key", version, enabled=True)
+        raise AssertionError(command)
+
+    def fake_run(command: Any, **_kwargs: Any) -> str:
+        disabled.append(command[command.index("--version") + 1])
+        return ""
+
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+    monkeypatch.setattr(deploy, "_run_command", fake_run)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="versions changed"):
+        deploy._finalize_key_vault_secret_rotation(
+            vault_name="murmur-vault",
+            secret_name="azure-openai-api-key",
+            current_version=selected_version,
+            attempts=1,
+        )
+
+    assert disabled == [previous_version]
+    assert concurrent_version not in disabled
+
+
+def test_legacy_firebase_secret_is_disabled_but_not_deleted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_version = "d" * 32
+    second_version = "e" * 32
+    state = {first_version: True, second_version: True}
+    disabled: list[str] = []
+
+    def fake_json(command: Any, **_kwargs: Any) -> object:
+        if "list-versions" in command:
+            return [
+                _secret_version(
+                    deploy.LEGACY_FIREBASE_SECRET_NAME,
+                    version,
+                    enabled=enabled,
+                )
+                for version, enabled in state.items()
+            ]
+        if "list" in command:
+            return [deploy.LEGACY_FIREBASE_SECRET_NAME]
+        raise AssertionError(command)
+
+    def fake_run(command: Any, **_kwargs: Any) -> str:
+        assert "delete" not in command and "purge" not in command
+        version = command[command.index("--version") + 1]
+        disabled.append(version)
+        state[version] = False
+        return ""
+
+    monkeypatch.setattr(deploy, "_run_json", fake_json)
+    monkeypatch.setattr(deploy, "_run_command", fake_run)
+
+    status = deploy._retire_legacy_firebase_secret(
+        vault_name="murmur-vault",
+        attempts=1,
+    )
+
+    assert status == "disabled_recoverable"
+    assert state == {first_version: False, second_version: False}
+    assert disabled == [first_version, second_version]
+
+
+def test_legacy_firebase_secret_absence_is_safe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: [])
+
+    assert (
+        deploy._retire_legacy_firebase_secret(vault_name="murmur-vault", attempts=1)
+        == "not_present"
+    )
 
 
 def test_validate_source_revision_requires_clean_exact_remote(
@@ -570,6 +1032,68 @@ def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
     assert PRIVATE_KEY not in observed
 
 
+def test_firebase_runtime_authority_requires_exact_known_auth_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(deploy, "_firebase_access_token", lambda _account: "runtime-token")
+
+    def fake_request(url: str, token: str, payload: Mapping[str, object]) -> object:
+        observed.update(url=url, token=token, payload=payload)
+        return {"permissions": sorted(deploy.EXPECTED_FIREBASE_RUNTIME_AUTH_PERMISSIONS)}
+
+    monkeypatch.setattr(deploy, "_resource_manager_request", fake_request)
+
+    deploy._verify_firebase_runtime_authority(_service_account(), "firebase-project")
+
+    assert observed["url"] == (
+        "https://cloudresourcemanager.googleapis.com/v1/projects/"
+        "firebase-project:testIamPermissions"
+    )
+    assert observed["token"] == "runtime-token"
+    assert observed["payload"] == {"permissions": list(deploy.FIREBASE_AUTH_PERMISSION_UNIVERSE)}
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    (
+        ["firebaseauth.users.get"],
+        [
+            "firebaseauth.configs.get",
+            "firebaseauth.users.get",
+            "firebaseauth.users.update",
+        ],
+    ),
+)
+def test_firebase_runtime_authority_rejects_missing_or_extra_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    permissions: list[str],
+) -> None:
+    monkeypatch.setattr(deploy, "_firebase_access_token", lambda _account: "runtime-token")
+    monkeypatch.setattr(
+        deploy,
+        "_resource_manager_request",
+        lambda *_args, **_kwargs: {"permissions": permissions},
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="exact required Firebase"):
+        deploy._verify_firebase_runtime_authority(_service_account(), "firebase-project")
+
+
+def test_firebase_runtime_authority_fails_closed_when_api_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deploy, "_firebase_access_token", lambda _account: "runtime-token")
+
+    def fail(*_args: Any, **_kwargs: Any) -> object:
+        raise deploy.DeploymentRefusal("Google Cloud Resource Manager was unavailable")
+
+    monkeypatch.setattr(deploy, "_resource_manager_request", fail)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="was unavailable"):
+        deploy._verify_firebase_runtime_authority(_service_account(), "firebase-project")
+
+
 def test_firebase_domain_update_preserves_existing_domains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -717,6 +1241,20 @@ def test_inspect_backend_refuses_inline_secret(monkeypatch: pytest.MonkeyPatch) 
     assert AZURE_KEY not in str(raised.value)
 
 
+def test_inspect_backend_refuses_versionless_key_vault_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _container_app(backend=True)
+    secret = app["properties"]["configuration"]["secrets"][0]  # type: ignore[index]
+    secret["keyVaultUrl"] = (  # type: ignore[index]
+        f"https://murmur-vault.vault.azure.net/secrets/{deploy.AZURE_KEY_SECRET_NAME}"
+    )
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="not version-pinned"):
+        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+
+
 def test_inspect_backend_refuses_registry_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -761,11 +1299,19 @@ def test_bicep_keeps_frontend_identity_out_of_key_vault() -> None:
     foundation = (PROJECT_ROOT / "infra/azure/foundation.bicep").read_text(encoding="utf-8")
     apps = (PROJECT_ROOT / "infra/azure/apps.bicep").read_text(encoding="utf-8")
 
-    key_vault_assignment = foundation.split("resource keyVaultRead", 1)[1].split(
+    key_vault_assignment = foundation.split("resource azureOpenAiSecretRead", 1)[1].split(
         "output environmentId", 1
     )[0]
     assert "principalId: identity.properties.principalId" in key_vault_assignment
     assert "frontendIdentity.properties.principalId" not in key_vault_assignment
+    assert "scope: azureOpenAiSecret" in key_vault_assignment
+    assert "scope: firebaseRuntimeSecret" in key_vault_assignment
+    lock_assignment = foundation.split("resource deploymentLockAccess", 1)[1].split(
+        "output environmentId", 1
+    )[0]
+    assert "scope: deploymentLockContainer" in lock_assignment
+    assert "deploymentPrincipalObjectId" in lock_assignment.split("properties:", 1)[0]
+    assert "principalId: deploymentPrincipalObjectId" in lock_assignment
 
     backend_app = apps.split("resource backend 'Microsoft.App/containerApps", 1)[1].split(
         "resource frontend 'Microsoft.App/containerApps", 1
@@ -773,6 +1319,8 @@ def test_bicep_keeps_frontend_identity_out_of_key_vault() -> None:
     frontend_app = apps.split("resource frontend 'Microsoft.App/containerApps", 1)[1]
     assert "'${identity.id}': {}" in backend_app
     assert "identity: identity.id" in backend_app
+    assert deploy.FIREBASE_SECRET_NAME in backend_app
+    assert deploy.LEGACY_FIREBASE_SECRET_NAME not in backend_app
     assert "'${frontendIdentity.id}': {}" in frontend_app
     assert "identity: frontendIdentity.id" in frontend_app
     assert "secrets:" not in frontend_app
@@ -808,18 +1356,24 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         "keyVaultName": _output("murmur-vault"),
         "keyVaultId": _output("/subscriptions/sub/resourceGroups/rg/providers/keyvault"),
         "identityId": _output(BACKEND_IDENTITY_ID),
+        "identityPrincipalId": _output(BACKEND_IDENTITY_PRINCIPAL_ID),
         "frontendIdentityId": _output(FRONTEND_IDENTITY_ID),
         "frontendIdentityPrincipalId": _output(FRONTEND_IDENTITY_PRINCIPAL_ID),
         "environmentDefaultDomain": _output("example.centralindia.azurecontainerapps.io"),
         "backendUrl": _output(BACKEND_URL),
         "frontendUrl": _output(FRONTEND_URL),
+        "deploymentLockStorageAccountName": _output("murmurlockaccount"),
+        "deploymentLockContainerName": _output("deployment-locks"),
+        "deploymentLockBlobName": _output("azure-pilot.lock"),
     }
     app_outputs = {
         "backendUrl": _output(BACKEND_URL),
         "frontendUrl": _output(FRONTEND_URL),
         "backendLatestRevisionName": _output("murmur-api--revision"),
+        "azureOpenAiSecretVersion": _output(AZURE_KEY_VERSION),
+        "firebaseRuntimeSecretVersion": _output(FIREBASE_VERSION),
     }
-    deployments = iter((foundation, app_outputs))
+    deployments = iter((foundation, foundation, app_outputs))
 
     monkeypatch.setattr(
         deploy,
@@ -828,6 +1382,11 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     )
     monkeypatch.setattr(deploy, "load_deployment_inputs", lambda *_args: inputs)
     monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        deploy,
+        "_verify_firebase_runtime_authority",
+        lambda *_args: calls.append(("firebase-authority", None)),
+    )
     monkeypatch.setattr(deploy, "_register_providers", lambda: calls.append(("providers", None)))
     monkeypatch.setattr(
         deploy,
@@ -841,13 +1400,53 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     monkeypatch.setattr(deploy, "_deployment_outputs", fake_deployment_outputs)
     monkeypatch.setattr(
-        deploy, "_grant_key_vault_write", lambda value: calls.append(("kv-role", value))
+        deploy,
+        "_current_principal",
+        lambda: (BACKEND_IDENTITY_PRINCIPAL_ID, "User"),
     )
+
+    class FakeLease:
+        def assert_healthy(self) -> None:
+            calls.append(("lease-healthy", None))
+
+    @deploy.contextmanager
+    def fake_lease(**_kwargs: Any) -> Any:
+        calls.append(("lease", None))
+        yield FakeLease()
+
+    monkeypatch.setattr(deploy, "_deployment_blob_lease", fake_lease)
+    assignment_id = (
+        "/subscriptions/sub/providers/Microsoft.Authorization/roleAssignments/"
+        "55555555-5555-5555-5555-555555555555"
+    )
+
+    assignment = deploy.RoleAssignmentMetadata(
+        id=assignment_id,
+        scope=KEY_VAULT_ID,
+        principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
+        role_definition_id=deploy.KEY_VAULT_SECRETS_OFFICER_ROLE_ID,
+        description=deploy.KEY_VAULT_WRITER_DESCRIPTION,
+    )
+
+    def fake_grant(value: str, **_kwargs: Any) -> deploy.RoleAssignmentMetadata:
+        calls.append(("kv-role", value))
+        return assignment
+
+    monkeypatch.setattr(deploy, "_grant_key_vault_write", fake_grant)
     monkeypatch.setattr(
         deploy,
-        "_write_key_vault_secret",
-        lambda **kwargs: calls.append(("secret", kwargs["secret_name"])),
+        "_revoke_key_vault_write",
+        lambda vault, value: calls.append(("kv-role-revoked", (vault, value))),
     )
+
+    def fake_write_secret(**kwargs: Any) -> str:
+        calls.append(("secret", kwargs["secret_name"]))
+        return "a" * 32 if kwargs["secret_name"] == deploy.AZURE_KEY_SECRET_NAME else "b" * 32
+
+    monkeypatch.setattr(deploy, "_write_key_vault_secret", fake_write_secret)
+    monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_retire_legacy_backend_vault_read", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_assert_no_key_vault_writer", lambda _vault: None)
     monkeypatch.setattr(
         deploy,
         "_build_backend",
@@ -872,10 +1471,26 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     monkeypatch.setattr(deploy, "_configure_firebase_domain", fake_configure_firebase)
     backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
     frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
+
+    def fake_verify_live(**_kwargs: Any) -> tuple[deploy.AppInspection, deploy.AppInspection]:
+        calls.append(("verify-live", None))
+        return backend_inspection, frontend_inspection
+
+    monkeypatch.setattr(deploy, "verify_live", fake_verify_live)
     monkeypatch.setattr(
         deploy,
-        "verify_live",
-        lambda **_kwargs: (backend_inspection, frontend_inspection),
+        "_verify_old_revisions_inactive",
+        lambda **_kwargs: calls.append(("old-revisions-inactive", None)),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_finalize_key_vault_secret_rotation",
+        lambda **kwargs: calls.append(("finalize-secret", kwargs["secret_name"])),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_retire_legacy_firebase_secret",
+        lambda **_kwargs: calls.append(("legacy-secret-retired", None)) or "disabled_recoverable",
     )
     monkeypatch.setattr(deploy, "_print_verification", lambda *_args: None)
 
@@ -893,7 +1508,14 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert deploy.deploy(args) == expected_result
 
     labels = [item[0] for item in calls]
+    assert labels.index("firebase-authority") < labels.index("group")
     assert labels.index("backend-build") < labels.index("frontend-build")
+    assert labels.index("verify-live") < labels.index("old-revisions-inactive")
+    assert labels.index("old-revisions-inactive") < labels.index("finalize-secret")
+    assert labels.index("finalize-secret") < labels.index("legacy-secret-retired")
+    assert labels.count("finalize-secret") == 2
+    assert labels.count("kv-role") == 1
+    assert labels.count("kv-role-revoked") == 1
     assert "restart" not in labels
     frontend_build = next(item[1] for item in calls if item[0] == "frontend-build")
     assert frontend_build[2] == BACKEND_URL
@@ -905,6 +1527,8 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert apps_parameters["releaseSha"] == SHA
     assert apps_parameters["backendImage"].endswith(f"@{DIGEST}")
     assert apps_parameters["frontendImage"].endswith(f"@{FRONTEND_DIGEST}")
+    assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
+    assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION
     foundation_parameters = next(
         item[1]["parameters"]
         for item in calls
@@ -914,6 +1538,9 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         "location": "centralindia",
         "backendAppName": "murmur-api",
         "frontendAppName": "murmur-web",
+        "deploymentPrincipalObjectId": BACKEND_IDENTITY_PRINCIPAL_ID,
+        "deploymentPrincipalType": "User",
+        "grantBackendSecretRead": False,
     }
 
 
@@ -950,6 +1577,11 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     )
     monkeypatch.setattr(
         deploy,
+        "_verify_backend_key_vault_boundary",
+        lambda **_kwargs: observed.append("backend-boundary"),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_verify_https",
         lambda *_args, **_kwargs: observed.append("https"),
     )
@@ -959,20 +1591,135 @@ def test_verify_live_performs_only_metadata_and_health_checks(
         backend_app="murmur-api",
         frontend_app="murmur-web",
         expected_backend_identity_id=BACKEND_IDENTITY_ID,
+        expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
         expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
         expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
         key_vault_id=KEY_VAULT_ID,
         subscription_id=SUBSCRIPTION_ID,
         tenant_id=TENANT_ID,
+        expected_secret_versions=SECRET_VERSIONS,
     )
 
     assert live_backend == backend_inspection
     assert live_frontend == frontend_inspection
-    assert observed == ["azure", "key-vault-metadata", "identity-boundary", "https"]
+    assert observed == [
+        "azure",
+        "key-vault-metadata",
+        "identity-boundary",
+        "backend-boundary",
+        "https",
+    ]
     assert boundary == {
         "frontend_principal_id": FRONTEND_IDENTITY_PRINCIPAL_ID,
         "key_vault_id": KEY_VAULT_ID,
     }
+
+
+def test_old_revision_check_requires_only_verified_revision_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def revisions(command: list[str], **_kwargs: Any) -> object:
+        assert "--all" in command
+        return [
+            {
+                "name": "murmur-api--current",
+                "active": True,
+                "replicas": 1,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "Running",
+            },
+            {
+                "name": "murmur-api--previous",
+                "active": False,
+                "replicas": 0,
+                "healthState": None,
+                "provisioningState": "Provisioned",
+                "runningState": "Stopped",
+            },
+        ]
+
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        revisions,
+    )
+
+    deploy._verify_old_revisions_inactive(
+        resource_group="murmur-pilot-rg",
+        app_name="murmur-api",
+        current_revision="murmur-api--current",
+    )
+
+
+def test_old_revision_check_refuses_an_active_previous_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: [
+            {
+                "name": "murmur-api--current",
+                "active": True,
+                "replicas": 1,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "Running",
+            },
+            {
+                "name": "murmur-api--previous",
+                "active": True,
+                "replicas": 1,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "Running",
+            },
+        ],
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="safe terminal cutover"):
+        deploy._verify_old_revisions_inactive(
+            resource_group="murmur-pilot-rg",
+            app_name="murmur-api",
+            current_revision="murmur-api--current",
+            attempts=1,
+        )
+
+
+def test_old_revision_check_refuses_inactive_revision_with_replicas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: [
+            {
+                "name": "murmur-api--current",
+                "active": True,
+                "replicas": 1,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "Running",
+            },
+            {
+                "name": "murmur-api--previous",
+                "active": False,
+                "replicas": 1,
+                "healthState": None,
+                "provisioningState": "Deprovisioning",
+                "runningState": "Running",
+            },
+        ],
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="safe terminal cutover"):
+        deploy._verify_old_revisions_inactive(
+            resource_group="murmur-pilot-rg",
+            app_name="murmur-api",
+            current_revision="murmur-api--current",
+            attempts=1,
+        )
 
 
 def test_verify_live_rejects_latest_revision_that_is_not_ready(
@@ -997,6 +1744,7 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
         lambda _identity: FRONTEND_IDENTITY_PRINCIPAL_ID,
     )
     monkeypatch.setattr(deploy, "_verify_frontend_key_vault_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_verify_https", lambda *_args, **_kwargs: None)
 
     with pytest.raises(deploy.DeploymentRefusal, match="latest revision is not reported ready"):
@@ -1005,11 +1753,13 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
             backend_app="murmur-api",
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
             expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
+            expected_secret_versions=SECRET_VERSIONS,
         )
 
 
@@ -1035,11 +1785,13 @@ def test_verify_live_rejects_shared_frontend_and_backend_identity(
             backend_app="murmur-api",
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
             expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
+            expected_secret_versions=SECRET_VERSIONS,
         )
 
 
@@ -1065,17 +1817,23 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
             backend_app="murmur-api",
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
             expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
+            expected_secret_versions=SECRET_VERSIONS,
         )
 
 
 @pytest.mark.parametrize(
     "protected_secret",
-    (deploy.AZURE_KEY_SECRET_NAME, deploy.FIREBASE_SECRET_NAME),
+    (
+        deploy.AZURE_KEY_SECRET_NAME,
+        deploy.FIREBASE_SECRET_NAME,
+        deploy.LEGACY_FIREBASE_SECRET_NAME,
+    ),
 )
 def test_frontend_key_vault_boundary_rejects_secret_read_role_at_each_secret_scope(
     monkeypatch: pytest.MonkeyPatch,
@@ -1092,8 +1850,13 @@ def test_frontend_key_vault_boundary_rejects_secret_read_role_at_each_secret_sco
             assert "--include-groups" in command
             if scope.endswith(f"/secrets/{protected_secret}"):
                 return [
-                    "/subscriptions/sub/providers/Microsoft.Authorization/"
-                    f"roleDefinitions/{role_id}"
+                    {
+                        "scope": scope,
+                        "roleDefinitionId": (
+                            "/subscriptions/sub/providers/Microsoft.Authorization/"
+                            f"roleDefinitions/{role_id}"
+                        ),
+                    }
                 ]
             return []
         if command[1:4] == ["role", "definition", "list"]:
@@ -1117,8 +1880,58 @@ def test_frontend_key_vault_boundary_rejects_secret_read_role_at_each_secret_sco
 
     assert observed_scopes == [
         f"{KEY_VAULT_ID}/secrets/{deploy.AZURE_KEY_SECRET_NAME}",
-        f"{KEY_VAULT_ID}/secrets/{deploy.FIREBASE_SECRET_NAME}",
+        *(
+            [f"{KEY_VAULT_ID}/secrets/{deploy.FIREBASE_SECRET_NAME}"]
+            if protected_secret != deploy.AZURE_KEY_SECRET_NAME
+            else []
+        ),
+        *(
+            [f"{KEY_VAULT_ID}/secrets/{deploy.LEGACY_FIREBASE_SECRET_NAME}"]
+            if protected_secret == deploy.LEGACY_FIREBASE_SECRET_NAME
+            else []
+        ),
     ]
+
+
+@pytest.mark.parametrize("vault_wide", (False, True))
+def test_backend_key_vault_boundary_requires_exact_secret_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+    vault_wide: bool,
+) -> None:
+    def fake_run_json(command: list[str], **_kwargs: Any) -> object:
+        if command[1:4] == ["role", "assignment", "list"]:
+            scope = command[command.index("--scope") + 1]
+            if scope.endswith(f"/secrets/{deploy.LEGACY_FIREBASE_SECRET_NAME}"):
+                return []
+            return [
+                {
+                    "scope": KEY_VAULT_ID if vault_wide else scope,
+                    "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+                }
+            ]
+        if command[1:4] == ["role", "definition", "list"]:
+            return [
+                {
+                    "actions": [],
+                    "notActions": [],
+                    "dataActions": ["Microsoft.KeyVault/vaults/secrets/getSecret/action"],
+                    "notDataActions": [],
+                }
+            ]
+        raise AssertionError(command)
+
+    monkeypatch.setattr(deploy, "_run_json", fake_run_json)
+    if vault_wide:
+        with pytest.raises(deploy.DeploymentRefusal, match="intended secret scope"):
+            deploy._verify_backend_key_vault_boundary(
+                backend_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
+                key_vault_id=KEY_VAULT_ID,
+            )
+    else:
+        deploy._verify_backend_key_vault_boundary(
+            backend_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+        )
 
 
 def test_verify_live_rejects_stale_frontend_principal_output(
@@ -1145,11 +1958,13 @@ def test_verify_live_rejects_stale_frontend_principal_output(
             backend_app="murmur-api",
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
             expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
+            expected_secret_versions=SECRET_VERSIONS,
         )
 
 
@@ -1182,11 +1997,13 @@ def test_verify_live_rejects_stale_key_vault_output(
             backend_app="murmur-api",
             frontend_app="murmur-web",
             expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
             expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
             expected_frontend_identity_principal_id=FRONTEND_IDENTITY_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
+            expected_secret_versions=SECRET_VERSIONS,
         )
 
 
