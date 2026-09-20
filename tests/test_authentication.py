@@ -13,7 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from firebase_admin import auth as firebase_auth
 from firebase_admin import exceptions as firebase_exceptions
-from murmur.api import authentication
+from murmur.api import authentication, firebase_credentials
 from murmur.api import dependencies as api_dependencies
 from murmur.api.errors import ApiError, api_error_handler
 from murmur.persistence.database import get_session
@@ -94,8 +94,9 @@ def test_firebase_initialization_bounds_http_in_every_configuration_branch(
         "FIREBASE_SERVICE_ACCOUNT_PATH",
         service_account_path,
     )
+    monkeypatch.setattr(authentication.config, "FIREBASE_SERVICE_ACCOUNT_JSON", None)
     monkeypatch.setattr(authentication.config, "FIREBASE_PROJECT_ID", project_id)
-    monkeypatch.setattr(authentication.credentials, "Certificate", certificate)
+    monkeypatch.setattr(firebase_credentials.credentials, "Certificate", certificate)
     monkeypatch.setattr(authentication.firebase_admin, "initialize_app", initialize_app)
 
     assert authentication._ensure_firebase() is app
@@ -132,6 +133,7 @@ def test_concurrent_firebase_initialization_is_exactly_once(
     monkeypatch.setattr(authentication, "_firebase_app", None)
     monkeypatch.setattr(authentication, "_firebase_init_attempted", False)
     monkeypatch.setattr(authentication.config, "FIREBASE_SERVICE_ACCOUNT_PATH", None)
+    monkeypatch.setattr(authentication.config, "FIREBASE_SERVICE_ACCOUNT_JSON", None)
     monkeypatch.setattr(authentication.config, "FIREBASE_PROJECT_ID", "firebase-project")
     monkeypatch.setattr(authentication.firebase_admin, "initialize_app", initializer)
 
@@ -158,6 +160,7 @@ def test_failed_firebase_initialization_is_fixed_unavailable_and_not_retried(
     monkeypatch.setattr(authentication, "_firebase_app", None)
     monkeypatch.setattr(authentication, "_firebase_init_attempted", False)
     monkeypatch.setattr(authentication.config, "FIREBASE_SERVICE_ACCOUNT_PATH", None)
+    monkeypatch.setattr(authentication.config, "FIREBASE_SERVICE_ACCOUNT_JSON", None)
     monkeypatch.setattr(authentication.config, "FIREBASE_PROJECT_ID", "firebase-project")
     monkeypatch.setattr(authentication.firebase_admin, "initialize_app", initializer)
     caplog.set_level(logging.WARNING, logger="murmur.api.authentication")

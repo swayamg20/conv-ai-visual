@@ -12,6 +12,7 @@ if (
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  output: "standalone",
   ...(requestedE2EDistDir ? { distDir: requestedE2EDistDir } : {}),
 };
 

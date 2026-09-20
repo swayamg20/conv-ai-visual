@@ -18,9 +18,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from murmur.api.firebase_credentials import create_firebase_credential
 from murmur.api.routers.pipecat_voice import (
     DEFAULT_MAX_PIPECAT_REQUEST_BODY_BYTES,
     PipecatHttpComposition,
@@ -488,11 +488,7 @@ def _get_pipecat_firebase_app() -> firebase_admin.App:
             return _firebase_app
         except ValueError:
             pass
-        credential = (
-            credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
-            if config.FIREBASE_SERVICE_ACCOUNT_PATH
-            else None
-        )
+        credential = create_firebase_credential()
         options = {"projectId": config.FIREBASE_PROJECT_ID} if config.FIREBASE_PROJECT_ID else None
         _firebase_app = firebase_admin.initialize_app(
             credential,

@@ -7,8 +7,8 @@ from collections.abc import Mapping
 import firebase_admin
 from fastapi import HTTPException, Request
 from firebase_admin import auth as firebase_auth
-from firebase_admin import credentials
 
+from murmur.api.firebase_credentials import create_firebase_credential
 from murmur.core.config import config
 from murmur.persistence.repositories.identities import UserRepo
 
@@ -45,8 +45,8 @@ def _ensure_firebase() -> firebase_admin.App:
             options["projectId"] = config.FIREBASE_PROJECT_ID
 
         try:
-            if config.FIREBASE_SERVICE_ACCOUNT_PATH:
-                cred = credentials.Certificate(config.FIREBASE_SERVICE_ACCOUNT_PATH)
+            cred = create_firebase_credential()
+            if cred is not None:
                 _firebase_app = firebase_admin.initialize_app(cred, options=options)
             elif config.FIREBASE_PROJECT_ID:
                 # Explicitly pin the Firebase project for local/dev token verification.

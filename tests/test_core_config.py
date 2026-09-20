@@ -4,13 +4,43 @@ import sys
 from pathlib import Path
 
 import pytest
-from murmur.core.config import Config, default_env_path, normalize_azure_openai_endpoint
+from murmur.core.config import (
+    Config,
+    default_env_path,
+    normalize_azure_openai_endpoint,
+    normalize_release_sha,
+)
 
 
 def test_default_env_path_is_the_documented_repository_file() -> None:
     repository_root = Path(__file__).resolve().parents[1]
 
     assert default_env_path() == repository_root / ".env"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (None, None),
+        ("", None),
+        (" ABCDEF1 ", "abcdef1"),
+        (
+            "0123456789ABCDEF0123456789ABCDEF01234567",
+            "0123456789abcdef0123456789abcdef01234567",
+        ),
+    ],
+)
+def test_release_sha_is_optional_normalized_hex(
+    value: str | None,
+    expected: str | None,
+) -> None:
+    assert normalize_release_sha(value) == expected
+
+
+@pytest.mark.parametrize("value", ["abcdef", "not-a-sha", "a" * 65])
+def test_release_sha_rejects_invalid_provenance(value: str) -> None:
+    with pytest.raises(ValueError, match=r"^MURMUR_RELEASE_SHA"):
+        normalize_release_sha(value)
 
 
 def test_dotenv_can_be_disabled_before_config_import(tmp_path: Path) -> None:

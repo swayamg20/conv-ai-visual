@@ -1,7 +1,8 @@
 import { getIdToken } from "@/hooks/use-auth";
+import { API_BASE } from "./api-base";
 import type { Agent, AgentCreatePayload, Session, SessionEndResponse, SessionWithMessages, Resource, MasteryData } from "./types";
 
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+export { API_BASE } from "./api-base";
 
 async function authHeaders(): Promise<Record<string, string>> {
   const token = await getIdToken();

@@ -1,6 +1,7 @@
 """Environment-backed application configuration."""
 
 import os
+import re
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -27,6 +28,17 @@ def _parse_csv_env(value: str | None, default: tuple[str, ...]) -> list[str]:
     if not value:
         return list(default)
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def normalize_release_sha(value: str | None) -> str | None:
+    """Normalize an optional Git object ID used only for deployment provenance."""
+
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{7,64}", normalized):
+        raise ValueError("MURMUR_RELEASE_SHA must be 7 to 64 hexadecimal characters")
+    return normalized
 
 
 def normalize_azure_openai_endpoint(endpoint: str) -> str:
@@ -341,8 +353,10 @@ EXAMPLE — "Explain the Pythagorean theorem":
     TTS_FALLBACK_TO_KOKORO: bool = os.getenv("TTS_FALLBACK_TO_KOKORO", "true").lower() == "true"
     # Firebase Auth
     FIREBASE_SERVICE_ACCOUNT_PATH: Optional[str] = os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH")
+    FIREBASE_SERVICE_ACCOUNT_JSON: Optional[str] = os.getenv("FIREBASE_SERVICE_ACCOUNT_JSON")
     FIREBASE_PROJECT_ID: Optional[str] = os.getenv("FIREBASE_PROJECT_ID")
 
+    MURMUR_RELEASE_SHA: Optional[str] = normalize_release_sha(os.getenv("MURMUR_RELEASE_SHA"))
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
 

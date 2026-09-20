@@ -1,0 +1,6 @@
+# Canonical backend build context allowlist. Build from the repository root.
+**
+!backend/
+!backend/**
+!main.py
+!requirements.txt
