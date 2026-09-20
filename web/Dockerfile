@@ -40,10 +40,16 @@ RUN npm run build
 FROM node:22-alpine AS runner
 WORKDIR /app
 
+ARG MURMUR_RELEASE_SHA=""
+
+LABEL org.opencontainers.image.title="Murmur web" \
+      org.opencontainers.image.revision="${MURMUR_RELEASE_SHA}"
+
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \
-    PORT=3000
+    PORT=3000 \
+    MURMUR_RELEASE_SHA=${MURMUR_RELEASE_SHA}
 
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 nextjs
