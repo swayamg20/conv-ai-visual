@@ -17,9 +17,10 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - [x] 2026-09-20 13:42 IST: Added a redaction-safe deployment driver that imports existing local credentials into Key Vault and never prints them.
 - [x] 2026-09-20 13:42 IST: Passed deployment-driver lint, formatting, 21 focused tests, Python compilation, both Bicep builds, and diff checks. Earlier application checks passed 239 backend checks plus the complete 1,298-test frontend suite and production build; local container execution remains unavailable because Docker Desktop is stopped, so Azure ACR performs the image builds.
 - [x] 2026-09-20 14:30 IST: Committed and pushed application readiness, reproducible infrastructure, ACR compatibility, Azure metadata normalization, non-root runtime-home, and safe rollout fixes to `codex/azure-app-deployment`.
-- [ ] Provision the isolated `murmur-pilot-rg` Azure resources and build immutable images from the accepted commit. The Central India foundation, both Container Apps, and digest-pinned images exist; the final local-SQLite revision and live acceptance remain.
+- [x] 2026-09-20 14:59 IST: Provisioned the isolated `murmur-pilot-rg` Azure resources and deployed digest-pinned backend and frontend images from commit `706a60e` to healthy revisions `murmur-api--0000003` and `murmur-web--0000003`.
 - [x] 2026-09-20 14:30 IST: Added the deployed frontend hostname to Firebase Authentication authorized domains through the Identity Toolkit Admin API and confirmed the returned configuration.
-- [ ] Verify HTTPS health, readiness, CORS, authenticated UI loading, and the Gate 1.8 request path without an unbudgeted model corpus. Persistence is explicitly out of scope for this low-cost pilot after Azure Files incompatibility was proven live.
+- [x] 2026-09-20 14:59 IST: Verified public HTTPS liveness, dependency-aware readiness, exact frontend CORS, release SHA, probes, one-replica limits, Key Vault references, and both public browser routes with zero paid model calls. The landing and sign-in pages render, and unauthenticated `/canvas/storyboard` access redirects to `/login` as designed.
+- [ ] Complete one user-authenticated Azure browser pass through `/canvas/storyboard` without pressing the model-backed continue action. Persistence is explicitly out of scope for this low-cost pilot after Azure Files incompatibility was proven live.
 - [ ] Open, review, and merge the deployment pull request, then prove the live revision corresponds to merged `main`.
 
 ## Surprises & Discoveries
@@ -38,6 +39,7 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - Restarting a newly created revision before its first replica became ready caused Container Apps to overlap two backend replicas during SQLite schema initialization, producing a real `database is locked` failure despite the steady-state `maxReplicas: 1` contract. Deployment now lets the immutable new revision start once; restart persistence is tested only after the app is healthy and quiescent.
 - After all replicas were terminated, Azure Files still returned `database is locked` for a single process creating the first table. The share contained only a zero-byte bootstrap file, which was removed with no user data loss. The persistent-SQLite design was rejected rather than weakened with unsafe lock suppression.
 - ACR completed both immutable image builds but its registry endpoint briefly failed during the immediate manifest lookup. Digest resolution now has a small bounded retry window; it still refuses to deploy unless the final value is a valid `sha256` digest.
+- The Container Apps API can briefly report the previous `latestReadyRevisionName` while a new `latestRevisionName` starts. Verification now distinguishes those fields, probes the expected SHA over HTTPS, then refuses success unless the current revision is the one Azure reports ready.
 
 ## Decision Log
 
@@ -53,7 +55,9 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 
 ## Outcomes & Retrospective
 
-The isolated Azure foundation, ACR images, Key Vault references, Firebase authorized domain, and both Container Apps now exist. Live acceptance is still pending a healthy revision after replacing the rejected Azure Files/SQLite pairing with local ephemeral storage.
+The isolated Azure foundation, ACR images, Key Vault references, Firebase authorized domain, and both Container Apps are live in Central India. The backend and frontend answer at their public HTTPS origins from release `706a60e`; health, readiness, CORS, release provenance, probes, scale bounds, and current-ready revisions passed with zero paid model calls. Browser QA proved the landing and sign-in pages and the protected storyboard redirect.
+
+The pilot is intentionally non-durable: backend SQLite lives on local ephemeral Container Apps storage because live testing proved that SQLite locking on the Azure Files SMB mount is not safe for this workload. PostgreSQL remains required before stored agents or history can be relied on across scale-down or deployment. The remaining acceptance steps are a user-authenticated storyboard page load, pull-request review and merge, and a final rebuild whose reported release SHA is the merged `main` commit.
 
 ## Context and Orientation
 

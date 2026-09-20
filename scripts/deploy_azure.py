@@ -139,6 +139,7 @@ class AppInspection:
     registry_server: str
     release_sha: str
     latest_revision: str
+    latest_ready_revision: str | None
     provisioning_state: str
     running_status: str
     min_replicas: int
@@ -1260,11 +1261,12 @@ def _inspect_app(
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/healthz"}
 
     probe_types = _probe_types(container, expected_paths, expected_port)
-    latest_revision = properties.get("latestReadyRevisionName") or properties.get(
-        "latestRevisionName"
-    )
+    latest_revision = properties.get("latestRevisionName")
     if not isinstance(latest_revision, str) or not latest_revision:
         raise DeploymentRefusal(f"Container App {name} has no active revision")
+    latest_ready_revision = properties.get("latestReadyRevisionName")
+    if not isinstance(latest_ready_revision, str) or not latest_ready_revision:
+        latest_ready_revision = None
     return AppInspection(
         name=name,
         url=url,
@@ -1273,6 +1275,7 @@ def _inspect_app(
         registry_server=registry_server,
         release_sha=release_sha,
         latest_revision=latest_revision,
+        latest_ready_revision=latest_ready_revision,
         provisioning_state=str(properties.get("provisioningState", "unknown")),
         running_status=str(properties.get("runningStatus", "unknown")),
         min_replicas=min_replicas,
@@ -1353,6 +1356,17 @@ def verify_live(
         expected_sha=backend.release_sha,
         timeout_seconds=health_timeout_seconds,
     )
+    backend = _inspect_app(resource_group, backend_app, backend=True)
+    frontend = _inspect_app(resource_group, frontend_app, backend=False)
+    for app in (backend, frontend):
+        if app.latest_ready_revision != app.latest_revision:
+            raise DeploymentRefusal(
+                f"Container App {app.name} latest revision is not reported ready"
+            )
+    if backend.release_sha != frontend.release_sha:
+        raise DeploymentRefusal("frontend and backend image revisions do not match")
+    if expected_sha is not None and backend.release_sha != expected_sha:
+        raise DeploymentRefusal("live applications do not match the expected release SHA")
     return backend, frontend
 
 

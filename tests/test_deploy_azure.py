@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import importlib.util
 import io
 import json
@@ -187,6 +188,7 @@ def _inspection(name: str, url: str, *, backend: bool) -> deploy.AppInspection:
         registry_server="murmurregistry.azurecr.io",
         release_sha=SHA,
         latest_revision=f"{name}--revision",
+        latest_ready_revision=f"{name}--revision",
         provisioning_state="Succeeded",
         running_status="Running",
         min_replicas=0,
@@ -756,6 +758,32 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     assert live_backend == backend_inspection
     assert live_frontend == frontend_inspection
     assert observed == ["azure", "key-vault-metadata", "https"]
+
+
+def test_verify_live_rejects_latest_revision_that_is_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend_inspection = dataclasses.replace(
+        _inspection("murmur-api", BACKEND_URL, backend=True),
+        latest_ready_revision="murmur-api--previous",
+    )
+    frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda: None)
+    monkeypatch.setattr(deploy, "_run_command", lambda *args, **kwargs: "")
+    monkeypatch.setattr(
+        deploy,
+        "_inspect_app",
+        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+    )
+    monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: None)
+    monkeypatch.setattr(deploy, "_verify_https", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="latest revision is not reported ready"):
+        deploy.verify_live(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            frontend_app="murmur-web",
+        )
 
 
 def test_main_redacts_unexpected_exception_text(
