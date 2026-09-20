@@ -82,7 +82,6 @@ _FULL_SHA = re.compile(r"[0-9a-f]{40}\Z")
 _IMAGE_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _AZURE_RESOURCE_NAME = re.compile(r"[a-zA-Z0-9._()\-]{1,90}\Z")
 _CONTAINER_APP_NAME = re.compile(r"[a-z][a-z0-9-]{0,30}[a-z0-9]\Z")
-_CONTAINER_REVISION_NAME = re.compile(r"[a-z][a-z0-9-]{0,62}[a-z0-9]\Z")
 _AZURE_LOCATION = re.compile(r"[a-z0-9]{2,32}\Z")
 _REGISTRY_NAME = re.compile(r"[a-z0-9]{5,50}\Z")
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -217,12 +216,6 @@ def _require_container_app_name(value: str, label: str) -> str:
 def _require_location(value: str) -> str:
     if not _AZURE_LOCATION.fullmatch(value):
         raise DeploymentRefusal("location is not a safe Azure region name")
-    return value
-
-
-def _require_revision_name(value: str, label: str) -> str:
-    if not _CONTAINER_REVISION_NAME.fullmatch(value):
-        raise DeploymentRefusal(f"{label} is not a valid Container App revision name")
     return value
 
 
@@ -718,29 +711,6 @@ def _write_key_vault_secret(
                 if attempt + 1 == attempts:
                     raise
                 time.sleep(min(2**attempt, 10))
-
-
-def _restart_revision(resource_group: str, app_name: str, revision_name: str) -> None:
-    revision = _require_revision_name(revision_name, f"{app_name} revision")
-    _run_command(
-        [
-            "az",
-            "containerapp",
-            "revision",
-            "restart",
-            "--resource-group",
-            resource_group,
-            "--name",
-            app_name,
-            "--revision",
-            revision,
-            "--output",
-            "none",
-            "--only-show-errors",
-        ],
-        timeout_seconds=300,
-        operation=f"restart Container App revision {app_name}",
-    )
 
 
 def _extract_git_archive(archive_path: Path, destination: Path) -> None:
@@ -1513,10 +1483,6 @@ def deploy(args: argparse.Namespace) -> int:
         raise DeploymentRefusal("deployed backend URL changed after the frontend build")
     if frontend_url != frontend_url_from_domain:
         raise DeploymentRefusal("deployed frontend URL changed after foundation provisioning")
-
-    backend_revision = _output_value(app_outputs, "backendLatestRevisionName")
-    print("Restarting the backend revision to activate current Key Vault secret versions")
-    _restart_revision(resource_group, backend_app, backend_revision)
 
     try:
         firebase_domain = _configure_firebase_domain(

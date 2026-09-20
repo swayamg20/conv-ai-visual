@@ -35,6 +35,7 @@ This is a deliberately bounded single-replica pilot for the visual product. It d
 - Azure ACR Quick Build currently uses the classic Docker builder for this registry, so a BuildKit-only `RUN --mount=type=cache` instruction fails before dependency installation. The backend image uses the same hash-locked install without the optional cache mount; correctness is unchanged and remote layer caching still applies.
 - The Container Apps control plane serializes the same managed-identity resource ID with different casing in the app identity map and its ACR/Key Vault references, and emits empty registry credential fields. Verification therefore compares Azure resource IDs case-insensitively and rejects non-empty credentials instead of rejecting Azure's normalized representation.
 - The first backend revision exited before serving because Mem0 initializes client metadata below the process home and the non-root container user intentionally had no home directory. The image remains non-root but now creates and owns `/home/murmur`, giving third-party initialization a bounded writable location.
+- Restarting a newly created revision before its first replica became ready caused Container Apps to overlap two backend replicas during SQLite schema initialization, producing a real `database is locked` failure despite the steady-state `maxReplicas: 1` contract. Deployment now lets the immutable new revision start once; restart persistence is tested only after the app is healthy and quiescent.
 
 ## Decision Log
 

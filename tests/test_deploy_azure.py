@@ -676,11 +676,6 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         )
 
     monkeypatch.setattr(deploy, "_configure_firebase_domain", fake_configure_firebase)
-    monkeypatch.setattr(
-        deploy,
-        "_restart_revision",
-        lambda *args: calls.append(("restart", args)),
-    )
     backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
     frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
     monkeypatch.setattr(
@@ -703,12 +698,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     labels = [item[0] for item in calls]
     assert labels.index("backend-build") < labels.index("frontend-build")
-    assert labels.index("frontend-build") < labels.index("restart")
-    assert next(item[1] for item in calls if item[0] == "restart") == (
-        "murmur-pilot-rg",
-        "murmur-api",
-        "murmur-api--revision",
-    )
+    assert "restart" not in labels
     frontend_build = next(item[1] for item in calls if item[0] == "frontend-build")
     assert frontend_build[2] == BACKEND_URL
     apps_parameters = next(
