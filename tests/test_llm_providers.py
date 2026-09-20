@@ -8,6 +8,7 @@ import openai
 import pytest
 from murmur.core.provider_errors import LLMProviderError, LLMProviderFailureKind
 from murmur.llm import GeminiClient, OpenAIClient, create_llm_client
+from murmur.llm.pipeline import LLMPipeline
 
 
 @pytest.mark.asyncio
@@ -448,12 +449,49 @@ def test_factory_routes_azure_deployment_through_openai_v1_endpoint(monkeypatch)
     )
     monkeypatch.setattr("murmur.llm.factory.config.AZURE_OPENAI_API_KEY", "server-key")
 
-    client = create_llm_client("azure_openai")
+    client = create_llm_client("azure_openai", transport_max_retries=0)
 
     assert client.api_key == "server-key"
     assert client.model == "murmur-gpt-oss-120b"
     assert captured["base_url"] == "https://murmur-resource.openai.azure.com/openai/v1/"
     assert captured["max_tokens_parameter"] == "max_completion_tokens"
+    assert captured["transport_max_retries"] == 0
+
+
+def test_pipeline_preserves_transport_retry_ceiling_across_client_construction(
+    monkeypatch,
+) -> None:
+    client_calls: list[dict[str, object]] = []
+
+    def fake_create_llm_client(**kwargs):
+        client_calls.append(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("murmur.llm.pipeline.create_llm_client", fake_create_llm_client)
+
+    pipeline = LLMPipeline(
+        provider="azure_openai",
+        api_key="server-key",
+        model="deployment",
+        enable_memory=False,
+        transport_max_retries=0,
+    )
+    pipeline.switch_provider("openai", "other-key", "other-model")
+
+    assert client_calls == [
+        {
+            "provider": "azure_openai",
+            "api_key": "server-key",
+            "model": "deployment",
+            "transport_max_retries": 0,
+        },
+        {
+            "provider": "openai",
+            "api_key": "other-key",
+            "model": "other-model",
+            "transport_max_retries": 0,
+        },
+    ]
 
 
 def test_factory_rejects_invalid_azure_endpoint_before_client_construction(monkeypatch) -> None:

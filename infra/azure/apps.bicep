@@ -134,6 +134,30 @@ resource backend 'Microsoft.App/containerApps@2024-03-01' = {
               value: 'azure_openai'
             }
             {
+              name: 'LLM_MAX_TOKENS'
+              value: '1024'
+            }
+            {
+              name: 'MURMUR_CHAT_GLOBAL_CONCURRENCY'
+              value: '1'
+            }
+            {
+              name: 'MURMUR_CHAT_PER_USER_CONCURRENCY'
+              value: '1'
+            }
+            {
+              name: 'MURMUR_CHAT_REQUESTS_PER_MINUTE'
+              value: '2'
+            }
+            {
+              name: 'MURMUR_CHAT_MAX_TOOL_ROUNDS'
+              value: '2'
+            }
+            {
+              name: 'MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES'
+              value: '0'
+            }
+            {
               name: 'AZURE_OPENAI_ENDPOINT'
               value: azureOpenAiEndpoint
             }

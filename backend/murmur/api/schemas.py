@@ -17,6 +17,7 @@ UUID4String = Annotated[
         ),
     ),
 ]
+MAX_CHAT_MESSAGE_CHARS = 4_000
 
 
 class Offer(BaseModel):
@@ -28,7 +29,7 @@ class Offer(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    message: str
+    message: str = Field(max_length=MAX_CHAT_MESSAGE_CHARS)
     session_id: str | None = None
     user_id: str | None = None
     canvas_mode: bool | None = None

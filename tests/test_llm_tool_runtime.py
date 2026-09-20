@@ -1,5 +1,6 @@
 """Deterministic tool-runtime policy tests without provider or database access."""
 
+import asyncio
 from typing import ClassVar
 
 import pytest
@@ -27,6 +28,47 @@ class RuntimeHarness(ToolConversationMixin):
     async def _execute_single_tool_call(self, call: ToolCall) -> ToolResult:
         self.events.append(("single", (call.name,)))
         return ToolResult(call.id, call.name)
+
+
+class _ClosingProviderClient:
+    def __init__(self) -> None:
+        self.events_closed = False
+        self.provider_closed = False
+
+    async def _provider_stream(self):
+        try:
+            yield object()
+            await asyncio.Event().wait()
+        finally:
+            self.provider_closed = True
+
+    def stream_with_tools(self, **_kwargs):
+        return self._provider_stream()
+
+    async def _events(self, stream):
+        try:
+            async for _chunk in stream:
+                yield {"type": "text_delta", "text": "hello"}
+        finally:
+            self.events_closed = True
+
+    def iter_stream_tool_events(self, stream):
+        return self._events(stream)
+
+
+class _StreamingRuntimeHarness(ToolConversationMixin):
+    MUTATING_TOOL_NAMES: ClassVar[set[str]] = set()
+
+    def __init__(self) -> None:
+        self.client = _ClosingProviderClient()
+        self.memory = None
+        self._last_call_timing = None
+        self._last_call_tool_calls = []
+        self._last_call_response = None
+        self._last_call_error = None
+
+    async def _build_context_and_tools(self, _user_message: str):
+        return [{"role": "user", "content": "hello"}], None
 
 
 @pytest.mark.asyncio
@@ -97,3 +139,15 @@ def test_speech_cues_are_extracted_in_step_order() -> None:
     ]
 
     assert ToolConversationMixin._extract_speech_cues(calls) == "First. Then second."
+
+
+@pytest.mark.asyncio
+async def test_orchestrated_stream_closes_event_and_provider_iterators_on_abort() -> None:
+    runtime = _StreamingRuntimeHarness()
+    stream = runtime.chat_with_tools_stream("hello", max_tool_rounds=2)
+
+    assert await anext(stream) == "hello"
+    await stream.aclose()
+
+    assert runtime.client.events_closed is True
+    assert runtime.client.provider_closed is True

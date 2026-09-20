@@ -174,3 +174,32 @@ def test_enabled_scene_provider_requires_its_own_api_key(
         match=rf"{missing_key}.*MURMUR_SCENE_LLM_PROVIDER={scene_provider}",
     ):
         Config.validate()
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MURMUR_CHAT_MAX_TOOL_ROUNDS", 0),
+        ("MURMUR_CHAT_MAX_TOOL_ROUNDS", 11),
+        ("MURMUR_CHAT_MAX_TOOL_ROUNDS", True),
+        ("MURMUR_CHAT_MAX_TOOL_ROUNDS", 1.5),
+        ("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES", -1),
+        ("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES", 3),
+        ("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES", True),
+        ("MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES", 1.5),
+    ],
+)
+def test_chat_cost_controls_reject_values_that_expand_unbounded_work(
+    monkeypatch,
+    name: str,
+    value: object,
+) -> None:
+    monkeypatch.setattr(Config, "LLM_PROVIDER", "openai")
+    monkeypatch.setattr(Config, "OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(Config, "MURMUR_SCENE_ENABLED", False)
+    monkeypatch.setattr(Config, "MURMUR_SCENE_LLM_PROVIDER", "openai")
+    monkeypatch.setattr(Config, "TTS_PROVIDER", "kokoro")
+    monkeypatch.setattr(Config, name, value)
+
+    with pytest.raises(ValueError, match=name):
+        Config.validate()

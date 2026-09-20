@@ -8,6 +8,7 @@ from typing import Any
 
 from murmur.canvas.animation import teach_with_visuals
 from murmur.canvas.state import canvas_update
+from murmur.core.async_cleanup import close_async_resource
 from murmur.core.config import config
 from murmur.tools.contracts import ToolCall, ToolResult
 
@@ -334,15 +335,19 @@ class ToolConversationMixin:
             yield speech_cue_text
         else:
             # No speech cues — fall back to streaming the LLM's text response
-            async for chunk in self.client.stream(
+            provider_stream = self.client.stream(
                 messages=context, temperature=temperature, max_tokens=max_tokens
-            ):
-                if t_first_provider_chunk is None:
-                    t_first_provider_chunk = time.perf_counter()
-                full_response += chunk
-                if t_first_text_yield is None:
-                    t_first_text_yield = time.perf_counter()
-                yield chunk
+            )
+            try:
+                async for chunk in provider_stream:
+                    if t_first_provider_chunk is None:
+                        t_first_provider_chunk = time.perf_counter()
+                    full_response += chunk
+                    if t_first_text_yield is None:
+                        t_first_text_yield = time.perf_counter()
+                    yield chunk
+            finally:
+                await close_async_resource(provider_stream)
 
         t_stream_end = time.perf_counter()
         t_end = time.perf_counter()
@@ -448,26 +453,32 @@ class ToolConversationMixin:
                     temperature=temperature,
                     max_tokens=max_tokens,
                 )
+                provider_events = self.client.iter_stream_tool_events(provider_stream)
+                try:
+                    async for event in provider_events:
+                        if t_first_provider_chunk is None:
+                            t_first_provider_chunk = time.perf_counter()
 
-                async for event in self.client.iter_stream_tool_events(provider_stream):
-                    if t_first_provider_chunk is None:
-                        t_first_provider_chunk = time.perf_counter()
-
-                    event_type = event.get("type")
-                    if event_type == "text_delta":
-                        text = event.get("text") or ""
-                        if not text:
-                            continue
-                        full_response += text
-                        if t_first_text_yield is None:
-                            t_first_text_yield = time.perf_counter()
-                            t_stream_start = t_first_text_yield
-                        yield text
-                    elif event_type == "tool_call_done":
-                        round_tool_calls = event.get("tool_calls") or []
-                    elif event_type == "usage":
-                        tokens_in = event.get("tokens_in", tokens_in)
-                        tokens_out = event.get("tokens_out", tokens_out)
+                        event_type = event.get("type")
+                        if event_type == "text_delta":
+                            text = event.get("text") or ""
+                            if not text:
+                                continue
+                            full_response += text
+                            if t_first_text_yield is None:
+                                t_first_text_yield = time.perf_counter()
+                                t_stream_start = t_first_text_yield
+                            yield text
+                        elif event_type == "tool_call_done":
+                            round_tool_calls = event.get("tool_calls") or []
+                        elif event_type == "usage":
+                            tokens_in = event.get("tokens_in", tokens_in)
+                            tokens_out = event.get("tokens_out", tokens_out)
+                finally:
+                    try:
+                        await close_async_resource(provider_events)
+                    finally:
+                        await close_async_resource(provider_stream)
 
                 t_llm_total += time.perf_counter() - t_llm_start
 
@@ -519,18 +530,22 @@ class ToolConversationMixin:
                     "Exceeded max tool rounds (%d) in orchestrated path; falling back to final text stream",
                     max_tool_rounds,
                 )
-                async for chunk in self.client.stream(
+                provider_stream = self.client.stream(
                     messages=context,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                ):
-                    if t_first_provider_chunk is None:
-                        t_first_provider_chunk = time.perf_counter()
-                    full_response += chunk
-                    if t_first_text_yield is None:
-                        t_first_text_yield = time.perf_counter()
-                        t_stream_start = t_first_text_yield
-                    yield chunk
+                )
+                try:
+                    async for chunk in provider_stream:
+                        if t_first_provider_chunk is None:
+                            t_first_provider_chunk = time.perf_counter()
+                        full_response += chunk
+                        if t_first_text_yield is None:
+                            t_first_text_yield = time.perf_counter()
+                            t_stream_start = t_first_text_yield
+                        yield chunk
+                finally:
+                    await close_async_resource(provider_stream)
 
             if speech_cue_text:
                 if full_response and not full_response.endswith(" "):

@@ -13,12 +13,12 @@ from murmur.api.dependencies import (
     SceneAuthoringServiceDependency,
 )
 from murmur.api.errors import ApiError
+from murmur.api.streaming import OwnedStreamingResponse as _OwnedStreamingResponse
 from murmur.core.async_cleanup import close_async_resource
 from murmur.core.config import config
 from murmur.live_scene import (
     LiveSceneRequest,
     SceneAdmissionError,
-    SceneAdmissionLease,
     SceneAuthoringAdmission,
     SceneAuthoringService,
     SceneStreamEvent,
@@ -84,30 +84,6 @@ def _require_development_scene_lab(request: Request) -> None:
         is_loopback = False
     if os.getenv("MURMUR_SCENE_LAB") != "1" or environment != "development" or not is_loopback:
         raise ApiError(404, "Not found")
-
-
-class _OwnedStreamingResponse(StreamingResponse):
-    """Release admission even when the client disconnects before streaming starts."""
-
-    def __init__(
-        self,
-        content: AsyncIterator[str],
-        *,
-        admission_lease: SceneAdmissionLease,
-        media_type: str | None = None,
-        headers: dict[str, str] | None = None,
-    ) -> None:
-        super().__init__(content, media_type=media_type, headers=headers)
-        self._admission_lease = admission_lease
-
-    async def __call__(self, scope, receive, send) -> None:
-        try:
-            await super().__call__(scope, receive, send)
-        finally:
-            try:
-                await close_async_resource(self.body_iterator)
-            finally:
-                await self._admission_lease.aclose()
 
 
 async def _encode_scene_events(
