@@ -1675,6 +1675,40 @@ def test_old_revision_check_requires_only_verified_revision_active(
     )
 
 
+def test_old_revision_check_accepts_healthy_current_revision_at_max_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: [
+            {
+                "name": "murmur-api--current",
+                "active": True,
+                "replicas": 1,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "RunningAtMaxScale",
+            },
+            {
+                "name": "murmur-api--previous",
+                "active": False,
+                "replicas": 0,
+                "healthState": "Healthy",
+                "provisioningState": "Provisioned",
+                "runningState": "Stopped",
+            },
+        ],
+    )
+
+    deploy._verify_old_revisions_inactive(
+        resource_group="murmur-pilot-rg",
+        app_name="murmur-api",
+        current_revision="murmur-api--current",
+        attempts=1,
+    )
+
+
 def test_old_revision_check_refuses_an_active_previous_revision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
