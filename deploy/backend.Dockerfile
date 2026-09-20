@@ -11,13 +11,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/backend \
     PYTHON_DOTENV_DISABLED=1 \
+    HOME=/home/murmur \
     MURMUR_DATA_DIR=/data \
     MURMUR_RELEASE_SHA=${MURMUR_RELEASE_SHA}
 
 WORKDIR /app
 
 RUN groupadd --gid 10001 murmur \
-    && useradd --uid 10001 --gid murmur --no-create-home --shell /usr/sbin/nologin murmur \
+    && useradd --uid 10001 --gid murmur --create-home --home-dir /home/murmur --shell /usr/sbin/nologin murmur \
     && mkdir -p /data \
     && chown murmur:murmur /data
 

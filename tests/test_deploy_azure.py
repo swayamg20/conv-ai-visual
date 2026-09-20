@@ -401,6 +401,14 @@ def test_git_build_context_contains_only_requested_committed_tree(
     ]
 
 
+def test_backend_image_provisions_a_non_root_writable_home() -> None:
+    dockerfile = (PROJECT_ROOT / "deploy" / "backend.Dockerfile").read_text(encoding="utf-8")
+
+    assert "HOME=/home/murmur" in dockerfile
+    assert "--create-home --home-dir /home/murmur" in dockerfile
+    assert "USER 10001:10001" in dockerfile
+
+
 def test_acr_build_waits_for_amd64_manifest_and_does_not_use_secret_args(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
