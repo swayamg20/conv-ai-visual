@@ -21,6 +21,8 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - [x] 2026-09-20 14:30 IST: Added the deployed frontend hostname to Firebase Authentication authorized domains through the Identity Toolkit Admin API and confirmed the returned configuration.
 - [x] 2026-09-20 14:59 IST: Verified public HTTPS liveness, dependency-aware readiness, exact frontend CORS, release SHA, probes, one-replica limits, Key Vault references, and both public browser routes with zero paid model calls. The landing and sign-in pages render, and unauthenticated `/canvas/storyboard` access redirects to `/login` as designed.
 - [x] 2026-09-20 17:01 IST: Closed the pre-merge frontend credential-isolation blocker with separate managed identities, exact foundation identity checks, frontend Key Vault RBAC checks, and regression coverage. Upgraded Next.js to 16.3.5 and eliminated all production dependency audit findings.
+- [x] 2026-09-20 17:30 IST: Pinned the deployer to an explicit Azure subscription and tenant, made temporary Key Vault writer access self-revoking, removed mutable ACR build-tag races, and bound frontend secret-denial checks to the live identity and both protected secret scopes.
+- [x] 2026-09-20 17:30 IST: Split Firebase deployment authority from runtime token verification. Azure now accepts only a dedicated runtime credential, an optional domain administrator must be a different principal and key, and prior Key Vault secret versions are disabled after rotation.
 - [ ] Complete one user-authenticated Azure browser pass through `/canvas/storyboard` without pressing the model-backed continue action. Persistence is explicitly out of scope for this low-cost pilot after Azure Files incompatibility was proven live.
 - [ ] Open, review, and merge the deployment pull request, then prove the live revision corresponds to merged `main`.
 
@@ -43,6 +45,7 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - The Container Apps API can briefly report the previous `latestReadyRevisionName` while a new `latestRevisionName` starts. Verification now distinguishes those fields, probes the expected SHA over HTTPS, then refuses success unless the current revision is the one Azure reports ready.
 - Pre-merge review found that using one managed identity for both apps let the frontend request Key Vault data-plane access even though it had no secret reference. The frontend now has a separate ACR-pull-only identity; verification rejects shared identities and any frontend secret wiring.
 - The public image used Next.js 16.3.0 and a vulnerable Sharp transitive dependency. Moving to Next.js 16.3.5 plus the compatible lockfile updates cleared `npm audit --omit=dev` with no production findings.
+- The Firebase credential previously served two incompatible trust boundaries: it updated authorized-domain configuration during deployment and remained in Azure for runtime token revocation checks. The backend only needs Firebase Authentication Viewer permissions, so deployment now requires a dedicated runtime principal and keeps the optional configuration writer local to the deploy process.
 
 ## Decision Log
 
@@ -55,6 +58,7 @@ This is a deliberately bounded single-replica, non-durable pilot for the visual 
 - 2026-09-20, Codex: Configure the qualified Azure model for chat and scenes, cap scene output at 2,048 tokens, and set global/per-user concurrency to one. Production scene dispatch starts at one per minute until token-window admission is promoted from the acceptance harness.
 - 2026-09-20, Codex: Deployment acceptance covers authenticated text/visual operation. Voice transport qualification stays in the separate voice track because Container Apps HTTP ingress is not proof of browser WebRTC/TURN behavior.
 - 2026-09-20, Codex: Build a git-SHA tag for traceability but deploy its resolved ACR manifest digest. A rerun can therefore never silently move the bytes behind a live Container Apps revision.
+- 2026-09-20, Codex: Store only a dedicated Firebase Authentication Viewer credential in Azure. A separate optional domain administrator may update the authorized hostname during deployment but is never serialized into Key Vault; rotated-out secret versions are disabled.
 
 ## Outcomes & Retrospective
 

@@ -8,4 +8,6 @@ Use `scripts/deploy_azure.py`; it validates git provenance, imports secrets with
 
 The deployer grants itself Key Vault secret-write access only when needed and removes that exact temporary role assignment after the writes. Image builds use unique, unguessable tags before resolving immutable digests, so concurrent releases cannot race on a shared source-SHA tag.
 
+`FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH` must point to a dedicated Firebase Authentication Viewer credential. This read-only principal is the only Google credential imported into Azure. `FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH` is optional, must identify a different principal and key, and is used only by the local deploy process when the Container Apps hostname is not already authorized.
+
 The low-cost visual pilot is intentionally limited to one backend process and one replica. Its SQLite database is local and ephemeral because SQLite locking is not safe on the SMB-backed Azure Files mount. Stored agents and history can reset on scale-down or deployment; move to PostgreSQL plus migrations before treating data as durable or raising the replica maximum.

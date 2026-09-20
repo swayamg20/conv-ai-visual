@@ -30,6 +30,9 @@ DIGEST = f"sha256:{'a' * 64}"
 FRONTEND_DIGEST = f"sha256:{'b' * 64}"
 AZURE_KEY = "azure-secret-must-not-escape"
 PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----\n"
+RUNTIME_PRIVATE_KEY = (
+    "-----BEGIN PRIVATE KEY-----\nruntime-private-secret\n-----END PRIVATE KEY-----\n"
+)
 BACKEND_URL = "https://murmur-api.example.centralindia.azurecontainerapps.io"
 FRONTEND_URL = "https://murmur-web.example.centralindia.azurecontainerapps.io"
 BACKEND_IDENTITY_ID = "/subscriptions/sub/resourceGroups/rg/providers/backend"
@@ -40,22 +43,32 @@ SUBSCRIPTION_ID = "22222222-2222-2222-2222-222222222222"
 TENANT_ID = "33333333-3333-3333-3333-333333333333"
 
 
-def _service_account(project_id: str = "firebase-project") -> dict[str, str]:
+def _service_account(
+    project_id: str = "firebase-project",
+    *,
+    purpose: str = "runtime",
+) -> dict[str, str]:
+    private_key = RUNTIME_PRIVATE_KEY if purpose == "runtime" else PRIVATE_KEY
     return {
         "type": "service_account",
         "project_id": project_id,
-        "private_key_id": "private-key-id",
-        "private_key": PRIVATE_KEY,
-        "client_email": f"firebase-adminsdk@{project_id}.iam.gserviceaccount.com",
+        "private_key_id": f"{purpose}-private-key-id",
+        "private_key": private_key,
+        "client_email": f"firebase-{purpose}@{project_id}.iam.gserviceaccount.com",
         "client_id": "123456789",
         "token_uri": "https://oauth2.googleapis.com/token",
     }
 
 
 def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
-    service_account = tmp_path / "firebase-service-account.json"
-    service_account.write_text(json.dumps(_service_account()), encoding="utf-8")
-    service_account.chmod(0o600)
+    runtime_account = tmp_path / "firebase-runtime-service-account.json"
+    runtime_account.write_text(json.dumps(_service_account()), encoding="utf-8")
+    runtime_account.chmod(0o600)
+    domain_admin_account = tmp_path / "firebase-domain-admin-service-account.json"
+    domain_admin_account.write_text(
+        json.dumps(_service_account(purpose="domain-admin")), encoding="utf-8"
+    )
+    domain_admin_account.chmod(0o600)
 
     backend = tmp_path / ".env"
     backend.write_text(
@@ -65,7 +78,8 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 "AZURE_OPENAI_ENDPOINT=https://murmur-resource.services.ai.azure.com",
                 "AZURE_OPENAI_DEPLOYMENT=murmur-gpt-oss-120b",
                 "FIREBASE_PROJECT_ID=firebase-project",
-                f"FIREBASE_SERVICE_ACCOUNT_PATH={service_account}",
+                f"FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH={runtime_account}",
+                f"FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH={domain_admin_account}",
             )
         ),
         encoding="utf-8",
@@ -215,7 +229,10 @@ def test_load_deployment_inputs_validates_projects_without_printing_secrets(
 
     assert inputs.azure_openai_key == AZURE_KEY
     assert inputs.firebase_project_id == "firebase-project"
-    assert json.loads(inputs.firebase_json_bytes())["private_key"] == PRIVATE_KEY
+    assert json.loads(inputs.firebase_runtime_json_bytes())["private_key"] == RUNTIME_PRIVATE_KEY
+    assert (
+        inputs.firebase_domain_admin_service_account["private_key"] == PRIVATE_KEY  # type: ignore[index]
+    )
     assert inputs.frontend_public["NEXT_PUBLIC_FIREBASE_API_KEY"] == "browser-public-key"
     assert "NEXT_PUBLIC_API_URL" not in inputs.frontend_public
     output = capsys.readouterr()
@@ -223,6 +240,7 @@ def test_load_deployment_inputs_validates_projects_without_printing_secrets(
     assert output.err == ""
     assert AZURE_KEY not in repr(inputs)
     assert PRIVATE_KEY not in repr(inputs)
+    assert RUNTIME_PRIVATE_KEY not in repr(inputs)
 
 
 def test_load_deployment_inputs_rejects_mismatched_firebase_project(tmp_path: Path) -> None:
@@ -236,6 +254,30 @@ def test_load_deployment_inputs_rejects_mismatched_firebase_project(tmp_path: Pa
     )
 
     with pytest.raises(deploy.DeploymentRefusal, match="project IDs do not match"):
+        deploy.load_deployment_inputs(backend, frontend)
+
+
+def test_load_deployment_inputs_rejects_reused_firebase_runtime_credential(
+    tmp_path: Path,
+) -> None:
+    backend, frontend = _write_inputs(tmp_path)
+    lines = backend.read_text(encoding="utf-8").splitlines()
+    runtime_path = next(
+        line.split("=", 1)[1]
+        for line in lines
+        if line.startswith("FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH=")
+    )
+    backend.write_text(
+        "\n".join(
+            f"FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH={runtime_path}"
+            if line.startswith("FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH=")
+            else line
+            for line in lines
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="must be different"):
         deploy.load_deployment_inputs(backend, frontend)
 
 
@@ -297,19 +339,46 @@ def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: dict[str, object] = {}
+    current_version = "a" * 32
+    previous_version = "b" * 32
 
     def fake_run(command: Any, **kwargs: Any) -> str:
+        if "set-attributes" in command:
+            observed["disabled_version"] = command[command.index("--version") + 1]
+            return ""
         path = Path(command[command.index("--file") + 1])
         observed["path"] = path
         observed["payload"] = path.read_text(encoding="utf-8")
         observed["mode"] = stat.S_IMODE(path.stat().st_mode)
         observed["command"] = tuple(command)
         assert kwargs["operation"] == "write Key Vault secret azure-openai-api-key"
-        return ""
+        return (
+            f"https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/{current_version}\n"
+        )
 
     monkeypatch.setattr(deploy, "_run_command", fake_run)
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *args, **kwargs: [
+            {
+                "id": (
+                    "https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/"
+                    f"{current_version}"
+                ),
+                "enabled": True,
+            },
+            {
+                "id": (
+                    "https://murmur-vault.vault.azure.net/secrets/azure-openai-api-key/"
+                    f"{previous_version}"
+                ),
+                "enabled": True,
+            },
+        ],
+    )
 
-    deploy._write_key_vault_secret(
+    written_version = deploy._write_key_vault_secret(
         vault_name="murmur-vault",
         secret_name="azure-openai-api-key",
         payload=AZURE_KEY.encode(),
@@ -320,8 +389,10 @@ def test_key_vault_secret_uses_mode_600_file_and_suppresses_output(
     assert observed["mode"] == 0o600
     assert observed["payload"] == AZURE_KEY
     assert AZURE_KEY not in command
-    assert command[-2:] == ("--output", "none")
+    assert command[-4:] == ("--query", "id", "--output", "tsv")
     assert not observed["path"].exists()
+    assert written_version == current_version
+    assert observed["disabled_version"] == previous_version
 
 
 def test_validate_source_revision_requires_clean_exact_remote(
@@ -503,7 +574,11 @@ def test_firebase_domain_update_preserves_existing_domains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[str, str, str, object]] = []
-    monkeypatch.setattr(deploy, "_firebase_access_token", lambda _account: "oauth-token")
+    monkeypatch.setattr(
+        deploy,
+        "_firebase_access_token",
+        lambda account: f"{account['client_email']}-token",
+    )
 
     def fake_request(method: str, url: str, token: str, payload: Any = None) -> dict[str, object]:
         calls.append((method, url, token, payload))
@@ -513,11 +588,18 @@ def test_firebase_domain_update_preserves_existing_domains(
 
     monkeypatch.setattr(deploy, "_identity_toolkit_request", fake_request)
 
-    result = deploy._configure_firebase_domain(_service_account(), "firebase-project", FRONTEND_URL)
+    result = deploy._configure_firebase_domain(
+        _service_account(),
+        "firebase-project",
+        FRONTEND_URL,
+        domain_admin_service_account=_service_account(purpose="domain-admin"),
+    )
 
     assert result.status == "configured"
     assert calls[0][0] == "GET"
     assert calls[1][0] == "PATCH"
+    assert calls[0][2].startswith("firebase-runtime@")
+    assert calls[1][2].startswith("firebase-domain-admin@")
     assert calls[1][3] == {
         "authorizedDomains": [
             "localhost",
@@ -541,6 +623,28 @@ def test_firebase_domain_update_is_idempotent(monkeypatch: pytest.MonkeyPatch) -
     result = deploy._configure_firebase_domain(_service_account(), "firebase-project", FRONTEND_URL)
 
     assert result.status == "already_present"
+    assert calls == ["GET"]
+
+
+def test_firebase_domain_update_without_deploy_admin_requires_manual_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deploy, "_firebase_access_token", lambda _account: "runtime-token")
+    calls: list[str] = []
+
+    def fake_request(method: str, *_args: Any, **_kwargs: Any) -> dict[str, object]:
+        calls.append(method)
+        return {"authorizedDomains": ["localhost"]}
+
+    monkeypatch.setattr(deploy, "_identity_toolkit_request", fake_request)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="no deploy-only domain administrator"):
+        deploy._configure_firebase_domain(
+            _service_account(),
+            "firebase-project",
+            FRONTEND_URL,
+        )
+
     assert calls == ["GET"]
 
 
@@ -758,7 +862,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         ),
     )
 
-    def fake_configure_firebase(*_args: Any) -> deploy.FirebaseDomainResult:
+    def fake_configure_firebase(*_args: Any, **_kwargs: Any) -> deploy.FirebaseDomainResult:
         if not firebase_configured:
             raise deploy.DeploymentRefusal("IAM unavailable")
         return deploy.FirebaseDomainResult(

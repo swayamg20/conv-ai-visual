@@ -90,6 +90,7 @@ _AZURE_GUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z",
     re.IGNORECASE,
 )
+_KEY_VAULT_SECRET_VERSION = re.compile(r"[0-9a-f]{32}\Z", re.IGNORECASE)
 _ENV_KEY = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _MAX_DOTENV_BYTES = 256 * 1024
 _MAX_FIREBASE_JSON_BYTES = 24 * 1024
@@ -113,12 +114,13 @@ class DeploymentInputs:
     azure_openai_endpoint: str
     azure_openai_deployment: str
     firebase_project_id: str
-    firebase_service_account: Mapping[str, object]
+    firebase_runtime_service_account: Mapping[str, object]
+    firebase_domain_admin_service_account: Mapping[str, object] | None
     frontend_public: Mapping[str, str]
 
-    def firebase_json_bytes(self) -> bytes:
+    def firebase_runtime_json_bytes(self) -> bytes:
         return json.dumps(
-            self.firebase_service_account,
+            self.firebase_runtime_service_account,
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
@@ -411,12 +413,40 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
     if frontend_project_id != firebase_project_id:
         raise DeploymentRefusal("frontend and backend Firebase project IDs do not match")
 
-    account_path = _required_value(backend, "FIREBASE_SERVICE_ACCOUNT_PATH", "backend dotenv")
-    service_account = _load_service_account(
-        account_path,
+    runtime_account_path = _required_value(
+        backend,
+        "FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH",
+        "backend dotenv",
+    )
+    runtime_service_account = _load_service_account(
+        runtime_account_path,
         relative_to=backend_env_path.expanduser().resolve().parent,
         expected_project_id=firebase_project_id,
     )
+    domain_admin_path = backend.get("FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH", "").strip()
+    domain_admin_service_account = (
+        _load_service_account(
+            domain_admin_path,
+            relative_to=backend_env_path.expanduser().resolve().parent,
+            expected_project_id=firebase_project_id,
+        )
+        if domain_admin_path
+        else None
+    )
+    if domain_admin_service_account is not None:
+        same_principal = (
+            domain_admin_service_account["client_email"] == runtime_service_account["client_email"]
+        )
+        runtime_key_id = runtime_service_account.get("private_key_id")
+        admin_key_id = domain_admin_service_account.get("private_key_id")
+        same_key = bool(runtime_key_id) and runtime_key_id == admin_key_id
+        same_private_key = (
+            domain_admin_service_account["private_key"] == runtime_service_account["private_key"]
+        )
+        if same_principal or same_key or same_private_key:
+            raise DeploymentRefusal(
+                "Firebase runtime and domain-admin credentials must be different principals and keys"
+            )
 
     frontend_public = {
         key: _required_value(frontend, key, "frontend dotenv") for key in REQUIRED_FRONTEND_KEYS
@@ -437,7 +467,8 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
             backend, "AZURE_OPENAI_DEPLOYMENT", "backend dotenv"
         ),
         firebase_project_id=firebase_project_id,
-        firebase_service_account=service_account,
+        firebase_runtime_service_account=runtime_service_account,
+        firebase_domain_admin_service_account=domain_admin_service_account,
         frontend_public=frontend_public,
     )
 
@@ -756,11 +787,12 @@ def _write_key_vault_secret(
     secret_name: str,
     payload: bytes,
     attempts: int = 32,
-) -> None:
+) -> str:
+    secret_id = ""
     with _secure_temp_file(payload, suffix=".secret") as path:
         for attempt in range(attempts):
             try:
-                _run_command(
+                secret_id = _run_command(
                     [
                         "az",
                         "keyvault",
@@ -775,17 +807,111 @@ def _write_key_vault_secret(
                         "--encoding",
                         "utf-8",
                         "--only-show-errors",
+                        "--query",
+                        "id",
                         "--output",
-                        "none",
+                        "tsv",
                     ],
                     timeout_seconds=60,
                     operation=f"write Key Vault secret {secret_name}",
                 )
-                return
+                break
             except DeploymentRefusal:
                 if attempt + 1 == attempts:
                     raise
                 time.sleep(min(2**attempt, 10))
+    current_version = _key_vault_secret_version(
+        secret_id.strip(),
+        vault_name=vault_name,
+        secret_name=secret_name,
+    )
+    _disable_previous_secret_versions(
+        vault_name=vault_name,
+        secret_name=secret_name,
+        current_version=current_version,
+    )
+    return current_version
+
+
+def _key_vault_secret_version(
+    secret_id: str,
+    *,
+    vault_name: str,
+    secret_name: str,
+) -> str:
+    parsed = urllib.parse.urlsplit(secret_id)
+    path_parts = parsed.path.strip("/").split("/")
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname != f"{vault_name}.vault.azure.net"
+        or parsed.query
+        or parsed.fragment
+        or len(path_parts) != 3
+        or path_parts[:2] != ["secrets", secret_name]
+        or not _KEY_VAULT_SECRET_VERSION.fullmatch(path_parts[2])
+    ):
+        raise DeploymentRefusal("Azure returned an invalid Key Vault secret version")
+    return path_parts[2]
+
+
+def _disable_previous_secret_versions(
+    *,
+    vault_name: str,
+    secret_name: str,
+    current_version: str,
+) -> None:
+    versions = _run_json(
+        [
+            "az",
+            "keyvault",
+            "secret",
+            "list-versions",
+            "--vault-name",
+            vault_name,
+            "--name",
+            secret_name,
+            "--query",
+            "[].{id:id,enabled:attributes.enabled}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect Key Vault secret versions for {secret_name}",
+    )
+    if not isinstance(versions, list):
+        raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+    for item in versions:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise DeploymentRefusal("Azure returned invalid Key Vault secret-version metadata")
+        version = _key_vault_secret_version(
+            item["id"],
+            vault_name=vault_name,
+            secret_name=secret_name,
+        )
+        if version.casefold() == current_version.casefold() or item.get("enabled") is False:
+            continue
+        _run_command(
+            [
+                "az",
+                "keyvault",
+                "secret",
+                "set-attributes",
+                "--vault-name",
+                vault_name,
+                "--name",
+                secret_name,
+                "--version",
+                version,
+                "--enabled",
+                "false",
+                "--output",
+                "none",
+                "--only-show-errors",
+            ],
+            timeout_seconds=60,
+            operation=f"disable retired Key Vault secret version for {secret_name}",
+        )
 
 
 def _extract_git_archive(archive_path: Path, destination: Path) -> None:
@@ -990,23 +1116,37 @@ def _identity_toolkit_request(
 
 
 def _configure_firebase_domain(
-    service_account: Mapping[str, object], project_id: str, frontend_url: str
+    runtime_service_account: Mapping[str, object],
+    project_id: str,
+    frontend_url: str,
+    *,
+    domain_admin_service_account: Mapping[str, object] | None = None,
 ) -> FirebaseDomainResult:
     parsed = urllib.parse.urlsplit(_validate_container_app_url(frontend_url, "frontend URL"))
     assert parsed.hostname is not None
     hostname = parsed.hostname
-    token = _firebase_access_token(service_account)
+    runtime_token = _firebase_access_token(runtime_service_account)
     project = urllib.parse.quote(project_id, safe="")
     config_url = f"{IDENTITY_TOOLKIT_CONFIG_ROOT}/projects/{project}/config"
-    current = _identity_toolkit_request("GET", config_url, token)
+    current = _identity_toolkit_request("GET", config_url, runtime_token)
     raw_domains = current.get("authorizedDomains", [])
     if not isinstance(raw_domains, list) or any(not isinstance(item, str) for item in raw_domains):
         raise DeploymentRefusal("Firebase authorized-domain configuration is invalid")
     if hostname in raw_domains:
         return FirebaseDomainResult(status="already_present", hostname=hostname)
+    if domain_admin_service_account is None:
+        raise DeploymentRefusal(
+            "Firebase frontend domain is missing and no deploy-only domain administrator was provided"
+        )
+    admin_token = _firebase_access_token(domain_admin_service_account)
     domains = [*raw_domains, hostname]
     update_url = f"{config_url}?{urllib.parse.urlencode({'updateMask': 'authorizedDomains'})}"
-    updated = _identity_toolkit_request("PATCH", update_url, token, {"authorizedDomains": domains})
+    updated = _identity_toolkit_request(
+        "PATCH",
+        update_url,
+        admin_token,
+        {"authorizedDomains": domains},
+    )
     updated_domains = updated.get("authorizedDomains")
     if not isinstance(updated_domains, list) or hostname not in updated_domains:
         raise DeploymentRefusal("Firebase did not confirm the authorized frontend domain")
@@ -1702,7 +1842,7 @@ def deploy(args: argparse.Namespace) -> int:
         _write_key_vault_secret(
             vault_name=key_vault_name,
             secret_name=FIREBASE_SECRET_NAME,
-            payload=inputs.firebase_json_bytes(),
+            payload=inputs.firebase_runtime_json_bytes(),
         )
 
     print("Building backend image from the accepted git archive")
@@ -1747,9 +1887,10 @@ def deploy(args: argparse.Namespace) -> int:
 
     try:
         firebase_domain = _configure_firebase_domain(
-            inputs.firebase_service_account,
+            inputs.firebase_runtime_service_account,
             inputs.firebase_project_id,
             frontend_url,
+            domain_admin_service_account=inputs.firebase_domain_admin_service_account,
         )
     except DeploymentRefusal:
         firebase_domain = FirebaseDomainResult(
