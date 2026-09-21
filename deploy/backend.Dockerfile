@@ -24,13 +24,14 @@ RUN groupadd --gid 10001 murmur \
 
 COPY requirements.txt ./requirements.txt
 RUN python -m pip install --require-hashes --no-deps -r requirements.txt
+RUN python -c "import livekit.api, livekit.agents"
 
 COPY --chown=murmur:murmur backend ./backend
 COPY --chown=murmur:murmur main.py ./main.py
 
 USER 10001:10001
 
-EXPOSE 8000
+EXPOSE 8000 8081
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2).read()"]
