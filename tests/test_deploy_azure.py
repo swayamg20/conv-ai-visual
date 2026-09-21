@@ -208,7 +208,7 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                 "secrets": secrets,
             },
             "template": {
-                "scale": {"minReplicas": 0, "maxReplicas": 1},
+                "scale": {"minReplicas": 1, "maxReplicas": 1},
                 "containers": [
                     {
                         "name": "api" if backend else "web",
@@ -236,7 +236,7 @@ def _inspection(name: str, url: str, *, backend: bool) -> deploy.AppInspection:
         latest_ready_revision=f"{name}--revision",
         provisioning_state="Succeeded",
         running_status="Running",
-        min_replicas=0,
+        min_replicas=1,
         max_replicas=1,
         probe_types=("Liveness", "Readiness", "Startup"),
         key_vault_name="murmur-vault" if backend else None,
@@ -1246,9 +1246,31 @@ def test_inspect_backend_validates_scale_probes_local_database_and_key_vault(
 
     assert inspected.release_sha == SHA
     assert inspected.key_vault_name == "murmur-vault"
-    assert inspected.min_replicas == 0
+    assert inspected.min_replicas == 1
     assert inspected.max_replicas == 1
     assert inspected.probe_types == ("Liveness", "Readiness", "Startup")
+
+
+@pytest.mark.parametrize(
+    ("min_replicas", "max_replicas"),
+    ((0, 1), (1, 2)),
+)
+def test_inspect_app_refuses_scale_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    min_replicas: int,
+    max_replicas: int,
+) -> None:
+    app = _container_app(backend=True)
+    scale = app["properties"]["template"]["scale"]  # type: ignore[index]
+    scale["minReplicas"] = min_replicas  # type: ignore[index]
+    scale["maxReplicas"] = max_replicas  # type: ignore[index]
+    monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
+
+    with pytest.raises(
+        deploy.DeploymentRefusal,
+        match="always-on single-replica bounds",
+    ):
+        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
 
 
 def test_inspect_backend_refuses_inline_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1344,9 +1366,13 @@ def test_bicep_keeps_frontend_identity_out_of_key_vault() -> None:
     assert "identity: identity.id" in backend_app
     assert deploy.FIREBASE_SECRET_NAME in backend_app
     assert deploy.LEGACY_FIREBASE_SECRET_NAME not in backend_app
+    assert backend_app.count("minReplicas: 1") == 1
+    assert backend_app.count("maxReplicas: 1") == 1
     assert "'${frontendIdentity.id}': {}" in frontend_app
     assert "identity: frontendIdentity.id" in frontend_app
     assert "secrets:" not in frontend_app
+    assert frontend_app.count("minReplicas: 1") == 1
+    assert frontend_app.count("maxReplicas: 1") == 1
 
 
 def test_https_verification_refuses_empty_readiness_checks(
