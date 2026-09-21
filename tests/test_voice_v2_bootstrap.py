@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import subprocess
 import sys
@@ -296,6 +297,38 @@ async def test_bootstrap_uses_opaque_room_signed_metadata_and_restricted_grants(
     assert token_spec.grants.agent is False
     assert token_spec.grants.can_manage_agent_session is False
     assert result.trace_id == room_payload["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_logs_safe_correlated_lifecycle_without_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    service, _ = _service()
+    caplog.set_level(logging.INFO, logger="murmur.voice.bootstrap")
+
+    result = await service.bootstrap(
+        user_id="user-1",
+        session_id="session-1",
+        voice_call_id="call-1",
+    )
+
+    messages = [
+        record.getMessage() for record in caplog.records if record.name == "murmur.voice.bootstrap"
+    ]
+    assert any(
+        "component=api event=bootstrap outcome=started stage=authorized" in message
+        for message in messages
+    )
+    completed = next(
+        message
+        for message in messages
+        if "component=api event=bootstrap outcome=succeeded stage=token_issued" in message
+    )
+    assert "voice_call_id=call-1" in completed
+    assert f"trace_id={result.trace_id}" in completed
+    assert "session_id=session-1" in completed
+    assert result.participant_token not in "\n".join(messages)
+    assert SIGNING_SECRET not in "\n".join(messages)
 
 
 @pytest.mark.asyncio

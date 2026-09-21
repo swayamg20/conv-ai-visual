@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from livekit.agents import AgentServer, AutoSubscribe, JobContext, JobRequest
 from murmur.persistence.repositories.identities import AgentRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.voice.contracts import EventType
+from murmur.voice.observability import log_voice_v2_lifecycle
 from murmur.voice.profile import ProfilePreflight, VoiceProfileRegistry
 from murmur.voice.worker_authorization import VoiceJobAuthorizer
 from murmur.voice.worker_contracts import (
@@ -30,6 +32,8 @@ from murmur.voice.worker_session import (
     AgentSessionOwner,
     livekit_session_factory,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ReadyPublisher(Protocol):
@@ -68,16 +72,54 @@ class VoiceJobRequestHandler:
     async def __call__(self, request: JobRequest) -> None:
         try:
             authorized = await self.authorizer.authorize(request.job)
+        except Exception as exc:
+            log_voice_v2_lifecycle(
+                logger,
+                logging.WARNING,
+                component="worker",
+                event="request",
+                outcome="rejected",
+                stage="authorize",
+                error=exc,
+            )
+            await request.reject(terminate=True)
+            return
+        try:
             await asyncio.wait_for(
                 self.profiles.admit(authorized.profile_scope),
                 timeout=self.settings.preflight_timeout_seconds,
             )
-        except Exception:
+        except Exception as exc:
+            metadata = authorized.metadata
+            log_voice_v2_lifecycle(
+                logger,
+                logging.WARNING,
+                component="worker",
+                event="request",
+                outcome="rejected",
+                stage="profile_admission",
+                voice_call_id=metadata.voice_call_id,
+                trace_id=metadata.trace_id,
+                session_id=metadata.session_id,
+                error=exc,
+            )
             await request.reject(terminate=True)
             return
         await request.accept(
             name="Murmur voice agent",
             identity=authorized.metadata.agent_participant_identity,
+        )
+        metadata = authorized.metadata
+        log_voice_v2_lifecycle(
+            logger,
+            logging.INFO,
+            component="worker",
+            event="request",
+            outcome="accepted",
+            stage="profile_admission",
+            voice_call_id=metadata.voice_call_id,
+            trace_id=metadata.trace_id,
+            session_id=metadata.session_id,
         )
 
 
@@ -142,10 +184,49 @@ class VoiceJobEntrypoint:
     async def __call__(self, ctx: JobContext) -> None:
         # Re-authorize after assignment: session/agent ownership can change in the
         # gap between availability acceptance and process entrypoint execution.
-        authorized = await self.authorizer.authorize(ctx.job)
-        preflight, prepared = await asyncio.wait_for(
-            self.profiles.prepare(authorized.profile_scope),
-            timeout=self.settings.preflight_timeout_seconds,
+        try:
+            authorized = await self.authorizer.authorize(ctx.job)
+        except BaseException as exc:
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO if isinstance(exc, asyncio.CancelledError) else logging.WARNING,
+                component="worker",
+                event="entrypoint",
+                outcome=("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"),
+                stage="authorize",
+                error=exc,
+            )
+            raise
+        metadata = authorized.metadata
+        try:
+            preflight, prepared = await asyncio.wait_for(
+                self.profiles.prepare(authorized.profile_scope),
+                timeout=self.settings.preflight_timeout_seconds,
+            )
+        except BaseException as exc:
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO if isinstance(exc, asyncio.CancelledError) else logging.WARNING,
+                component="worker",
+                event="entrypoint",
+                outcome=("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"),
+                stage="profile_prepare",
+                voice_call_id=metadata.voice_call_id,
+                trace_id=metadata.trace_id,
+                session_id=metadata.session_id,
+                error=exc,
+            )
+            raise
+        log_voice_v2_lifecycle(
+            logger,
+            logging.INFO,
+            component="worker",
+            event="entrypoint",
+            outcome="progress",
+            stage="profile_prepared",
+            voice_call_id=metadata.voice_call_id,
+            trace_id=metadata.trace_id,
+            session_id=metadata.session_id,
         )
         owner: AgentSessionOwner | None = None
         event_channel: VoiceEventChannel | None = None
@@ -153,8 +234,10 @@ class VoiceJobEntrypoint:
         event_failure_monitor: asyncio.Task[None] | None = None
         session_closed: asyncio.Future[object] = asyncio.get_running_loop().create_future()
         cleanup_lock = asyncio.Lock()
+        cleanup_logged = False
 
         async def cleanup() -> None:
+            nonlocal cleanup_logged
             async with cleanup_lock:
                 if event_bridge is not None:
                     event_bridge.close()
@@ -169,6 +252,19 @@ class VoiceJobEntrypoint:
                     await event_channel.close()
                 if owner is not None:
                     await owner.close()
+                if not cleanup_logged:
+                    cleanup_logged = True
+                    log_voice_v2_lifecycle(
+                        logger,
+                        logging.INFO,
+                        component="worker",
+                        event="entrypoint",
+                        outcome="succeeded",
+                        stage="cleanup",
+                        voice_call_id=metadata.voice_call_id,
+                        trace_id=metadata.trace_id,
+                        session_id=metadata.session_id,
+                    )
 
         def observe_session_close(event: object) -> None:
             if event_channel is not None and not event_channel.activated:
@@ -226,6 +322,7 @@ class VoiceJobEntrypoint:
                 )
 
         try:
+            stage = "session_construct"
             owner = AgentSessionOwner(
                 prepared,
                 session_factory=self.session_factory,
@@ -233,16 +330,19 @@ class VoiceJobEntrypoint:
                 interruption_timeout_seconds=self.settings.interruption_timeout_seconds,
             )
             ctx.add_shutdown_callback(cleanup)
+            stage = "connect"
             await asyncio.wait_for(
                 ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY),
                 timeout=self.settings.connect_timeout_seconds,
             )
+            stage = "participant_wait"
             participant = await asyncio.wait_for(
                 ctx.wait_for_participant(
                     identity=authorized.metadata.participant_identity,
                 ),
                 timeout=self.settings.participant_wait_timeout_seconds,
             )
+            stage = "microphone_wait"
             await asyncio.wait_for(
                 wait_for_microphone_input(
                     ctx.room,
@@ -263,6 +363,7 @@ class VoiceJobEntrypoint:
                     on_session_closed=observe_session_close,
                 )
                 event_bridge.bind()
+            stage = "session_start"
             await asyncio.wait_for(
                 owner.start(
                     room=ctx.room,
@@ -270,6 +371,7 @@ class VoiceJobEntrypoint:
                 ),
                 timeout=self.settings.session_start_timeout_seconds,
             )
+            stage = "ready_publish"
             if self.ready_publisher is None:
                 assert event_channel is not None
                 # AgentSession can queue a public ``close`` callback while
@@ -293,7 +395,30 @@ class VoiceJobEntrypoint:
                     self.ready_publisher(ctx, authorized, preflight),
                     timeout=self.settings.event_publish_timeout_seconds,
                 )
-        except BaseException:
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO,
+                component="worker",
+                event="entrypoint",
+                outcome="succeeded",
+                stage="ready",
+                voice_call_id=metadata.voice_call_id,
+                trace_id=metadata.trace_id,
+                session_id=metadata.session_id,
+            )
+        except BaseException as exc:
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO if isinstance(exc, asyncio.CancelledError) else logging.WARNING,
+                component="worker",
+                event="entrypoint",
+                outcome=("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"),
+                stage=stage,
+                voice_call_id=metadata.voice_call_id,
+                trace_id=metadata.trace_id,
+                session_id=metadata.session_id,
+                error=exc,
+            )
             if owner is not None:
                 await cleanup()
             elif prepared.close_callback is not None:

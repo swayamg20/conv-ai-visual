@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import threading
 from datetime import UTC, datetime
 from multiprocessing.reduction import ForkingPickler
@@ -727,10 +728,13 @@ class HangingProfileProvider:
 
 
 @pytest.mark.asyncio
-async def test_request_preflight_controls_availability_and_uses_signed_agent_identity() -> None:
+async def test_request_preflight_controls_availability_and_uses_signed_agent_identity(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="murmur.voice.worker_runtime")
     unavailable = DeterministicVoiceProfileProvider(
         PROFILE_ID,
-        fail_preflight="provider key is invalid",
+        fail_preflight="provider key sensitive-provider-key is invalid",
     )
     handler = build_request_handler(
         _authorizer(),
@@ -744,6 +748,19 @@ async def test_request_preflight_controls_availability_and_uses_signed_agent_ide
     assert rejected.rejected is True
     assert rejected.accepted is None
     assert unavailable.prepare_calls == 0
+    rejected_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "murmur.voice.worker_runtime"
+        and "event=request outcome=rejected" in record.getMessage()
+    )
+    assert "stage=profile_admission" in rejected_log
+    assert "voice_call_id=call-1" in rejected_log
+    assert "trace_id=trace-1" in rejected_log
+    assert "session_id=session-1" in rejected_log
+    assert "error_type=VoiceProfileUnavailable" in rejected_log
+    assert "sensitive-provider-key" not in rejected_log
+    assert SECRET not in rejected_log
 
     available = DeterministicVoiceProfileProvider(PROFILE_ID)
     handler = build_request_handler(
@@ -762,6 +779,16 @@ async def test_request_preflight_controls_availability_and_uses_signed_agent_ide
     }
     assert available.preflight_calls == 1
     assert available.prepare_calls == 0
+    accepted_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "murmur.voice.worker_runtime"
+        and "event=request outcome=accepted" in record.getMessage()
+    )
+    assert "stage=profile_admission" in accepted_log
+    assert "voice_call_id=call-1" in accepted_log
+    assert "trace_id=trace-1" in accepted_log
+    assert "session_id=session-1" in accepted_log
 
 
 @pytest.mark.asyncio
@@ -957,7 +984,10 @@ async def _wait_for_track_listener(room: FakeRoom) -> None:
 
 
 @pytest.mark.asyncio
-async def test_entrypoint_publishes_genuine_ready_only_after_preflight_connect_and_start() -> None:
+async def test_entrypoint_publishes_genuine_ready_only_after_preflight_connect_and_start(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="murmur.voice.worker_runtime")
     events: list[str] = []
     provider = DeterministicVoiceProfileProvider(PROFILE_ID)
     sessions: list[FakeOwnedSession] = []
@@ -1001,6 +1031,24 @@ async def test_entrypoint_publishes_genuine_ready_only_after_preflight_connect_a
     assert ctx.waited_for_identity == PARTICIPANT_IDENTITY
     assert sessions[0].room_options.participant_identity == PARTICIPANT_IDENTITY
     assert sessions[0].room_options.text_input is False
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "murmur.voice.worker_runtime"
+    ]
+    assert any(
+        "event=entrypoint outcome=progress stage=profile_prepared" in message
+        for message in messages
+    )
+    ready_log = next(
+        message
+        for message in messages
+        if "event=entrypoint outcome=succeeded stage=ready" in message
+    )
+    assert "voice_call_id=call-1" in ready_log
+    assert "trace_id=trace-1" in ready_log
+    assert "session_id=session-1" in ready_log
+    assert SECRET not in "\n".join(messages)
 
 
 @pytest.mark.asyncio
@@ -1105,7 +1153,10 @@ async def test_entrypoint_requires_exact_subscribed_microphone_before_ready() ->
 
 
 @pytest.mark.asyncio
-async def test_entrypoint_input_timeout_never_starts_or_readies_and_removes_listener() -> None:
+async def test_entrypoint_input_timeout_never_starts_or_readies_and_removes_listener(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="murmur.voice.worker_runtime")
     events: list[str] = []
     session = FakeOwnedSession(events)
 
@@ -1130,6 +1181,17 @@ async def test_entrypoint_input_timeout_never_starts_or_readies_and_removes_list
     assert ctx.room.listener_count("track_subscribed") == 0
     assert session.shutdown_calls == [False]
     assert session.close_calls == 1
+    failure_log = next(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "murmur.voice.worker_runtime"
+        and "event=entrypoint outcome=failed" in record.getMessage()
+    )
+    assert "stage=microphone_wait" in failure_log
+    assert "voice_call_id=call-1" in failure_log
+    assert "trace_id=trace-1" in failure_log
+    assert "session_id=session-1" in failure_log
+    assert "error_type=TimeoutError" in failure_log
 
 
 @pytest.mark.asyncio
