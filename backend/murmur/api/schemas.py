@@ -100,3 +100,23 @@ class VoiceSessionBootstrapResponse(BaseModel):
     event_topic: ContractId
     trace_id: UUID4String
     expires_at: AwareDatetime
+
+
+class WebSocketVoiceSessionBootstrapResponse(BaseModel):
+    """Short-lived one-use assignment for Murmur's first-party WebSocket."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    runtime: Literal["websocket_v1"]
+    profile_id: ContractId
+    event_protocol: Literal["murmur.voice.websocket.v1"]
+    websocket_path: Literal["/api/voice/websocket"]
+    ticket: Annotated[
+        str,
+        StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{32,128}$"),
+    ]
+    session_id: UUID4String
+    agent_id: UUID4String
+    voice_call_id: UUID4String
+    trace_id: UUID4String
+    expires_at: AwareDatetime

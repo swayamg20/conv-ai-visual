@@ -23,6 +23,8 @@ def test_product_route_contract_is_registered_once() -> None:
         "/api/voice-logs/stats": {"get"},
         "/api/voice/session": {"post"},
         "/api/voice/session/end": {"post"},
+        "/api/voice/websocket/session": {"post"},
+        "/api/voice/websocket/session/end": {"post"},
         "/chat": {"post"},
         "/chat/{session_id}": {"delete"},
         "/chat/{session_id}/canvas-mode": {"post"},

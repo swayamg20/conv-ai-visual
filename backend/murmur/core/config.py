@@ -350,6 +350,33 @@ EXAMPLE — "Explain the Pythagorean theorem":
     VOICE_V2_MAX_ACTIVE_CALLS: str = os.getenv("VOICE_V2_MAX_ACTIVE_CALLS", "1")
     VOICE_V2_MAX_CALL_ASSIGNMENTS: str = os.getenv("VOICE_V2_MAX_CALL_ASSIGNMENTS", "10000")
 
+    # First-party browser-to-API WebSocket transport. Keep these values raw at
+    # import time so an inactive runtime cannot make legacy startup fail.
+    VOICE_WEBSOCKET_TICKET_TTL_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_TICKET_TTL_SECONDS", "15"
+    )
+    VOICE_WEBSOCKET_REPOSITORY_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_REPOSITORY_TIMEOUT_SECONDS", "2"
+    )
+    VOICE_WEBSOCKET_MAX_PENDING_TICKETS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_PENDING_TICKETS", "100"
+    )
+    VOICE_WEBSOCKET_MAX_ACTIVE_CALLS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_ACTIVE_CALLS", "1"
+    )
+    VOICE_WEBSOCKET_MAX_CALL_ASSIGNMENTS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_CALL_ASSIGNMENTS", "10000"
+    )
+    VOICE_WEBSOCKET_MAX_SESSION_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_SESSION_SECONDS", "900"
+    )
+    VOICE_WEBSOCKET_HEARTBEAT_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_HEARTBEAT_SECONDS", "15"
+    )
+    VOICE_WEBSOCKET_SEND_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_SEND_TIMEOUT_SECONDS", "2"
+    )
+
     # TTS provider: "elevenlabs" (cloud, high quality) or "kokoro" (local ONNX, low latency)
     TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "elevenlabs")
     KOKORO_MODEL_PATH: Optional[str] = os.getenv("KOKORO_MODEL_PATH")
