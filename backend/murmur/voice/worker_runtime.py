@@ -467,6 +467,7 @@ def build_agent_server(
         clock=clock,
     )
     server = server_factory(
+        drain_timeout=settings.drain_timeout_seconds,
         shutdown_process_timeout=settings.cleanup_timeout_seconds,
         # Keep exactly one process warm. The one-job load gate still bounds
         # concurrent calls, while avoiding a multi-second first-call spawn after

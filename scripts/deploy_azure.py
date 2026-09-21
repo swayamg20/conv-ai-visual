@@ -48,7 +48,35 @@ APPS_DEPLOYMENT = "murmur-apps"
 
 AZURE_KEY_SECRET_NAME = "azure-openai-api-key"
 FIREBASE_SECRET_NAME = "firebase-runtime-service-account-json"
+LIVEKIT_API_KEY_SECRET_NAME = "livekit-api-key"
+LIVEKIT_API_SECRET_SECRET_NAME = "livekit-api-secret"
+VOICE_V2_SIGNING_SECRET_NAME = "voice-v2-signing-secret"
+DEEPGRAM_API_KEY_SECRET_NAME = "deepgram-api-key"
+GROQ_API_KEY_SECRET_NAME = "groq-api-key"
+ELEVENLABS_API_KEY_SECRET_NAME = "elevenlabs-api-key"
+VOICE_V2_WORKER_NAME_PREFIX = "murmur-voice-v2"
+VOICE_V2_READY_PORT = 8082
 LEGACY_FIREBASE_SECRET_NAME = "firebase-service-account-json"
+ACTIVE_SECRET_NAMES = (
+    AZURE_KEY_SECRET_NAME,
+    FIREBASE_SECRET_NAME,
+    LIVEKIT_API_KEY_SECRET_NAME,
+    LIVEKIT_API_SECRET_SECRET_NAME,
+    VOICE_V2_SIGNING_SECRET_NAME,
+    DEEPGRAM_API_KEY_SECRET_NAME,
+    GROQ_API_KEY_SECRET_NAME,
+    ELEVENLABS_API_KEY_SECRET_NAME,
+)
+SECRET_VERSION_PARAMETERS = {
+    AZURE_KEY_SECRET_NAME: "azureOpenAiSecretVersion",
+    FIREBASE_SECRET_NAME: "firebaseRuntimeSecretVersion",
+    LIVEKIT_API_KEY_SECRET_NAME: "livekitApiKeySecretVersion",
+    LIVEKIT_API_SECRET_SECRET_NAME: "livekitApiSecretSecretVersion",
+    VOICE_V2_SIGNING_SECRET_NAME: "voiceV2SigningSecretVersion",
+    DEEPGRAM_API_KEY_SECRET_NAME: "deepgramApiKeySecretVersion",
+    GROQ_API_KEY_SECRET_NAME: "groqApiKeySecretVersion",
+    ELEVENLABS_API_KEY_SECRET_NAME: "elevenLabsApiKeySecretVersion",
+}
 KEY_VAULT_WRITER_ROLE = "Key Vault Secrets Officer"
 KEY_VAULT_ROTATION_TAG = "murmurRotationId"
 KEY_VAULT_SECRETS_USER_ROLE_ID = "4633458b-17de-408a-b874-0445c86b69e6"
@@ -93,11 +121,9 @@ REQUIRED_FRONTEND_KEYS = (
     "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET",
     "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
     "NEXT_PUBLIC_FIREBASE_APP_ID",
-)
-OPTIONAL_FRONTEND_KEYS = (
-    "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID",
     "NEXT_PUBLIC_VOICE_RUNTIME",
 )
+OPTIONAL_FRONTEND_KEYS = ("NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID",)
 REQUIRED_SERVICE_ACCOUNT_FIELDS = (
     "type",
     "project_id",
@@ -140,6 +166,14 @@ class DeploymentInputs:
     azure_openai_key: str
     azure_openai_endpoint: str
     azure_openai_deployment: str
+    livekit_url: str
+    livekit_api_key: str
+    livekit_api_secret: str
+    voice_v2_signing_secret: str
+    deepgram_key: str
+    groq_api_key: str
+    elevenlabs_api_key: str
+    elevenlabs_voice_id: str
     firebase_project_id: str
     firebase_runtime_service_account: Mapping[str, object]
     firebase_domain_admin_service_account: Mapping[str, object] | None
@@ -151,6 +185,18 @@ class DeploymentInputs:
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")
+
+    def secret_payloads(self) -> Mapping[str, bytes]:
+        return {
+            AZURE_KEY_SECRET_NAME: self.azure_openai_key.encode("utf-8"),
+            FIREBASE_SECRET_NAME: self.firebase_runtime_json_bytes(),
+            LIVEKIT_API_KEY_SECRET_NAME: self.livekit_api_key.encode("utf-8"),
+            LIVEKIT_API_SECRET_SECRET_NAME: self.livekit_api_secret.encode("utf-8"),
+            VOICE_V2_SIGNING_SECRET_NAME: self.voice_v2_signing_secret.encode("utf-8"),
+            DEEPGRAM_API_KEY_SECRET_NAME: self.deepgram_key.encode("utf-8"),
+            GROQ_API_KEY_SECRET_NAME: self.groq_api_key.encode("utf-8"),
+            ELEVENLABS_API_KEY_SECRET_NAME: self.elevenlabs_api_key.encode("utf-8"),
+        }
 
 
 @dataclass(frozen=True)
@@ -661,6 +707,41 @@ def _validate_azure_openai_endpoint(value: str) -> str:
     return normalized
 
 
+def _validate_livekit_url(value: str) -> str:
+    """Return a secure LiveKit origin without accepting path-like configuration."""
+
+    candidate = value.strip()
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        # Accessing port rejects malformed and out-of-range explicit ports.
+        _port = parsed.port
+    except ValueError:
+        raise DeploymentRefusal("LIVEKIT_URL is not a valid secure WebSocket origin") from None
+    if (
+        parsed.scheme.lower() != "wss"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise DeploymentRefusal("LIVEKIT_URL is not a valid secure WebSocket origin")
+    return urllib.parse.urlunsplit(("wss", parsed.netloc, "", "", ""))
+
+
+def _voice_v2_worker_name(release_sha: str, signing_secret_version: str) -> str:
+    """Bind API dispatch to the worker in the same immutable app revision."""
+
+    if not _FULL_SHA.fullmatch(release_sha):
+        raise DeploymentRefusal("Voice V2 worker identity requires a full release SHA")
+    if not _KEY_VAULT_SECRET_VERSION.fullmatch(signing_secret_version):
+        raise DeploymentRefusal("Voice V2 worker identity requires a secret rollout version")
+    return (
+        f"{VOICE_V2_WORKER_NAME_PREFIX}-{release_sha[:8]}-{signing_secret_version[:8].casefold()}"
+    )
+
+
 def validate_source_revision() -> SourceRevision:
     """Return HEAD only when the worktree is clean and its remote branch matches."""
 
@@ -843,6 +924,19 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
                 raise DeploymentRefusal(f"frontend dotenv contains an invalid value for {key}")
             frontend_public[key] = value
 
+    if _required_value(backend, "VOICE_RUNTIME", "backend dotenv") != "livekit_v2":
+        raise DeploymentRefusal("backend dotenv must set VOICE_RUNTIME=livekit_v2")
+    if frontend_public["NEXT_PUBLIC_VOICE_RUNTIME"] != "voice_v2":
+        raise DeploymentRefusal("frontend dotenv must set NEXT_PUBLIC_VOICE_RUNTIME=voice_v2")
+    configured_signing_secret = backend.get("VOICE_V2_SIGNING_SECRET", "").strip()
+    voice_v2_signing_secret = (
+        _required_value(backend, "VOICE_V2_SIGNING_SECRET", "backend dotenv")
+        if configured_signing_secret
+        else secrets.token_urlsafe(48)
+    )
+    if len(voice_v2_signing_secret.encode("utf-8")) < 32:
+        raise DeploymentRefusal("backend dotenv VOICE_V2_SIGNING_SECRET must be at least 32 bytes")
+
     return DeploymentInputs(
         azure_openai_key=_required_value(backend, "AZURE_OPENAI_API_KEY", "backend dotenv"),
         azure_openai_endpoint=_validate_azure_openai_endpoint(
@@ -851,6 +945,16 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
         azure_openai_deployment=_required_value(
             backend, "AZURE_OPENAI_DEPLOYMENT", "backend dotenv"
         ),
+        livekit_url=_validate_livekit_url(
+            _required_value(backend, "LIVEKIT_URL", "backend dotenv")
+        ),
+        livekit_api_key=_required_value(backend, "LIVEKIT_API_KEY", "backend dotenv"),
+        livekit_api_secret=_required_value(backend, "LIVEKIT_API_SECRET", "backend dotenv"),
+        voice_v2_signing_secret=voice_v2_signing_secret,
+        deepgram_key=_required_value(backend, "DEEPGRAM_KEY", "backend dotenv"),
+        groq_api_key=_required_value(backend, "GROQ_API_KEY", "backend dotenv"),
+        elevenlabs_api_key=_required_value(backend, "ELEVENLABS_API_KEY", "backend dotenv"),
+        elevenlabs_voice_id=_required_value(backend, "ELEVENLABS_VOICE_ID", "backend dotenv"),
         firebase_project_id=firebase_project_id,
         firebase_runtime_service_account=runtime_service_account,
         firebase_domain_admin_service_account=domain_admin_service_account,
@@ -1930,6 +2034,10 @@ def _build_frontend(
     backend_url: str,
     frontend_public: Mapping[str, str],
 ) -> str:
+    if frontend_public.get("NEXT_PUBLIC_VOICE_RUNTIME") != "voice_v2":
+        raise DeploymentRefusal(
+            "frontend production build requires NEXT_PUBLIC_VOICE_RUNTIME=voice_v2"
+        )
     build_args = {
         "NEXT_PUBLIC_API_URL": backend_url,
         "MURMUR_RELEASE_SHA": release_sha,
@@ -2202,7 +2310,7 @@ def _verify_https(
         raise DeploymentRefusal("backend CORS allowed an unrelated origin")
 
 
-def _single_container(app: Mapping[str, object]) -> Mapping[str, object]:
+def _containers_by_name(app: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
     properties = app.get("properties")
     if not isinstance(properties, dict):
         raise DeploymentRefusal("Container App properties are missing")
@@ -2210,13 +2318,17 @@ def _single_container(app: Mapping[str, object]) -> Mapping[str, object]:
     if not isinstance(template, dict):
         raise DeploymentRefusal("Container App template is missing")
     containers = template.get("containers")
-    if (
-        not isinstance(containers, list)
-        or len(containers) != 1
-        or not isinstance(containers[0], dict)
-    ):
-        raise DeploymentRefusal("Container App must have exactly one container")
-    return containers[0]
+    if not isinstance(containers, list) or not containers:
+        raise DeploymentRefusal("Container App containers are missing")
+    result: dict[str, Mapping[str, object]] = {}
+    for container in containers:
+        if not isinstance(container, dict) or not isinstance(container.get("name"), str):
+            raise DeploymentRefusal("Container App container metadata is invalid")
+        name = container["name"]
+        if name in result:
+            raise DeploymentRefusal("Container App contains duplicate container names")
+        result[name] = container
+    return result
 
 
 def _env_map(container: Mapping[str, object]) -> dict[str, Mapping[str, object]]:
@@ -2227,8 +2339,100 @@ def _env_map(container: Mapping[str, object]) -> dict[str, Mapping[str, object]]
     for item in raw_env:
         if not isinstance(item, dict) or not isinstance(item.get("name"), str):
             raise DeploymentRefusal("Container App environment is invalid")
+        if item["name"] in result:
+            raise DeploymentRefusal("Container App environment contains duplicate names")
         result[item["name"]] = item
     return result
+
+
+def _require_env_values(
+    env: Mapping[str, Mapping[str, object]],
+    expected: Mapping[str, str],
+    *,
+    app_name: str,
+    container_name: str,
+) -> None:
+    for env_name, expected_value in expected.items():
+        item = env.get(env_name)
+        if not isinstance(item, dict) or item.get("value") != expected_value or "secretRef" in item:
+            raise DeploymentRefusal(
+                f"Container App {app_name} container {container_name} has invalid {env_name}"
+            )
+
+
+def _require_secret_refs(
+    env: Mapping[str, Mapping[str, object]],
+    expected: Mapping[str, str],
+    *,
+    app_name: str,
+    container_name: str,
+) -> None:
+    for env_name, secret_ref in expected.items():
+        item = env.get(env_name)
+        if not isinstance(item, dict) or item.get("secretRef") != secret_ref or "value" in item:
+            raise DeploymentRefusal(
+                f"Container App {app_name} container {container_name} does not use "
+                f"secretRef for {env_name}"
+            )
+    observed = {
+        env_name: item.get("secretRef") for env_name, item in env.items() if "secretRef" in item
+    }
+    if observed != dict(expected):
+        raise DeploymentRefusal(
+            f"Container App {app_name} container {container_name} secretRefs are outside "
+            "the deployment contract"
+        )
+
+
+def _require_shared_data_mount(
+    container: Mapping[str, object], *, app_name: str, container_name: str
+) -> None:
+    expected = [{"mountPath": "/home/murmur/data", "volumeName": "murmur-data"}]
+    if container.get("volumeMounts") != expected:
+        raise DeploymentRefusal(
+            f"Container App {app_name} container {container_name} does not mount shared data"
+        )
+
+
+def _require_identity_unavailable_to_containers(
+    configuration: Mapping[str, object], *, identity_id: str, app_name: str
+) -> None:
+    settings = configuration.get("identitySettings")
+    if (
+        not isinstance(settings, list)
+        or len(settings) != 1
+        or not isinstance(settings[0], dict)
+        or not _same_azure_resource_id(settings[0].get("identity"), identity_id)
+        or settings[0].get("lifecycle") != "None"
+    ):
+        raise DeploymentRefusal(
+            f"Container App {app_name} exposes its platform identity to application containers"
+        )
+
+
+def _configured_secret_version(
+    configuration: Mapping[str, object], *, secret_name: str, app_name: str
+) -> str:
+    secrets = configuration.get("secrets")
+    if not isinstance(secrets, list):
+        raise DeploymentRefusal(f"Container App {app_name} Key Vault references are missing")
+    matches = [
+        item for item in secrets if isinstance(item, dict) and item.get("name") == secret_name
+    ]
+    if len(matches) != 1 or not isinstance(matches[0].get("keyVaultUrl"), str):
+        raise DeploymentRefusal(
+            f"Container App {app_name} has no unique {secret_name} Key Vault reference"
+        )
+    path_parts = urllib.parse.urlsplit(matches[0]["keyVaultUrl"]).path.strip("/").split("/")
+    if (
+        len(path_parts) != 3
+        or path_parts[:2] != ["secrets", secret_name]
+        or not _KEY_VAULT_SECRET_VERSION.fullmatch(path_parts[2])
+    ):
+        raise DeploymentRefusal(
+            f"Container App {app_name} {secret_name} reference is not version-pinned"
+        )
+    return path_parts[2].casefold()
 
 
 def _probe_types(
@@ -2243,14 +2447,18 @@ def _probe_types(
     for probe in probes:
         if not isinstance(probe, dict) or not isinstance(probe.get("type"), str):
             raise DeploymentRefusal("Container App probe is invalid")
+        probe_type = probe["type"]
+        expected = expected_paths.get(probe_type)
         http_get = probe.get("httpGet")
         if (
-            not isinstance(http_get, dict)
+            not isinstance(expected, str)
+            or not isinstance(http_get, dict)
             or not isinstance(http_get.get("path"), str)
+            or http_get.get("path") != expected
             or http_get.get("port") != expected_port
         ):
             raise DeploymentRefusal("Container App HTTP probe is invalid")
-        seen[probe["type"]] = http_get["path"]
+        seen[probe_type] = http_get["path"]
     if seen != dict(expected_paths):
         raise DeploymentRefusal("Container App probes do not match the deployment contract")
     return tuple(sorted(seen))
@@ -2338,7 +2546,13 @@ def _inspect_app(
             f"Container App {name} is outside the always-on single-replica bounds"
         )
 
-    container = _single_container(app)
+    containers = _containers_by_name(app)
+    expected_container_names = {"api", "voice-worker"} if backend else {"web"}
+    if set(containers) != expected_container_names:
+        raise DeploymentRefusal(
+            f"Container App {name} containers are outside the deployment contract"
+        )
+    container = containers["api" if backend else "web"]
     image = container.get("image")
     if not isinstance(image, str):
         raise DeploymentRefusal(f"Container App {name} image is missing")
@@ -2356,6 +2570,11 @@ def _inspect_app(
         or registry.get("passwordSecretRef") not in {None, ""}
     ):
         raise DeploymentRefusal(f"Container App {name} does not use identity-based ACR pull")
+    _require_identity_unavailable_to_containers(
+        configuration,
+        identity_id=identity_id,
+        app_name=name,
+    )
     env = _env_map(container)
     release_env = env.get("MURMUR_RELEASE_SHA")
     release_sha = release_env.get("value") if isinstance(release_env, dict) else None
@@ -2366,15 +2585,101 @@ def _inspect_app(
     key_vault_secret_versions: tuple[tuple[str, str], ...] = ()
     if backend:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/readyz"}
-        for env_name, secret_ref in (
-            ("AZURE_OPENAI_API_KEY", AZURE_KEY_SECRET_NAME),
-            ("FIREBASE_SERVICE_ACCOUNT_JSON", FIREBASE_SECRET_NAME),
+        expected_worker_name = _voice_v2_worker_name(
+            release_sha,
+            _configured_secret_version(
+                configuration,
+                secret_name=VOICE_V2_SIGNING_SECRET_NAME,
+                app_name=name,
+            ),
+        )
+        worker = containers["voice-worker"]
+        worker_image = worker.get("image")
+        if worker_image != image:
+            raise DeploymentRefusal(
+                f"Container App {name} API and voice worker do not use the same image"
+            )
+        if worker.get("command") != ["python", "-m", "livekit.agents", "start"] or worker.get(
+            "args"
+        ) != ["--log-level", "INFO", "backend/murmur/voice/worker.py"]:
+            raise DeploymentRefusal(
+                f"Container App {name} voice worker command is outside the deployment contract"
+            )
+        worker_env = _env_map(worker)
+        worker_release = worker_env.get("MURMUR_RELEASE_SHA", {}).get("value")
+        if worker_release != release_sha:
+            raise DeploymentRefusal(
+                f"Container App {name} voice worker release metadata does not match the API"
+            )
+        livekit_url_item = env.get("LIVEKIT_URL")
+        livekit_url = livekit_url_item.get("value") if isinstance(livekit_url_item, dict) else None
+        if not isinstance(livekit_url, str):
+            raise DeploymentRefusal(f"Container App {name} API has no LIVEKIT_URL")
+        normalized_livekit_url = _validate_livekit_url(livekit_url)
+        _require_env_values(
+            env,
+            {
+                "MURMUR_DATA_DIR": "/home/murmur/data",
+                "MURMUR_SQLITE_JOURNAL_MODE": "WAL",
+                "VOICE_RUNTIME": "livekit_v2",
+                "LIVEKIT_URL": normalized_livekit_url,
+                "VOICE_V2_PROFILE_ID": "livekit-agents-cascade-v1",
+                "VOICE_V2_WORKER_NAME": expected_worker_name,
+                "VOICE_V2_MAX_ACTIVE_CALLS": "1",
+            },
+            app_name=name,
+            container_name="api",
+        )
+        _require_secret_refs(
+            env,
+            {
+                "AZURE_OPENAI_API_KEY": AZURE_KEY_SECRET_NAME,
+                "FIREBASE_SERVICE_ACCOUNT_JSON": FIREBASE_SECRET_NAME,
+                "LIVEKIT_API_KEY": LIVEKIT_API_KEY_SECRET_NAME,
+                "LIVEKIT_API_SECRET": LIVEKIT_API_SECRET_SECRET_NAME,
+                "VOICE_V2_SIGNING_SECRET": VOICE_V2_SIGNING_SECRET_NAME,
+            },
+            app_name=name,
+            container_name="api",
+        )
+        _require_env_values(
+            worker_env,
+            {
+                "MURMUR_DATA_DIR": "/home/murmur/data",
+                "MURMUR_SQLITE_JOURNAL_MODE": "WAL",
+                "VOICE_RUNTIME": "livekit_v2",
+                "LIVEKIT_URL": normalized_livekit_url,
+                "VOICE_V2_PROFILE_ID": "livekit-agents-cascade-v1",
+                "VOICE_V2_WORKER_NAME": expected_worker_name,
+                "VOICE_V2_PROVIDER_PROBE_TIMEOUT_SECONDS": "4",
+                "VOICE_V2_DRAIN_TIMEOUT_SECONDS": "540",
+            },
+            app_name=name,
+            container_name="voice-worker",
+        )
+        elevenlabs_voice = worker_env.get("ELEVENLABS_VOICE_ID")
+        if (
+            not isinstance(elevenlabs_voice, dict)
+            or not isinstance(elevenlabs_voice.get("value"), str)
+            or not str(elevenlabs_voice["value"]).strip()
+            or "secretRef" in elevenlabs_voice
         ):
-            item = env.get(env_name)
-            if not isinstance(item, dict) or item.get("secretRef") != secret_ref or "value" in item:
-                raise DeploymentRefusal(
-                    f"Container App {name} does not use secretRef for {env_name}"
-                )
+            raise DeploymentRefusal(
+                f"Container App {name} voice worker has invalid ELEVENLABS_VOICE_ID"
+            )
+        _require_secret_refs(
+            worker_env,
+            {
+                "LIVEKIT_API_KEY": LIVEKIT_API_KEY_SECRET_NAME,
+                "LIVEKIT_API_SECRET": LIVEKIT_API_SECRET_SECRET_NAME,
+                "VOICE_V2_SIGNING_SECRET": VOICE_V2_SIGNING_SECRET_NAME,
+                "DEEPGRAM_KEY": DEEPGRAM_API_KEY_SECRET_NAME,
+                "GROQ_API_KEY": GROQ_API_KEY_SECRET_NAME,
+                "ELEVENLABS_API_KEY": ELEVENLABS_API_KEY_SECRET_NAME,
+            },
+            app_name=name,
+            container_name="voice-worker",
+        )
         secrets = configuration.get("secrets")
         if not isinstance(secrets, list):
             raise DeploymentRefusal(f"Container App {name} Key Vault references are missing")
@@ -2383,14 +2688,14 @@ def _inspect_app(
             for item in secrets
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         }
-        expected_secret_names = {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME}
-        if set(by_name) != expected_secret_names:
+        expected_secret_names = set(ACTIVE_SECRET_NAMES)
+        if len(by_name) != len(secrets) or set(by_name) != expected_secret_names:
             raise DeploymentRefusal(
                 f"Container App {name} Key Vault references are outside the deployment contract"
             )
         vault_names: set[str] = set()
         observed_versions: list[tuple[str, str]] = []
-        for secret_name in (AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME):
+        for secret_name in ACTIVE_SECRET_NAMES:
             item = by_name.get(secret_name)
             if not isinstance(item, dict) or "value" in item:
                 raise DeploymentRefusal(f"Container App {name} has an inline credential")
@@ -2428,14 +2733,39 @@ def _inspect_app(
             raise DeploymentRefusal(f"Container App {name} uses inconsistent Key Vaults")
         key_vault_name = vault_names.pop()
         key_vault_secret_versions = tuple(observed_versions)
-        if env.get("MURMUR_DATA_DIR", {}).get("value") != "/home/murmur/data":
+        if template.get("volumes") != [{"name": "murmur-data", "storageType": "EmptyDir"}]:
             raise DeploymentRefusal(
-                f"Container App {name} is not using isolated local pilot storage"
+                f"Container App {name} does not use the expected replica-local EmptyDir"
             )
-        if env.get("MURMUR_SQLITE_JOURNAL_MODE", {}).get("value") != "WAL":
-            raise DeploymentRefusal(f"Container App {name} local SQLite is not using WAL")
-        if container.get("volumeMounts"):
-            raise DeploymentRefusal(f"Container App {name} unexpectedly mounts shared storage")
+        _require_shared_data_mount(container, app_name=name, container_name="api")
+        _require_shared_data_mount(worker, app_name=name, container_name="voice-worker")
+        worker_probes = worker.get("probes")
+        if not isinstance(worker_probes, list) or len(worker_probes) != 3:
+            raise DeploymentRefusal("Container App voice worker probes are missing")
+        probes_by_type = {
+            probe.get("type"): probe
+            for probe in worker_probes
+            if isinstance(probe, dict) and isinstance(probe.get("type"), str)
+        }
+        if set(probes_by_type) != {"Startup", "Liveness", "Readiness"}:
+            raise DeploymentRefusal("Container App voice worker probes are invalid")
+        registration_probes = [
+            probes_by_type[probe_type] for probe_type in ("Startup", "Readiness")
+        ]
+        if len(registration_probes) != 2 or any(
+            not isinstance(probe.get("httpGet"), dict)
+            or probe["httpGet"].get("path") != "/"
+            or probe["httpGet"].get("port") != VOICE_V2_READY_PORT
+            for probe in registration_probes
+        ):
+            raise DeploymentRefusal("Container App voice worker registration probes are invalid")
+        liveness_http = probes_by_type["Liveness"].get("httpGet")
+        if (
+            not isinstance(liveness_http, dict)
+            or liveness_http.get("path") != "/"
+            or liveness_http.get("port") != 8081
+        ):
+            raise DeploymentRefusal("Container App voice worker liveness probe is invalid")
     else:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/healthz"}
         frontend_secrets = configuration.get("secrets")
@@ -2546,7 +2876,7 @@ def _verify_key_vault_metadata(vault_name: str) -> str:
         for item in metadata
         if isinstance(item, dict) and item.get("enabled") is not False
     }
-    required = {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME}
+    required = set(ACTIVE_SECRET_NAMES)
     if not required.issubset(enabled):
         raise DeploymentRefusal("Key Vault is missing required enabled secrets")
     return vault_id
@@ -2653,11 +2983,7 @@ def _security_relevant_key_vault_assignments(
 
 def _verify_frontend_key_vault_boundary(*, frontend_principal_id: str, key_vault_id: str) -> None:
     permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
-    for secret_name in (
-        AZURE_KEY_SECRET_NAME,
-        FIREBASE_SECRET_NAME,
-        LEGACY_FIREBASE_SECRET_NAME,
-    ):
+    for secret_name in (*ACTIVE_SECRET_NAMES, LEGACY_FIREBASE_SECRET_NAME):
         assignments = _key_vault_assignments_at_secret(
             principal_id=frontend_principal_id,
             key_vault_id=key_vault_id,
@@ -2669,7 +2995,7 @@ def _verify_frontend_key_vault_boundary(*, frontend_principal_id: str, key_vault
 
 def _verify_backend_key_vault_boundary(*, backend_principal_id: str, key_vault_id: str) -> None:
     permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
-    for secret_name in (AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME):
+    for secret_name in ACTIVE_SECRET_NAMES:
         secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
         assignments = _key_vault_assignments_at_secret(
             principal_id=backend_principal_id,
@@ -2879,7 +3205,7 @@ def verify_live(
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
 ) -> tuple[AppInspection, AppInspection]:
-    if set(expected_secret_versions) != {AZURE_KEY_SECRET_NAME, FIREBASE_SECRET_NAME} or any(
+    if set(expected_secret_versions) != set(ACTIVE_SECRET_NAMES) or any(
         not isinstance(version, str) or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
         for version in expected_secret_versions.values()
     ):
@@ -3103,18 +3429,18 @@ def deploy(args: argparse.Namespace) -> int:
         ),
     ):
         print("Staging server credentials in Azure Key Vault")
-        azure_key_version = _write_key_vault_secret(
-            vault_name=key_vault_name,
-            secret_name=AZURE_KEY_SECRET_NAME,
-            payload=inputs.azure_openai_key.encode("utf-8"),
-            mutation_guard=lease.assert_healthy,
-        )
-        firebase_version = _write_key_vault_secret(
-            vault_name=key_vault_name,
-            secret_name=FIREBASE_SECRET_NAME,
-            payload=inputs.firebase_runtime_json_bytes(),
-            mutation_guard=lease.assert_healthy,
-        )
+        payloads = inputs.secret_payloads()
+        if set(payloads) != set(ACTIVE_SECRET_NAMES):
+            raise DeploymentRefusal("deployment inputs do not contain the exact runtime secrets")
+        secret_versions = {
+            secret_name: _write_key_vault_secret(
+                vault_name=key_vault_name,
+                secret_name=secret_name,
+                payload=payloads[secret_name],
+                mutation_guard=lease.assert_healthy,
+            )
+            for secret_name in ACTIVE_SECRET_NAMES
+        }
         lease.assert_healthy()
         secured_foundation = _deployment_outputs(
             resource_group=resource_group,
@@ -3178,8 +3504,12 @@ def deploy(args: argparse.Namespace) -> int:
                 "azureOpenAiEndpoint": inputs.azure_openai_endpoint,
                 "azureOpenAiDeployment": inputs.azure_openai_deployment,
                 "firebaseProjectId": inputs.firebase_project_id,
-                "azureOpenAiSecretVersion": azure_key_version,
-                "firebaseRuntimeSecretVersion": firebase_version,
+                "livekitUrl": inputs.livekit_url,
+                "elevenLabsVoiceId": inputs.elevenlabs_voice_id,
+                **{
+                    parameter_name: secret_versions[secret_name]
+                    for secret_name, parameter_name in SECRET_VERSION_PARAMETERS.items()
+                },
             },
         )
         live_backend_url = _validate_container_app_url(
@@ -3188,8 +3518,9 @@ def deploy(args: argparse.Namespace) -> int:
         frontend_url = _validate_container_app_url(
             _output_value(app_outputs, "frontendUrl"), "deployed frontend URL"
         )
-        if _output_value(app_outputs, "azureOpenAiSecretVersion") != azure_key_version or (
-            _output_value(app_outputs, "firebaseRuntimeSecretVersion") != firebase_version
+        if any(
+            _output_value(app_outputs, parameter_name) != secret_versions[secret_name]
+            for secret_name, parameter_name in SECRET_VERSION_PARAMETERS.items()
         ):
             raise DeploymentRefusal("apps deployment changed the staged secret versions")
         if live_backend_url != backend_url:
@@ -3224,10 +3555,7 @@ def deploy(args: argparse.Namespace) -> int:
             key_vault_id=key_vault_id,
             subscription_id=args.subscription_id,
             tenant_id=args.tenant_id,
-            expected_secret_versions={
-                AZURE_KEY_SECRET_NAME: azure_key_version,
-                FIREBASE_SECRET_NAME: firebase_version,
-            },
+            expected_secret_versions=secret_versions,
             expected_sha=revision.sha,
             health_timeout_seconds=args.health_timeout_seconds,
         )
@@ -3237,18 +3565,13 @@ def deploy(args: argparse.Namespace) -> int:
             current_revision=backend.latest_revision,
         )
         print("Finalizing Key Vault rotation after backend health and revision retirement")
-        _finalize_key_vault_secret_rotation(
-            vault_name=key_vault_name,
-            secret_name=AZURE_KEY_SECRET_NAME,
-            current_version=azure_key_version,
-            mutation_guard=lease.assert_healthy,
-        )
-        _finalize_key_vault_secret_rotation(
-            vault_name=key_vault_name,
-            secret_name=FIREBASE_SECRET_NAME,
-            current_version=firebase_version,
-            mutation_guard=lease.assert_healthy,
-        )
+        for secret_name in ACTIVE_SECRET_NAMES:
+            _finalize_key_vault_secret_rotation(
+                vault_name=key_vault_name,
+                secret_name=secret_name,
+                current_version=secret_versions[secret_name],
+                mutation_guard=lease.assert_healthy,
+            )
         legacy_firebase_secret = _retire_legacy_firebase_secret(
             vault_name=key_vault_name,
             mutation_guard=lease.assert_healthy,
@@ -3283,8 +3606,8 @@ def verify(args: argparse.Namespace) -> int:
         deployment_name=APPS_DEPLOYMENT,
     )
     secret_versions = {
-        AZURE_KEY_SECRET_NAME: _output_value(apps, "azureOpenAiSecretVersion"),
-        FIREBASE_SECRET_NAME: _output_value(apps, "firebaseRuntimeSecretVersion"),
+        secret_name: _output_value(apps, parameter_name)
+        for secret_name, parameter_name in SECRET_VERSION_PARAMETERS.items()
     }
     key_vault_id = _output_value(foundation, "keyVaultId")
     key_vault_name = _output_value(foundation, "keyVaultName")

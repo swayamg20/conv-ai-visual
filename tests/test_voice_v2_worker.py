@@ -7,6 +7,7 @@ import importlib
 import json
 import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 from multiprocessing.reduction import ForkingPickler
 from types import SimpleNamespace
@@ -37,6 +38,7 @@ from murmur.voice.profile import (
     VoiceProfileScope,
     VoiceProfileUnavailable,
 )
+from murmur.voice.worker_readiness import install_worker_registration_readiness
 
 _original_signing_secret = config.VOICE_V2_SIGNING_SECRET
 try:
@@ -382,6 +384,12 @@ def test_worker_startup_timeouts_are_finite_and_bounded(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _settings(**{field: value})
+
+
+@pytest.mark.parametrize("value", [False, 29, 541])
+def test_worker_drain_timeout_finishes_inside_azure_grace(value: object) -> None:
+    with pytest.raises(ValueError, match="drain timeout"):
+        _settings(drain_timeout_seconds=value)
 
 
 @pytest.mark.asyncio
@@ -1449,6 +1457,7 @@ def test_agent_server_registers_exactly_one_named_rtc_session() -> None:
 
     assert created == [server]
     assert len(constructor_kwargs) == 1
+    assert constructor_kwargs[0]["drain_timeout"] == 540
     assert constructor_kwargs[0]["shutdown_process_timeout"] == 0.05
     assert constructor_kwargs[0]["num_idle_processes"] == 1
     assert constructor_kwargs[0]["load_threshold"] == 0.5
@@ -1461,3 +1470,25 @@ def test_agent_server_registers_exactly_one_named_rtc_session() -> None:
     assert server._agent_name == WORKER_NAME
     with pytest.raises(RuntimeError, match="only supports registering only one"):
         server.rtc_session(server._entrypoint_fnc, agent_name=WORKER_NAME)
+
+
+@pytest.mark.asyncio
+async def test_worker_readiness_waits_for_livekit_registration() -> None:
+    callbacks: dict[str, object] = {}
+
+    class FakeEventServer:
+        def on(self, event: str, callback: Callable[..., object]) -> object:
+            callbacks[event] = callback
+            return callback
+
+    readiness = install_worker_registration_readiness(FakeEventServer())
+
+    assert set(callbacks) == {"worker_started", "worker_registered"}
+    assert (await readiness.handle(None)).status == 503  # type: ignore[arg-type]
+    await readiness.start(host="127.0.0.1", port=0)
+    assert readiness.runner is not None
+    callback = callbacks["worker_registered"]
+    assert callable(callback)
+    callback("worker-id", object())
+    assert (await readiness.handle(None)).status == 200  # type: ignore[arg-type]
+    await readiness.runner.cleanup()

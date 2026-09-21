@@ -46,6 +46,7 @@ class VoiceWorkerSettings:
     input_wait_timeout_seconds: float = 10.0
     session_start_timeout_seconds: float = 10.0
     event_publish_timeout_seconds: float = 3.0
+    drain_timeout_seconds: int = 540
     cleanup_timeout_seconds: float = 5.0
     interruption_timeout_seconds: float = 2.0
 
@@ -112,6 +113,12 @@ class VoiceWorkerSettings:
             raise ValueError("Voice V2 input wait timeout must be between 0 and 60 seconds")
         if self.cleanup_timeout_seconds <= 0 or self.interruption_timeout_seconds <= 0:
             raise ValueError("Voice V2 lifecycle timeouts must be positive")
+        if (
+            isinstance(self.drain_timeout_seconds, bool)
+            or not isinstance(self.drain_timeout_seconds, int)
+            or not 30 <= self.drain_timeout_seconds <= 540
+        ):
+            raise ValueError("Voice V2 drain timeout must be between 30 and 540 seconds")
 
 
 @dataclass(frozen=True)
