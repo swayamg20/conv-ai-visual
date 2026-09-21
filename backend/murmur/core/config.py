@@ -331,6 +331,7 @@ EXAMPLE — "Explain the Pythagorean theorem":
     VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS: str = os.getenv(
         "VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS", "3"
     )
+    VOICE_V2_DRAIN_TIMEOUT_SECONDS: str = os.getenv("VOICE_V2_DRAIN_TIMEOUT_SECONDS", "540")
     # The named cascade profile fixes its provider/model/media choices in code.
     # Only the metadata-only reachability deadline is operator-tunable here.
     VOICE_V2_PROVIDER_PROBE_TIMEOUT_SECONDS: str = os.getenv(

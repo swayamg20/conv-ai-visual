@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -51,6 +52,7 @@ from murmur.voice.bootstrap_contracts import (
     verify_signed_metadata,
 )
 from murmur.voice.bootstrap_lifecycle import CallLockRegistry
+from murmur.voice.observability import log_voice_v2_lifecycle
 
 __all__ = [
     "RELEASE_TOMBSTONE_TTL_SECONDS",
@@ -89,6 +91,7 @@ __all__ = [
 ]
 
 _ControlResult = TypeVar("_ControlResult")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -185,8 +188,44 @@ class VoiceBootstrapService:
                 session_id=session_id,
                 voice_call_id=voice_call_id,
             )
-            async with self._hold_call_lock(voice_call_id):
-                return await self._bootstrap_locked(scope)
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO,
+                component="api",
+                event="bootstrap",
+                outcome="started",
+                stage="authorized",
+                voice_call_id=scope.voice_call_id,
+                session_id=scope.session_id,
+            )
+            try:
+                async with self._hold_call_lock(voice_call_id):
+                    result = await self._bootstrap_locked(scope)
+            except BaseException as exc:
+                log_voice_v2_lifecycle(
+                    logger,
+                    logging.INFO if isinstance(exc, asyncio.CancelledError) else logging.WARNING,
+                    component="api",
+                    event="bootstrap",
+                    outcome=("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"),
+                    stage="reconcile",
+                    voice_call_id=scope.voice_call_id,
+                    session_id=scope.session_id,
+                    error=exc,
+                )
+                raise
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO,
+                component="api",
+                event="bootstrap",
+                outcome="succeeded",
+                stage="token_issued",
+                voice_call_id=result.voice_call_id,
+                trace_id=result.trace_id,
+                session_id=result.session_id,
+            )
+            return result
 
     async def release(
         self,
@@ -202,21 +241,56 @@ class VoiceBootstrapService:
                 session_id=session_id,
                 voice_call_id=voice_call_id,
             )
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO,
+                component="api",
+                event="release",
+                outcome="started",
+                stage="authorized",
+                voice_call_id=scope.voice_call_id,
+                session_id=scope.session_id,
+            )
             # Record the negative intent before waiting behind an in-flight
             # bootstrap. The bootstrap rechecks it while holding the same call
             # lock, so cancellation cannot lose merely because reconciliation
             # is slow. Scope validation and mutation are atomic under the
             # assignment guard.
-            await self._record_release_intent(scope)
-            async with self._hold_call_lock(voice_call_id):
-                assignment = self._assignments.get(voice_call_id)
-                if assignment is not None and assignment.scope != scope:
-                    raise VoiceBootstrapConflict(
-                        "voice_call_id is assigned to another trusted scope"
-                    )
-                if assignment is not None:
-                    await self._cleanup_remote_assignment(assignment)
-                    await self._retire_assignment(assignment)
+            try:
+                await self._record_release_intent(scope)
+                async with self._hold_call_lock(voice_call_id):
+                    assignment = self._assignments.get(voice_call_id)
+                    if assignment is not None and assignment.scope != scope:
+                        raise VoiceBootstrapConflict(
+                            "voice_call_id is assigned to another trusted scope"
+                        )
+                    if assignment is not None:
+                        await self._cleanup_remote_assignment(assignment)
+                        await self._retire_assignment(assignment)
+            except BaseException as exc:
+                log_voice_v2_lifecycle(
+                    logger,
+                    logging.INFO if isinstance(exc, asyncio.CancelledError) else logging.WARNING,
+                    component="api",
+                    event="release",
+                    outcome=("cancelled" if isinstance(exc, asyncio.CancelledError) else "failed"),
+                    stage="cleanup",
+                    voice_call_id=scope.voice_call_id,
+                    session_id=scope.session_id,
+                    error=exc,
+                )
+                raise
+            log_voice_v2_lifecycle(
+                logger,
+                logging.INFO,
+                component="api",
+                event="release",
+                outcome="succeeded",
+                stage="cleanup",
+                voice_call_id=scope.voice_call_id,
+                trace_id=assignment.trace_id if assignment is not None else None,
+                session_id=scope.session_id,
+            )
 
     async def _authorize_scope(
         self,

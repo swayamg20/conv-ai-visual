@@ -31,7 +31,7 @@ param deploymentPrincipalObjectId string
 @description('Azure principal type of the deployment operator.')
 param deploymentPrincipalType string
 
-@description('Create backend read grants after both versioned secrets exist.')
+@description('Create backend read grants after every versioned runtime secret exists.')
 param grantBackendSecretRead bool = false
 
 var uniqueSuffix = uniqueString(subscription().id, resourceGroup().id)
@@ -40,6 +40,16 @@ var keyVaultName = 'murmur-${uniqueSuffix}-kv'
 var deploymentLockStorageName = 'murlock${uniqueSuffix}'
 var lockContainerName = 'deployment-locks'
 var lockBlobName = 'azure-pilot.lock'
+var backendSecretNames = [
+  'azure-openai-api-key'
+  'firebase-runtime-service-account-json'
+  'livekit-api-key'
+  'livekit-api-secret'
+  'voice-v2-signing-secret'
+  'deepgram-api-key'
+  'groq-api-key'
+  'elevenlabs-api-key'
+]
 
 var acrPullRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
@@ -139,33 +149,24 @@ resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
   }
 }
 
-resource azureOpenAiSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' existing = {
-  name: '${keyVault.name}/azure-openai-api-key'
-}
-
-resource firebaseRuntimeSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' existing = {
-  name: '${keyVault.name}/firebase-runtime-service-account-json'
-}
-
-resource azureOpenAiSecretRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (grantBackendSecretRead) {
-  name: guid(azureOpenAiSecret.id, identity.id, keyVaultSecretsUserRoleDefinitionId)
-  scope: azureOpenAiSecret
-  properties: {
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: keyVaultSecretsUserRoleDefinitionId
+resource backendSecrets 'Microsoft.KeyVault/vaults/secrets@2023-07-01' existing = [
+  for secretName in backendSecretNames: {
+    parent: keyVault
+    name: secretName
   }
-}
+]
 
-resource firebaseRuntimeSecretRead 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (grantBackendSecretRead) {
-  name: guid(firebaseRuntimeSecret.id, identity.id, keyVaultSecretsUserRoleDefinitionId)
-  scope: firebaseRuntimeSecret
-  properties: {
-    principalId: identity.properties.principalId
-    principalType: 'ServicePrincipal'
-    roleDefinitionId: keyVaultSecretsUserRoleDefinitionId
+resource backendSecretReads 'Microsoft.Authorization/roleAssignments@2022-04-01' = [
+  for (secretName, index) in backendSecretNames: if (grantBackendSecretRead) {
+    name: guid(backendSecrets[index].id, identity.id, keyVaultSecretsUserRoleDefinitionId)
+    scope: backendSecrets[index]
+    properties: {
+      principalId: identity.properties.principalId
+      principalType: 'ServicePrincipal'
+      roleDefinitionId: keyVaultSecretsUserRoleDefinitionId
+    }
   }
-}
+]
 
 resource deploymentLockStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: deploymentLockStorageName

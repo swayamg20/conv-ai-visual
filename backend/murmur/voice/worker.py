@@ -38,6 +38,7 @@ from murmur.voice.worker_contracts import (
     VoiceWorkerSettings,
 )
 from murmur.voice.worker_events import AgentSessionEventBridge, VoiceEventChannel
+from murmur.voice.worker_readiness import install_worker_registration_readiness
 from murmur.voice.worker_runtime import (
     ReadyPublisher,
     VoiceJobEntrypoint,
@@ -134,6 +135,7 @@ def _default_worker(
         event_publish_timeout_seconds=float(
             getattr(config, "VOICE_V2_EVENT_PUBLISH_TIMEOUT_SECONDS", 3)
         ),
+        drain_timeout_seconds=int(getattr(config, "VOICE_V2_DRAIN_TIMEOUT_SECONDS", 540)),
     )
     provider = _default_profile_provider(settings, provider_factory=provider_factory)
     return settings, VoiceProfileRegistry({settings.profile_id: provider})
@@ -180,3 +182,4 @@ def _default_profile_provider(
 # the worker can register or accept jobs. The FastAPI application never imports
 # this standalone entrypoint.
 server = build_agent_server(*_default_worker())
+install_worker_registration_readiness(server)
