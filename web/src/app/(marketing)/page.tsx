@@ -2,7 +2,7 @@
 
 import { useRef } from "react";
 import Link from "next/link";
-import { motion, useInView } from "framer-motion";
+import { MotionConfig, motion, useInView } from "framer-motion";
 import {
   Mic,
   PenTool,
@@ -31,6 +31,18 @@ const drawLine = {
     transition: {
       pathLength: { delay: i * 0.2, duration: 1.4, ease: "easeInOut" },
       opacity: { delay: i * 0.2, duration: 0.3 },
+    },
+  }),
+};
+
+const drawHeroLine = {
+  hidden: { pathLength: 0, opacity: 0 },
+  visible: (i: number) => ({
+    pathLength: 1,
+    opacity: 1,
+    transition: {
+      pathLength: { delay: i * 0.08, duration: 0.9, ease: "easeInOut" },
+      opacity: { delay: i * 0.08, duration: 0.2 },
     },
   }),
 };
@@ -81,7 +93,7 @@ function HeroSketch() {
         strokeWidth="1.5"
         opacity="0.12"
         custom={0}
-        variants={drawLine}
+        variants={drawHeroLine}
       />
 
       {/* Geometric shapes — right side */}
@@ -93,7 +105,7 @@ function HeroSketch() {
         strokeWidth="1"
         opacity="0.08"
         custom={2}
-        variants={drawLine}
+        variants={drawHeroLine}
       />
       <motion.path
         d="M550 400 L600 320 L650 400 Z"
@@ -101,7 +113,7 @@ function HeroSketch() {
         strokeWidth="1"
         opacity="0.08"
         custom={3}
-        variants={drawLine}
+        variants={drawHeroLine}
       />
 
       {/* Scattered dots */}
@@ -122,7 +134,7 @@ function HeroSketch() {
             hidden: { opacity: 0 },
             visible: (j: number) => ({
               opacity: 0.3,
-              transition: { delay: j * 0.2, duration: 0.5 },
+              transition: { delay: j * 0.08, duration: 0.3 },
             }),
           }}
         />
@@ -140,7 +152,7 @@ function HeroSketch() {
           hidden: { opacity: 0 },
           visible: (i: number) => ({
             opacity: 0.15,
-            transition: { delay: i * 0.2, duration: 0.8 },
+            transition: { delay: i * 0.08, duration: 0.4 },
           }),
         }}
       >
@@ -157,7 +169,7 @@ function HeroSketch() {
           hidden: { opacity: 0 },
           visible: (i: number) => ({
             opacity: 0.12,
-            transition: { delay: i * 0.2, duration: 0.8 },
+            transition: { delay: i * 0.08, duration: 0.4 },
           }),
         }}
       >
@@ -241,20 +253,20 @@ function StepIcon({ step }: { step: 1 | 2 | 3 }) {
    ════════════════════════════════════════════════════════ */
 export default function LandingPage() {
   return (
-    <>
+    <MotionConfig reducedMotion="user">
       {/* ── HERO ── */}
       <section className="relative min-h-screen flex items-center justify-center overflow-hidden pt-20">
         <HeroSketch />
 
         <div className="relative z-10 max-w-4xl mx-auto px-6 text-center">
           <motion.div
-            initial="hidden"
+            initial={false}
             animate="visible"
             variants={{ visible: { transition: { staggerChildren: 0.12 } } }}
           >
             {/* Badge */}
             <motion.div custom={0} variants={fadeUp} className="inline-flex items-center gap-2 glass-card px-4 py-2 rounded-full mb-8">
-              <span className="w-2 h-2 rounded-full bg-sage animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-sage animate-pulse motion-reduce:animate-none" />
               <span className="text-xs font-mono text-chalk-soft tracking-wide uppercase">
                 Voice-first AI learning
               </span>
@@ -570,6 +582,6 @@ export default function LandingPage() {
           </p>
         </div>
       </footer>
-    </>
+    </MotionConfig>
   );
 }

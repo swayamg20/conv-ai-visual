@@ -105,6 +105,12 @@
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
 /* Glassmorphic utility classes */
 .glass-card {
   backdrop-filter: blur(24px) saturate(150%);
