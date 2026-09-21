@@ -2333,8 +2333,10 @@ def _inspect_app(
         raise DeploymentRefusal(f"Container App {name} scale settings are missing")
     min_replicas = scale.get("minReplicas")
     max_replicas = scale.get("maxReplicas")
-    if min_replicas != 0 or max_replicas != 1:
-        raise DeploymentRefusal(f"Container App {name} is outside the pilot scale bounds")
+    if min_replicas != 1 or max_replicas != 1:
+        raise DeploymentRefusal(
+            f"Container App {name} is outside the always-on single-replica bounds"
+        )
 
     container = _single_container(app)
     image = container.get("image")

@@ -19,6 +19,7 @@ const caveat = Caveat({
   subsets: ["latin"],
   variable: "--font-handwriting",
   display: "swap",
+  preload: false,
 });
 
 const patrickHand = Patrick_Hand({
@@ -26,6 +27,7 @@ const patrickHand = Patrick_Hand({
   weight: "400",
   variable: "--font-handwriting-alt",
   display: "swap",
+  preload: false,
 });
 
 export const metadata: Metadata = {
