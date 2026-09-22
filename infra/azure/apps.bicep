@@ -39,11 +39,29 @@ param azureOpenAiSecretVersion string
 @maxLength(32)
 param firebaseRuntimeSecretVersion string
 
+@description('Existing retired voice-secret versions retained only for rollback during the WebSocket canary. The new API container never references these aliases.')
+param retainedRetiredVoiceSecretVersions object = {}
+
 var uniqueSuffix = uniqueString(subscription().id, resourceGroup().id)
 var registryName = 'murmur${uniqueSuffix}'
 var keyVaultName = 'murmur-${uniqueSuffix}-kv'
+var keyVaultUri = 'https://${keyVaultName}${az.environment().suffixes.keyvaultDns}/'
 var backendUrl = 'https://${backendAppName}.${environment.properties.defaultDomain}'
 var frontendUrl = 'https://${frontendAppName}.${environment.properties.defaultDomain}'
+var retiredVoiceSecretNames = [
+  'livekit-api-key'
+  'livekit-api-secret'
+  'voice-v2-signing-secret'
+  'deepgram-api-key'
+  'groq-api-key'
+  'elevenlabs-api-key'
+]
+var retainedRetiredVoiceSecretNames = filter(retiredVoiceSecretNames, secretName => contains(retainedRetiredVoiceSecretVersions, secretName))
+var retainedRetiredVoiceSecrets = [for secretName in retainedRetiredVoiceSecretNames: {
+  identity: identity.id
+  keyVaultUrl: '${keyVaultUri}secrets/${secretName}/${retainedRetiredVoiceSecretVersions[secretName]}'
+  name: secretName
+}]
 
 resource environment 'Microsoft.App/managedEnvironments@2024-03-01' existing = {
   name: environmentName
@@ -102,18 +120,18 @@ resource backend 'Microsoft.App/containerApps@2025-01-01' = {
           server: registry.properties.loginServer
         }
       ]
-      secrets: [
-        {
-          identity: identity.id
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-openai-api-key/${azureOpenAiSecretVersion}'
-          name: 'azure-openai-api-key'
-        }
-        {
-          identity: identity.id
-          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/firebase-runtime-service-account-json/${firebaseRuntimeSecretVersion}'
-          name: 'firebase-runtime-service-account-json'
-        }
-      ]
+      secrets: concat([
+          {
+            identity: identity.id
+            keyVaultUrl: '${keyVault.properties.vaultUri}secrets/azure-openai-api-key/${azureOpenAiSecretVersion}'
+            name: 'azure-openai-api-key'
+          }
+          {
+            identity: identity.id
+            keyVaultUrl: '${keyVault.properties.vaultUri}secrets/firebase-runtime-service-account-json/${firebaseRuntimeSecretVersion}'
+            name: 'firebase-runtime-service-account-json'
+          }
+        ], retainedRetiredVoiceSecrets)
     }
     template: {
       terminationGracePeriodSeconds: 600

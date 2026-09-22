@@ -110,7 +110,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=123456789",
                 "NEXT_PUBLIC_FIREBASE_APP_ID=1:123456789:web:abcdef",
                 "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID=G-EXAMPLE",
-                "NEXT_PUBLIC_VOICE_RUNTIME=voice_v2",
+                "NEXT_PUBLIC_VOICE_RUNTIME=disabled",
             )
         ),
         encoding="utf-8",
@@ -315,7 +315,7 @@ def test_load_deployment_inputs_validates_projects_without_printing_secrets(
         ("backend", "VOICE_RUNTIME=websocket_v1", "VOICE_RUNTIME=legacy", "VOICE_RUNTIME"),
         (
             "frontend",
-            "NEXT_PUBLIC_VOICE_RUNTIME=voice_v2",
+            "NEXT_PUBLIC_VOICE_RUNTIME=disabled",
             "NEXT_PUBLIC_VOICE_RUNTIME=legacy",
             "NEXT_PUBLIC_VOICE_RUNTIME",
         ),
@@ -1284,7 +1284,11 @@ def test_https_verification_checks_readiness_and_both_cors_directions(
                     "azure_openai": "ready",
                 },
             }
-        return {"status": "ok", "release_sha": SHA}
+        return {
+            "status": "ok",
+            "release_sha": SHA,
+            **({"voice_experience": "disabled"} if url.startswith(FRONTEND_URL) else {}),
+        }
 
     def fake_http(_url: str, *, headers: Any, **_kwargs: Any) -> deploy.HttpResult:
         origin = headers["Origin"]
@@ -1497,7 +1501,7 @@ def test_inspect_backend_refuses_websocket_topology_drift(
 
 
 def test_build_frontend_refuses_silent_legacy_runtime() -> None:
-    with pytest.raises(deploy.DeploymentRefusal, match="NEXT_PUBLIC_VOICE_RUNTIME=voice_v2"):
+    with pytest.raises(deploy.DeploymentRefusal, match="NEXT_PUBLIC_VOICE_RUNTIME=disabled"):
         deploy._build_frontend(
             "murmurregistry",
             SHA,
@@ -1573,6 +1577,7 @@ def test_https_verification_refuses_empty_readiness_checks(
 def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
     firebase_configured: bool,
     expected_result: int,
 ) -> None:
@@ -1677,6 +1682,12 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     monkeypatch.setattr(deploy, "_write_key_vault_secret", fake_write_secret)
     monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_retire_legacy_backend_vault_read", lambda **_kwargs: None)
+    retained_versions = {deploy.LIVEKIT_API_KEY_SECRET_NAME: "c" * 32}
+    monkeypatch.setattr(
+        deploy,
+        "_existing_retired_voice_secret_versions",
+        lambda **_kwargs: retained_versions,
+    )
     monkeypatch.setattr(deploy, "_assert_no_key_vault_writer", lambda _vault: None)
     monkeypatch.setattr(
         deploy,
@@ -1755,12 +1766,11 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert labels.index("firebase-authority") < labels.index("group")
     assert labels.index("backend-build") < labels.index("frontend-build")
     assert labels.index("verify-live") < labels.index("old-revisions-inactive")
-    assert labels.index("old-revisions-inactive") < labels.index("voice-secret-access-retired")
-    assert labels.index("voice-secret-access-retired") < labels.index("finalize-secret")
-    assert labels.index("finalize-secret") < labels.index("voice-secrets-retired")
-    assert labels.index("voice-secrets-retired") < labels.index("legacy-secret-retired")
+    assert labels.index("old-revisions-inactive") < labels.index("finalize-secret")
     assert labels.index("finalize-secret") < labels.index("legacy-secret-retired")
     assert labels.count("finalize-secret") == len(deploy.ACTIVE_SECRET_NAMES)
+    assert "voice-secret-access-retired" not in labels
+    assert "voice-secrets-retired" not in labels
     assert labels.count("kv-role") == 1
     assert labels.count("kv-role-revoked") == 1
     assert "restart" not in labels
@@ -1774,10 +1784,15 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert apps_parameters["releaseSha"] == SHA
     assert apps_parameters["backendImage"].endswith(f"@{DIGEST}")
     assert apps_parameters["frontendImage"].endswith(f"@{FRONTEND_DIGEST}")
+    assert json.loads(apps_parameters["retainedRetiredVoiceSecretVersions"]) == retained_versions
     verify_arguments = next(item[1] for item in calls if item[0] == "verify-live")
     assert verify_arguments["expected_registry_server"] == "murmurregistry.azurecr.io"
     assert verify_arguments["expected_backend_image_digest"] == DIGEST
     assert verify_arguments["expected_frontend_image_digest"] == FRONTEND_DIGEST
+    assert (
+        verify_arguments["expected_retained_retired_voice_secret_versions"]
+        == retained_versions
+    )
     assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
     assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION
     for secret_name, parameter_name in deploy.SECRET_VERSION_PARAMETERS.items():
@@ -1798,6 +1813,9 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         "deploymentPrincipalType": "User",
         "grantBackendSecretRead": False,
     }
+    output = capsys.readouterr().out
+    assert "websocket_canary_required: true" in output
+    assert "voice_retirement_status: pending_finalization" in output
 
 
 def test_verify_live_performs_only_metadata_and_health_checks(

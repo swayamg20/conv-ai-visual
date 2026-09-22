@@ -303,6 +303,7 @@ class AppInspection:
     probe_types: tuple[str, ...]
     key_vault_name: str | None = None
     key_vault_secret_versions: tuple[tuple[str, str], ...] = ()
+    retained_retired_voice_secret_versions: tuple[tuple[str, str], ...] = ()
     identity_id: str | None = None
 
 
@@ -921,8 +922,8 @@ def load_deployment_inputs(backend_env_path: Path, frontend_env_path: Path) -> D
 
     if _required_value(backend, "VOICE_RUNTIME", "backend dotenv") != "websocket_v1":
         raise DeploymentRefusal("backend dotenv must set VOICE_RUNTIME=websocket_v1")
-    if frontend_public["NEXT_PUBLIC_VOICE_RUNTIME"] != "voice_v2":
-        raise DeploymentRefusal("frontend dotenv must set NEXT_PUBLIC_VOICE_RUNTIME=voice_v2")
+    if frontend_public["NEXT_PUBLIC_VOICE_RUNTIME"] != "disabled":
+        raise DeploymentRefusal("frontend dotenv must set NEXT_PUBLIC_VOICE_RUNTIME=disabled")
 
     return DeploymentInputs(
         azure_openai_key=_required_value(backend, "AZURE_OPENAI_API_KEY", "backend dotenv"),
@@ -2090,9 +2091,9 @@ def _build_frontend(
     backend_url: str,
     frontend_public: Mapping[str, str],
 ) -> str:
-    if frontend_public.get("NEXT_PUBLIC_VOICE_RUNTIME") != "voice_v2":
+    if frontend_public.get("NEXT_PUBLIC_VOICE_RUNTIME") != "disabled":
         raise DeploymentRefusal(
-            "frontend production build requires NEXT_PUBLIC_VOICE_RUNTIME=voice_v2"
+            "frontend production build requires NEXT_PUBLIC_VOICE_RUNTIME=disabled"
         )
     build_args = {
         "NEXT_PUBLIC_API_URL": backend_url,
@@ -2339,6 +2340,8 @@ def _verify_https(
     )
     if frontend_health.get("status") != "ok":
         raise DeploymentRefusal("frontend liveness did not report ok")
+    if frontend_health.get("voice_experience") != "disabled":
+        raise DeploymentRefusal("frontend health did not report the voice experience disabled")
 
     allowed = _http_request(
         f"{backend}/healthz",
@@ -2550,12 +2553,168 @@ def _image_metadata(image: str, expected_repository: str) -> tuple[str, str]:
     return registry_server, digest
 
 
+def _normalize_retained_retired_voice_secret_versions(
+    versions: Mapping[str, str] | None,
+) -> dict[str, str]:
+    if versions is None:
+        return {}
+    if not isinstance(versions, Mapping):
+        raise DeploymentRefusal("retained retired voice-secret versions must be an object")
+    if any(
+        not isinstance(name, str)
+        or name not in RETIRED_VOICE_SECRET_NAMES
+        or not isinstance(version, str)
+        or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
+        for name, version in versions.items()
+    ):
+        raise DeploymentRefusal("retained retired voice-secret versions are invalid")
+    return {
+        name: versions[name].casefold()
+        for name in RETIRED_VOICE_SECRET_NAMES
+        if name in versions
+    }
+
+
+def _existing_retired_voice_secret_versions(
+    *,
+    resource_group: str,
+    backend_app: str,
+    expected_identity_id: str,
+    expected_key_vault_name: str,
+) -> Mapping[str, str]:
+    """Read rollback-only aliases from the existing app without requiring it to exist."""
+
+    names = _run_json(
+        [
+            "az",
+            "containerapp",
+            "list",
+            "--resource-group",
+            resource_group,
+            "--query",
+            "[].name",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect existing backend rollback aliases",
+    )
+    if not isinstance(names, list) or any(not isinstance(item, str) for item in names):
+        raise DeploymentRefusal("existing Container App inventory is invalid")
+    matches = [item for item in names if item == backend_app]
+    if not matches:
+        return {}
+    if len(matches) != 1:
+        raise DeploymentRefusal("existing backend Container App inventory is ambiguous")
+    app = _run_json(
+        [
+            "az",
+            "containerapp",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            backend_app,
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect existing backend rollback alias configuration",
+    )
+    if not isinstance(app, dict) or app.get("name") != backend_app:
+        raise DeploymentRefusal("existing backend Container App metadata is invalid")
+    identity = app.get("identity")
+    identities = identity.get("userAssignedIdentities") if isinstance(identity, dict) else None
+    if (
+        not isinstance(identity, dict)
+        or identity.get("type") != "UserAssigned"
+        or not isinstance(identities, dict)
+        or len(identities) != 1
+        or not _same_azure_resource_id(next(iter(identities)), expected_identity_id)
+    ):
+        raise DeploymentRefusal("existing backend rollback aliases use an unexpected identity")
+    properties = app.get("properties")
+    configuration = properties.get("configuration") if isinstance(properties, dict) else None
+    secrets = configuration.get("secrets") if isinstance(configuration, dict) else None
+    if secrets is None:
+        return {}
+    if not isinstance(secrets, list):
+        raise DeploymentRefusal("existing backend secret aliases are invalid")
+
+    expected_host = f"{expected_key_vault_name}.vault.azure.net".casefold()
+    retained: dict[str, str] = {}
+    for item in secrets:
+        if not isinstance(item, dict):
+            raise DeploymentRefusal("existing backend secret aliases are invalid")
+        name = item.get("name")
+        if name not in RETIRED_VOICE_SECRET_NAMES:
+            continue
+        if name in retained:
+            raise DeploymentRefusal("existing backend has duplicate retired voice-secret aliases")
+        key_vault_url = item.get("keyVaultUrl")
+        identity_id = item.get("identity")
+        if (
+            "value" in item
+            or not isinstance(key_vault_url, str)
+            or not isinstance(identity_id, str)
+            or not _same_azure_resource_id(identity_id, expected_identity_id)
+        ):
+            raise DeploymentRefusal("existing retired voice-secret alias is not identity-bound")
+        parsed = urllib.parse.urlsplit(key_vault_url)
+        path_parts = parsed.path.strip("/").split("/")
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.hostname.casefold() != expected_host
+            or parsed.query
+            or parsed.fragment
+            or len(path_parts) != 3
+            or path_parts[:2] != ["secrets", name]
+            or not _KEY_VAULT_SECRET_VERSION.fullmatch(path_parts[2])
+        ):
+            raise DeploymentRefusal(
+                "existing retired voice-secret alias is not version-pinned to the expected vault"
+            )
+        retained[name] = path_parts[2].casefold()
+    return _normalize_retained_retired_voice_secret_versions(retained)
+
+
+def _existing_deployment_retained_retired_voice_secret_versions(
+    *, resource_group: str, deployment_name: str
+) -> Mapping[str, str]:
+    versions = _run_json(
+        [
+            "az",
+            "deployment",
+            "group",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            deployment_name,
+            "--query",
+            "properties.parameters.retainedRetiredVoiceSecretVersions.value",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect {deployment_name} retained voice-secret parameter",
+    )
+    if versions is None:
+        return {}
+    return _normalize_retained_retired_voice_secret_versions(versions)
+
+
 def _inspect_app(
     resource_group: str,
     name: str,
     *,
     backend: bool,
     expected_frontend_url: str | None = None,
+    expected_retained_retired_voice_secret_versions: Mapping[str, str] | None = None,
 ) -> AppInspection:
     app = _run_json(
         [
@@ -2658,6 +2817,12 @@ def _inspect_app(
 
     key_vault_name: str | None = None
     key_vault_secret_versions: tuple[tuple[str, str], ...] = ()
+    retained_retired_voice_secret_versions: tuple[tuple[str, str], ...] = ()
+    expected_retained_versions = _normalize_retained_retired_voice_secret_versions(
+        expected_retained_retired_voice_secret_versions
+    )
+    if not backend and expected_retained_versions:
+        raise DeploymentRefusal("frontend inspection cannot retain backend voice-secret aliases")
     if backend:
         if expected_frontend_url is None:
             raise DeploymentRefusal("backend inspection requires the deployed frontend origin")
@@ -2696,6 +2861,12 @@ def _inspect_app(
             app_name=name,
             container_name="api",
         )
+        if any(
+            item.get("secretRef") in expected_retained_versions for item in env.values()
+        ):
+            raise DeploymentRefusal(
+                f"Container App {name} consumes a rollback-only voice-secret alias"
+            )
         secrets = configuration.get("secrets")
         if not isinstance(secrets, list):
             raise DeploymentRefusal(f"Container App {name} Key Vault references are missing")
@@ -2704,14 +2875,15 @@ def _inspect_app(
             for item in secrets
             if isinstance(item, dict) and isinstance(item.get("name"), str)
         }
-        expected_secret_names = set(ACTIVE_SECRET_NAMES)
+        expected_secret_names = set(ACTIVE_SECRET_NAMES) | set(expected_retained_versions)
         if len(by_name) != len(secrets) or set(by_name) != expected_secret_names:
             raise DeploymentRefusal(
                 f"Container App {name} Key Vault references are outside the deployment contract"
             )
         vault_names: set[str] = set()
         observed_versions: list[tuple[str, str]] = []
-        for secret_name in ACTIVE_SECRET_NAMES:
+        observed_retained_versions: list[tuple[str, str]] = []
+        for secret_name in (*ACTIVE_SECRET_NAMES, *expected_retained_versions):
             item = by_name.get(secret_name)
             if not isinstance(item, dict) or "value" in item:
                 raise DeploymentRefusal(f"Container App {name} has an inline credential")
@@ -2743,12 +2915,21 @@ def _inspect_app(
                 raise DeploymentRefusal(
                     f"Container App {name} Key Vault reference is not version-pinned"
                 )
-            observed_versions.append((secret_name, path_parts[2].casefold()))
+            observed_version = path_parts[2].casefold()
+            if secret_name in expected_retained_versions:
+                if observed_version != expected_retained_versions[secret_name]:
+                    raise DeploymentRefusal(
+                        f"Container App {name} changed a retained voice-secret version"
+                    )
+                observed_retained_versions.append((secret_name, observed_version))
+            else:
+                observed_versions.append((secret_name, observed_version))
             vault_names.add(parsed.hostname.removesuffix(".vault.azure.net"))
         if len(vault_names) != 1:
             raise DeploymentRefusal(f"Container App {name} uses inconsistent Key Vaults")
         key_vault_name = vault_names.pop()
         key_vault_secret_versions = tuple(observed_versions)
+        retained_retired_voice_secret_versions = tuple(observed_retained_versions)
         if template.get("volumes") != [{"name": "murmur-data", "storageType": "EmptyDir"}]:
             raise DeploymentRefusal(
                 f"Container App {name} does not use the expected replica-local EmptyDir"
@@ -2797,6 +2978,7 @@ def _inspect_app(
         probe_types=probe_types,
         key_vault_name=key_vault_name,
         key_vault_secret_versions=key_vault_secret_versions,
+        retained_retired_voice_secret_versions=retained_retired_voice_secret_versions,
         identity_id=identity_id,
     )
 
@@ -3001,10 +3183,17 @@ def _verify_backend_key_vault_boundary(
     *,
     backend_principal_id: str,
     key_vault_id: str,
-    allow_retired_voice_access: bool = False,
+    allowed_retired_voice_secret_names: Sequence[str] = (),
 ) -> None:
+    allowed_retired = frozenset(allowed_retired_voice_secret_names)
+    if not allowed_retired.issubset(RETIRED_VOICE_SECRET_NAMES):
+        raise DeploymentRefusal("allowed retired voice-secret access is invalid")
     permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
-    for secret_name in ACTIVE_SECRET_NAMES:
+    expected_access_names = (
+        *ACTIVE_SECRET_NAMES,
+        *(name for name in RETIRED_VOICE_SECRET_NAMES if name in allowed_retired),
+    )
+    for secret_name in expected_access_names:
         secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
         assignments = _key_vault_assignments_at_secret(
             principal_id=backend_principal_id,
@@ -3024,9 +3213,8 @@ def _verify_backend_key_vault_boundary(
             )
 
     retired_names = (
-        (LEGACY_FIREBASE_SECRET_NAME,)
-        if allow_retired_voice_access
-        else (*RETIRED_VOICE_SECRET_NAMES, LEGACY_FIREBASE_SECRET_NAME)
+        *(name for name in RETIRED_VOICE_SECRET_NAMES if name not in allowed_retired),
+        LEGACY_FIREBASE_SECRET_NAME,
     )
     for secret_name in retired_names:
         assignments = _key_vault_assignments_at_secret(
@@ -3358,15 +3546,18 @@ def verify_live(
     expected_registry_server: str,
     expected_backend_image_digest: str,
     expected_frontend_image_digest: str,
+    expected_retained_retired_voice_secret_versions: Mapping[str, str] | None = None,
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
-    allow_retired_voice_access_during_cutover: bool = False,
 ) -> tuple[AppInspection, AppInspection]:
     if set(expected_secret_versions) != set(ACTIVE_SECRET_NAMES) or any(
         not isinstance(version, str) or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
         for version in expected_secret_versions.values()
     ):
         raise DeploymentRefusal("expected Key Vault secret versions are invalid")
+    expected_retained_versions = _normalize_retained_retired_voice_secret_versions(
+        expected_retained_retired_voice_secret_versions
+    )
     if (
         not expected_registry_server.endswith(".azurecr.io")
         or not _REGISTRY_NAME.fullmatch(
@@ -3414,6 +3605,7 @@ def verify_live(
         backend_app,
         backend=True,
         expected_frontend_url=frontend.url,
+        expected_retained_retired_voice_secret_versions=expected_retained_versions,
     )
     require_expected_images(backend, frontend)
     if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
@@ -3424,6 +3616,8 @@ def verify_live(
         name: version.casefold() for name, version in expected_secret_versions.items()
     }:
         raise DeploymentRefusal("backend does not reference the expected secret versions")
+    if dict(backend.retained_retired_voice_secret_versions) != expected_retained_versions:
+        raise DeploymentRefusal("backend does not retain the expected rollback aliases")
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
     if not isinstance(frontend.identity_id, str):
@@ -3449,7 +3643,7 @@ def verify_live(
     _verify_backend_key_vault_boundary(
         backend_principal_id=expected_backend_identity_principal_id,
         key_vault_id=live_key_vault_id,
-        allow_retired_voice_access=allow_retired_voice_access_during_cutover,
+        allowed_retired_voice_secret_names=tuple(expected_retained_versions),
     )
     _verify_https(
         backend.url,
@@ -3463,6 +3657,7 @@ def verify_live(
         backend_app,
         backend=True,
         expected_frontend_url=frontend.url,
+        expected_retained_retired_voice_secret_versions=expected_retained_versions,
     )
     require_expected_images(backend, frontend)
     if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
@@ -3473,6 +3668,8 @@ def verify_live(
         name: version.casefold() for name, version in expected_secret_versions.items()
     }:
         raise DeploymentRefusal("backend secret versions changed during health verification")
+    if dict(backend.retained_retired_voice_secret_versions) != expected_retained_versions:
+        raise DeploymentRefusal("backend rollback aliases changed during health verification")
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
     for app in (backend, frontend):
@@ -3565,9 +3762,13 @@ def _apps_deployment_parameters(
     release_sha: str,
     inputs: DeploymentInputs,
     secret_versions: Mapping[str, str],
+    retained_retired_voice_secret_versions: Mapping[str, str] | None = None,
 ) -> Mapping[str, str]:
     if set(secret_versions) != set(ACTIVE_SECRET_NAMES):
         raise DeploymentRefusal("apps deployment received unexpected secret versions")
+    retained_versions = _normalize_retained_retired_voice_secret_versions(
+        retained_retired_voice_secret_versions
+    )
     return {
         "location": location,
         "backendAppName": backend_app,
@@ -3578,6 +3779,10 @@ def _apps_deployment_parameters(
         "azureOpenAiEndpoint": inputs.azure_openai_endpoint,
         "azureOpenAiDeployment": inputs.azure_openai_deployment,
         "firebaseProjectId": inputs.firebase_project_id,
+        "retainedRetiredVoiceSecretVersions": json.dumps(
+            retained_versions,
+            separators=(",", ":"),
+        ),
         **{
             parameter_name: secret_versions[secret_name]
             for secret_name, parameter_name in SECRET_VERSION_PARAMETERS.items()
@@ -3714,10 +3919,18 @@ def deploy(args: argparse.Namespace) -> int:
             key_vault_id=key_vault_id,
             mutation_guard=lease.assert_healthy,
         )
+        retained_retired_voice_secret_versions = _existing_retired_voice_secret_versions(
+            resource_group=resource_group,
+            backend_app=backend_app,
+            expected_identity_id=backend_identity_id,
+            expected_key_vault_name=key_vault_name,
+        )
         _verify_backend_key_vault_boundary(
             backend_principal_id=backend_identity_principal_id,
             key_vault_id=key_vault_id,
-            allow_retired_voice_access=True,
+            allowed_retired_voice_secret_names=tuple(
+                retained_retired_voice_secret_versions
+            ),
         )
 
         lease.assert_healthy()
@@ -3745,6 +3958,9 @@ def deploy(args: argparse.Namespace) -> int:
                 release_sha=revision.sha,
                 inputs=inputs,
                 secret_versions=secret_versions,
+                retained_retired_voice_secret_versions=(
+                    retained_retired_voice_secret_versions
+                ),
             ),
         )
         live_backend_url = _validate_container_app_url(
@@ -3794,26 +4010,18 @@ def deploy(args: argparse.Namespace) -> int:
             expected_registry_server=registry_login_server,
             expected_backend_image_digest=backend_digest,
             expected_frontend_image_digest=frontend_digest,
+            expected_retained_retired_voice_secret_versions=(
+                retained_retired_voice_secret_versions
+            ),
             expected_sha=revision.sha,
             health_timeout_seconds=args.health_timeout_seconds,
-            allow_retired_voice_access_during_cutover=True,
         )
         _verify_old_revisions_inactive(
             resource_group=resource_group,
             app_name=backend_app,
             current_revision=backend.latest_revision,
         )
-        print("Retiring backend access to the removed voice-provider secrets")
-        _retire_backend_voice_secret_access(
-            backend_principal_id=backend_identity_principal_id,
-            key_vault_id=key_vault_id,
-            mutation_guard=lease.assert_healthy,
-        )
-        _verify_backend_key_vault_boundary(
-            backend_principal_id=backend_identity_principal_id,
-            key_vault_id=key_vault_id,
-        )
-        print("Finalizing Key Vault rotation after backend health and revision retirement")
+        print("Finalizing active-secret rotation after backend health and revision retirement")
         for secret_name in ACTIVE_SECRET_NAMES:
             _finalize_key_vault_secret_rotation(
                 vault_name=key_vault_name,
@@ -3821,25 +4029,24 @@ def deploy(args: argparse.Namespace) -> int:
                 current_version=secret_versions[secret_name],
                 mutation_guard=lease.assert_healthy,
             )
-        retired_voice_secrets = _retire_voice_key_vault_secrets(
-            vault_name=key_vault_name,
-            mutation_guard=lease.assert_healthy,
-        )
         legacy_firebase_secret = _retire_legacy_firebase_secret(
             vault_name=key_vault_name,
             mutation_guard=lease.assert_healthy,
         )
     _assert_no_key_vault_writer(key_vault_id)
     print(
-        "retired_voice_secrets: "
-        + ",".join(f"{name}={status}" for name, status in retired_voice_secrets.items())
+        "retained_retired_voice_aliases: "
+        + (",".join(retained_retired_voice_secret_versions) or "none")
     )
     print(f"legacy_firebase_secret: {legacy_firebase_secret}")
     _print_verification(backend, frontend)
+    print("websocket_canary_required: true")
+    print("voice_retirement_status: pending_finalization")
     if firebase_domain.status.startswith("not_configured"):
         print(f"firebase_hostname_requiring_manual_authorization: {firebase_domain.hostname}")
         print("deployment_status: manual_action_required")
         return 3
+    print("deployment_status: pending_finalization")
     return 0
 
 
@@ -3884,6 +4091,13 @@ def verify(args: argparse.Namespace) -> int:
     }
     key_vault_id = _output_value(foundation, "keyVaultId")
     key_vault_name = _output_value(foundation, "keyVaultName")
+    backend_identity_id = _output_value(foundation, "identityId")
+    retained_retired_voice_secret_versions = (
+        _existing_deployment_retained_retired_voice_secret_versions(
+            resource_group=resource_group,
+            deployment_name=APPS_DEPLOYMENT,
+        )
+    )
     deployment_principal = _current_principal()
     with (
         _deployment_blob_lease(
@@ -3902,7 +4116,7 @@ def verify(args: argparse.Namespace) -> int:
             resource_group=resource_group,
             backend_app=backend_app,
             frontend_app=frontend_app,
-            expected_backend_identity_id=_output_value(foundation, "identityId"),
+            expected_backend_identity_id=backend_identity_id,
             expected_backend_identity_principal_id=_output_value(foundation, "identityPrincipalId"),
             expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
             expected_frontend_identity_principal_id=_output_value(
@@ -3915,6 +4129,9 @@ def verify(args: argparse.Namespace) -> int:
             expected_registry_server=expected_registry_server,
             expected_backend_image_digest=backend_digest,
             expected_frontend_image_digest=frontend_digest,
+            expected_retained_retired_voice_secret_versions=(
+                retained_retired_voice_secret_versions
+            ),
             expected_sha=expected_sha,
             health_timeout_seconds=args.health_timeout_seconds,
         )
@@ -3929,11 +4146,12 @@ def verify(args: argparse.Namespace) -> int:
                 secret_name=secret_name,
                 current_version=version,
             )
-        _verify_retired_voice_secret_postconditions(vault_name=key_vault_name)
         _verify_legacy_secret_postcondition(vault_name=key_vault_name)
         lease.assert_healthy()
     _assert_no_key_vault_writer(key_vault_id)
     _print_verification(backend, frontend)
+    print("websocket_canary_required: true")
+    print("voice_retirement_status: pending_finalization")
     return 0
 
 

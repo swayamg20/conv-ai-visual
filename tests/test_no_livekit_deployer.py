@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import sys
@@ -33,6 +34,7 @@ VERSIONS = {
     deploy.AZURE_KEY_SECRET_NAME: "a" * 32,
     deploy.FIREBASE_SECRET_NAME: "b" * 32,
 }
+RETAINED_VERSIONS = {deploy.LIVEKIT_API_KEY_SECRET_NAME: "c" * 32}
 
 
 def _service_account() -> dict[str, str]:
@@ -74,7 +76,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=firebase-project.appspot.com",
                 "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=123",
                 "NEXT_PUBLIC_FIREBASE_APP_ID=1:123:web:abc",
-                "NEXT_PUBLIC_VOICE_RUNTIME=voice_v2",
+                "NEXT_PUBLIC_VOICE_RUNTIME=disabled",
             )
         ),
         encoding="utf-8",
@@ -234,9 +236,11 @@ def test_active_inputs_and_parameters_contain_no_voice_provider_credentials(
         "azureOpenAiEndpoint",
         "azureOpenAiDeployment",
         "firebaseProjectId",
+        "retainedRetiredVoiceSecretVersions",
         "azureOpenAiSecretVersion",
         "firebaseRuntimeSecretVersion",
     }
+    assert parameters["retainedRetiredVoiceSecretVersions"] == "{}"
 
 
 def test_inputs_require_websocket_runtime(tmp_path: Path) -> None:
@@ -265,6 +269,162 @@ def test_inspector_accepts_only_api_websocket_topology(
     )
 
     assert dict(inspection.key_vault_secret_versions) == VERSIONS
+
+
+def test_existing_alias_discovery_uses_list_then_exact_show(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _backend_app()
+    properties = app["properties"]
+    assert isinstance(properties, dict)
+    configuration = properties["configuration"]
+    assert isinstance(configuration, dict)
+    secrets = configuration["secrets"]
+    assert isinstance(secrets, list)
+    secrets.append(
+        {
+            "name": deploy.LIVEKIT_API_KEY_SECRET_NAME,
+            "keyVaultUrl": (
+                "https://murmur-vault.vault.azure.net/secrets/"
+                f"{deploy.LIVEKIT_API_KEY_SECRET_NAME}/{RETAINED_VERSIONS[deploy.LIVEKIT_API_KEY_SECRET_NAME]}"
+            ),
+            "identity": BACKEND_IDENTITY_ID,
+        }
+    )
+    commands: list[str] = []
+
+    def run(command: list[str], **_kwargs: Any) -> object:
+        commands.append(command[2])
+        return ["murmur-api"] if command[2] == "list" else app
+
+    monkeypatch.setattr(deploy, "_run_json", run)
+
+    assert deploy._existing_retired_voice_secret_versions(
+        resource_group="murmur-pilot-rg",
+        backend_app="murmur-api",
+        expected_identity_id=BACKEND_IDENTITY_ID,
+        expected_key_vault_name="murmur-vault",
+    ) == RETAINED_VERSIONS
+    assert commands == ["list", "show"]
+
+
+def test_existing_alias_discovery_allows_a_missing_app(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: ["murmur-web"])
+
+    assert deploy._existing_retired_voice_secret_versions(
+        resource_group="murmur-pilot-rg",
+        backend_app="murmur-api",
+        expected_identity_id=BACKEND_IDENTITY_ID,
+        expected_key_vault_name="murmur-vault",
+    ) == {}
+
+
+@pytest.mark.parametrize("drift", ("identity", "vault", "unpinned", "inline"))
+def test_existing_alias_discovery_rejects_ambiguous_rollback_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+) -> None:
+    app = _backend_app()
+    properties = app["properties"]
+    assert isinstance(properties, dict)
+    configuration = properties["configuration"]
+    assert isinstance(configuration, dict)
+    secrets = configuration["secrets"]
+    assert isinstance(secrets, list)
+    alias: dict[str, str] = {
+        "name": deploy.LIVEKIT_API_KEY_SECRET_NAME,
+        "keyVaultUrl": (
+            "https://murmur-vault.vault.azure.net/secrets/"
+            f"{deploy.LIVEKIT_API_KEY_SECRET_NAME}/{'c' * 32}"
+        ),
+        "identity": BACKEND_IDENTITY_ID,
+    }
+    if drift == "identity":
+        alias["identity"] = FRONTEND_IDENTITY_ID
+    elif drift == "vault":
+        alias["keyVaultUrl"] = alias["keyVaultUrl"].replace("murmur-vault", "other-vault")
+    elif drift == "unpinned":
+        alias["keyVaultUrl"] = alias["keyVaultUrl"].rsplit("/", 1)[0]
+    else:
+        alias["value"] = "must-not-be-accepted"
+    secrets.append(alias)
+    responses = iter((["murmur-api"], app))
+    monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: next(responses))
+
+    with pytest.raises(deploy.DeploymentRefusal):
+        deploy._existing_retired_voice_secret_versions(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            expected_identity_id=BACKEND_IDENTITY_ID,
+            expected_key_vault_name="murmur-vault",
+        )
+
+
+def test_inspector_accepts_exact_unreferenced_retained_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _backend_app()
+    properties = app["properties"]
+    assert isinstance(properties, dict)
+    configuration = properties["configuration"]
+    assert isinstance(configuration, dict)
+    secrets = configuration["secrets"]
+    assert isinstance(secrets, list)
+    secrets.append(
+        {
+            "name": deploy.LIVEKIT_API_KEY_SECRET_NAME,
+            "keyVaultUrl": (
+                "https://murmur-vault.vault.azure.net/secrets/"
+                f"{deploy.LIVEKIT_API_KEY_SECRET_NAME}/{'c' * 32}"
+            ),
+            "identity": BACKEND_IDENTITY_ID,
+        }
+    )
+    monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: app)
+
+    inspection = deploy._inspect_app(
+        "murmur-pilot-rg",
+        "murmur-api",
+        backend=True,
+        expected_frontend_url=FRONTEND_URL,
+        expected_retained_retired_voice_secret_versions=RETAINED_VERSIONS,
+    )
+
+    assert dict(inspection.retained_retired_voice_secret_versions) == RETAINED_VERSIONS
+
+
+def test_inspector_rejects_retained_alias_version_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _backend_app()
+    properties = app["properties"]
+    assert isinstance(properties, dict)
+    configuration = properties["configuration"]
+    assert isinstance(configuration, dict)
+    secrets = configuration["secrets"]
+    assert isinstance(secrets, list)
+    secrets.append(
+        {
+            "name": deploy.LIVEKIT_API_KEY_SECRET_NAME,
+            "keyVaultUrl": (
+                "https://murmur-vault.vault.azure.net/secrets/"
+                f"{deploy.LIVEKIT_API_KEY_SECRET_NAME}/{'d' * 32}"
+            ),
+            "identity": BACKEND_IDENTITY_ID,
+        }
+    )
+    monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: app)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="changed a retained"):
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+            expected_retained_retired_voice_secret_versions=RETAINED_VERSIONS,
+        )
 
 
 @pytest.mark.parametrize(
@@ -464,3 +624,129 @@ def test_backend_boundary_rejects_retired_voice_secret_access(
             backend_principal_id=BACKEND_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
         )
+
+
+def test_deployment_parameter_round_trips_pending_canary_aliases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: Any) -> object:
+        observed.append(command)
+        return RETAINED_VERSIONS
+
+    monkeypatch.setattr(deploy, "_run_json", run)
+
+    assert deploy._existing_deployment_retained_retired_voice_secret_versions(
+        resource_group="murmur-pilot-rg",
+        deployment_name=deploy.APPS_DEPLOYMENT,
+    ) == RETAINED_VERSIONS
+    assert observed[0][observed[0].index("--query") + 1] == (
+        "properties.parameters.retainedRetiredVoiceSecretVersions.value"
+    )
+
+
+def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def output(value: str) -> dict[str, object]:
+        return {"type": "String", "value": value}
+
+    foundation = {
+        "registryLoginServer": output("murmurregistry.azurecr.io"),
+        "keyVaultId": output(KEY_VAULT_ID),
+        "keyVaultName": output("murmur-vault"),
+        "identityId": output(BACKEND_IDENTITY_ID),
+        "identityPrincipalId": output(BACKEND_PRINCIPAL_ID),
+        "frontendIdentityId": output(FRONTEND_IDENTITY_ID),
+        "frontendIdentityPrincipalId": output(FRONTEND_PRINCIPAL_ID),
+        "deploymentLockStorageAccountName": output("murmurlockaccount"),
+        "deploymentLockContainerName": output("deployment-locks"),
+        "deploymentLockBlobName": output("azure-pilot.lock"),
+    }
+    apps = {
+        parameter_name: output(VERSIONS[secret_name])
+        for secret_name, parameter_name in deploy.SECRET_VERSION_PARAMETERS.items()
+    }
+    live_arguments: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        deploy,
+        "_existing_deployment_outputs",
+        lambda *, deployment_name, **_kwargs: (
+            foundation if deployment_name == deploy.FOUNDATION_DEPLOYMENT else apps
+        ),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_existing_deployment_images",
+        lambda **_kwargs: (
+            f"murmurregistry.azurecr.io/murmur-api@{DIGEST}",
+            f"murmurregistry.azurecr.io/murmur-web@{FRONTEND_DIGEST}",
+        ),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_existing_deployment_retained_retired_voice_secret_versions",
+        lambda **_kwargs: RETAINED_VERSIONS,
+    )
+    monkeypatch.setattr(deploy, "_current_principal", lambda: (BACKEND_PRINCIPAL_ID, "User"))
+
+    class Lease:
+        def assert_healthy(self) -> None:
+            return None
+
+    @deploy.contextmanager
+    def lease(**_kwargs: Any) -> Any:
+        yield Lease()
+
+    @deploy.contextmanager
+    def writer(*_args: Any, **_kwargs: Any) -> Any:
+        yield None
+
+    monkeypatch.setattr(deploy, "_deployment_blob_lease", lease)
+    monkeypatch.setattr(deploy, "_temporary_key_vault_write", writer)
+
+    backend = replace(
+        _inspection("murmur-api", backend=True, digest=DIGEST),
+        retained_retired_voice_secret_versions=tuple(RETAINED_VERSIONS.items()),
+    )
+    frontend = _inspection("murmur-web", backend=False, digest=FRONTEND_DIGEST)
+
+    def verify_live(**kwargs: Any) -> tuple[deploy.AppInspection, deploy.AppInspection]:
+        live_arguments.update(kwargs)
+        return backend, frontend
+
+    monkeypatch.setattr(deploy, "verify_live", verify_live)
+    monkeypatch.setattr(deploy, "_verify_old_revisions_inactive", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_verify_rotation_postcondition", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_verify_legacy_secret_postcondition", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        deploy,
+        "_verify_retired_voice_secret_postconditions",
+        lambda **_kwargs: pytest.fail("pending canary must not require voice-secret retirement"),
+    )
+    monkeypatch.setattr(deploy, "_assert_no_key_vault_writer", lambda _vault: None)
+    monkeypatch.setattr(deploy, "_print_verification", lambda *_args: None)
+
+    result = deploy.verify(
+        argparse.Namespace(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            frontend_app="murmur-web",
+            expected_sha=SHA,
+            subscription_id="11111111-1111-1111-1111-111111111111",
+            tenant_id="22222222-2222-2222-2222-222222222222",
+            health_timeout_seconds=1,
+        )
+    )
+
+    assert result == 0
+    assert (
+        live_arguments["expected_retained_retired_voice_secret_versions"]
+        == RETAINED_VERSIONS
+    )
+    output_text = capsys.readouterr().out
+    assert "websocket_canary_required: true" in output_text
+    assert "voice_retirement_status: pending_finalization" in output_text

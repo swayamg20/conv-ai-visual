@@ -12,16 +12,6 @@ BACKEND = APPS.split("resource backend 'Microsoft.App/containerApps", 1)[1].spli
 )[0]
 FRONTEND = APPS.split("resource frontend 'Microsoft.App/containerApps", 1)[1]
 
-FORBIDDEN_VOICE_PROVIDER_MARKERS = (
-    "livekit",
-    "deepgram",
-    "groq",
-    "elevenlabs",
-    "signing",
-    "worker",
-)
-
-
 def test_apps_deploys_one_first_party_websocket_api_container() -> None:
     assert BACKEND.count("containers: [") == 1
     assert BACKEND.count("image: backendImage") == 1
@@ -44,9 +34,25 @@ def test_apps_limits_runtime_secrets_to_openai_and_firebase() -> None:
     assert "param azureOpenAiSecretVersion string" in APPS
     assert "param firebaseRuntimeSecretVersion string" in APPS
 
-    rendered = f"{APPS}\n{FOUNDATION}".casefold()
-    for marker in FORBIDDEN_VOICE_PROVIDER_MARKERS:
-        assert marker not in rendered
+    assert "name: 'voice-worker'" not in BACKEND
+    assert "livekit.agents" not in BACKEND
+
+
+def test_apps_retains_old_secret_aliases_only_as_unreferenced_canary_rollback() -> None:
+    assert "param retainedRetiredVoiceSecretVersions object = {}" in APPS
+    assert "contains(retainedRetiredVoiceSecretVersions, secretName)" in APPS
+    assert "concat([" in BACKEND
+    assert "], retainedRetiredVoiceSecrets)" in BACKEND
+    for secret_name in (
+        "livekit-api-key",
+        "livekit-api-secret",
+        "voice-v2-signing-secret",
+        "deepgram-api-key",
+        "groq-api-key",
+        "elevenlabs-api-key",
+    ):
+        assert f"'{secret_name}'" in APPS
+        assert f"secretRef: '{secret_name}'" not in BACKEND
 
 
 def test_foundation_grants_key_vault_access_only_to_active_secrets() -> None:
