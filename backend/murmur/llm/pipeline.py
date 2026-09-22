@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 
 from murmur.canvas.state import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, CanvasState
 from murmur.core.config import config
+from murmur.live_scene.conversation_storyboard import CONVERSATION_STORYBOARD_TOOL_NAME
 from murmur.llm.base import LLMClient
 from murmur.llm.factory import create_llm_client
 from murmur.llm.tool_runtime import ToolConversationMixin
@@ -499,6 +500,11 @@ class LLMPipeline(ToolConversationMixin):
             existing_tool_names = {t.get("function", {}).get("name") for t in tools}
             for anim_tool in ANIMATION_TOOLS:
                 tool_name = anim_tool.get("function", {}).get("name")
+                if (
+                    tool_name == CONVERSATION_STORYBOARD_TOOL_NAME
+                    and self.storyboard_callback is None
+                ):
+                    continue
                 if tool_name and tool_name not in existing_tool_names:
                     tools.append(anim_tool)
                     logger.debug("Added animation tool: %s", tool_name)

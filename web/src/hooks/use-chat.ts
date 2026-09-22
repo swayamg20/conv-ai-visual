@@ -97,6 +97,7 @@ export function useChat(options: UseChatOptions = {}) {
 
     let assistantId: string | null = null;
     let fullContent = "";
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
     try {
       const response = await fetch(`${apiUrl}/chat`, {
@@ -118,7 +119,7 @@ export function useChat(options: UseChatOptions = {}) {
         await response.body?.cancel();
         return;
       }
-      const reader = response.body?.getReader();
+      reader = response.body?.getReader();
       if (!reader) throw new Error("No response body");
 
       const decoder = new LiveSceneSseDecoder();
@@ -199,6 +200,13 @@ export function useChat(options: UseChatOptions = {}) {
       }
     } catch (e) {
       const error = e as Error;
+      if (reader) {
+        try {
+          await reader.cancel(error);
+        } catch {
+          // Preserve the decoder/network failure that ended the request.
+        }
+      }
       if (isCurrent() && error.name !== "AbortError") {
         setMessages((prev) => [
           ...prev,
@@ -210,6 +218,7 @@ export function useChat(options: UseChatOptions = {}) {
         ]);
       }
     } finally {
+      reader?.releaseLock();
       if (requestGenerationRef.current === generation) {
         activeRequestRef.current = null;
         setIsLoading(false);

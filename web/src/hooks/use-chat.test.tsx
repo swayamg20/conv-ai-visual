@@ -290,4 +290,38 @@ describe("useChat", () => {
     ]);
     expect(mounted.read().isLoading).toBe(false);
   });
+
+  it("cancels a held-open response when the SSE decoder rejects malformed UTF-8", async () => {
+    const cancel = vi.fn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(Uint8Array.of(0xc3, 0x28));
+            },
+            cancel,
+          }),
+          { headers: { "Content-Type": "text/event-stream" } },
+        ),
+      ),
+    );
+    const mounted = await mountHook();
+
+    await act(async () => {
+      await mounted.read().sendMessage("hello");
+    });
+
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(cancel.mock.calls[0]?.[0]).toMatchObject({
+      name: "LiveSceneSseError",
+      code: "invalid_utf8",
+    });
+    expect(mounted.read().messages.map((message) => message.content)).toEqual([
+      "hello",
+      "Error: Invalid live scene SSE stream: stream contains malformed UTF-8",
+    ]);
+    expect(mounted.read().isLoading).toBe(false);
+  });
 });

@@ -19,6 +19,7 @@ def test_product_route_contract_is_registered_once() -> None:
         "/api/sessions": {"get", "post"},
         "/api/sessions/{session_id}": {"get"},
         "/api/sessions/{session_id}/end": {"post"},
+        "/api/sessions/{session_id}/storyboard/stream": {"post"},
         "/api/voice-logs": {"get"},
         "/api/voice-logs/stats": {"get"},
         "/api/voice/session": {"post"},

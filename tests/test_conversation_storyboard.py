@@ -24,6 +24,20 @@ class _StoryboardRuntime(ToolConversationMixin):
         self.storyboard_callback = self.commands.append
 
 
+def _create_pipeline(monkeypatch: pytest.MonkeyPatch, *, canvas_mode: bool) -> LLMPipeline:
+    monkeypatch.setattr("murmur.llm.pipeline.create_llm_client", lambda **_kwargs: object())
+    return LLMPipeline(
+        provider="openai",
+        api_key="test-key",
+        enable_memory=False,
+        canvas_mode=canvas_mode,
+    )
+
+
+def _tool_names(pipeline: LLMPipeline) -> list[str]:
+    return [tool["function"]["name"] for tool in pipeline.get_tools_schema()]
+
+
 def test_command_uses_verified_defaults_and_server_owned_identity() -> None:
     command = create_conversation_storyboard_command(
         {"prompt": "  Trace both arcs, then compare their ranges.  "}
@@ -119,5 +133,58 @@ async def test_tool_runtime_publishes_one_typed_command() -> None:
     assert runtime.commands[0]["prompt"] == ("Trace the lower path before the higher path.")
 
 
+@pytest.mark.asyncio
+async def test_tool_runtime_awaits_async_storyboard_callback_exactly_once() -> None:
+    runtime = _StoryboardRuntime()
+    commands: list[dict] = []
+
+    async def publish(command: dict) -> None:
+        commands.append(command)
+
+    runtime.storyboard_callback = publish
+
+    result = await runtime._execute_single_tool_call(
+        ToolCall(
+            "call-async",
+            CONVERSATION_STORYBOARD_TOOL_NAME,
+            {"prompt": "Compare the landing ranges."},
+        )
+    )
+
+    assert result.success is True
+    assert len(commands) == 1
+    assert commands[0]["prompt"] == "Compare the landing ranges."
+
+
 def test_storyboard_tool_is_serialized_with_other_visual_mutations() -> None:
     assert CONVERSATION_STORYBOARD_TOOL_NAME in LLMPipeline.MUTATING_TOOL_NAMES
+
+
+def test_non_canvas_pipeline_does_not_expose_storyboard_tool_with_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = _create_pipeline(monkeypatch, canvas_mode=False)
+    pipeline.set_storyboard_callback(lambda _command: None)
+
+    assert CONVERSATION_STORYBOARD_TOOL_NAME not in _tool_names(pipeline)
+
+
+def test_canvas_pipeline_without_callback_does_not_expose_storyboard_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = _create_pipeline(monkeypatch, canvas_mode=True)
+
+    tool_names = _tool_names(pipeline)
+
+    assert "canvas_update" in tool_names
+    assert "teach_with_visuals" in tool_names
+    assert CONVERSATION_STORYBOARD_TOOL_NAME not in tool_names
+
+
+def test_canvas_pipeline_exposes_storyboard_tool_with_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = _create_pipeline(monkeypatch, canvas_mode=True)
+    pipeline.set_storyboard_callback(lambda _command: None)
+
+    assert _tool_names(pipeline).count(CONVERSATION_STORYBOARD_TOOL_NAME) == 1
