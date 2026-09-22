@@ -35,6 +35,30 @@ VERSIONS = {
     deploy.FIREBASE_SECRET_NAME: "b" * 32,
 }
 RETAINED_VERSIONS = {deploy.LIVEKIT_API_KEY_SECRET_NAME: "c" * 32}
+LEGACY_ASSIGNMENT_ID = (
+    f"{KEY_VAULT_ID}/providers/Microsoft.Authorization/roleAssignments/"
+    "33333333-3333-3333-3333-333333333333"
+)
+
+
+def _role_assignment(
+    *,
+    scope: str,
+    principal_id: str = BACKEND_PRINCIPAL_ID,
+    role_definition_id: str = deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+    assignment_id: str | None = None,
+) -> deploy.RoleAssignmentMetadata:
+    return deploy.RoleAssignmentMetadata(
+        id=assignment_id
+        or (
+            f"{scope}/providers/Microsoft.Authorization/roleAssignments/"
+            "44444444-4444-4444-4444-444444444444"
+        ),
+        scope=scope,
+        principal_id=principal_id,
+        role_definition_id=role_definition_id,
+        description=None,
+    )
 
 
 def _service_account() -> dict[str, str]:
@@ -596,16 +620,18 @@ def test_verify_live_binds_both_images_before_and_after_health(
 def test_backend_boundary_rejects_retired_voice_secret_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def assignments(*, secret_name: str, **_kwargs: Any) -> tuple[tuple[str, str], ...]:
+    def assignments(
+        *, secret_name: str, **_kwargs: Any
+    ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
         if secret_name in deploy.ACTIVE_SECRET_NAMES:
             scope = f"{KEY_VAULT_ID}/secrets/{secret_name}"
-            return ((scope, deploy.KEY_VAULT_SECRETS_USER_ROLE_ID),)
+            return (_role_assignment(scope=scope),)
         if secret_name == deploy.RETIRED_VOICE_SECRET_NAMES[0]:
             scope = f"{KEY_VAULT_ID}/secrets/{secret_name}"
-            return ((scope, deploy.KEY_VAULT_SECRETS_USER_ROLE_ID),)
+            return (_role_assignment(scope=scope),)
         return ()
 
-    monkeypatch.setattr(deploy, "_key_vault_assignments_at_secret", assignments)
+    monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
     monkeypatch.setattr(
         deploy,
         "_role_permissions",
@@ -619,8 +645,213 @@ def test_backend_boundary_rejects_retired_voice_secret_access(
         ),
     )
 
-    with pytest.raises(deploy.DeploymentRefusal, match="retired Key Vault secret"):
+    with pytest.raises(deploy.DeploymentRefusal, match="exact accepted assignments"):
         deploy._verify_backend_key_vault_boundary(
+            backend_principal_id=BACKEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+        )
+
+
+def test_pending_canary_accepts_only_the_pinned_direct_legacy_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = _role_assignment(scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID)
+
+    def assignments(
+        *, secret_name: str, **_kwargs: Any
+    ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
+        effective = [legacy]
+        if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
+            effective.append(
+                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
+            )
+        return tuple(effective)
+
+    monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
+    monkeypatch.setattr(
+        deploy,
+        "_role_permissions",
+        lambda _role: (
+            {
+                "actions": [],
+                "notActions": [],
+                "dataActions": ["Microsoft.KeyVault/vaults/secrets/getSecret/action"],
+                "notDataActions": [],
+            },
+        ),
+    )
+
+    deploy._verify_backend_key_vault_boundary(
+        backend_principal_id=BACKEND_PRINCIPAL_ID,
+        key_vault_id=KEY_VAULT_ID,
+        allowed_retired_voice_secret_names=tuple(RETAINED_VERSIONS),
+        expected_legacy_vault_read=legacy,
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="rollback aliases"):
+        deploy._verify_backend_key_vault_boundary(
+            backend_principal_id=BACKEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            expected_legacy_vault_read=legacy,
+        )
+
+
+def test_pending_canary_rejects_group_derived_or_broader_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = _role_assignment(scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID)
+    group_legacy = _role_assignment(
+        scope=KEY_VAULT_ID,
+        principal_id="55555555-5555-5555-5555-555555555555",
+        assignment_id=(
+            f"{KEY_VAULT_ID}/providers/Microsoft.Authorization/roleAssignments/"
+            "66666666-6666-6666-6666-666666666666"
+        ),
+    )
+
+    def assignments(
+        *, secret_name: str, **_kwargs: Any
+    ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
+        effective = [group_legacy]
+        if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
+            effective.append(
+                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
+            )
+        return tuple(effective)
+
+    monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
+    monkeypatch.setattr(
+        deploy,
+        "_role_permissions",
+        lambda _role: (
+            {
+                "actions": [],
+                "notActions": [],
+                "dataActions": ["Microsoft.KeyVault/vaults/secrets/getSecret/action"],
+                "notDataActions": [],
+            },
+        ),
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="exact accepted assignments"):
+        deploy._verify_backend_key_vault_boundary(
+            backend_principal_id=BACKEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            allowed_retired_voice_secret_names=tuple(RETAINED_VERSIONS),
+            expected_legacy_vault_read=legacy,
+        )
+
+
+@pytest.mark.parametrize("danger", ("broader-read", "grant-writer"))
+def test_pending_canary_rejects_broader_read_and_grant_permissions(
+    monkeypatch: pytest.MonkeyPatch,
+    danger: str,
+) -> None:
+    legacy = _role_assignment(scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID)
+    dangerous_role = (
+        deploy.KEY_VAULT_SECRETS_USER_ROLE_ID
+        if danger == "broader-read"
+        else "77777777-7777-7777-7777-777777777777"
+    )
+    broad_scope = "/subscriptions/sub/resourceGroups/rg"
+    dangerous = _role_assignment(
+        scope=broad_scope,
+        role_definition_id=dangerous_role,
+        assignment_id=(
+            f"{broad_scope}/providers/Microsoft.Authorization/roleAssignments/"
+            "88888888-8888-8888-8888-888888888888"
+        ),
+    )
+
+    def assignments(
+        *, secret_name: str, **_kwargs: Any
+    ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
+        effective = [legacy, dangerous]
+        if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
+            effective.append(
+                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
+            )
+        return tuple(effective)
+
+    def permissions(role_id: str) -> tuple[dict[str, list[str]], ...]:
+        return (
+            {
+                "actions": (
+                    ["Microsoft.Authorization/roleAssignments/write"]
+                    if role_id == dangerous_role and danger == "grant-writer"
+                    else []
+                ),
+                "notActions": [],
+                "dataActions": (
+                    ["Microsoft.KeyVault/vaults/secrets/getSecret/action"]
+                    if role_id == deploy.KEY_VAULT_SECRETS_USER_ROLE_ID
+                    else []
+                ),
+                "notDataActions": [],
+            },
+        )
+
+    monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
+    monkeypatch.setattr(deploy, "_role_permissions", permissions)
+
+    with pytest.raises(deploy.DeploymentRefusal, match="exact accepted assignments"):
+        deploy._verify_backend_key_vault_boundary(
+            backend_principal_id=BACKEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            allowed_retired_voice_secret_names=tuple(RETAINED_VERSIONS),
+            expected_legacy_vault_read=legacy,
+        )
+
+
+def test_direct_legacy_discovery_excludes_inherited_and_group_assignments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+
+    def run(command: list[str], **_kwargs: Any) -> object:
+        commands.append(command)
+        return [
+            {
+                "id": LEGACY_ASSIGNMENT_ID,
+                "scope": KEY_VAULT_ID,
+                "principalId": BACKEND_PRINCIPAL_ID,
+                "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+                "description": None,
+            }
+        ]
+
+    monkeypatch.setattr(deploy, "_run_json", run)
+
+    assignment = deploy._direct_legacy_backend_vault_read_assignment(
+        backend_principal_id=BACKEND_PRINCIPAL_ID,
+        key_vault_id=KEY_VAULT_ID,
+    )
+
+    assert assignment is not None
+    assert assignment.id == LEGACY_ASSIGNMENT_ID
+    assert "--include-inherited" not in commands[0]
+    assert "--include-groups" not in commands[0]
+
+
+def test_direct_legacy_discovery_rejects_a_different_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *_args, **_kwargs: [
+            {
+                "id": LEGACY_ASSIGNMENT_ID,
+                "scope": KEY_VAULT_ID,
+                "principalId": "55555555-5555-5555-5555-555555555555",
+                "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+                "description": None,
+            }
+        ],
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="ambiguous"):
+        deploy._direct_legacy_backend_vault_read_assignment(
             backend_principal_id=BACKEND_PRINCIPAL_ID,
             key_vault_id=KEY_VAULT_ID,
         )
@@ -707,6 +938,15 @@ def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
 
     monkeypatch.setattr(deploy, "_deployment_blob_lease", lease)
     monkeypatch.setattr(deploy, "_temporary_key_vault_write", writer)
+    legacy_vault_read = _role_assignment(
+        scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_direct_legacy_backend_vault_read_assignment",
+        lambda **_kwargs: legacy_vault_read,
+    )
+    monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
 
     backend = replace(
         _inspection("murmur-api", backend=True, digest=DIGEST),
@@ -747,6 +987,7 @@ def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
         live_arguments["expected_retained_retired_voice_secret_versions"]
         == RETAINED_VERSIONS
     )
+    assert live_arguments["expected_legacy_backend_vault_read"] == legacy_vault_read
     output_text = capsys.readouterr().out
     assert "websocket_canary_required: true" in output_text
     assert "voice_retirement_status: pending_finalization" in output_text

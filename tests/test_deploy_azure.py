@@ -1681,12 +1681,31 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     monkeypatch.setattr(deploy, "_write_key_vault_secret", fake_write_secret)
     monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
-    monkeypatch.setattr(deploy, "_retire_legacy_backend_vault_read", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        deploy,
+        "_retire_legacy_backend_vault_read",
+        lambda **_kwargs: pytest.fail("pending canary must preserve rollback access"),
+    )
     retained_versions = {deploy.LIVEKIT_API_KEY_SECRET_NAME: "c" * 32}
+    legacy_vault_read = deploy.RoleAssignmentMetadata(
+        id=(
+            f"{KEY_VAULT_ID}/providers/Microsoft.Authorization/roleAssignments/"
+            "66666666-6666-6666-6666-666666666666"
+        ),
+        scope=KEY_VAULT_ID,
+        principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
+        role_definition_id=deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+        description=None,
+    )
     monkeypatch.setattr(
         deploy,
         "_existing_retired_voice_secret_versions",
         lambda **_kwargs: retained_versions,
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_direct_legacy_backend_vault_read_assignment",
+        lambda **_kwargs: legacy_vault_read,
     )
     monkeypatch.setattr(deploy, "_assert_no_key_vault_writer", lambda _vault: None)
     monkeypatch.setattr(
@@ -1793,6 +1812,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
         verify_arguments["expected_retained_retired_voice_secret_versions"]
         == retained_versions
     )
+    assert verify_arguments["expected_legacy_backend_vault_read"] == legacy_vault_read
     assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
     assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION
     for secret_name, parameter_name in deploy.SECRET_VERSION_PARAMETERS.items():
@@ -1816,6 +1836,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     output = capsys.readouterr().out
     assert "websocket_canary_required: true" in output
     assert "voice_retirement_status: pending_finalization" in output
+    assert "legacy_vault_read_status: retained_for_rollback_pending_canary" in output
 
 
 def test_verify_live_performs_only_metadata_and_health_checks(
@@ -2227,8 +2248,15 @@ def test_backend_key_vault_boundary_requires_exact_secret_scopes(
                 return []
             return [
                 {
+                    "id": (
+                        f"{KEY_VAULT_ID if vault_wide else scope}/providers/"
+                        "Microsoft.Authorization/roleAssignments/"
+                        "77777777-7777-7777-7777-777777777777"
+                    ),
                     "scope": KEY_VAULT_ID if vault_wide else scope,
+                    "principalId": BACKEND_IDENTITY_PRINCIPAL_ID,
                     "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+                    "description": None,
                 }
             ]
         if command[1:4] == ["role", "definition", "list"]:
@@ -2244,7 +2272,7 @@ def test_backend_key_vault_boundary_requires_exact_secret_scopes(
 
     monkeypatch.setattr(deploy, "_run_json", fake_run_json)
     if vault_wide:
-        with pytest.raises(deploy.DeploymentRefusal, match="intended secret scope"):
+        with pytest.raises(deploy.DeploymentRefusal, match="exact accepted assignments"):
             deploy._verify_backend_key_vault_boundary(
                 backend_principal_id=BACKEND_IDENTITY_PRINCIPAL_ID,
                 key_vault_id=KEY_VAULT_ID,

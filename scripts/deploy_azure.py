@@ -3118,6 +3118,136 @@ def _key_vault_assignments_at_secret(
     return tuple(assignments)
 
 
+def _parse_role_assignment_metadata(item: object) -> RoleAssignmentMetadata:
+    if not isinstance(item, dict):
+        raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
+    assignment_id = item.get("id")
+    scope = item.get("scope")
+    principal_id = item.get("principalId")
+    description = item.get("description")
+    if (
+        not isinstance(assignment_id, str)
+        or not isinstance(scope, str)
+        or not isinstance(principal_id, str)
+        or not _AZURE_GUID.fullmatch(principal_id)
+        or (description is not None and not isinstance(description, str))
+    ):
+        raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
+    marker = "/providers/microsoft.authorization/roleassignments/"
+    try:
+        assignment_scope, assignment_name = assignment_id.casefold().rsplit(marker, 1)
+    except ValueError:
+        raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid") from None
+    if (
+        not _same_azure_resource_id(assignment_scope, scope)
+        or not _AZURE_GUID.fullmatch(assignment_name)
+    ):
+        raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
+    return RoleAssignmentMetadata(
+        id=assignment_id,
+        scope=scope,
+        principal_id=principal_id,
+        role_definition_id=_role_definition_guid(item.get("roleDefinitionId")),
+        description=description or None,
+    )
+
+
+def _effective_key_vault_assignments_at_secret(
+    *, principal_id: str, key_vault_id: str, secret_name: str
+) -> tuple[RoleAssignmentMetadata, ...]:
+    secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
+    result = _run_json(
+        [
+            "az",
+            "role",
+            "assignment",
+            "list",
+            "--assignee-object-id",
+            principal_id,
+            "--scope",
+            secret_scope,
+            "--include-inherited",
+            "--include-groups",
+            "--fill-principal-name",
+            "false",
+            "--fill-role-definition-name",
+            "false",
+            "--query",
+            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect effective managed-identity access to Key Vault secret {secret_name}",
+    )
+    if not isinstance(result, list):
+        raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
+    return tuple(_parse_role_assignment_metadata(item) for item in result)
+
+
+def _direct_legacy_backend_vault_read_assignment(
+    *, backend_principal_id: str, key_vault_id: str
+) -> RoleAssignmentMetadata | None:
+    """Return the one direct rollback grant; group and inherited grants are excluded."""
+
+    result = _run_json(
+        [
+            "az",
+            "role",
+            "assignment",
+            "list",
+            "--assignee-object-id",
+            backend_principal_id,
+            "--scope",
+            key_vault_id,
+            "--fill-principal-name",
+            "false",
+            "--fill-role-definition-name",
+            "false",
+            "--query",
+            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation="inspect direct legacy backend Key Vault role assignment",
+    )
+    if not isinstance(result, list):
+        raise DeploymentRefusal("legacy backend Key Vault role metadata is invalid")
+    assignments = tuple(_parse_role_assignment_metadata(item) for item in result)
+    candidates = tuple(
+        assignment
+        for assignment in assignments
+        if _same_azure_resource_id(assignment.scope, key_vault_id)
+        and assignment.role_definition_id == KEY_VAULT_SECRETS_USER_ROLE_ID
+    )
+    if len(candidates) > 1:
+        raise DeploymentRefusal("legacy backend Key Vault role metadata is ambiguous")
+    if not candidates:
+        return None
+    assignment = candidates[0]
+    if (
+        assignment.principal_id.casefold() != backend_principal_id.casefold()
+        or assignment.description is not None
+    ):
+        raise DeploymentRefusal("legacy backend Key Vault role metadata is ambiguous")
+    return assignment
+
+
+def _same_role_assignment(
+    actual: RoleAssignmentMetadata, expected: RoleAssignmentMetadata
+) -> bool:
+    return (
+        _same_azure_resource_id(actual.id, expected.id)
+        and _same_azure_resource_id(actual.scope, expected.scope)
+        and actual.principal_id.casefold() == expected.principal_id.casefold()
+        and actual.role_definition_id == expected.role_definition_id
+        and actual.description == expected.description
+    )
+
+
 def _role_permissions(role_id: str) -> tuple[Mapping[str, object], ...]:
     permissions = _run_json(
         [
@@ -3184,49 +3314,81 @@ def _verify_backend_key_vault_boundary(
     backend_principal_id: str,
     key_vault_id: str,
     allowed_retired_voice_secret_names: Sequence[str] = (),
+    expected_legacy_vault_read: RoleAssignmentMetadata | None = None,
 ) -> None:
+    """Require the exact per-secret grants plus one explicitly pinned rollback grant."""
+
+    if expected_legacy_vault_read is not None and (
+        not _same_azure_resource_id(expected_legacy_vault_read.scope, key_vault_id)
+        or expected_legacy_vault_read.principal_id.casefold()
+        != backend_principal_id.casefold()
+        or expected_legacy_vault_read.role_definition_id
+        != KEY_VAULT_SECRETS_USER_ROLE_ID
+        or expected_legacy_vault_read.description is not None
+    ):
+        raise DeploymentRefusal("expected legacy backend Key Vault role metadata is invalid")
     allowed_retired = frozenset(allowed_retired_voice_secret_names)
     if not allowed_retired.issubset(RETIRED_VOICE_SECRET_NAMES):
         raise DeploymentRefusal("allowed retired voice-secret access is invalid")
+    if expected_legacy_vault_read is not None and not allowed_retired:
+        raise DeploymentRefusal(
+            "legacy vault-wide access cannot be retained without rollback aliases"
+        )
     permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
-    expected_access_names = (
+    expected_access_names = frozenset(
+        (*ACTIVE_SECRET_NAMES, *allowed_retired)
+    )
+    for secret_name in (
         *ACTIVE_SECRET_NAMES,
-        *(name for name in RETIRED_VOICE_SECRET_NAMES if name in allowed_retired),
-    )
-    for secret_name in expected_access_names:
-        secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
-        assignments = _key_vault_assignments_at_secret(
-            principal_id=backend_principal_id,
-            key_vault_id=key_vault_id,
-            secret_name=secret_name,
-        )
-        relevant = _security_relevant_key_vault_assignments(
-            assignments, permission_cache=permission_cache
-        )
-        if (
-            len(relevant) != 1
-            or not _same_azure_resource_id(relevant[0][0], secret_scope)
-            or relevant[0][1] != KEY_VAULT_SECRETS_USER_ROLE_ID
-        ):
-            raise DeploymentRefusal(
-                "backend Key Vault access is not limited to the intended secret scope"
-            )
-
-    retired_names = (
-        *(name for name in RETIRED_VOICE_SECRET_NAMES if name not in allowed_retired),
+        *RETIRED_VOICE_SECRET_NAMES,
         LEGACY_FIREBASE_SECRET_NAME,
-    )
-    for secret_name in retired_names:
-        assignments = _key_vault_assignments_at_secret(
+    ):
+        secret_scope = f"{key_vault_id.rstrip('/')}/secrets/{secret_name}"
+        assignments = _effective_key_vault_assignments_at_secret(
             principal_id=backend_principal_id,
             key_vault_id=key_vault_id,
             secret_name=secret_name,
         )
-        if _security_relevant_key_vault_assignments(
-            assignments, permission_cache=permission_cache
+        relevant_pairs = set(
+            _security_relevant_key_vault_assignments(
+                tuple(
+                    (assignment.scope, assignment.role_definition_id)
+                    for assignment in assignments
+                ),
+                permission_cache=permission_cache,
+            )
+        )
+        relevant = tuple(
+            assignment
+            for assignment in assignments
+            if (assignment.scope, assignment.role_definition_id) in relevant_pairs
+        )
+        direct = tuple(
+            assignment
+            for assignment in relevant
+            if _same_azure_resource_id(assignment.scope, secret_scope)
+            and assignment.principal_id.casefold() == backend_principal_id.casefold()
+            and assignment.role_definition_id == KEY_VAULT_SECRETS_USER_ROLE_ID
+            and assignment.description is None
+        )
+        legacy = (
+            ()
+            if expected_legacy_vault_read is None
+            else tuple(
+                assignment
+                for assignment in relevant
+                if _same_role_assignment(assignment, expected_legacy_vault_read)
+            )
+        )
+        expected_direct_count = 1 if secret_name in expected_access_names else 0
+        expected_legacy_count = 1 if expected_legacy_vault_read is not None else 0
+        if (
+            len(direct) != expected_direct_count
+            or len(legacy) != expected_legacy_count
+            or len(relevant) != expected_direct_count + expected_legacy_count
         ):
             raise DeploymentRefusal(
-                f"backend identity can access retired Key Vault secret {secret_name}"
+                "backend Key Vault access is not limited to the exact accepted assignments"
             )
 
 
@@ -3547,6 +3709,7 @@ def verify_live(
     expected_backend_image_digest: str,
     expected_frontend_image_digest: str,
     expected_retained_retired_voice_secret_versions: Mapping[str, str] | None = None,
+    expected_legacy_backend_vault_read: RoleAssignmentMetadata | None = None,
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
 ) -> tuple[AppInspection, AppInspection]:
@@ -3644,6 +3807,7 @@ def verify_live(
         backend_principal_id=expected_backend_identity_principal_id,
         key_vault_id=live_key_vault_id,
         allowed_retired_voice_secret_names=tuple(expected_retained_versions),
+        expected_legacy_vault_read=expected_legacy_backend_vault_read,
     )
     _verify_https(
         backend.url,
@@ -3914,16 +4078,19 @@ def deploy(args: argparse.Namespace) -> int:
                 != expected_value.casefold()
             ):
                 raise DeploymentRefusal("foundation outputs changed during secured deployment")
-        _retire_legacy_backend_vault_read(
-            backend_principal_id=backend_identity_principal_id,
-            key_vault_id=key_vault_id,
-            mutation_guard=lease.assert_healthy,
-        )
         retained_retired_voice_secret_versions = _existing_retired_voice_secret_versions(
             resource_group=resource_group,
             backend_app=backend_app,
             expected_identity_id=backend_identity_id,
             expected_key_vault_name=key_vault_name,
+        )
+        legacy_backend_vault_read = (
+            _direct_legacy_backend_vault_read_assignment(
+                backend_principal_id=backend_identity_principal_id,
+                key_vault_id=key_vault_id,
+            )
+            if retained_retired_voice_secret_versions
+            else None
         )
         _verify_backend_key_vault_boundary(
             backend_principal_id=backend_identity_principal_id,
@@ -3931,6 +4098,7 @@ def deploy(args: argparse.Namespace) -> int:
             allowed_retired_voice_secret_names=tuple(
                 retained_retired_voice_secret_versions
             ),
+            expected_legacy_vault_read=legacy_backend_vault_read,
         )
 
         lease.assert_healthy()
@@ -4013,6 +4181,7 @@ def deploy(args: argparse.Namespace) -> int:
             expected_retained_retired_voice_secret_versions=(
                 retained_retired_voice_secret_versions
             ),
+            expected_legacy_backend_vault_read=legacy_backend_vault_read,
             expected_sha=revision.sha,
             health_timeout_seconds=args.health_timeout_seconds,
         )
@@ -4037,6 +4206,14 @@ def deploy(args: argparse.Namespace) -> int:
     print(
         "retained_retired_voice_aliases: "
         + (",".join(retained_retired_voice_secret_versions) or "none")
+    )
+    print(
+        "legacy_vault_read_status: "
+        + (
+            "retained_for_rollback_pending_canary"
+            if legacy_backend_vault_read is not None
+            else "not_present"
+        )
     )
     print(f"legacy_firebase_secret: {legacy_firebase_secret}")
     _print_verification(backend, frontend)
@@ -4092,6 +4269,7 @@ def verify(args: argparse.Namespace) -> int:
     key_vault_id = _output_value(foundation, "keyVaultId")
     key_vault_name = _output_value(foundation, "keyVaultName")
     backend_identity_id = _output_value(foundation, "identityId")
+    backend_identity_principal_id = _output_value(foundation, "identityPrincipalId")
     retained_retired_voice_secret_versions = (
         _existing_deployment_retained_retired_voice_secret_versions(
             resource_group=resource_group,
@@ -4112,12 +4290,28 @@ def verify(args: argparse.Namespace) -> int:
             mutation_guard=lease.assert_healthy,
         ),
     ):
+        legacy_backend_vault_read = (
+            _direct_legacy_backend_vault_read_assignment(
+                backend_principal_id=backend_identity_principal_id,
+                key_vault_id=key_vault_id,
+            )
+            if retained_retired_voice_secret_versions
+            else None
+        )
+        _verify_backend_key_vault_boundary(
+            backend_principal_id=backend_identity_principal_id,
+            key_vault_id=key_vault_id,
+            allowed_retired_voice_secret_names=tuple(
+                retained_retired_voice_secret_versions
+            ),
+            expected_legacy_vault_read=legacy_backend_vault_read,
+        )
         backend, frontend = verify_live(
             resource_group=resource_group,
             backend_app=backend_app,
             frontend_app=frontend_app,
             expected_backend_identity_id=backend_identity_id,
-            expected_backend_identity_principal_id=_output_value(foundation, "identityPrincipalId"),
+            expected_backend_identity_principal_id=backend_identity_principal_id,
             expected_frontend_identity_id=_output_value(foundation, "frontendIdentityId"),
             expected_frontend_identity_principal_id=_output_value(
                 foundation, "frontendIdentityPrincipalId"
@@ -4132,6 +4326,7 @@ def verify(args: argparse.Namespace) -> int:
             expected_retained_retired_voice_secret_versions=(
                 retained_retired_voice_secret_versions
             ),
+            expected_legacy_backend_vault_read=legacy_backend_vault_read,
             expected_sha=expected_sha,
             health_timeout_seconds=args.health_timeout_seconds,
         )
@@ -4150,6 +4345,14 @@ def verify(args: argparse.Namespace) -> int:
         lease.assert_healthy()
     _assert_no_key_vault_writer(key_vault_id)
     _print_verification(backend, frontend)
+    print(
+        "legacy_vault_read_status: "
+        + (
+            "retained_for_rollback_pending_canary"
+            if legacy_backend_vault_read is not None
+            else "not_present"
+        )
+    )
     print("websocket_canary_required: true")
     print("voice_retirement_status: pending_finalization")
     return 0
