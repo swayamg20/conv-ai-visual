@@ -13,6 +13,7 @@ from murmur.api.dependencies import (
     SceneAuthoringServiceDependency,
 )
 from murmur.api.errors import ApiError
+from murmur.api.streaming import AsyncCloseable
 from murmur.api.streaming import OwnedStreamingResponse as _OwnedStreamingResponse
 from murmur.core.async_cleanup import close_async_resource
 from murmur.core.config import config
@@ -212,8 +213,12 @@ async def _stream_choreography_scene(
         body,
         (SemanticStoryboardReflexRequestV1, SemanticStoryboardDirectorRequestV1),
     ):
-        encoded_events = _encode_semantic_storyboard_scene_events(
-            scene_service.stream_semantic_storyboard_events(body)
+        return await _stream_semantic_storyboard_scene(
+            body,
+            admission_identity=admission_identity,
+            admission=admission,
+            scene_service=scene_service,
+            admission_lease=lease,
         )
     else:
         await lease.aclose()
@@ -227,6 +232,43 @@ async def _stream_choreography_scene(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+async def _stream_semantic_storyboard_scene(
+    body: SemanticStoryboardReflexRequestV1 | SemanticStoryboardDirectorRequestV1,
+    *,
+    admission_identity: str,
+    admission: SceneAuthoringAdmission,
+    scene_service: SceneAuthoringService,
+    admission_lease: AsyncCloseable | None = None,
+) -> StreamingResponse:
+    """Stream one exact Gate 1.8 request and retain cleanup ownership."""
+
+    lease = admission_lease
+    if lease is None:
+        try:
+            lease = await admission.acquire(admission_identity)
+        except SceneAdmissionError as exc:
+            raise ApiError(429, str(exc)) from None
+
+    events: AsyncIterator[SemanticStoryboardSceneStreamEventV1] | None = None
+    try:
+        events = scene_service.stream_semantic_storyboard_events(body)
+        return _OwnedStreamingResponse(
+            _encode_semantic_storyboard_scene_events(events),
+            admission_lease=lease,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    except BaseException:
+        try:
+            await close_async_resource(events)
+        finally:
+            await close_async_resource(lease)
+        raise
 
 
 @router.post("/stream")

@@ -8,8 +8,9 @@ from murmur.api.authentication import FirebaseAuthenticationUnavailable, get_cur
 from murmur.api.errors import ApiError
 from murmur.chat import ChatAdmission, ChatService
 from murmur.live_scene import SceneAuthoringAdmission, SceneAuthoringService
-from murmur.persistence.models import AgentModel
+from murmur.persistence.models import AgentModel, SessionModel
 from murmur.persistence.repositories.identities import AgentRepo
+from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.runtime import RuntimeRegistry
 from murmur.voice import VoiceService
 from murmur.voice.bootstrap import VoiceBootstrapper
@@ -52,6 +53,30 @@ def get_owned_agent(agent_id: str, user: CurrentUserDependency) -> AgentModel:
 
 
 OwnedAgentDependency = Annotated[AgentModel, Depends(get_owned_agent)]
+
+
+def require_owned_session(session_id: str, user: CurrentUser) -> SessionModel:
+    """Resolve a persistent session and its agent from server-owned records."""
+    session = SessionRepo.get_by_id(session_id)
+    if not session:
+        raise ApiError(404, "Session not found")
+    if session.user_id != user["id"]:
+        raise ApiError(403, "Forbidden")
+
+    # The persistent session is the authority for the agent binding. Never
+    # accept an agent identity from a request body at this boundary.
+    agent = require_owned_agent(session.agent_id, user)
+    if agent.id != session.agent_id:
+        raise ApiError(403, "Forbidden")
+    return session
+
+
+def get_owned_session(session_id: str, user: CurrentUserDependency) -> SessionModel:
+    """FastAPI adapter for an authenticated, persistent session path."""
+    return require_owned_session(session_id, user)
+
+
+OwnedSessionDependency = Annotated[SessionModel, Depends(get_owned_session)]
 
 
 def get_runtime(request: Request) -> RuntimeRegistry:

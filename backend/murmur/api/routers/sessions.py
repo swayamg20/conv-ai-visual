@@ -6,15 +6,20 @@ import re
 from typing import Any
 
 from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from murmur.api.dependencies import (
     ChatServiceDependency,
     CurrentUserDependency,
+    OwnedSessionDependency,
+    SceneAuthoringAdmissionDependency,
+    SceneAuthoringServiceDependency,
     require_owned_agent,
 )
 from murmur.api.errors import ApiError
+from murmur.api.routers.live_scenes import _stream_semantic_storyboard_scene
 from murmur.api.schemas import CreateSessionRequest
+from murmur.live_scene.semantic_storyboard_requests import SemanticStoryboardRequestV1
 from murmur.llm import create_llm_client
 from murmur.persistence.models import ConversationMessageModel, SessionModel, TopicMasteryModel
 from murmur.persistence.repositories.sessions import (
@@ -87,6 +92,23 @@ async def get_session_detail(
         for message in ConversationMessageRepo.get_recent(session_id, limit=50)
     ]
     return JSONResponse(payload)
+
+
+@router.post("/{session_id}/storyboard/stream")
+async def stream_session_storyboard(
+    body: SemanticStoryboardRequestV1,
+    session: OwnedSessionDependency,
+    admission: SceneAuthoringAdmissionDependency,
+    scene_service: SceneAuthoringServiceDependency,
+) -> StreamingResponse:
+    """Stream Gate 1.8 only after resolving the owned persistent session."""
+
+    return await _stream_semantic_storyboard_scene(
+        body,
+        admission_identity=session.user_id,
+        admission=admission,
+        scene_service=scene_service,
+    )
 
 
 @router.post("/{session_id}/end")
