@@ -17,6 +17,7 @@ from murmur.persistence.repositories.identities import AgentRepo, UserRepo
 from murmur.persistence.repositories.sessions import SessionRepo
 from murmur.voice.websocket_protocol import (
     INPUT_FRAME_PCM_BYTES,
+    WEBSOCKET_CANARY_MODE,
     WEBSOCKET_TICKET_PROTOCOL_PREFIX,
     WEBSOCKET_VOICE_PROTOCOL,
     VoiceBinaryFrame,
@@ -172,6 +173,7 @@ def test_authenticated_canary_is_bidirectional_generation_fenced_and_cleaned(
         assert socket.accepted_subprotocol == WEBSOCKET_VOICE_PROTOCOL
         ready = socket.receive_json()
         assert ready["type"] == "canary_ready"
+        assert ready["runtime_mode"] == WEBSOCKET_CANARY_MODE
         assert ready["generation"] == 0
         assert ready["trace_id"] == assignment["trace_id"]
         assert ready["input_sample_rate_hz"] == 16_000

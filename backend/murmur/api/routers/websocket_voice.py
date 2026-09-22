@@ -29,6 +29,7 @@ from murmur.voice.bootstrap import (
 from murmur.voice.websocket_protocol import (
     INPUT_FRAME_PCM_BYTES,
     INPUT_SAMPLE_RATE_HZ,
+    WEBSOCKET_CANARY_MODE,
     WEBSOCKET_TICKET_PROTOCOL_PREFIX,
     WEBSOCKET_VOICE_PROTOCOL,
     VoiceBinaryFrame,
@@ -257,6 +258,7 @@ async def _run_provider_free_canary(
             await send_control(
                 "canary_ready",
                 protocol=WEBSOCKET_VOICE_PROTOCOL,
+                runtime_mode=WEBSOCKET_CANARY_MODE,
                 session_id=connection.scope.session_id,
                 voice_call_id=connection.scope.voice_call_id,
                 profile_id=connection.profile_id,

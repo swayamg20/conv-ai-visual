@@ -12,7 +12,7 @@ The first milestone is intentionally provider-free. Azure Container Apps documen
 - [x] 2026-09-22 02:39 IST: Recorded the product constraint that the MVP must not depend on LiveKit Cloud or a separately billed managed media service.
 - [x] 2026-09-22 02:39 IST: Selected a first-party browser-to-FastAPI WebSocket as the primary candidate and isolated work on `codex/azure-voice-websocket` from current `origin/main`.
 - [x] 2026-09-22 04:05 IST: Implemented the reusable authenticated one-use WebSocket ticket, exact-origin/subprotocol admission, generation-fenced PCM framing, provider-free echo/heartbeat canary, explicit close behavior, and lifecycle cleanup. Independent review exposed and drove fixes for cancel/connect ordering, pre-decode WebSocket buffering, echo sample-rate truth, bounded outbound writes, child-task cleanup, and closed-service behavior. The resulting focused/deployment/Voice V2 regression selection passes 173 tests without provider traffic.
-- [ ] Add the source-pinned canary client and production deployment guardrails for the provider-free Azure proof.
+- [x] 2026-09-22 12:27 IST: Added the source-pinned provider-free canary client. A formal remote run now requires at least 310 seconds, a clean local HEAD equal to the expected SHA and current origin branch tip, an exact deployed health/readiness SHA, one socket with zero reconnects, explicit `provider_free_echo` server attestation, active plus idempotent release, and secret-safe non-overwriting evidence. Independent security review passed and the focused foundation/canary selection passes 27 tests.
 - [ ] Prove the canary locally and for more than five minutes through Azure Container Apps ingress, with zero provider calls.
 - [ ] Implement browser PCM capture/playback, generation fencing, backpressure, and deterministic interruption.
 - [ ] Bridge the server session to Deepgram, Murmur's Groq/tool/canvas pipeline, and ElevenLabs while preserving one authoritative call owner.
@@ -32,6 +32,7 @@ The first milestone is intentionally provider-free. Azure Container Apps documen
 - Application-level frame validation runs only after Uvicorn buffers a complete WebSocket message. The production server therefore also needs a small pre-decode message limit and bounded protocol buffering; an application frame cap alone is not a memory bound.
 - Uvicorn's SansIO WebSocket implementation honors the message-size limit but self-pauses its input rather than using the legacy `ws-max-queue` setting. Pin the SansIO implementation and assert the real 8 KiB pre-decode bound instead of claiming an ignored queue flag is protection.
 - ASGI sends and closes can stall on a non-reading peer. Every outbound operation now has a two-second deadline, ordinary writes race exact-call release, and every locally owned send/receive/release task is cancelled and joined on exit.
+- A canary can be technically green yet operationally dishonest. The first runner draft allowed short remote runs, trusted a caller-provided SHA, overwrote evidence, and claimed provider usage it could not observe. The accepted runner refuses those states and records provider usage as unverified while requiring a source-pinned server to attest its provider-free echo mode.
 
 ## Decision Log
 
