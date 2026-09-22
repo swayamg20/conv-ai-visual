@@ -256,6 +256,8 @@ class RoleAssignmentMetadata:
     principal_id: str
     role_definition_id: str
     description: str | None
+    condition: str | None = None
+    condition_version: str | None = None
 
 
 class DeploymentLease:
@@ -3177,12 +3179,16 @@ def _parse_role_assignment_metadata(item: object) -> RoleAssignmentMetadata:
     scope = item.get("scope")
     principal_id = item.get("principalId")
     description = item.get("description")
+    condition = item.get("condition")
+    condition_version = item.get("conditionVersion")
     if (
         not isinstance(assignment_id, str)
         or not isinstance(scope, str)
         or not isinstance(principal_id, str)
         or not _AZURE_GUID.fullmatch(principal_id)
         or (description is not None and not isinstance(description, str))
+        or (condition is not None and not isinstance(condition, str))
+        or (condition_version is not None and not isinstance(condition_version, str))
     ):
         raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
     marker = "/providers/microsoft.authorization/roleassignments/"
@@ -3201,6 +3207,8 @@ def _parse_role_assignment_metadata(item: object) -> RoleAssignmentMetadata:
         principal_id=principal_id,
         role_definition_id=_role_definition_guid(item.get("roleDefinitionId")),
         description=description or None,
+        condition=condition,
+        condition_version=condition_version,
     )
 
 
@@ -3225,7 +3233,7 @@ def _effective_key_vault_assignments_at_secret(
             "--fill-role-definition-name",
             "false",
             "--query",
-            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description}",
+            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description,condition:condition,conditionVersion:conditionVersion}",
             "--output",
             "json",
             "--only-show-errors",
@@ -3258,7 +3266,7 @@ def _direct_legacy_backend_vault_read_assignment(
             "--fill-role-definition-name",
             "false",
             "--query",
-            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description}",
+            "[].{id:id,scope:scope,principalId:principalId,roleDefinitionId:roleDefinitionId,description:description,condition:condition,conditionVersion:conditionVersion}",
             "--output",
             "json",
             "--only-show-errors",
@@ -3283,6 +3291,8 @@ def _direct_legacy_backend_vault_read_assignment(
     if (
         assignment.principal_id.casefold() != backend_principal_id.casefold()
         or assignment.description is not None
+        or assignment.condition is not None
+        or assignment.condition_version is not None
     ):
         raise DeploymentRefusal("legacy backend Key Vault role metadata is ambiguous")
     return assignment
@@ -3297,6 +3307,8 @@ def _same_role_assignment(
         and actual.principal_id.casefold() == expected.principal_id.casefold()
         and actual.role_definition_id == expected.role_definition_id
         and actual.description == expected.description
+        and actual.condition == expected.condition
+        and actual.condition_version == expected.condition_version
     )
 
 
@@ -3377,6 +3389,8 @@ def _verify_backend_key_vault_boundary(
         or expected_legacy_vault_read.role_definition_id
         != KEY_VAULT_SECRETS_USER_ROLE_ID
         or expected_legacy_vault_read.description is not None
+        or expected_legacy_vault_read.condition is not None
+        or expected_legacy_vault_read.condition_version is not None
     ):
         raise DeploymentRefusal("expected legacy backend Key Vault role metadata is invalid")
     allowed_retired = frozenset(allowed_retired_voice_secret_names)
@@ -3422,6 +3436,8 @@ def _verify_backend_key_vault_boundary(
             and assignment.principal_id.casefold() == backend_principal_id.casefold()
             and assignment.role_definition_id == KEY_VAULT_SECRETS_USER_ROLE_ID
             and assignment.description is None
+            and assignment.condition is None
+            and assignment.condition_version is None
         )
         legacy = (
             ()
@@ -4113,6 +4129,13 @@ def deploy(args: argparse.Namespace) -> int:
             expected_identity_id=backend_identity_id,
             expected_key_vault_name=key_vault_name,
         )
+        if retained_retired_voice_secret_versions:
+            lease.assert_healthy()
+            _await_key_vault_data_plane_access(
+                vault_name=key_vault_name,
+                attempts=32,
+            )
+            lease.assert_healthy()
         _verify_retained_voice_secret_versions_enabled(
             vault_name=key_vault_name,
             versions=retained_retired_voice_secret_versions,
@@ -4363,6 +4386,12 @@ def verify(args: argparse.Namespace) -> int:
             mutation_guard=lease.assert_healthy,
         ),
     ):
+        lease.assert_healthy()
+        _await_key_vault_data_plane_access(
+            vault_name=key_vault_name,
+            attempts=32,
+        )
+        lease.assert_healthy()
         legacy_backend_vault_read = (
             _direct_legacy_backend_vault_read_assignment(
                 backend_principal_id=backend_identity_principal_id,

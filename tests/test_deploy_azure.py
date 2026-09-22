@@ -1709,6 +1709,11 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     )
     monkeypatch.setattr(
         deploy,
+        "_await_key_vault_data_plane_access",
+        lambda **_kwargs: calls.append(("key-vault-data-plane-ready", None)),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_direct_legacy_backend_vault_read_assignment",
         lambda **_kwargs: legacy_vault_read,
     )
@@ -1788,6 +1793,9 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     labels = [item[0] for item in calls]
     assert labels.index("firebase-authority") < labels.index("group")
+    assert labels.index("key-vault-data-plane-ready") < labels.index(
+        "retained-version-preflight"
+    )
     assert labels.index("retained-version-preflight") < labels.index("secret")
     assert labels.index("backend-build") < labels.index("frontend-build")
     assert labels.index("verify-live") < labels.index("old-revisions-inactive")

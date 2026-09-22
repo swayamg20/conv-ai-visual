@@ -47,6 +47,8 @@ def _role_assignment(
     principal_id: str = BACKEND_PRINCIPAL_ID,
     role_definition_id: str = deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
     assignment_id: str | None = None,
+    condition: str | None = None,
+    condition_version: str | None = None,
 ) -> deploy.RoleAssignmentMetadata:
     return deploy.RoleAssignmentMetadata(
         id=assignment_id
@@ -58,6 +60,8 @@ def _role_assignment(
         principal_id=principal_id,
         role_definition_id=role_definition_id,
         description=None,
+        condition=condition,
+        condition_version=condition_version,
     )
 
 
@@ -643,6 +647,28 @@ def test_retained_voice_version_preflight_reads_the_exact_enabled_version(
     assert commands[0][commands[0].index("--version") + 1] == version
 
 
+def test_key_vault_data_plane_wait_retries_transient_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    attempts = 0
+    sleeps: list[int] = []
+
+    def run(*_args: Any, **_kwargs: Any) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise deploy.DeploymentRefusal("authorization has not propagated")
+        return []
+
+    monkeypatch.setattr(deploy, "_run_json", run)
+    monkeypatch.setattr(deploy.time, "sleep", sleeps.append)
+
+    deploy._await_key_vault_data_plane_access(vault_name="vault", attempts=2)
+
+    assert attempts == 2
+    assert sleeps == [1]
+
+
 @pytest.mark.parametrize(
     ("observed_version", "enabled"),
     (("d" * 32, True), ("c" * 32, False)),
@@ -934,6 +960,9 @@ def test_direct_legacy_discovery_excludes_inherited_and_group_assignments(
     assert assignment.id == LEGACY_ASSIGNMENT_ID
     assert "--include-inherited" not in commands[0]
     assert "--include-groups" not in commands[0]
+    query = commands[0][commands[0].index("--query") + 1]
+    assert "condition:condition" in query
+    assert "conditionVersion:conditionVersion" in query
 
 
 def test_direct_legacy_discovery_rejects_a_different_principal(
@@ -949,6 +978,32 @@ def test_direct_legacy_discovery_rejects_a_different_principal(
                 "principalId": "55555555-5555-5555-5555-555555555555",
                 "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
                 "description": None,
+            }
+        ],
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="ambiguous"):
+        deploy._direct_legacy_backend_vault_read_assignment(
+            backend_principal_id=BACKEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+        )
+
+
+def test_direct_legacy_discovery_rejects_a_conditional_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *_args, **_kwargs: [
+            {
+                "id": LEGACY_ASSIGNMENT_ID,
+                "scope": KEY_VAULT_ID,
+                "principalId": BACKEND_PRINCIPAL_ID,
+                "roleDefinitionId": deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+                "description": None,
+                "condition": "@Resource[Microsoft.KeyVault/vaults/secrets:name] StringNotEquals 'rollback'",
+                "conditionVersion": "2.0",
             }
         ],
     )
@@ -1041,6 +1096,11 @@ def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
 
     monkeypatch.setattr(deploy, "_deployment_blob_lease", lease)
     monkeypatch.setattr(deploy, "_temporary_key_vault_write", writer)
+    monkeypatch.setattr(
+        deploy,
+        "_await_key_vault_data_plane_access",
+        lambda **_kwargs: None,
+    )
     legacy_vault_read = _role_assignment(
         scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID
     )
