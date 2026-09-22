@@ -96,6 +96,15 @@ def compile_agent_prompt(persona: dict, capabilities: list[str]) -> str:
 
         if _is_physics_subject(subject):
             lines.append("For physics, be concrete and diagram-first.")
+            lines.append(
+                "For a same-speed projectile comparison launched and landed at the same height "
+                "with no drag, use start_projectile_storyboard instead of teach_with_visuals."
+            )
+            lines.append(
+                "If the learner omits values, use the verified 20 m/s and 30°/60° defaults. "
+                "After starting it, acknowledge the visual handoff briefly instead of narrating "
+                "a competing lesson."
+            )
             lines.append("Use free-body diagrams for force problems before writing equations.")
             lines.append(
                 "For inclined planes, draw the slope, angle, weight, normal, and resolved force components before solving."
@@ -199,6 +208,25 @@ def append_mastery_context(system_prompt: str, mastery_context: str) -> str:
     return system_prompt + "\n".join(lines)
 
 
+def append_storyboard_tool_context(system_prompt: str) -> str:
+    """Add current visual-routing guidance to stored agent prompts at runtime."""
+
+    return system_prompt + "\n".join(
+        [
+            "",
+            "VERIFIED PROJECTILE STORYBOARD:",
+            "For a same-speed projectile comparison launched and landed at the same height "
+            "with no drag, use start_projectile_storyboard instead of teach_with_visuals.",
+            "If the learner omits values, use 20 m/s and 30°/60°. Copy the learner's requested "
+            "teaching direction into the tool prompt.",
+            "After starting the storyboard, acknowledge the visual handoff briefly and do not "
+            "repeat a competing prose lesson.",
+            "For every unsupported subject or physics setup, keep using the normal conversation "
+            "and teach_with_visuals path.",
+        ]
+    )
+
+
 def get_agent_tools(capabilities: list[str]) -> list[str]:
     """
     Map capability strings to tool names.
@@ -210,7 +238,11 @@ def get_agent_tools(capabilities: list[str]) -> list[str]:
         List of tool name strings to include for this agent.
     """
     tool_map = {
-        "canvas": ["canvas_update", "teach_with_visuals"],
+        "canvas": [
+            "canvas_update",
+            "teach_with_visuals",
+            "start_projectile_storyboard",
+        ],
         "web_search": ["web_search"],
         "sandbox": ["code_execution"],
     }

@@ -221,6 +221,7 @@ class ChatService:
         """Yield transport-neutral events for one pipeline turn."""
         canvas_events: deque[Any] = deque()
         animation_events: deque[dict[str, Any]] = deque()
+        storyboard_commands: deque[dict[str, Any]] = deque()
         pipeline = turn.session.pipeline
 
         async with turn.session.turn_lock:
@@ -232,6 +233,7 @@ class ChatService:
                 pipeline.set_canvas_mode(turn.canvas_mode)
             pipeline.set_canvas_callback(canvas_events.append)
             pipeline.set_animation_callback(animation_events.append)
+            pipeline.set_storyboard_callback(storyboard_commands.append)
             yield {"type": "session", "session_id": turn.session_id}
 
             model_stream = pipeline.chat_with_tools_stream(
@@ -243,11 +245,19 @@ class ChatService:
             try:
                 async for chunk in model_stream:
                     self.runtime.touch_chat(turn.session_id)
-                    for event in self._drain_queued_events(canvas_events, animation_events):
+                    for event in self._drain_queued_events(
+                        canvas_events,
+                        animation_events,
+                        storyboard_commands,
+                    ):
                         yield event
                     yield {"type": "chunk", "text": chunk}
 
-                for event in self._drain_queued_events(canvas_events, animation_events):
+                for event in self._drain_queued_events(
+                    canvas_events,
+                    animation_events,
+                    storyboard_commands,
+                ):
                     yield event
                 self._save_observability(turn)
                 yield {"type": "done"}
@@ -262,12 +272,15 @@ class ChatService:
     def _drain_queued_events(
         canvas_events: deque[Any],
         animation_events: deque[dict[str, Any]],
+        storyboard_commands: deque[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         while canvas_events:
             events.append({"type": "canvas_update", "operations": canvas_events.popleft()})
         while animation_events:
             events.append({"type": "animation_event", **animation_events.popleft()})
+        while storyboard_commands:
+            events.append({"type": "storyboard_command", "command": storyboard_commands.popleft()})
         return events
 
     @staticmethod

@@ -1,5 +1,6 @@
 """Multi-round tool execution and streaming policy for the LLM pipeline."""
 
+import inspect
 import json
 import logging
 import time
@@ -10,6 +11,10 @@ from murmur.canvas.animation import teach_with_visuals
 from murmur.canvas.state import canvas_update
 from murmur.core.async_cleanup import close_async_resource
 from murmur.core.config import config
+from murmur.live_scene.conversation_storyboard import (
+    CONVERSATION_STORYBOARD_TOOL_NAME,
+    create_conversation_storyboard_command,
+)
 from murmur.tools.contracts import ToolCall, ToolResult
 
 logger = logging.getLogger(__name__)
@@ -62,10 +67,9 @@ class ToolConversationMixin:
             )
 
             if self.canvas_callback and result.get("operations"):
-                try:
-                    await self.canvas_callback(result["operations"])
-                except TypeError:
-                    self.canvas_callback(result["operations"])
+                callback_result = self.canvas_callback(result["operations"])
+                if inspect.isawaitable(callback_result):
+                    await callback_result
 
             return ToolResult(
                 tool_call_id=tc.id,
@@ -79,14 +83,31 @@ class ToolConversationMixin:
 
             if self.animation_callback and result.get("success"):
                 animation_data = {"tool": "teach_with_visuals", "sdl": result["sdl"]}
-                try:
-                    await self.animation_callback(animation_data)
-                except TypeError:
-                    self.animation_callback(animation_data)
+                callback_result = self.animation_callback(animation_data)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
 
             return ToolResult(
                 tool_call_id=tc.id,
                 content=result.get("speech_text", "Visual explanation rendered."),
+                success=True,
+            )
+
+        if tc.name == CONVERSATION_STORYBOARD_TOOL_NAME:
+            command = create_conversation_storyboard_command(tc.arguments)
+            command_data = command.model_dump(mode="json", by_alias=True)
+            callback = getattr(self, "storyboard_callback", None)
+            if callback:
+                callback_result = callback(command_data)
+                if inspect.isawaitable(callback_result):
+                    await callback_result
+
+            return ToolResult(
+                tool_call_id=tc.id,
+                content=(
+                    "The certified projectile storyboard is rendering. "
+                    "Acknowledge the visual handoff briefly and do not repeat its lesson in prose."
+                ),
                 success=True,
             )
 

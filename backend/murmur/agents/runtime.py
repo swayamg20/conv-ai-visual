@@ -7,7 +7,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from murmur.agents.prompting import append_mastery_context, append_resource_context
+from murmur.agents.prompting import (
+    append_mastery_context,
+    append_resource_context,
+    append_storyboard_tool_context,
+)
 from murmur.llm.pipeline import LLMPipeline
 from murmur.persistence.repositories.resources import ResourceRepo
 from murmur.persistence.repositories.sessions import TopicMasteryRepo
@@ -31,6 +35,8 @@ def build_agent_runtime_config(user_id: str, agent: Any) -> AgentRuntimeConfig:
     canvas_enabled = "canvas" in capabilities
 
     prompt = agent.system_prompt
+    if canvas_enabled:
+        prompt = append_storyboard_tool_context(prompt)
     resources = ResourceRepo.list_by_agent(agent.id)
     ready_resources = tuple(resource for resource in resources if resource.status == "ready")
     if ready_resources:

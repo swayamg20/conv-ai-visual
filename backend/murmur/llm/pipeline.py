@@ -31,6 +31,7 @@ class LLMPipeline(ToolConversationMixin):
 
     MUTATING_TOOL_NAMES: ClassVar[set[str]] = {
         "canvas_update",
+        "start_projectile_storyboard",
         "teach_with_visuals",
     }
 
@@ -127,6 +128,7 @@ class LLMPipeline(ToolConversationMixin):
         self.canvas_state = CanvasState()
         self.canvas_callback: Callable[[list[dict]], Any] | None = None
         self.animation_callback: Callable[[dict], Any] | None = None
+        self.storyboard_callback: Callable[[dict], Any] | None = None
 
         # Call metrics (populated after each chat_with_tools_stream call)
         self._last_call_timing: dict | None = None
@@ -427,6 +429,10 @@ class LLMPipeline(ToolConversationMixin):
             callback: Function that receives animation data dict
         """
         self.animation_callback = callback
+
+    def set_storyboard_callback(self, callback: Callable[[dict], Any]):
+        """Set the callback for validated conversational storyboard commands."""
+        self.storyboard_callback = callback
 
     def switch_provider(self, provider: str, api_key: str | None = None, model: str | None = None):
         """Hot-swap LLM provider for this pipeline. Used for model routing."""

@@ -24,6 +24,9 @@ class _ConcurrentPipeline:
     def set_animation_callback(self, _callback) -> None:
         pass
 
+    def set_storyboard_callback(self, _callback) -> None:
+        pass
+
     async def chat_with_tools_stream(self, message, **kwargs):
         self.call_options.append(kwargs)
         self.active_calls += 1
@@ -50,6 +53,28 @@ class _FactoryPipeline(_ConcurrentPipeline):
 
     def get_tools_schema(self) -> list[dict[str, object]]:
         return []
+
+
+class _StoryboardPipeline(_ConcurrentPipeline):
+    def __init__(self) -> None:
+        super().__init__()
+        self.storyboard_callback = None
+
+    def set_storyboard_callback(self, callback) -> None:
+        self.storyboard_callback = callback
+
+    async def chat_with_tools_stream(self, message, **kwargs):
+        assert self.storyboard_callback is not None
+        self.storyboard_callback(
+            {
+                "v": 1,
+                "commandId": "7a1837be-07a2-47eb-8ac7-6ad41cd44922",
+                "protocol": "projectile_comparison_storyboard_v1",
+                "problemSpec": {"v": 1, "speedMps": 20, "anglesDeg": [30, 60]},
+                "prompt": message,
+            }
+        )
+        yield "Opening the verified board."
 
 
 class _ClosablePipeline:
@@ -118,6 +143,45 @@ async def test_closing_chat_events_closes_the_owned_model_stream(monkeypatch) ->
 
     assert pipeline.active_calls == 0
     assert pipeline.closed_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_storyboard_command_before_assistant_chunk(monkeypatch) -> None:
+    monkeypatch.setattr("murmur.chat.service.config.MURMUR_CHAT_MAX_TOOL_ROUNDS", 2)
+    runtime = RuntimeRegistry()
+    service = ChatService(runtime)
+    pipeline = _StoryboardPipeline()
+    session = runtime.register_chat(
+        "chat-session",
+        pipeline,
+        user_id="owner",
+        agent_id=None,
+    )
+
+    events = [
+        event
+        async for event in service.stream_events(
+            ChatTurn(
+                session_id="chat-session",
+                user_id="owner",
+                message="Compare the 30 and 60 degree launches.",
+                session=session,
+            )
+        )
+    ]
+
+    assert [event["type"] for event in events] == [
+        "session",
+        "storyboard_command",
+        "chunk",
+        "done",
+    ]
+    assert events[1]["command"]["problemSpec"] == {
+        "v": 1,
+        "speedMps": 20,
+        "anglesDeg": [30, 60],
+    }
+    assert events[2]["text"] == "Opening the verified board."
 
 
 def test_chat_pipeline_receives_transport_retry_ceiling(monkeypatch) -> None:
