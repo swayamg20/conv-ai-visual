@@ -141,6 +141,48 @@ describe("semantic storyboard model transport", () => {
     });
   });
 
+  it("binds embedded product streams to the owned tutoring session", async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => response(EVENTS));
+    const runner = createSemanticStoryboardSceneStreamRunner({
+      apiUrl: "https://murmur.example/",
+      endpoint: "product",
+      sessionId: "a4f4328e-185e-4c65-b3f7-101e04a37578",
+      getHeaders: async () => ({ Authorization: "Bearer fresh-token" }),
+      fetchImpl,
+    });
+
+    await runner({
+      request: REQUEST,
+      signal: new AbortController().signal,
+      onEvent: () => undefined,
+    });
+
+    expect(fetchImpl.mock.calls[0]?.[0]).toBe(
+      "https://murmur.example/api/sessions/a4f4328e-185e-4c65-b3f7-101e04a37578/storyboard/stream",
+    );
+  });
+
+  it("rejects invalid session bindings before auth or fetch", async () => {
+    const getHeaders = vi.fn(async () => ({ Authorization: "Bearer token" }));
+    const fetchImpl = vi.fn<typeof fetch>();
+
+    await expect(
+      runSemanticStoryboardSceneModelStream({
+        apiUrl: "https://murmur.example",
+        endpoint: "developmentLab",
+        sessionId: "session-id",
+        request: REQUEST,
+        signal: new AbortController().signal,
+        onEvent: () => undefined,
+        getHeaders,
+        fetchImpl,
+      }),
+    ).rejects.toThrow(/supported only by the product endpoint/);
+
+    expect(getHeaders).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-canonical nested request before auth or fetch", async () => {
     const getHeaders = vi.fn(async () => ({ Authorization: "Bearer token" }));
     const fetchImpl = vi.fn<typeof fetch>();

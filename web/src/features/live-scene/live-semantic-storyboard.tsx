@@ -82,6 +82,10 @@ export interface LiveSemanticStoryboardProps {
   readonly layout?: ChoreographyLayout;
   readonly reducedMotion?: boolean;
   readonly playbackRate?: ChoreographyPlaybackRate;
+  /** Full standalone product page or compact surface hosted inside a session. */
+  readonly presentation?: "page" | "embedded";
+  /** Start the initial certified lesson once the renderer is attached. */
+  readonly autoStart?: boolean;
   readonly runStream?: SemanticStoryboardSceneStreamRunner;
   /** Provider-free E2E observer; production callers leave this unset. */
   readonly onSessionSnapshot?: (
@@ -155,6 +159,8 @@ function StoryboardStudio({
   initialProblemSpec = DEFAULT_PROBLEM,
   initialPrompt = DEFAULT_PROMPT,
   playbackRate = 1,
+  presentation = "page",
+  autoStart = false,
   preferences,
   runStream,
   onSessionSnapshot,
@@ -162,6 +168,7 @@ function StoryboardStudio({
   const { layout, reducedMotion } = preferences;
   const canvasRef = useRef<SVGCanvasHandle>(null);
   const lifecycleRef = useRef<object | null>(null);
+  const autoStartAttemptedRef = useRef(false);
   const [renderer] = useState(() => new ChoreographyCanvasBridge());
   // Transport identity is part of a session. A parent rerender must not leave
   // an old active runtime alive while attaching its renderer to a new one.
@@ -217,6 +224,21 @@ function StoryboardStudio({
     () => problemSpec(desiredSpeed, desiredAngles),
     [desiredAngles, desiredSpeed],
   );
+
+  useEffect(() => {
+    if (!autoStart || autoStartAttemptedRef.current) return;
+    autoStartAttemptedRef.current = true;
+    try {
+      controller.startFresh({ problemSpec: desiredProblem, prompt });
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error
+          ? error.message
+          : "The visual story could not start.";
+      queueMicrotask(() => setFormError(errorMessage));
+    }
+  }, [autoStart, controller, desiredProblem, prompt]);
+
   const promptCodePoints = [...prompt].length;
   const problemLocked = snapshot.problemSpec !== null;
   const promptLocked =
@@ -313,10 +335,154 @@ function StoryboardStudio({
     ? `${component.problemSpec.anglesDeg[0]}° + ${component.problemSpec.anglesDeg[1]}°`
     : `${desiredAngles[0]}° + ${desiredAngles[1]}°`;
 
+  const controls = (
+    <div
+      className={cn(
+        presentation === "page"
+          ? "mt-5 grid grid-cols-2 gap-2"
+          : "flex flex-wrap items-center justify-end gap-2",
+      )}
+      data-testid={
+        presentation === "embedded"
+          ? "semantic-storyboard-embedded-controls"
+          : undefined
+      }
+    >
+      <Button
+        type="button"
+        onClick={runPrimary}
+        disabled={primaryDisabled}
+        className={cn(
+          "min-h-11 gap-2",
+          presentation === "page" && "col-span-2",
+        )}
+        data-testid="semantic-storyboard-primary"
+      >
+        {isSettling ? (
+          <CheckCircle2 className="h-4 w-4" />
+        ) : canStop ? (
+          <StopCircle className="h-4 w-4" />
+        ) : (
+          <Sparkles className="h-4 w-4" />
+        )}
+        {primaryLabel}
+      </Button>
+      <Button
+        type="button"
+        variant="secondary"
+        disabled={!snapshot.controls.canReplay}
+        onClick={replay}
+        className="min-h-11 gap-2"
+        data-testid="semantic-storyboard-replay"
+      >
+        <Play className="h-4 w-4" />
+        Replay
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        disabled={!snapshot.controls.canReset || canStop || isSettling}
+        onClick={reset}
+        className="min-h-11 gap-2 text-chalk-soft"
+        data-testid="semantic-storyboard-reset"
+      >
+        <RotateCcw className="h-4 w-4" />
+        Reset
+      </Button>
+    </div>
+  );
+
+  const feedback = (
+    <>
+      {acceptedPrefix && !visibleError && (
+        <p
+          className="mt-4 text-xs leading-5 text-sage"
+          data-testid="semantic-storyboard-accepted-prefix"
+        >
+          The verified prefix stays on the board; an unsafe later beat was
+          discarded.
+        </p>
+      )}
+      {snapshot.status === "declined" && !visibleError && (
+        <p
+          className="mt-4 text-xs leading-5 text-chalk-soft"
+          data-testid="semantic-storyboard-decline"
+        >
+          {snapshot.runtime.narration}
+        </p>
+      )}
+      {visibleError && (
+        <p
+          className="mt-4 text-xs leading-5 text-ember"
+          role="alert"
+          data-testid="semantic-storyboard-error"
+        >
+          {visibleError}
+        </p>
+      )}
+    </>
+  );
+
+  const storyboardStage = (
+    <CertifiedChoreographyStage
+      canvasRef={canvasRef}
+      phase={snapshot.runtime.phase}
+      layout={layout}
+      subjectLabel="Same speed · two launch angles"
+      checkpointLabel={checkpointLabel(snapshot)}
+      progress={snapshot.progress}
+      caption={stageCaption}
+      rendererTrusted={snapshot.runtime.rendererTrusted}
+      reducedMotion={reducedMotion}
+      playbackRate={playbackRate}
+      exactCameraClip
+      className="w-full shadow-[0_30px_100px_hsl(var(--void)/0.7)]"
+      testId="semantic-storyboard-stage"
+      dataAttributes={{
+        "data-session-status": snapshot.status,
+        "data-visible-checkpoint-id":
+          snapshot.runtime.visibleCheckpointId ?? "none",
+        "data-accepted-speed": component?.problemSpec.speedMps ?? "none",
+        "data-accepted-angle-pair": component
+          ? anglePairKey(component.problemSpec.anglesDeg)
+          : "none",
+        "data-accepted-angles": acceptedAngles,
+        "data-program-sha256": programSha256,
+        "data-certificate-head": certificateHead,
+        "data-scene-revision": snapshot.runtime.committedScene.revision,
+        "data-semantic-revision":
+          snapshot.runtime.committedSemanticScene.revision,
+        "data-generation": snapshot.runtime.generation,
+        "data-last-route": snapshot.lastRoute ?? "none",
+        "data-completion-reason": completionMetadata?.reasonCode ?? "none",
+        "data-completion-detail": completionMetadata?.detailCode ?? "none",
+      }}
+    />
+  );
+
+  const stageFooter = (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] leading-5 text-chalk-soft">
+      <p className="max-w-[70ch]">
+        Interrupt on any visible beat. Continue grows from that exact certified
+        frontier; Replay makes no model request.
+      </p>
+      <p className="font-mono uppercase tracking-[0.12em]">
+        {layout} · scene {snapshot.runtime.committedScene.revision} · motion{" "}
+        {reducedMotion ? "reduced" : "full"}
+      </p>
+    </div>
+  );
+
   return (
     <div
-      className="dark min-h-screen overflow-x-hidden bg-void text-chalk"
+      className={cn(
+        "dark bg-void text-chalk",
+        presentation === "page"
+          ? "min-h-screen overflow-x-hidden"
+          : "w-full min-w-0 overflow-hidden",
+      )}
       data-testid="semantic-storyboard-product"
+      data-presentation={presentation}
       data-session-status={snapshot.status}
       data-runtime-phase={snapshot.runtime.phase}
       data-generation={snapshot.runtime.generation}
@@ -341,11 +507,15 @@ function StoryboardStudio({
         "none"
       }
     >
-      <div
-        aria-hidden="true"
-        className="pointer-events-none fixed inset-0 opacity-35 [background-image:radial-gradient(circle_at_82%_4%,hsl(var(--amber)/0.13),transparent_26%),radial-gradient(circle_at_10%_84%,hsl(var(--lavender)/0.07),transparent_29%)]"
-      />
+      {presentation === "page" && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 opacity-35 [background-image:radial-gradient(circle_at_82%_4%,hsl(var(--amber)/0.13),transparent_26%),radial-gradient(circle_at_10%_84%,hsl(var(--lavender)/0.07),transparent_29%)]"
+        />
+      )}
 
+      {presentation === "page" ? (
+        <>
       <header className="relative z-20 border-b border-chalk-faint/20 bg-void/95">
         <div className="mx-auto flex max-w-[1760px] items-center justify-between gap-3 px-3 py-3 sm:px-6 lg:px-8">
           <div className="flex min-w-0 items-center gap-2.5 sm:gap-3">
@@ -519,124 +689,55 @@ function StoryboardStudio({
             </div>
           </section>
 
-          <div className="mt-5 grid grid-cols-2 gap-2">
-            <Button
-              type="button"
-              onClick={runPrimary}
-              disabled={primaryDisabled}
-              className="col-span-2 min-h-11 gap-2"
-              data-testid="semantic-storyboard-primary"
-            >
-              {isSettling ? (
-                <CheckCircle2 className="h-4 w-4" />
-              ) : canStop ? (
-                <StopCircle className="h-4 w-4" />
-              ) : (
-                <Sparkles className="h-4 w-4" />
-              )}
-              {primaryLabel}
-            </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              disabled={!snapshot.controls.canReplay}
-              onClick={replay}
-              className="min-h-11 gap-2"
-              data-testid="semantic-storyboard-replay"
-            >
-              <Play className="h-4 w-4" />
-              Replay
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              disabled={!snapshot.controls.canReset || canStop || isSettling}
-              onClick={reset}
-              className="min-h-11 gap-2 text-chalk-soft"
-              data-testid="semantic-storyboard-reset"
-            >
-              <RotateCcw className="h-4 w-4" />
-              Reset
-            </Button>
-          </div>
-
-          {acceptedPrefix && !visibleError && (
-            <p
-              className="mt-4 text-xs leading-5 text-sage"
-              data-testid="semantic-storyboard-accepted-prefix"
-            >
-              The verified prefix stays on the board; an unsafe later beat was
-              discarded.
-            </p>
-          )}
-          {snapshot.status === "declined" && !visibleError && (
-            <p
-              className="mt-4 text-xs leading-5 text-chalk-soft"
-              data-testid="semantic-storyboard-decline"
-            >
-              {snapshot.runtime.narration}
-            </p>
-          )}
-          {visibleError && (
-            <p
-              className="mt-4 text-xs leading-5 text-ember"
-              role="alert"
-              data-testid="semantic-storyboard-error"
-            >
-              {visibleError}
-            </p>
-          )}
+          {controls}
+          {feedback}
         </aside>
 
         <section className="min-w-0" aria-label="Living storyboard blackboard">
-          <CertifiedChoreographyStage
-            canvasRef={canvasRef}
-            phase={snapshot.runtime.phase}
-            layout={layout}
-            subjectLabel="Same speed · two launch angles"
-            checkpointLabel={checkpointLabel(snapshot)}
-            progress={snapshot.progress}
-            caption={stageCaption}
-            rendererTrusted={snapshot.runtime.rendererTrusted}
-            reducedMotion={reducedMotion}
-            playbackRate={playbackRate}
-            exactCameraClip
-            className="w-full shadow-[0_30px_100px_hsl(var(--void)/0.7)]"
-            testId="semantic-storyboard-stage"
-            dataAttributes={{
-              "data-session-status": snapshot.status,
-              "data-visible-checkpoint-id":
-                snapshot.runtime.visibleCheckpointId ?? "none",
-              "data-accepted-speed": component?.problemSpec.speedMps ?? "none",
-              "data-accepted-angle-pair": component
-                ? anglePairKey(component.problemSpec.anglesDeg)
-                : "none",
-              "data-accepted-angles": acceptedAngles,
-              "data-program-sha256": programSha256,
-              "data-certificate-head": certificateHead,
-              "data-scene-revision": snapshot.runtime.committedScene.revision,
-              "data-semantic-revision":
-                snapshot.runtime.committedSemanticScene.revision,
-              "data-generation": snapshot.runtime.generation,
-              "data-last-route": snapshot.lastRoute ?? "none",
-              "data-completion-reason":
-                completionMetadata?.reasonCode ?? "none",
-              "data-completion-detail":
-                completionMetadata?.detailCode ?? "none",
-            }}
-          />
-          <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1 text-[11px] leading-5 text-chalk-soft">
-            <p className="max-w-[70ch]">
-              Interrupt on any visible beat. Continue grows from that exact
-              certified frontier; Replay makes no model request.
-            </p>
-            <p className="font-mono uppercase tracking-[0.12em]">
-              {layout} · scene {snapshot.runtime.committedScene.revision} ·
-              motion {reducedMotion ? "reduced" : "full"}
-            </p>
-          </div>
+          {storyboardStage}
+          {stageFooter}
         </section>
       </main>
+        </>
+      ) : (
+        <section
+          className="relative z-10 min-w-0 p-3 sm:p-4"
+          aria-label="Embedded living storyboard blackboard"
+        >
+          <div
+            className="mb-3 flex flex-col gap-3 border border-chalk-faint/20 bg-graphite/45 p-3 sm:flex-row sm:items-center sm:justify-between"
+            data-testid="semantic-storyboard-embedded-rail"
+          >
+            <div className="flex min-w-0 items-start gap-2.5">
+              <span
+                aria-hidden="true"
+                className={cn(
+                  "mt-1.5 h-2 w-2 shrink-0 rounded-full",
+                  snapshot.progress.frontierStatus === "live"
+                    ? "bg-sage motion-safe:animate-pulse"
+                    : "bg-chalk-soft",
+                )}
+              />
+              <div className="min-w-0">
+                <p
+                  className="text-sm font-medium leading-5 text-chalk"
+                  data-testid="semantic-storyboard-status"
+                >
+                  {SESSION_LABELS[snapshot.status]}
+                </p>
+                <p className="mt-1 font-mono text-[9px] uppercase tracking-[0.12em] text-chalk-soft">
+                  {snapshot.progress.settledBeatCount} certified beats ·{" "}
+                  {angleLabel}
+                </p>
+              </div>
+            </div>
+            {controls}
+          </div>
+          {feedback}
+          {storyboardStage}
+          {stageFooter}
+        </section>
+      )}
     </div>
   );
 }
@@ -645,6 +746,7 @@ function StoryboardStudio({
 export function LiveSemanticStoryboard({
   layout,
   reducedMotion,
+  presentation = "page",
   runStream = runAuthenticatedSemanticStoryboardStream,
   ...props
 }: LiveSemanticStoryboardProps) {
@@ -655,7 +757,10 @@ export function LiveSemanticStoryboard({
   if (!preferences) {
     return (
       <main
-        className="dark flex min-h-screen items-center justify-center bg-void px-4 text-center text-sm text-chalk-soft"
+        className={cn(
+          "dark flex items-center justify-center bg-void px-4 text-center text-sm text-chalk-soft",
+          presentation === "page" ? "min-h-screen" : "min-h-80 w-full",
+        )}
         aria-busy="true"
       >
         Preparing the living blackboard…
@@ -667,6 +772,7 @@ export function LiveSemanticStoryboard({
     <StoryboardStudio
       key={`${preferences.layout}:${preferences.reducedMotion}`}
       {...props}
+      presentation={presentation}
       preferences={preferences}
       runStream={runStream}
     />

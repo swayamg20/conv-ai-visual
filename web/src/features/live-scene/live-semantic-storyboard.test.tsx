@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 
-import { act, type ComponentProps, type ReactNode } from "react";
+import { act, StrictMode, type ComponentProps, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -28,7 +28,10 @@ import {
   createSemanticStoryboardFixtureBatch,
   createSemanticStoryboardFixtureRunner,
 } from "./semantic-storyboard-scene-stream-fixture";
-import type { SemanticStoryboardSessionSnapshot } from "./semantic-storyboard-session-controller";
+import {
+  SemanticStoryboardSessionController,
+  type SemanticStoryboardSessionSnapshot,
+} from "./semantic-storyboard-session-controller";
 
 const DEFAULT_PROBLEM = Object.freeze({
   v: 1,
@@ -163,6 +166,7 @@ function immediatePlayback(
 
 async function mount(
   props: Partial<ComponentProps<typeof LiveSemanticStoryboard>> = {},
+  options: { readonly strict?: boolean } = {},
 ): Promise<MountedProduct> {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -170,9 +174,10 @@ async function mount(
   const mounted = { container, root };
   mountedRoots.add(mounted);
   await act(async () => {
-    root.render(
-      <LiveSemanticStoryboard layout="cinematic" reducedMotion {...props} />,
+    const product = (
+      <LiveSemanticStoryboard layout="cinematic" reducedMotion {...props} />
     );
+    root.render(options.strict ? <StrictMode>{product}</StrictMode> : product);
   });
   return mounted;
 }
@@ -281,6 +286,75 @@ describe("LiveSemanticStoryboard", () => {
     for (const mounted of [...mountedRoots]) await unmount(mounted);
     document.body.replaceChildren();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("renders a compact embedded control rail without the standalone page chrome", async () => {
+    const runStream = vi.fn<SemanticStoryboardSceneStreamRunner>();
+    const mounted = await mount({ presentation: "embedded", runStream });
+
+    expect(root(mounted.container).dataset.presentation).toBe("embedded");
+    expect(
+      mounted.container.querySelector(
+        '[data-testid="semantic-storyboard-embedded-rail"]',
+      ),
+    ).toBeTruthy();
+    expect(
+      mounted.container.querySelector(
+        '[data-testid="semantic-storyboard-embedded-controls"]',
+      ),
+    ).toBeTruthy();
+    expect(stage(mounted.container)).toBeTruthy();
+    expect(button(mounted.container, "Make it visible")).toBeTruthy();
+    expect(button(mounted.container, "Replay").disabled).toBe(true);
+    expect(button(mounted.container, "Reset").disabled).toBe(true);
+    expect(mounted.container.querySelector("header")).toBeNull();
+    expect(
+      mounted.container.querySelector('[aria-label="Storyboard Director"]'),
+    ).toBeNull();
+    expect(mounted.container.querySelector("textarea")).toBeNull();
+    expect(runStream).not.toHaveBeenCalled();
+  });
+
+  it("auto-starts exactly once after renderer attachment under StrictMode", async () => {
+    const calls: SemanticStoryboardSceneStreamRunInvocation[] = [];
+    const startFresh = vi.spyOn(
+      SemanticStoryboardSessionController.prototype,
+      "startFresh",
+    );
+    const mounted = await mount(
+      {
+        presentation: "embedded",
+        autoStart: true,
+        runStream: fixtureRunner(calls),
+      },
+      { strict: true },
+    );
+
+    await waitFor(
+      () => root(mounted.container).dataset.sessionStatus === "paused",
+      "StrictMode auto-started storyboard",
+    );
+
+    expect(
+      mounted.container.querySelector(
+        '[data-testid="semantic-storyboard-canvas"]',
+      ),
+    ).toBeTruthy();
+    expect(startFresh).toHaveBeenCalledTimes(1);
+    expect(startFresh).toHaveBeenCalledWith({
+      problemSpec: DEFAULT_PROBLEM,
+      prompt: DEFAULT_PROMPT,
+    });
+    expect(calls.map((call) => call.request.routingMode)).toEqual([
+      "reflex",
+      "director",
+    ]);
+    expect(button(mounted.container, "Continue from here").disabled).toBe(
+      false,
+    );
+    expect(button(mounted.container, "Replay").disabled).toBe(false);
+    expect(button(mounted.container, "Reset").disabled).toBe(false);
   });
 
   it("settles the provider-free anchor before Director, locks the problem, and exposes ordered certified progress", async () => {

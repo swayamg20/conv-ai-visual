@@ -4,13 +4,16 @@ import { useState, useRef, useCallback, useMemo, useEffect } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { motion } from "framer-motion";
 import { Mic, ArrowLeft, ChevronUp, Loader2 } from "lucide-react";
-import { SVGCanvas } from "@/components/svg-canvas";
 import {
   endStepTimelineSequence,
   killStepTimelines,
   type SDLSequenceEndReason,
   type SDLStepTimelineMap,
 } from "@/features/canvas/sequence-lifecycle";
+import {
+  ConversationStoryboardWorkspace,
+  type ActiveConversationStoryboard,
+} from "@/features/live-scene/conversation-storyboard-workspace";
 import type {
   CanvasOperation,
   SVGCanvasHandle,
@@ -37,6 +40,7 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { ChatInterface } from "@/components/chat-interface";
 import { BackgroundDoodles, WaveformToSketch } from "@/components/murmur-doodles";
 import { fetchAgent, createSession, endSession, API_BASE } from "@/lib/api";
+import type { ConversationStoryboardCommandV1 } from "@/lib/live-scene/conversation-storyboard-command";
 import type { Agent, Session, SessionEndResponse } from "@/lib/types";
 
 interface SessionShutdownResult {
@@ -202,6 +206,8 @@ export default function AgentSessionPage() {
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [activeStoryboard, setActiveStoryboard] =
+    useState<ActiveConversationStoryboard | null>(null);
 
   const canvasRef = useRef<SVGCanvasHandle>(null);
 
@@ -279,6 +285,36 @@ export default function AgentSessionPage() {
     };
   }, []);
 
+  const handleSessionReady = useCallback((nextSessionId: string) => {
+    if (!nextSessionId || sessionShutdownPromiseRef.current) {
+      return;
+    }
+    sessionIdRef.current = nextSessionId;
+    setSessionId((current) =>
+      current === nextSessionId ? current : nextSessionId,
+    );
+  }, []);
+
+  const handleStoryboardCommand = useCallback(
+    (command: ConversationStoryboardCommandV1) => {
+      const ownedSessionId = sessionIdRef.current;
+      if (!ownedSessionId || sessionShutdownPromiseRef.current) {
+        const time = new Date().toISOString().slice(11, 19);
+        setLogs((current) => [
+          ...current,
+          `${time}  Storyboard ignored: no active tutoring session`,
+        ]);
+        return;
+      }
+      setActiveStoryboard((current) =>
+        current?.command.commandId === command.commandId
+          ? current
+          : { command, sessionId: ownedSessionId },
+      );
+    },
+    [],
+  );
+
   const {
     messages: chatMessages,
     isLoading: chatLoading,
@@ -290,6 +326,8 @@ export default function AgentSessionPage() {
     sessionId,
     onCanvasUpdate: handleCanvasUpdate,
     onSDLScene: handleSDLScene,
+    onSessionReady: handleSessionReady,
+    onStoryboardCommand: handleStoryboardCommand,
   });
 
   const handleTranscript = useCallback((event: TranscriptEvent) => {
@@ -327,14 +365,6 @@ export default function AgentSessionPage() {
     handleLog(`Pipeline: ${parts.join(" | ")}`);
   }, [handleLog]);
 
-  const handleVoiceSessionReady = useCallback((nextSessionId: string) => {
-    if (!nextSessionId || sessionShutdownPromiseRef.current) {
-      return;
-    }
-    sessionIdRef.current = nextSessionId;
-    setSessionId((current) => (current === nextSessionId ? current : nextSessionId));
-  }, []);
-
   const ensureSessionId = useCallback(async (): Promise<string | null> => {
     if (sessionIdRef.current) {
       return sessionIdRef.current;
@@ -362,7 +392,7 @@ export default function AgentSessionPage() {
   }, [agentId]);
 
   const voiceCallbacks = useMemo<SessionVoiceCallbacks>(() => ({
-    onSessionReady: handleVoiceSessionReady,
+    onSessionReady: handleSessionReady,
     onTranscript: handleTranscript,
     onAssistantSpeech: handleLLMResponse,
     onCanvasUpdate: handleCanvasUpdate,
@@ -388,7 +418,7 @@ export default function AgentSessionPage() {
     handleSDLStepComplete,
     handleStateChange,
     handleTranscript,
-    handleVoiceSessionReady,
+    handleSessionReady,
   ]);
 
   const latestTranscript = useMemo(() => {
@@ -479,6 +509,7 @@ export default function AgentSessionPage() {
               status: "ended",
             });
           } finally {
+            setActiveStoryboard(null);
             setSessionId(null);
             setIsEndingSession(false);
           }
@@ -662,7 +693,11 @@ export default function AgentSessionPage() {
               className="flex-1 flex items-center justify-center"
             >
               <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
-                <SVGCanvas ref={canvasRef} width={800} height={600} className="w-full h-full" />
+                <ConversationStoryboardWorkspace
+                  activeStoryboard={activeStoryboard}
+                  canvasRef={canvasRef}
+                  onCloseStoryboard={() => setActiveStoryboard(null)}
+                />
               </GlassmorphicCard>
             </motion.section>
           </>
@@ -679,7 +714,10 @@ export default function AgentSessionPage() {
                   messages={chatMessages}
                   isLoading={chatLoading}
                   onSendMessage={sendChatMessage}
-                  onClearChat={clearChat}
+                  onClearChat={() => {
+                    setActiveStoryboard(null);
+                    void clearChat();
+                  }}
                 />
               </div>
             </motion.section>
@@ -691,7 +729,11 @@ export default function AgentSessionPage() {
               className="flex-1 flex items-center justify-center"
             >
               <GlassmorphicCard variant="elevated" shadow="lg" padding="xl" className="w-full h-full max-w-[900px]">
-                <SVGCanvas ref={canvasRef} width={800} height={600} className="w-full h-full" />
+                <ConversationStoryboardWorkspace
+                  activeStoryboard={activeStoryboard}
+                  canvasRef={canvasRef}
+                  onCloseStoryboard={() => setActiveStoryboard(null)}
+                />
               </GlassmorphicCard>
             </motion.section>
           </>
