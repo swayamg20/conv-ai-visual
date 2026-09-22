@@ -617,6 +617,109 @@ def test_verify_live_binds_both_images_before_and_after_health(
         )
 
 
+def test_retained_voice_version_preflight_reads_the_exact_enabled_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    secret_name, version = next(iter(RETAINED_VERSIONS.items()))
+
+    def run(command: list[str], **_kwargs: Any) -> object:
+        commands.append(command)
+        return {
+            "id": f"https://vault.vault.azure.net/secrets/{secret_name}/{version}",
+            "enabled": True,
+            "tags": {},
+        }
+
+    monkeypatch.setattr(deploy, "_run_json", run)
+
+    deploy._verify_retained_voice_secret_versions_enabled(
+        vault_name="vault",
+        versions=RETAINED_VERSIONS,
+    )
+
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("--name") + 1] == secret_name
+    assert commands[0][commands[0].index("--version") + 1] == version
+
+
+@pytest.mark.parametrize(
+    ("observed_version", "enabled"),
+    (("d" * 32, True), ("c" * 32, False)),
+)
+def test_retained_voice_version_preflight_rejects_wrong_or_disabled_version(
+    monkeypatch: pytest.MonkeyPatch,
+    observed_version: str,
+    enabled: bool,
+) -> None:
+    secret_name, expected_version = next(iter(RETAINED_VERSIONS.items()))
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *_args, **_kwargs: {
+            "id": (
+                "https://vault.vault.azure.net/secrets/"
+                f"{secret_name}/{observed_version}"
+            ),
+            "enabled": enabled,
+            "tags": {},
+        },
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="missing or disabled"):
+        deploy._verify_enabled_key_vault_secret_version(
+            vault_name="vault",
+            secret_name=secret_name,
+            version=expected_version,
+        )
+
+
+@pytest.mark.parametrize(
+    ("observed_vault", "observed_secret"),
+    (("other-vault", None), ("vault", "wrong-secret")),
+)
+def test_retained_voice_version_preflight_rejects_wrong_vault_or_secret(
+    monkeypatch: pytest.MonkeyPatch,
+    observed_vault: str,
+    observed_secret: str | None,
+) -> None:
+    secret_name, version = next(iter(RETAINED_VERSIONS.items()))
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *_args, **_kwargs: {
+            "id": (
+                f"https://{observed_vault}.vault.azure.net/secrets/"
+                f"{observed_secret or secret_name}/{version}"
+            ),
+            "enabled": True,
+            "tags": {},
+        },
+    )
+
+    with pytest.raises(deploy.DeploymentRefusal, match="invalid Key Vault secret version"):
+        deploy._verify_enabled_key_vault_secret_version(
+            vault_name="vault",
+            secret_name=secret_name,
+            version=version,
+        )
+
+
+def test_empty_retained_voice_version_preflight_makes_no_azure_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        deploy,
+        "_run_json",
+        lambda *_args, **_kwargs: pytest.fail("empty preflight must not call Azure"),
+    )
+
+    deploy._verify_retained_voice_secret_versions_enabled(
+        vault_name="vault",
+        versions={},
+    )
+
+
 def test_backend_boundary_rejects_retired_voice_secret_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

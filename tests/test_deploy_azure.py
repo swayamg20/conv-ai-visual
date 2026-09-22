@@ -1704,6 +1704,11 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     )
     monkeypatch.setattr(
         deploy,
+        "_verify_retained_voice_secret_versions_enabled",
+        lambda **_kwargs: calls.append(("retained-version-preflight", None)),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_direct_legacy_backend_vault_read_assignment",
         lambda **_kwargs: legacy_vault_read,
     )
@@ -1783,6 +1788,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     labels = [item[0] for item in calls]
     assert labels.index("firebase-authority") < labels.index("group")
+    assert labels.index("retained-version-preflight") < labels.index("secret")
     assert labels.index("backend-build") < labels.index("frontend-build")
     assert labels.index("verify-live") < labels.index("old-revisions-inactive")
     assert labels.index("old-revisions-inactive") < labels.index("finalize-secret")
@@ -1879,6 +1885,11 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     )
     monkeypatch.setattr(
         deploy,
+        "_verify_retained_voice_secret_versions_enabled",
+        lambda **_kwargs: observed.append("retained-version-preflight"),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_verify_https",
         lambda *_args, **_kwargs: observed.append("https"),
     )
@@ -1903,9 +1914,12 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     assert observed == [
         "azure",
         "key-vault-metadata",
+        "retained-version-preflight",
         "identity-boundary",
         "backend-boundary",
         "https",
+        "retained-version-preflight",
+        "backend-boundary",
     ]
     assert boundary == {
         "frontend_principal_id": FRONTEND_IDENTITY_PRINCIPAL_ID,

@@ -1633,6 +1633,58 @@ def _current_key_vault_secret_version(
     )
 
 
+def _verify_enabled_key_vault_secret_version(
+    *, vault_name: str, secret_name: str, version: str
+) -> None:
+    if (
+        secret_name not in RETIRED_VOICE_SECRET_NAMES
+        or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
+    ):
+        raise DeploymentRefusal("retained voice-secret version is invalid")
+    item = _run_json(
+        [
+            "az",
+            "keyvault",
+            "secret",
+            "show",
+            "--vault-name",
+            vault_name,
+            "--name",
+            secret_name,
+            "--version",
+            version,
+            "--query",
+            "{id:id,enabled:attributes.enabled,tags:tags}",
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"verify retained Key Vault secret version for {secret_name}",
+    )
+    observed = _parse_key_vault_secret_version(
+        item,
+        vault_name=vault_name,
+        secret_name=secret_name,
+    )
+    if observed.version.casefold() != version.casefold() or not observed.enabled:
+        raise DeploymentRefusal(
+            f"retained Key Vault secret version for {secret_name} is missing or disabled"
+        )
+
+
+def _verify_retained_voice_secret_versions_enabled(
+    *, vault_name: str, versions: Mapping[str, str] | None
+) -> None:
+    retained = _normalize_retained_retired_voice_secret_versions(versions)
+    for secret_name, version in retained.items():
+        _verify_enabled_key_vault_secret_version(
+            vault_name=vault_name,
+            secret_name=secret_name,
+            version=version,
+        )
+
+
 def _await_key_vault_data_plane_access(*, vault_name: str, attempts: int) -> None:
     for attempt in range(attempts):
         try:
@@ -3796,9 +3848,14 @@ def verify_live(
         raise DeploymentRefusal("live applications do not match the expected release SHA")
     if not backend.key_vault_name:
         raise DeploymentRefusal("backend has no verified Key Vault reference")
-    live_key_vault_id = _verify_key_vault_metadata(backend.key_vault_name)
+    verified_key_vault_name = backend.key_vault_name
+    live_key_vault_id = _verify_key_vault_metadata(verified_key_vault_name)
     if not _same_azure_resource_id(live_key_vault_id, key_vault_id):
         raise DeploymentRefusal("backend Key Vault does not match the foundation deployment")
+    _verify_retained_voice_secret_versions_enabled(
+        vault_name=verified_key_vault_name,
+        versions=expected_retained_versions,
+    )
     _verify_frontend_key_vault_boundary(
         frontend_principal_id=frontend_principal_id,
         key_vault_id=live_key_vault_id,
@@ -3834,6 +3891,18 @@ def verify_live(
         raise DeploymentRefusal("backend secret versions changed during health verification")
     if dict(backend.retained_retired_voice_secret_versions) != expected_retained_versions:
         raise DeploymentRefusal("backend rollback aliases changed during health verification")
+    if backend.key_vault_name != verified_key_vault_name:
+        raise DeploymentRefusal("backend Key Vault changed during health verification")
+    _verify_retained_voice_secret_versions_enabled(
+        vault_name=verified_key_vault_name,
+        versions=expected_retained_versions,
+    )
+    _verify_backend_key_vault_boundary(
+        backend_principal_id=expected_backend_identity_principal_id,
+        key_vault_id=live_key_vault_id,
+        allowed_retired_voice_secret_names=tuple(expected_retained_versions),
+        expected_legacy_vault_read=expected_legacy_backend_vault_read,
+    )
     if not _same_azure_resource_id(frontend.identity_id, expected_frontend_identity_id):
         raise DeploymentRefusal("frontend does not use the foundation managed identity")
     for app in (backend, frontend):
@@ -4038,6 +4107,16 @@ def deploy(args: argparse.Namespace) -> int:
             mutation_guard=lease.assert_healthy,
         ),
     ):
+        retained_retired_voice_secret_versions = _existing_retired_voice_secret_versions(
+            resource_group=resource_group,
+            backend_app=backend_app,
+            expected_identity_id=backend_identity_id,
+            expected_key_vault_name=key_vault_name,
+        )
+        _verify_retained_voice_secret_versions_enabled(
+            vault_name=key_vault_name,
+            versions=retained_retired_voice_secret_versions,
+        )
         print("Staging server credentials in Azure Key Vault")
         payloads = inputs.secret_payloads()
         if set(payloads) != set(ACTIVE_SECRET_NAMES):
@@ -4078,12 +4157,6 @@ def deploy(args: argparse.Namespace) -> int:
                 != expected_value.casefold()
             ):
                 raise DeploymentRefusal("foundation outputs changed during secured deployment")
-        retained_retired_voice_secret_versions = _existing_retired_voice_secret_versions(
-            resource_group=resource_group,
-            backend_app=backend_app,
-            expected_identity_id=backend_identity_id,
-            expected_key_vault_name=key_vault_name,
-        )
         legacy_backend_vault_read = (
             _direct_legacy_backend_vault_read_assignment(
                 backend_principal_id=backend_identity_principal_id,
