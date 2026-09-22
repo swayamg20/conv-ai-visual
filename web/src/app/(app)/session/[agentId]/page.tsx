@@ -53,6 +53,7 @@ export default function AgentSessionPage() {
   const voiceRuntime = resolveVoiceRuntimeAssignment(
     process.env.NEXT_PUBLIC_VOICE_RUNTIME
   );
+  const voiceDisabled = voiceRuntime === "disabled";
 
   const [agent, setAgent] = useState<Agent | null>(null);
   const [agentLoading, setAgentLoading] = useState(true);
@@ -195,7 +196,9 @@ export default function AgentSessionPage() {
     };
   }, [shutdownSession]);
 
-  const [appMode, setAppMode] = useState<AppMode>("voice");
+  const [appMode, setAppMode] = useState<AppMode>(() =>
+    voiceDisabled ? "chat" : "voice"
+  );
   const [transcripts, setTranscripts] = useState<string[]>([]);
   const [logs, setLogs] = useState<string[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -449,6 +452,7 @@ export default function AgentSessionPage() {
         };
 
         const handleModeChange = (nextMode: AppMode) => {
+          if (voiceDisabled && nextMode === "voice") return;
           if (appMode === "voice" && nextMode === "chat") {
             handleCancelConnection();
           }
@@ -507,6 +511,7 @@ export default function AgentSessionPage() {
               mode={appMode}
               onChange={handleModeChange}
               disabled={isEndingSession}
+              voiceDisabled={voiceDisabled}
             />
             <ThemeToggle />
           </div>

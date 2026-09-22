@@ -76,6 +76,48 @@ function v2Result() {
 }
 
 describe("SessionVoiceRuntimeController", () => {
+  it("mounts no media hook when the product voice experience is disabled", async () => {
+    hooks.useWebRTC.mockReset().mockReturnValue(legacyResult());
+    hooks.useVoiceSession.mockReset().mockReturnValue(v2Result());
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let rendered: SessionVoiceRuntime | undefined;
+
+    await act(async () => {
+      root.render(
+        <SessionVoiceRuntimeController
+          runtime="disabled"
+          agentId="agent-1"
+          sessionId="session-1"
+          callbacks={callbacks}
+        >
+          {(voice) => {
+            rendered = voice;
+            return null;
+          }}
+        </SessionVoiceRuntimeController>
+      );
+    });
+
+    expect(rendered).toMatchObject({
+      runtime: "disabled",
+      isConnected: false,
+      isVoiceReady: false,
+      canStartVoice: false,
+      terminal: true,
+      unavailableReason: {
+        code: "voice_canary_only",
+        retryable: false,
+      },
+    });
+    expect(hooks.useVoiceSession).not.toHaveBeenCalled();
+    expect(hooks.useWebRTC).not.toHaveBeenCalled();
+    await expect(rendered?.connect("session-1")).rejects.toThrow(
+      "Voice is being validated",
+    );
+    await act(async () => root.unmount());
+  });
+
   it("mounts only the assigned media runtime", async () => {
     hooks.useWebRTC.mockReset().mockReturnValue(legacyResult());
     hooks.useVoiceSession.mockReset().mockReturnValue(v2Result());

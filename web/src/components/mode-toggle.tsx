@@ -10,20 +10,30 @@ interface ModeToggleProps {
   mode: AppMode;
   onChange: (mode: AppMode) => void;
   disabled?: boolean;
+  voiceDisabled?: boolean;
 }
 
-export function ModeToggle({ mode, onChange, disabled }: ModeToggleProps) {
+export function ModeToggle({
+  mode,
+  onChange,
+  disabled,
+  voiceDisabled = false,
+}: ModeToggleProps) {
+  const isVoiceDisabled = disabled || voiceDisabled;
   return (
     <div className="flex items-center gap-1 p-1 rounded-xl bg-void border border-chalk-faint/30">
       <button
+        type="button"
         onClick={() => onChange("voice")}
-        disabled={disabled}
+        disabled={isVoiceDisabled}
+        title={voiceDisabled ? "Voice is being validated and is not available yet" : undefined}
+        aria-label={voiceDisabled ? "Voice unavailable while the pilot is validated" : "Voice"}
         className={cn(
           "relative flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors",
           mode === "voice"
             ? "text-primary"
             : "text-muted-foreground hover:text-foreground",
-          disabled && "opacity-50 cursor-not-allowed"
+          isVoiceDisabled && "opacity-50 cursor-not-allowed"
         )}
       >
         {mode === "voice" && (
@@ -34,9 +44,12 @@ export function ModeToggle({ mode, onChange, disabled }: ModeToggleProps) {
           />
         )}
         <Mic className="h-4 w-4 relative z-10" />
-        <span className="relative z-10">Voice</span>
+        <span className="relative z-10">
+          {voiceDisabled ? "Voice unavailable" : "Voice"}
+        </span>
       </button>
       <button
+        type="button"
         onClick={() => onChange("chat")}
         disabled={disabled}
         className={cn(

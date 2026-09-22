@@ -12,6 +12,7 @@ const testState = vi.hoisted(() => ({
   fetchAgent: vi.fn(),
   routerPush: vi.fn(),
   voice: {} as Record<string, unknown>,
+  voiceRuntime: "voice_v2" as "disabled" | "voice_v2",
 }));
 
 vi.mock("next/navigation", () => ({
@@ -38,7 +39,7 @@ vi.mock("framer-motion", () => {
 vi.mock("gsap", () => ({ gsap: {} }));
 
 vi.mock("@/features/voice/session-view", () => ({
-  resolveVoiceRuntimeAssignment: () => "voice_v2",
+  resolveVoiceRuntimeAssignment: () => testState.voiceRuntime,
 }));
 
 vi.mock("@/features/voice/session-runtime-controller", () => ({
@@ -61,13 +62,15 @@ vi.mock("@/components/mode-toggle", () => ({
   ModeToggle: ({
     onChange,
     disabled,
+    voiceDisabled,
   }: {
     onChange: (mode: "voice" | "chat") => void;
     disabled?: boolean;
+    voiceDisabled?: boolean;
   }) => (
     <div>
-      <button disabled={disabled} onClick={() => onChange("voice")}>
-        Voice
+      <button disabled={disabled || voiceDisabled} onClick={() => onChange("voice")}>
+        {voiceDisabled ? "Voice unavailable" : "Voice"}
       </button>
       <button disabled={disabled} onClick={() => onChange("chat")}>
         Text
@@ -221,11 +224,33 @@ describe("AgentSessionPage voice lifecycle", () => {
       created_at: "2026-08-12T00:00:00Z",
       updated_at: "2026-08-12T00:00:00Z",
     });
+    testState.voiceRuntime = "voice_v2";
     testState.voice = voiceRuntime();
   });
 
   afterEach(() => {
     document.body.replaceChildren();
+  });
+
+  it("starts in chat and cannot enter voice when the product gate is disabled", async () => {
+    testState.voiceRuntime = "disabled";
+    testState.voice = voiceRuntime({
+      runtime: "disabled",
+      canStartVoice: false,
+      terminal: true,
+    });
+
+    const mounted = await mountPage();
+    const voiceButton = buttonWithText(mounted.container, "Voice unavailable");
+
+    expect(voiceButton.disabled).toBe(true);
+    expect(mounted.container.querySelector("[data-testid='chat-interface']")).not.toBeNull();
+    expect(mounted.container.querySelector("[data-testid='voice-orb']")).toBeNull();
+    voiceButton.click();
+    expect(testState.connect).not.toHaveBeenCalled();
+    expect(mounted.container.querySelector("[data-testid='chat-interface']")).not.toBeNull();
+
+    await act(async () => mounted.root.unmount());
   });
 
   it("does not end the session during the Strict Mode effect probe", async () => {
