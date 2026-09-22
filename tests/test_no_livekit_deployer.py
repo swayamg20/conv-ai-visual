@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +22,11 @@ MODULE_SPEC.loader.exec_module(deploy)
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 DIGEST = f"sha256:{'a' * 64}"
+FRONTEND_DIGEST = f"sha256:{'b' * 64}"
 BACKEND_IDENTITY_ID = "/subscriptions/sub/resourceGroups/rg/providers/backend-identity"
 BACKEND_PRINCIPAL_ID = "11111111-1111-1111-1111-111111111111"
+FRONTEND_IDENTITY_ID = "/subscriptions/sub/resourceGroups/rg/providers/frontend-identity"
+FRONTEND_PRINCIPAL_ID = "22222222-2222-2222-2222-222222222222"
 KEY_VAULT_ID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.KeyVault/vaults/vault"
 FRONTEND_URL = "https://murmur-web.example.centralindia.azurecontainerapps.io"
 VERSIONS = {
@@ -79,15 +83,27 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _backend_app() -> dict[str, object]:
-    env = [
-        {"name": "MURMUR_RELEASE_SHA", "value": SHA},
-        {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
-        {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
-        {"name": "ALLOWED_CORS_ORIGINS", "value": FRONTEND_URL},
-        {"name": "VOICE_RUNTIME", "value": "websocket_v1"},
-        {"name": "AZURE_OPENAI_API_KEY", "secretRef": deploy.AZURE_KEY_SECRET_NAME},
-        {"name": "FIREBASE_SERVICE_ACCOUNT_JSON", "secretRef": deploy.FIREBASE_SECRET_NAME},
-    ]
+    plain_values = {
+        name: "test-value"
+        for name in deploy.BACKEND_ENV_NAMES
+        if name not in {"AZURE_OPENAI_API_KEY", "FIREBASE_SERVICE_ACCOUNT_JSON"}
+    }
+    plain_values.update(
+        {
+            "MURMUR_RELEASE_SHA": SHA,
+            "MURMUR_DATA_DIR": "/home/murmur/data",
+            "MURMUR_SQLITE_JOURNAL_MODE": "WAL",
+            "ALLOWED_CORS_ORIGINS": FRONTEND_URL,
+            "VOICE_RUNTIME": "websocket_v1",
+        }
+    )
+    env = [{"name": name, "value": value} for name, value in plain_values.items()]
+    env.extend(
+        (
+            {"name": "AZURE_OPENAI_API_KEY", "secretRef": deploy.AZURE_KEY_SECRET_NAME},
+            {"name": "FIREBASE_SERVICE_ACCOUNT_JSON", "secretRef": deploy.FIREBASE_SECRET_NAME},
+        )
+    )
     secrets = [
         {
             "name": name,
@@ -148,6 +164,31 @@ def _backend_app() -> dict[str, object]:
             },
         },
     }
+
+
+def _inspection(name: str, *, backend: bool, digest: str) -> deploy.AppInspection:
+    return deploy.AppInspection(
+        name=name,
+        url=(
+            "https://murmur-api.example.centralindia.azurecontainerapps.io"
+            if backend
+            else FRONTEND_URL
+        ),
+        image=f"murmurregistry.azurecr.io/{name}@{digest}",
+        image_digest=digest,
+        registry_server="murmurregistry.azurecr.io",
+        release_sha=SHA,
+        latest_revision=f"{name}--revision",
+        latest_ready_revision=f"{name}--revision",
+        provisioning_state="Succeeded",
+        running_status="Running",
+        min_replicas=1,
+        max_replicas=1,
+        probe_types=("Liveness", "Readiness", "Startup"),
+        key_vault_name="murmur-vault" if backend else None,
+        key_vault_secret_versions=(tuple(VERSIONS.items()) if backend else ()),
+        identity_id=BACKEND_IDENTITY_ID if backend else FRONTEND_IDENTITY_ID,
+    )
 
 
 def test_active_inputs_and_parameters_contain_no_voice_provider_credentials(
@@ -226,7 +267,18 @@ def test_inspector_accepts_only_api_websocket_topology(
     assert dict(inspection.key_vault_secret_versions) == VERSIONS
 
 
-@pytest.mark.parametrize("drift", ("worker", "livekit_env", "provider_secret", "cors"))
+@pytest.mark.parametrize(
+    "drift",
+    (
+        "worker",
+        "livekit_env",
+        "provider_secret",
+        "cors",
+        "unknown_env",
+        "init_container",
+        "process_override",
+    ),
+)
 def test_inspector_rejects_retired_voice_or_origin_drift(
     monkeypatch: pytest.MonkeyPatch,
     drift: str,
@@ -258,10 +310,16 @@ def test_inspector_rejects_retired_voice_or_origin_drift(
                 "identity": BACKEND_IDENTITY_ID,
             }
         )
-    else:
+    elif drift == "cors":
         next(item for item in env if item["name"] == "ALLOWED_CORS_ORIGINS")["value"] = (
             "https://wrong.example.azurecontainerapps.io"
         )
+    elif drift == "unknown_env":
+        env.append({"name": "UNREVIEWED_RUNTIME_SWITCH", "value": "true"})
+    elif drift == "init_container":
+        template["initContainers"] = [{"name": "bootstrap", "image": "unexpected"}]
+    else:
+        containers[0]["command"] = ["sh", "-c"]
     monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: app)
 
     with pytest.raises(deploy.DeploymentRefusal):
@@ -278,22 +336,26 @@ def test_retired_voice_scope_grant_is_revoked_and_reconciled(
 ) -> None:
     secret_name = deploy.RETIRED_VOICE_SECRET_NAMES[0]
     scope = f"{KEY_VAULT_ID}/secrets/{secret_name}"
-    assignment = deploy.RoleAssignmentMetadata(
-        id=f"{scope}/providers/Microsoft.Authorization/roleAssignments/assignment",
-        scope=scope,
-        principal_id=BACKEND_PRINCIPAL_ID,
-        role_definition_id=deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
-        description=None,
+    assignments = tuple(
+        deploy.RoleAssignmentMetadata(
+            id=f"{scope}/providers/Microsoft.Authorization/roleAssignments/assignment-{index}",
+            scope=scope,
+            principal_id=BACKEND_PRINCIPAL_ID,
+            role_definition_id=deploy.KEY_VAULT_SECRETS_USER_ROLE_ID,
+            description=None,
+        )
+        for index in range(2)
     )
-    present = {secret_name: True}
-    deleted: list[str] = []
+    present = {assignment.id for assignment in assignments}
+    events: list[str] = []
 
     def direct(*, secret_name: str, **_kwargs: Any) -> tuple[Any, ...]:
-        return (assignment,) if present.get(secret_name, False) else ()
+        return tuple(assignment for assignment in assignments if assignment.id in present)
 
     def run(command: list[str], **_kwargs: Any) -> str:
-        deleted.append(command[command.index("--ids") + 1])
-        present[secret_name] = False
+        assignment_id = command[command.index("--ids") + 1]
+        events.append(f"delete:{assignment_id}")
+        present.remove(assignment_id)
         return ""
 
     monkeypatch.setattr(deploy, "_direct_backend_secret_assignments", direct)
@@ -315,11 +377,60 @@ def test_retired_voice_scope_grant_is_revoked_and_reconciled(
     deploy._retire_backend_voice_secret_access(
         backend_principal_id=BACKEND_PRINCIPAL_ID,
         key_vault_id=KEY_VAULT_ID,
-        mutation_guard=lambda: None,
+        mutation_guard=lambda: events.append("guard"),
         attempts=1,
     )
 
-    assert deleted == [assignment.id]
+    assert events == [
+        "guard",
+        f"delete:{assignments[0].id}",
+        "guard",
+        f"delete:{assignments[1].id}",
+    ]
+
+
+def test_verify_live_binds_both_images_before_and_after_health(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _inspection("murmur-api", backend=True, digest=DIGEST)
+    frontend = _inspection("murmur-web", backend=False, digest=FRONTEND_DIGEST)
+    changed_digest = f"sha256:{'c' * 64}"
+    changed_frontend = replace(
+        frontend,
+        image=f"murmurregistry.azurecr.io/murmur-web@{changed_digest}",
+        image_digest=changed_digest,
+    )
+    inspections = iter((frontend, backend, changed_frontend, backend))
+
+    monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_run_command", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(
+        deploy, "_inspect_app", lambda *_args, **_kwargs: next(inspections)
+    )
+    monkeypatch.setattr(deploy, "_inspect_managed_identity", lambda _identity: FRONTEND_PRINCIPAL_ID)
+    monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: KEY_VAULT_ID)
+    monkeypatch.setattr(deploy, "_verify_frontend_key_vault_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
+    monkeypatch.setattr(deploy, "_verify_https", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(deploy.DeploymentRefusal, match=r"frontend.*immutable image"):
+        deploy.verify_live(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            frontend_app="murmur-web",
+            expected_backend_identity_id=BACKEND_IDENTITY_ID,
+            expected_backend_identity_principal_id=BACKEND_PRINCIPAL_ID,
+            expected_frontend_identity_id=FRONTEND_IDENTITY_ID,
+            expected_frontend_identity_principal_id=FRONTEND_PRINCIPAL_ID,
+            key_vault_id=KEY_VAULT_ID,
+            subscription_id="11111111-1111-1111-1111-111111111111",
+            tenant_id="22222222-2222-2222-2222-222222222222",
+            expected_secret_versions=VERSIONS,
+            expected_registry_server="murmurregistry.azurecr.io",
+            expected_backend_image_digest=DIGEST,
+            expected_frontend_image_digest=FRONTEND_DIGEST,
+            expected_sha=SHA,
+        )
 
 
 def test_backend_boundary_rejects_retired_voice_secret_access(

@@ -48,6 +48,11 @@ SECRET_VERSIONS = {
     deploy.AZURE_KEY_SECRET_NAME: AZURE_KEY_VERSION,
     deploy.FIREBASE_SECRET_NAME: FIREBASE_VERSION,
 }
+EXPECTED_IMAGE_ARGS = {
+    "expected_registry_server": "murmurregistry.azurecr.io",
+    "expected_backend_image_digest": DIGEST,
+    "expected_frontend_image_digest": FRONTEND_DIGEST,
+}
 
 
 def _service_account(
@@ -147,7 +152,7 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
             "httpGet": {"path": "/readyz" if backend else "/healthz", "port": port},
         },
     ]
-    env: list[dict[str, str]] = [{"name": "MURMUR_RELEASE_SHA", "value": SHA}]
+    env: list[dict[str, str]]
     secrets: list[dict[str, str]] = []
     volumes: list[dict[str, str]] = []
     mounts: list[dict[str, str]] = []
@@ -156,6 +161,21 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
     identity_id = f"/subscriptions/sub/resourcegroups/rg/providers/{identity_name}"
     reference_identity_id = f"/subscriptions/sub/resourceGroups/rg/providers/{identity_name}"
     if backend:
+        plain_values = {
+            env_name: "test-value"
+            for env_name in deploy.BACKEND_ENV_NAMES
+            if env_name not in {"AZURE_OPENAI_API_KEY", "FIREBASE_SERVICE_ACCOUNT_JSON"}
+        }
+        plain_values.update(
+            {
+                "MURMUR_RELEASE_SHA": SHA,
+                "MURMUR_DATA_DIR": "/home/murmur/data",
+                "MURMUR_SQLITE_JOURNAL_MODE": "WAL",
+                "ALLOWED_CORS_ORIGINS": FRONTEND_URL,
+                "VOICE_RUNTIME": "websocket_v1",
+            }
+        )
+        env = [{"name": key, "value": value} for key, value in plain_values.items()]
         mounts = [{"mountPath": "/home/murmur/data", "volumeName": "murmur-data"}]
         volumes = [{"name": "murmur-data", "storageType": "EmptyDir"}]
         env.extend(
@@ -165,10 +185,6 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                     "name": "FIREBASE_SERVICE_ACCOUNT_JSON",
                     "secretRef": deploy.FIREBASE_SECRET_NAME,
                 },
-                {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
-                {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
-                {"name": "ALLOWED_CORS_ORIGINS", "value": FRONTEND_URL},
-                {"name": "VOICE_RUNTIME", "value": "websocket_v1"},
             )
         )
         secrets = [
@@ -193,10 +209,15 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
             },
         ]
     else:
+        env = [
+            {"name": "HOSTNAME", "value": "0.0.0.0"},
+            {"name": "PORT", "value": "3000"},
+            {"name": "MURMUR_RELEASE_SHA", "value": SHA},
+        ]
         containers = [
             {
                 "name": "web",
-                "image": f"murmurregistry.azurecr.io/{name}@{DIGEST}",
+                "image": f"murmurregistry.azurecr.io/{name}@{FRONTEND_DIGEST}",
                 "env": env,
                 "probes": probes,
                 "volumeMounts": mounts,
@@ -242,11 +263,12 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
 
 
 def _inspection(name: str, url: str, *, backend: bool) -> deploy.AppInspection:
+    digest = DIGEST if backend else FRONTEND_DIGEST
     return deploy.AppInspection(
         name=name,
         url=url,
-        image=f"murmurregistry.azurecr.io/{name}@{DIGEST}",
-        image_digest=DIGEST,
+        image=f"murmurregistry.azurecr.io/{name}@{digest}",
+        image_digest=digest,
         registry_server="murmurregistry.azurecr.io",
         release_sha=SHA,
         latest_revision=f"{name}--revision",
@@ -407,7 +429,7 @@ def test_temporary_key_vault_role_is_revoked_after_a_failed_write(
     monkeypatch.setattr(
         deploy,
         "_revoke_key_vault_write",
-        lambda vault, value: revoked.append((vault, value)),
+        lambda vault, value, **_kwargs: revoked.append((vault, value)),
     )
 
     with pytest.raises(RuntimeError, match="write failed"):
@@ -1645,7 +1667,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     monkeypatch.setattr(
         deploy,
         "_revoke_key_vault_write",
-        lambda vault, value: calls.append(("kv-role-revoked", (vault, value))),
+        lambda vault, value, **_kwargs: calls.append(("kv-role-revoked", (vault, value))),
     )
 
     def fake_write_secret(**kwargs: Any) -> str:
@@ -1681,8 +1703,8 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     backend_inspection = _inspection("murmur-api", BACKEND_URL, backend=True)
     frontend_inspection = _inspection("murmur-web", FRONTEND_URL, backend=False)
 
-    def fake_verify_live(**_kwargs: Any) -> tuple[deploy.AppInspection, deploy.AppInspection]:
-        calls.append(("verify-live", None))
+    def fake_verify_live(**kwargs: Any) -> tuple[deploy.AppInspection, deploy.AppInspection]:
+        calls.append(("verify-live", kwargs))
         return backend_inspection, frontend_inspection
 
     monkeypatch.setattr(deploy, "verify_live", fake_verify_live)
@@ -1752,6 +1774,10 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert apps_parameters["releaseSha"] == SHA
     assert apps_parameters["backendImage"].endswith(f"@{DIGEST}")
     assert apps_parameters["frontendImage"].endswith(f"@{FRONTEND_DIGEST}")
+    verify_arguments = next(item[1] for item in calls if item[0] == "verify-live")
+    assert verify_arguments["expected_registry_server"] == "murmurregistry.azurecr.io"
+    assert verify_arguments["expected_backend_image_digest"] == DIGEST
+    assert verify_arguments["expected_frontend_image_digest"] == FRONTEND_DIGEST
     assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
     assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION
     for secret_name, parameter_name in deploy.SECRET_VERSION_PARAMETERS.items():
@@ -1830,6 +1856,7 @@ def test_verify_live_performs_only_metadata_and_health_checks(
         subscription_id=SUBSCRIPTION_ID,
         tenant_id=TENANT_ID,
         expected_secret_versions=SECRET_VERSIONS,
+        **EXPECTED_IMAGE_ARGS,
     )
 
     assert live_backend == backend_inspection
@@ -2028,6 +2055,7 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
             expected_secret_versions=SECRET_VERSIONS,
+            **EXPECTED_IMAGE_ARGS,
         )
 
 
@@ -2062,6 +2090,7 @@ def test_verify_live_rejects_shared_frontend_and_backend_identity(
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
             expected_secret_versions=SECRET_VERSIONS,
+            **EXPECTED_IMAGE_ARGS,
         )
 
 
@@ -2096,6 +2125,7 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
             expected_secret_versions=SECRET_VERSIONS,
+            **EXPECTED_IMAGE_ARGS,
         )
 
 
@@ -2241,6 +2271,7 @@ def test_verify_live_rejects_stale_frontend_principal_output(
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
             expected_secret_versions=SECRET_VERSIONS,
+            **EXPECTED_IMAGE_ARGS,
         )
 
 
@@ -2282,6 +2313,7 @@ def test_verify_live_rejects_stale_key_vault_output(
             subscription_id=SUBSCRIPTION_ID,
             tenant_id=TENANT_ID,
             expected_secret_versions=SECRET_VERSIONS,
+            **EXPECTED_IMAGE_ARGS,
         )
 
 

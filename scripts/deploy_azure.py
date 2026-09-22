@@ -84,6 +84,39 @@ RETIRED_VOICE_ENV_NAMES = frozenset(
         "ELEVENLABS_VOICE_ID",
     }
 )
+BACKEND_ENV_NAMES = frozenset(
+    {
+        "PYTHON_DOTENV_DISABLED",
+        "MURMUR_ENVIRONMENT",
+        "MURMUR_RELEASE_SHA",
+        "MURMUR_DATA_DIR",
+        "MURMUR_SQLITE_JOURNAL_MODE",
+        "ALLOWED_CORS_ORIGINS",
+        "LLM_PROVIDER",
+        "LLM_MAX_TOKENS",
+        "MURMUR_CHAT_GLOBAL_CONCURRENCY",
+        "MURMUR_CHAT_PER_USER_CONCURRENCY",
+        "MURMUR_CHAT_REQUESTS_PER_MINUTE",
+        "MURMUR_CHAT_MAX_TOOL_ROUNDS",
+        "MURMUR_CHAT_LLM_TRANSPORT_MAX_RETRIES",
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "AZURE_OPENAI_API_KEY",
+        "FIREBASE_PROJECT_ID",
+        "FIREBASE_SERVICE_ACCOUNT_JSON",
+        "VOICE_RUNTIME",
+        "MURMUR_SCENE_ENABLED",
+        "MURMUR_SCENE_LLM_PROVIDER",
+        "MURMUR_SCENE_LLM_MODEL",
+        "MURMUR_SCENE_LLM_MAX_TOKENS",
+        "MURMUR_SCENE_LLM_TIMEOUT_SECONDS",
+        "MURMUR_SCENE_GLOBAL_CONCURRENCY",
+        "MURMUR_SCENE_PER_USER_CONCURRENCY",
+        "MURMUR_SCENE_REQUESTS_PER_MINUTE",
+        "MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE",
+    }
+)
+FRONTEND_ENV_NAMES = frozenset({"HOSTNAME", "PORT", "MURMUR_RELEASE_SHA"})
 SECRET_VERSION_PARAMETERS = {
     AZURE_KEY_SECRET_NAME: "azureOpenAiSecretVersion",
     FIREBASE_SECRET_NAME: "firebaseRuntimeSecretVersion",
@@ -1072,6 +1105,40 @@ def _existing_deployment_outputs(
     return outputs
 
 
+def _existing_deployment_images(
+    *, resource_group: str, deployment_name: str
+) -> tuple[str, str]:
+    images = _run_json(
+        [
+            "az",
+            "deployment",
+            "group",
+            "show",
+            "--resource-group",
+            resource_group,
+            "--name",
+            deployment_name,
+            "--query",
+            (
+                "properties.parameters."
+                "{backendImage:backendImage.value,frontendImage:frontendImage.value}"
+            ),
+            "--output",
+            "json",
+            "--only-show-errors",
+        ],
+        timeout_seconds=60,
+        operation=f"inspect {deployment_name} image parameters",
+    )
+    if not isinstance(images, dict):
+        raise DeploymentRefusal(f"{deployment_name} returned invalid image parameters")
+    backend_image = images.get("backendImage")
+    frontend_image = images.get("frontendImage")
+    if not isinstance(backend_image, str) or not isinstance(frontend_image, str):
+        raise DeploymentRefusal(f"{deployment_name} omitted immutable image parameters")
+    return backend_image, frontend_image
+
+
 def _output_value(outputs: Mapping[str, object], name: str) -> str:
     item = outputs.get(name)
     if not isinstance(item, dict) or not isinstance(item.get("value"), str) or not item["value"]:
@@ -1288,9 +1355,12 @@ def _revoke_key_vault_write(
     assignment: RoleAssignmentMetadata,
     *,
     attempts: int = 8,
+    mutation_guard: Callable[[], None] | None = None,
 ) -> None:
     _await_writer_assignment(key_vault_id, expected=assignment, present=True, attempts=1)
     for attempt in range(attempts):
+        if mutation_guard is not None:
+            mutation_guard()
         try:
             _run_command(
                 [
@@ -1340,7 +1410,11 @@ def _temporary_key_vault_write(
     try:
         yield
     finally:
-        _revoke_key_vault_write(key_vault_id, assignment)
+        _revoke_key_vault_write(
+            key_vault_id,
+            assignment,
+            mutation_guard=mutation_guard,
+        )
 
 
 @contextmanager
@@ -2327,6 +2401,20 @@ def _env_map(container: Mapping[str, object]) -> dict[str, Mapping[str, object]]
     return result
 
 
+def _require_exact_env_names(
+    env: Mapping[str, Mapping[str, object]],
+    expected_names: frozenset[str],
+    *,
+    app_name: str,
+    container_name: str,
+) -> None:
+    if set(env) != expected_names:
+        raise DeploymentRefusal(
+            f"Container App {app_name} container {container_name} environment names are "
+            "outside the deployment contract"
+        )
+
+
 def _require_env_values(
     env: Mapping[str, Mapping[str, object]],
     expected: Mapping[str, str],
@@ -2528,6 +2616,8 @@ def _inspect_app(
         raise DeploymentRefusal(
             f"Container App {name} is outside the always-on single-replica bounds"
         )
+    if template.get("initContainers") not in (None, []):
+        raise DeploymentRefusal(f"Container App {name} unexpectedly has init containers")
 
     containers = _containers_by_name(app)
     expected_container_names = {"api"} if backend else {"web"}
@@ -2536,6 +2626,8 @@ def _inspect_app(
             f"Container App {name} containers are outside the deployment contract"
         )
     container = containers["api" if backend else "web"]
+    if container.get("command") not in (None, []) or container.get("args") not in (None, []):
+        raise DeploymentRefusal(f"Container App {name} overrides the image process")
     image = container.get("image")
     if not isinstance(image, str):
         raise DeploymentRefusal(f"Container App {name} image is missing")
@@ -2578,6 +2670,12 @@ def _inspect_app(
             raise DeploymentRefusal(
                 f"Container App {name} still exposes retired voice environment variables"
             )
+        _require_exact_env_names(
+            env,
+            BACKEND_ENV_NAMES,
+            app_name=name,
+            container_name="api",
+        )
         _require_env_values(
             env,
             {
@@ -2658,6 +2756,18 @@ def _inspect_app(
         _require_shared_data_mount(container, app_name=name, container_name="api")
     else:
         expected_paths = {"Startup": "/healthz", "Liveness": "/healthz", "Readiness": "/healthz"}
+        _require_exact_env_names(
+            env,
+            FRONTEND_ENV_NAMES,
+            app_name=name,
+            container_name="web",
+        )
+        _require_env_values(
+            env,
+            {"HOSTNAME": "0.0.0.0", "PORT": "3000"},
+            app_name=name,
+            container_name="web",
+        )
         frontend_secrets = configuration.get("secrets")
         if frontend_secrets is not None and frontend_secrets != []:
             raise DeploymentRefusal(f"Container App {name} unexpectedly has secret configuration")
@@ -3017,8 +3127,8 @@ def _retire_backend_voice_secret_access(
             ]
             if not relevant:
                 break
-            mutation_guard()
             for assignment in relevant:
+                mutation_guard()
                 try:
                     _run_command(
                         [
@@ -3245,6 +3355,9 @@ def verify_live(
     subscription_id: str,
     tenant_id: str,
     expected_secret_versions: Mapping[str, str],
+    expected_registry_server: str,
+    expected_backend_image_digest: str,
+    expected_frontend_image_digest: str,
     expected_sha: str | None = None,
     health_timeout_seconds: float = 300,
     allow_retired_voice_access_during_cutover: bool = False,
@@ -3254,6 +3367,30 @@ def verify_live(
         for version in expected_secret_versions.values()
     ):
         raise DeploymentRefusal("expected Key Vault secret versions are invalid")
+    if (
+        not expected_registry_server.endswith(".azurecr.io")
+        or not _REGISTRY_NAME.fullmatch(
+            expected_registry_server.removesuffix(".azurecr.io")
+        )
+        or not _IMAGE_DIGEST.fullmatch(expected_backend_image_digest)
+        or not _IMAGE_DIGEST.fullmatch(expected_frontend_image_digest)
+    ):
+        raise DeploymentRefusal("expected immutable image identity is invalid")
+
+    def require_expected_images(
+        backend: AppInspection, frontend: AppInspection
+    ) -> None:
+        if (
+            backend.registry_server != expected_registry_server
+            or backend.image_digest != expected_backend_image_digest
+        ):
+            raise DeploymentRefusal("backend does not run the expected immutable image")
+        if (
+            frontend.registry_server != expected_registry_server
+            or frontend.image_digest != expected_frontend_image_digest
+        ):
+            raise DeploymentRefusal("frontend does not run the expected immutable image")
+
     _validate_azure_session(subscription_id=subscription_id, tenant_id=tenant_id)
     _run_command(
         [
@@ -3278,6 +3415,7 @@ def verify_live(
         backend=True,
         expected_frontend_url=frontend.url,
     )
+    require_expected_images(backend, frontend)
     if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
         raise DeploymentRefusal("frontend and backend must use separate managed identities")
     if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
@@ -3326,6 +3464,7 @@ def verify_live(
         backend=True,
         expected_frontend_url=frontend.url,
     )
+    require_expected_images(backend, frontend)
     if _same_azure_resource_id(backend.identity_id, frontend.identity_id):
         raise DeploymentRefusal("frontend and backend must use separate managed identities")
     if not _same_azure_resource_id(backend.identity_id, expected_backend_identity_id):
@@ -3652,6 +3791,9 @@ def deploy(args: argparse.Namespace) -> int:
             subscription_id=args.subscription_id,
             tenant_id=args.tenant_id,
             expected_secret_versions=secret_versions,
+            expected_registry_server=registry_login_server,
+            expected_backend_image_digest=backend_digest,
+            expected_frontend_image_digest=frontend_digest,
             expected_sha=revision.sha,
             health_timeout_seconds=args.health_timeout_seconds,
             allow_retired_voice_access_during_cutover=True,
@@ -3720,6 +3862,22 @@ def verify(args: argparse.Namespace) -> int:
         resource_group=resource_group,
         deployment_name=APPS_DEPLOYMENT,
     )
+    backend_image, frontend_image = _existing_deployment_images(
+        resource_group=resource_group,
+        deployment_name=APPS_DEPLOYMENT,
+    )
+    expected_registry_server = _output_value(foundation, "registryLoginServer")
+    backend_registry_server, backend_digest = _image_metadata(
+        backend_image, "murmur-api"
+    )
+    frontend_registry_server, frontend_digest = _image_metadata(
+        frontend_image, "murmur-web"
+    )
+    if {
+        backend_registry_server,
+        frontend_registry_server,
+    } != {expected_registry_server}:
+        raise DeploymentRefusal("apps deployment images do not use the foundation registry")
     secret_versions = {
         secret_name: _output_value(apps, parameter_name)
         for secret_name, parameter_name in SECRET_VERSION_PARAMETERS.items()
@@ -3754,6 +3912,9 @@ def verify(args: argparse.Namespace) -> int:
             subscription_id=args.subscription_id,
             tenant_id=args.tenant_id,
             expected_secret_versions=secret_versions,
+            expected_registry_server=expected_registry_server,
+            expected_backend_image_digest=backend_digest,
+            expected_frontend_image_digest=frontend_digest,
             expected_sha=expected_sha,
             health_timeout_seconds=args.health_timeout_seconds,
         )
