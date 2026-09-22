@@ -343,7 +343,11 @@ async def _run_provider_free_canary(
                     control_type = control["type"]
                     if control_type == "ping" and set(control) == {"type", "sequence"}:
                         sequence = control["sequence"]
-                        if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0:
+                        if (
+                            isinstance(sequence, bool)
+                            or not isinstance(sequence, int)
+                            or sequence < 0
+                        ):
                             await policy_failure("control_frame_invalid")
                             return
                         await send_control("pong", client_sequence=sequence)
@@ -403,6 +407,7 @@ async def _run_provider_free_canary(
             await asyncio.gather(receive, return_exceptions=True)
         release_wait.cancel()
         await asyncio.gather(release_wait, return_exceptions=True)
+
 
 async def _close_safely(websocket: WebSocket, code: int, timeout_seconds: float) -> None:
     try:

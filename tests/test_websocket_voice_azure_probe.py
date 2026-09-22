@@ -177,7 +177,9 @@ class _FakeHttpClient:
         no_store = {"Cache-Control": "no-store"}
         observed_sha = "b" * 40 if self.bad_sha else SHA
         if path == "/healthz":
-            return httpx.Response(200, headers=no_store, json={"status": "ok", "release_sha": observed_sha})
+            return httpx.Response(
+                200, headers=no_store, json={"status": "ok", "release_sha": observed_sha}
+            )
         if path == "/readyz":
             return httpx.Response(
                 200,

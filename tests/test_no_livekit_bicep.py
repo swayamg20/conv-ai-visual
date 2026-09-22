@@ -12,6 +12,7 @@ BACKEND = APPS.split("resource backend 'Microsoft.App/containerApps", 1)[1].spli
 )[0]
 FRONTEND = APPS.split("resource frontend 'Microsoft.App/containerApps", 1)[1]
 
+
 def test_apps_deploys_one_first_party_websocket_api_container() -> None:
     assert BACKEND.count("containers: [") == 1
     assert BACKEND.count("image: backendImage") == 1
@@ -19,7 +20,10 @@ def test_apps_deploys_one_first_party_websocket_api_container() -> None:
     assert BACKEND.count("name: 'VOICE_RUNTIME'") == 1
     assert "name: 'VOICE_RUNTIME'\n              value: 'websocket_v1'" in BACKEND
     assert "name: 'ALLOWED_CORS_ORIGINS'\n              value: frontendUrl" in BACKEND
-    assert "var frontendUrl = 'https://${frontendAppName}.${environment.properties.defaultDomain}'" in APPS
+    assert (
+        "var frontendUrl = 'https://${frontendAppName}.${environment.properties.defaultDomain}'"
+        in APPS
+    )
     assert BACKEND.count("minReplicas: 1") == 1
     assert BACKEND.count("maxReplicas: 1") == 1
 

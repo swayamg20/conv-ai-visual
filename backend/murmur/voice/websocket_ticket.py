@@ -263,9 +263,7 @@ class WebSocketVoiceTicketRegistry:
             existing = self._release_intents.get(scope.voice_call_id)
             if existing is not None and existing.scope != scope:
                 raise VoiceBootstrapForbidden("Voice call belongs to another scope")
-            expires_monotonic = (
-                self._monotonic_clock() + self.settings.max_session_seconds
-            )
+            expires_monotonic = self._monotonic_clock() + self.settings.max_session_seconds
             if existing is None and active is None and digest is None:
                 if self._registry_size_locked() >= self._max_registry_entries:
                     self._release_overflow_until = max(
@@ -288,9 +286,7 @@ class WebSocketVoiceTicketRegistry:
             if retained is not None and retained.connection_id == connection.connection_id:
                 self._active.pop(connection.scope.voice_call_id, None)
                 existing = self._release_intents.get(connection.scope.voice_call_id)
-                expires_monotonic = (
-                    self._monotonic_clock() + self.settings.max_session_seconds
-                )
+                expires_monotonic = self._monotonic_clock() + self.settings.max_session_seconds
                 self._release_intents[connection.scope.voice_call_id] = _ReleaseIntent(
                     scope=connection.scope,
                     expires_monotonic=max(
@@ -324,9 +320,7 @@ class WebSocketVoiceTicketRegistry:
 
     def _registry_size_locked(self) -> int:
         return len(
-            self._pending_by_call.keys()
-            | self._active.keys()
-            | self._release_intents.keys()
+            self._pending_by_call.keys() | self._active.keys() | self._release_intents.keys()
         )
 
     def _assignment(self, pending: _PendingTicket) -> WebSocketVoiceAssignment:

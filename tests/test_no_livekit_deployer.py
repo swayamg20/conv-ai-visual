@@ -327,12 +327,15 @@ def test_existing_alias_discovery_uses_list_then_exact_show(
 
     monkeypatch.setattr(deploy, "_run_json", run)
 
-    assert deploy._existing_retired_voice_secret_versions(
-        resource_group="murmur-pilot-rg",
-        backend_app="murmur-api",
-        expected_identity_id=BACKEND_IDENTITY_ID,
-        expected_key_vault_name="murmur-vault",
-    ) == RETAINED_VERSIONS
+    assert (
+        deploy._existing_retired_voice_secret_versions(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            expected_identity_id=BACKEND_IDENTITY_ID,
+            expected_key_vault_name="murmur-vault",
+        )
+        == RETAINED_VERSIONS
+    )
     assert commands == ["list", "show"]
 
 
@@ -341,12 +344,15 @@ def test_existing_alias_discovery_allows_a_missing_app(
 ) -> None:
     monkeypatch.setattr(deploy, "_run_json", lambda *_args, **_kwargs: ["murmur-web"])
 
-    assert deploy._existing_retired_voice_secret_versions(
-        resource_group="murmur-pilot-rg",
-        backend_app="murmur-api",
-        expected_identity_id=BACKEND_IDENTITY_ID,
-        expected_key_vault_name="murmur-vault",
-    ) == {}
+    assert (
+        deploy._existing_retired_voice_secret_versions(
+            resource_group="murmur-pilot-rg",
+            backend_app="murmur-api",
+            expected_identity_id=BACKEND_IDENTITY_ID,
+            expected_key_vault_name="murmur-vault",
+        )
+        == {}
+    )
 
 
 @pytest.mark.parametrize("drift", ("identity", "vault", "unpinned", "inline"))
@@ -592,10 +598,10 @@ def test_verify_live_binds_both_images_before_and_after_health(
 
     monkeypatch.setattr(deploy, "_validate_azure_session", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_run_command", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(deploy, "_inspect_app", lambda *_args, **_kwargs: next(inspections))
     monkeypatch.setattr(
-        deploy, "_inspect_app", lambda *_args, **_kwargs: next(inspections)
+        deploy, "_inspect_managed_identity", lambda _identity: FRONTEND_PRINCIPAL_ID
     )
-    monkeypatch.setattr(deploy, "_inspect_managed_identity", lambda _identity: FRONTEND_PRINCIPAL_ID)
     monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: KEY_VAULT_ID)
     monkeypatch.setattr(deploy, "_verify_frontend_key_vault_boundary", lambda **_kwargs: None)
     monkeypatch.setattr(deploy, "_verify_backend_key_vault_boundary", lambda **_kwargs: None)
@@ -683,10 +689,7 @@ def test_retained_voice_version_preflight_rejects_wrong_or_disabled_version(
         deploy,
         "_run_json",
         lambda *_args, **_kwargs: {
-            "id": (
-                "https://vault.vault.azure.net/secrets/"
-                f"{secret_name}/{observed_version}"
-            ),
+            "id": (f"https://vault.vault.azure.net/secrets/{secret_name}/{observed_version}"),
             "enabled": enabled,
             "tags": {},
         },
@@ -791,9 +794,7 @@ def test_pending_canary_accepts_only_the_pinned_direct_legacy_assignment(
     ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
         effective = [legacy]
         if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
-            effective.append(
-                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
-            )
+            effective.append(_role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}"))
         return tuple(effective)
 
     monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
@@ -843,9 +844,7 @@ def test_pending_canary_rejects_group_derived_or_broader_access(
     ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
         effective = [group_legacy]
         if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
-            effective.append(
-                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
-            )
+            effective.append(_role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}"))
         return tuple(effective)
 
     monkeypatch.setattr(deploy, "_effective_key_vault_assignments_at_secret", assignments)
@@ -897,9 +896,7 @@ def test_pending_canary_rejects_broader_read_and_grant_permissions(
     ) -> tuple[deploy.RoleAssignmentMetadata, ...]:
         effective = [legacy, dangerous]
         if secret_name in (*deploy.ACTIVE_SECRET_NAMES, *RETAINED_VERSIONS):
-            effective.append(
-                _role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}")
-            )
+            effective.append(_role_assignment(scope=f"{KEY_VAULT_ID}/secrets/{secret_name}"))
         return tuple(effective)
 
     def permissions(role_id: str) -> tuple[dict[str, list[str]], ...]:
@@ -1026,10 +1023,13 @@ def test_deployment_parameter_round_trips_pending_canary_aliases(
 
     monkeypatch.setattr(deploy, "_run_json", run)
 
-    assert deploy._existing_deployment_retained_retired_voice_secret_versions(
-        resource_group="murmur-pilot-rg",
-        deployment_name=deploy.APPS_DEPLOYMENT,
-    ) == RETAINED_VERSIONS
+    assert (
+        deploy._existing_deployment_retained_retired_voice_secret_versions(
+            resource_group="murmur-pilot-rg",
+            deployment_name=deploy.APPS_DEPLOYMENT,
+        )
+        == RETAINED_VERSIONS
+    )
     assert observed[0][observed[0].index("--query") + 1] == (
         "properties.parameters.retainedRetiredVoiceSecretVersions.value"
     )
@@ -1101,9 +1101,7 @@ def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
         "_await_key_vault_data_plane_access",
         lambda **_kwargs: None,
     )
-    legacy_vault_read = _role_assignment(
-        scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID
-    )
+    legacy_vault_read = _role_assignment(scope=KEY_VAULT_ID, assignment_id=LEGACY_ASSIGNMENT_ID)
     monkeypatch.setattr(
         deploy,
         "_direct_legacy_backend_vault_read_assignment",
@@ -1146,10 +1144,7 @@ def test_standalone_verify_accepts_pending_canary_without_voice_retirement(
     )
 
     assert result == 0
-    assert (
-        live_arguments["expected_retained_retired_voice_secret_versions"]
-        == RETAINED_VERSIONS
-    )
+    assert live_arguments["expected_retained_retired_voice_secret_versions"] == RETAINED_VERSIONS
     assert live_arguments["expected_legacy_backend_vault_read"] == legacy_vault_read
     output_text = capsys.readouterr().out
     assert "websocket_canary_required: true" in output_text

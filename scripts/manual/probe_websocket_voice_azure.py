@@ -70,16 +70,10 @@ _CONTROL_KEYS: Mapping[str, frozenset[str]] = {
             "input_frame_pcm_bytes",
         }
     ),
-    "heartbeat": frozenset(
-        {"type", "server_sequence", "generation", "trace_id", "elapsed_ms"}
-    ),
-    "pong": frozenset(
-        {"type", "server_sequence", "generation", "trace_id", "client_sequence"}
-    ),
+    "heartbeat": frozenset({"type", "server_sequence", "generation", "trace_id", "elapsed_ms"}),
+    "pong": frozenset({"type", "server_sequence", "generation", "trace_id", "client_sequence"}),
     "clear_audio": frozenset({"type", "server_sequence", "generation", "trace_id"}),
-    "session_released": frozenset(
-        {"type", "server_sequence", "generation", "trace_id"}
-    ),
+    "session_released": frozenset({"type", "server_sequence", "generation", "trace_id"}),
 }
 
 
@@ -137,7 +131,10 @@ class ProbeSettings:
                 raise ProbeRefusal(
                     "settings_invalid", "settings", f"{name} is outside its safe range"
                 )
-        if not _is_loopback_origin(self.base_url) and self.duration_seconds < _REMOTE_MIN_DURATION_SECONDS:
+        if (
+            not _is_loopback_origin(self.base_url)
+            and self.duration_seconds < _REMOTE_MIN_DURATION_SECONDS
+        ):
             raise ProbeRefusal(
                 "settings_invalid",
                 "settings",
@@ -221,7 +218,9 @@ def read_private_token(path: Path) -> str:
     try:
         descriptor = os.open(path, flags)
     except OSError:
-        raise ProbeRefusal("token_file_invalid", "authentication", "token file is unavailable") from None
+        raise ProbeRefusal(
+            "token_file_invalid", "authentication", "token file is unavailable"
+        ) from None
     try:
         metadata = os.fstat(descriptor)
         if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != _PRIVATE_MODE:
@@ -231,17 +230,25 @@ def read_private_token(path: Path) -> str:
                 "token file must be a mode-0600 regular file",
             )
         if hasattr(os, "getuid") and metadata.st_uid != os.getuid():
-            raise ProbeRefusal("token_file_invalid", "authentication", "token file owner is invalid")
+            raise ProbeRefusal(
+                "token_file_invalid", "authentication", "token file owner is invalid"
+            )
         if metadata.st_size <= 0 or metadata.st_size > _TOKEN_MAX_BYTES:
             raise ProbeRefusal("token_file_invalid", "authentication", "token file size is invalid")
         raw = os.read(descriptor, _TOKEN_MAX_BYTES + 1)
         token = raw.decode("ascii")
     except (OSError, UnicodeDecodeError):
-        raise ProbeRefusal("token_file_invalid", "authentication", "token file is invalid") from None
+        raise ProbeRefusal(
+            "token_file_invalid", "authentication", "token file is invalid"
+        ) from None
     finally:
         os.close(descriptor)
     token = token.removesuffix("\n").removesuffix("\r")
-    if not token or len(token) > _TOKEN_MAX_BYTES or any(character.isspace() for character in token):
+    if (
+        not token
+        or len(token) > _TOKEN_MAX_BYTES
+        or any(character.isspace() for character in token)
+    ):
         raise ProbeRefusal("token_file_invalid", "authentication", "token file is invalid")
     if any(ord(character) < 33 or ord(character) > 126 for character in token):
         raise ProbeRefusal("token_file_invalid", "authentication", "token file is invalid")
@@ -283,7 +290,9 @@ def verify_local_source(settings: ProbeSettings) -> str:
     remote_ref = f"refs/heads/{branch}"
     remote = _git(settings.repo_root, "ls-remote", "--exit-code", "origin", remote_ref)
     if remote != f"{settings.expected_sha}\t{remote_ref}":
-        raise ProbeRefusal("source_not_pushed", "source", "expected SHA is not the origin branch tip")
+        raise ProbeRefusal(
+            "source_not_pushed", "source", "expected SHA is not the origin branch tip"
+        )
     return branch
 
 
@@ -347,9 +356,7 @@ async def verify_source_and_health(
     )
     if ready_response.status_code != 200 or not _has_no_store(ready_response):
         raise ProbeRefusal("readiness_contract_invalid", "readiness", "readiness contract failed")
-    readiness = _json_response(
-        ready_response, "readiness_contract_invalid", "readiness"
-    )
+    readiness = _json_response(ready_response, "readiness_contract_invalid", "readiness")
     if readiness.get("status") != "ready":
         raise ProbeRefusal("readiness_contract_invalid", "readiness", "backend is not ready")
     if readiness.get("release_sha") != expected_sha:
@@ -375,9 +382,7 @@ async def bootstrap(
         payload={"session_id": session_id, "voice_call_id": voice_call_id},
     )
     if response.status_code != 200 or not _has_no_store(response):
-        raise ProbeRefusal(
-            "bootstrap_contract_invalid", "bootstrap", "bootstrap contract failed"
-        )
+        raise ProbeRefusal("bootstrap_contract_invalid", "bootstrap", "bootstrap contract failed")
     payload = _json_response(response, "bootstrap_contract_invalid", "bootstrap")
     try:
         decoded = WebSocketVoiceSessionBootstrapResponse.model_validate(payload)
@@ -428,9 +433,7 @@ def _websocket_url(base_url: str, path: str) -> str:
     parsed = urlsplit(base_url)
     scheme = "wss" if parsed.scheme == "https" else "ws"
     if path != "/api/voice/websocket":
-        raise ProbeRefusal(
-            "bootstrap_contract_invalid", "bootstrap", "WebSocket path is invalid"
-        )
+        raise ProbeRefusal("bootstrap_contract_invalid", "bootstrap", "WebSocket path is invalid")
     return urlunsplit((scheme, parsed.netloc, path, "", ""))
 
 
@@ -446,7 +449,9 @@ def _decode_control(
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        raise ProbeRefusal("control_contract_invalid", "protocol", "control frame is invalid") from None
+        raise ProbeRefusal(
+            "control_contract_invalid", "protocol", "control frame is invalid"
+        ) from None
     if (
         not isinstance(payload, dict)
         or payload.get("type") != expected_type
@@ -464,7 +469,10 @@ def _decode_control(
         raise ProbeRefusal(
             "control_contract_invalid", "protocol", "server control sequence is invalid"
         )
-    if payload.get("generation") != counters.generation or payload.get("trace_id") != assignment.trace_id:
+    if (
+        payload.get("generation") != counters.generation
+        or payload.get("trace_id") != assignment.trace_id
+    ):
         raise ProbeRefusal(
             "control_contract_invalid", "protocol", "server control scope is invalid"
         )
@@ -625,9 +633,7 @@ async def exercise_protocol(
             "duration_short", "protocol", "WebSocket did not remain open for the requested duration"
         )
     if counters.heartbeats < 1 or counters.interrupts != 1:
-        raise ProbeRefusal(
-            "protocol_incomplete", "protocol", "protocol coverage is incomplete"
-        )
+        raise ProbeRefusal("protocol_incomplete", "protocol", "protocol coverage is incomplete")
 
     await release_active()
     _decode_control(
@@ -825,7 +831,9 @@ async def run_probe(
     return evidence
 
 
-def atomic_private_evidence(path: Path, evidence: Mapping[str, Any], secrets: tuple[str, ...]) -> None:
+def atomic_private_evidence(
+    path: Path, evidence: Mapping[str, Any], secrets: tuple[str, ...]
+) -> None:
     rendered = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
     if any(secret and secret in rendered for secret in secrets):
         raise ProbeRefusal("evidence_secret_detected", "evidence", "evidence was not written")
@@ -848,9 +856,7 @@ def atomic_private_evidence(path: Path, evidence: Mapping[str, Any], secrets: tu
     descriptor = -1
     temporary: str | None = None
     try:
-        descriptor, temporary = tempfile.mkstemp(
-            prefix=f".{requested.name}.", dir=target.parent
-        )
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{requested.name}.", dir=target.parent)
         os.fchmod(descriptor, _PRIVATE_MODE)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             descriptor = -1

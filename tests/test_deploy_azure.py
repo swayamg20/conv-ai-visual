@@ -1793,9 +1793,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
 
     labels = [item[0] for item in calls]
     assert labels.index("firebase-authority") < labels.index("group")
-    assert labels.index("key-vault-data-plane-ready") < labels.index(
-        "retained-version-preflight"
-    )
+    assert labels.index("key-vault-data-plane-ready") < labels.index("retained-version-preflight")
     assert labels.index("retained-version-preflight") < labels.index("secret")
     assert labels.index("backend-build") < labels.index("frontend-build")
     assert labels.index("verify-live") < labels.index("old-revisions-inactive")
@@ -1822,10 +1820,7 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert verify_arguments["expected_registry_server"] == "murmurregistry.azurecr.io"
     assert verify_arguments["expected_backend_image_digest"] == DIGEST
     assert verify_arguments["expected_frontend_image_digest"] == FRONTEND_DIGEST
-    assert (
-        verify_arguments["expected_retained_retired_voice_secret_versions"]
-        == retained_versions
-    )
+    assert verify_arguments["expected_retained_retired_voice_secret_versions"] == retained_versions
     assert verify_arguments["expected_legacy_backend_vault_read"] == legacy_vault_read
     assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
     assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION

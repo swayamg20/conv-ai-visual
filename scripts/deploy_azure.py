@@ -1108,9 +1108,7 @@ def _existing_deployment_outputs(
     return outputs
 
 
-def _existing_deployment_images(
-    *, resource_group: str, deployment_name: str
-) -> tuple[str, str]:
+def _existing_deployment_images(*, resource_group: str, deployment_name: str) -> tuple[str, str]:
     images = _run_json(
         [
             "az",
@@ -1638,9 +1636,8 @@ def _current_key_vault_secret_version(
 def _verify_enabled_key_vault_secret_version(
     *, vault_name: str, secret_name: str, version: str
 ) -> None:
-    if (
-        secret_name not in RETIRED_VOICE_SECRET_NAMES
-        or not _KEY_VAULT_SECRET_VERSION.fullmatch(version)
+    if secret_name not in RETIRED_VOICE_SECRET_NAMES or not _KEY_VAULT_SECRET_VERSION.fullmatch(
+        version
     ):
         raise DeploymentRefusal("retained voice-secret version is invalid")
     item = _run_json(
@@ -2623,9 +2620,7 @@ def _normalize_retained_retired_voice_secret_versions(
     ):
         raise DeploymentRefusal("retained retired voice-secret versions are invalid")
     return {
-        name: versions[name].casefold()
-        for name in RETIRED_VOICE_SECRET_NAMES
-        if name in versions
+        name: versions[name].casefold() for name in RETIRED_VOICE_SECRET_NAMES if name in versions
     }
 
 
@@ -2915,9 +2910,7 @@ def _inspect_app(
             app_name=name,
             container_name="api",
         )
-        if any(
-            item.get("secretRef") in expected_retained_versions for item in env.values()
-        ):
+        if any(item.get("secretRef") in expected_retained_versions for item in env.values()):
             raise DeploymentRefusal(
                 f"Container App {name} consumes a rollback-only voice-secret alias"
             )
@@ -3196,9 +3189,8 @@ def _parse_role_assignment_metadata(item: object) -> RoleAssignmentMetadata:
         assignment_scope, assignment_name = assignment_id.casefold().rsplit(marker, 1)
     except ValueError:
         raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid") from None
-    if (
-        not _same_azure_resource_id(assignment_scope, scope)
-        or not _AZURE_GUID.fullmatch(assignment_name)
+    if not _same_azure_resource_id(assignment_scope, scope) or not _AZURE_GUID.fullmatch(
+        assignment_name
     ):
         raise DeploymentRefusal("managed-identity Key Vault role metadata is invalid")
     return RoleAssignmentMetadata(
@@ -3298,9 +3290,7 @@ def _direct_legacy_backend_vault_read_assignment(
     return assignment
 
 
-def _same_role_assignment(
-    actual: RoleAssignmentMetadata, expected: RoleAssignmentMetadata
-) -> bool:
+def _same_role_assignment(actual: RoleAssignmentMetadata, expected: RoleAssignmentMetadata) -> bool:
     return (
         _same_azure_resource_id(actual.id, expected.id)
         and _same_azure_resource_id(actual.scope, expected.scope)
@@ -3384,10 +3374,8 @@ def _verify_backend_key_vault_boundary(
 
     if expected_legacy_vault_read is not None and (
         not _same_azure_resource_id(expected_legacy_vault_read.scope, key_vault_id)
-        or expected_legacy_vault_read.principal_id.casefold()
-        != backend_principal_id.casefold()
-        or expected_legacy_vault_read.role_definition_id
-        != KEY_VAULT_SECRETS_USER_ROLE_ID
+        or expected_legacy_vault_read.principal_id.casefold() != backend_principal_id.casefold()
+        or expected_legacy_vault_read.role_definition_id != KEY_VAULT_SECRETS_USER_ROLE_ID
         or expected_legacy_vault_read.description is not None
         or expected_legacy_vault_read.condition is not None
         or expected_legacy_vault_read.condition_version is not None
@@ -3401,9 +3389,7 @@ def _verify_backend_key_vault_boundary(
             "legacy vault-wide access cannot be retained without rollback aliases"
         )
     permission_cache: dict[str, tuple[Mapping[str, object], ...]] = {}
-    expected_access_names = frozenset(
-        (*ACTIVE_SECRET_NAMES, *allowed_retired)
-    )
+    expected_access_names = frozenset((*ACTIVE_SECRET_NAMES, *allowed_retired))
     for secret_name in (
         *ACTIVE_SECRET_NAMES,
         *RETIRED_VOICE_SECRET_NAMES,
@@ -3418,8 +3404,7 @@ def _verify_backend_key_vault_boundary(
         relevant_pairs = set(
             _security_relevant_key_vault_assignments(
                 tuple(
-                    (assignment.scope, assignment.role_definition_id)
-                    for assignment in assignments
+                    (assignment.scope, assignment.role_definition_id) for assignment in assignments
                 ),
                 permission_cache=permission_cache,
             )
@@ -3588,9 +3573,7 @@ def _retire_backend_voice_secret_access(
             key_vault_id=key_vault_id,
             secret_name=secret_name,
         )
-        if _security_relevant_key_vault_assignments(
-            assignments, permission_cache=permission_cache
-        ):
+        if _security_relevant_key_vault_assignments(assignments, permission_cache=permission_cache):
             raise DeploymentRefusal(
                 f"backend access to retired secret {secret_name} remains inherited"
             )
@@ -3791,17 +3774,13 @@ def verify_live(
     )
     if (
         not expected_registry_server.endswith(".azurecr.io")
-        or not _REGISTRY_NAME.fullmatch(
-            expected_registry_server.removesuffix(".azurecr.io")
-        )
+        or not _REGISTRY_NAME.fullmatch(expected_registry_server.removesuffix(".azurecr.io"))
         or not _IMAGE_DIGEST.fullmatch(expected_backend_image_digest)
         or not _IMAGE_DIGEST.fullmatch(expected_frontend_image_digest)
     ):
         raise DeploymentRefusal("expected immutable image identity is invalid")
 
-    def require_expected_images(
-        backend: AppInspection, frontend: AppInspection
-    ) -> None:
+    def require_expected_images(backend: AppInspection, frontend: AppInspection) -> None:
         if (
             backend.registry_server != expected_registry_server
             or backend.image_digest != expected_backend_image_digest
@@ -3968,12 +3947,8 @@ def _verify_rotation_postcondition(
 def _verify_retired_secret_postcondition(*, vault_name: str, secret_name: str) -> str:
     if not _key_vault_secret_exists(vault_name=vault_name, secret_name=secret_name):
         return "not_present"
-    before = _list_key_vault_secret_versions(
-        vault_name=vault_name, secret_name=secret_name
-    )
-    after = _list_key_vault_secret_versions(
-        vault_name=vault_name, secret_name=secret_name
-    )
+    before = _list_key_vault_secret_versions(vault_name=vault_name, secret_name=secret_name)
+    after = _list_key_vault_secret_versions(vault_name=vault_name, secret_name=secret_name)
     if before != after or any(item.enabled for item in after):
         raise DeploymentRefusal(f"retired Key Vault secret {secret_name} is not stably disabled")
     return "disabled_recoverable"
@@ -4191,9 +4166,7 @@ def deploy(args: argparse.Namespace) -> int:
         _verify_backend_key_vault_boundary(
             backend_principal_id=backend_identity_principal_id,
             key_vault_id=key_vault_id,
-            allowed_retired_voice_secret_names=tuple(
-                retained_retired_voice_secret_versions
-            ),
+            allowed_retired_voice_secret_names=tuple(retained_retired_voice_secret_versions),
             expected_legacy_vault_read=legacy_backend_vault_read,
         )
 
@@ -4222,9 +4195,7 @@ def deploy(args: argparse.Namespace) -> int:
                 release_sha=revision.sha,
                 inputs=inputs,
                 secret_versions=secret_versions,
-                retained_retired_voice_secret_versions=(
-                    retained_retired_voice_secret_versions
-                ),
+                retained_retired_voice_secret_versions=(retained_retired_voice_secret_versions),
             ),
         )
         live_backend_url = _validate_container_app_url(
@@ -4347,12 +4318,8 @@ def verify(args: argparse.Namespace) -> int:
         deployment_name=APPS_DEPLOYMENT,
     )
     expected_registry_server = _output_value(foundation, "registryLoginServer")
-    backend_registry_server, backend_digest = _image_metadata(
-        backend_image, "murmur-api"
-    )
-    frontend_registry_server, frontend_digest = _image_metadata(
-        frontend_image, "murmur-web"
-    )
+    backend_registry_server, backend_digest = _image_metadata(backend_image, "murmur-api")
+    frontend_registry_server, frontend_digest = _image_metadata(frontend_image, "murmur-web")
     if {
         backend_registry_server,
         frontend_registry_server,
@@ -4403,9 +4370,7 @@ def verify(args: argparse.Namespace) -> int:
         _verify_backend_key_vault_boundary(
             backend_principal_id=backend_identity_principal_id,
             key_vault_id=key_vault_id,
-            allowed_retired_voice_secret_names=tuple(
-                retained_retired_voice_secret_versions
-            ),
+            allowed_retired_voice_secret_names=tuple(retained_retired_voice_secret_versions),
             expected_legacy_vault_read=legacy_backend_vault_read,
         )
         backend, frontend = verify_live(
