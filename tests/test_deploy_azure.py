@@ -29,14 +29,6 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 DIGEST = f"sha256:{'a' * 64}"
 FRONTEND_DIGEST = f"sha256:{'b' * 64}"
 AZURE_KEY = "azure-secret-must-not-escape"
-LIVEKIT_API_KEY = "livekit-api-key-must-not-escape"
-LIVEKIT_API_SECRET = "livekit-api-secret-must-not-escape"
-VOICE_V2_SIGNING_SECRET = "voice-v2-signing-secret-must-not-escape-000000"
-DEEPGRAM_KEY = "deepgram-key-must-not-escape"
-GROQ_API_KEY = "groq-key-must-not-escape"
-ELEVENLABS_API_KEY = "elevenlabs-key-must-not-escape"
-ELEVENLABS_VOICE_ID = "elevenlabs-voice-id"
-LIVEKIT_URL = "wss://murmur-example.livekit.cloud"
 PRIVATE_KEY = "-----BEGIN PRIVATE KEY-----\nprivate-secret\n-----END PRIVATE KEY-----\n"
 RUNTIME_PRIVATE_KEY = (
     "-----BEGIN PRIVATE KEY-----\nruntime-private-secret\n-----END PRIVATE KEY-----\n"
@@ -55,12 +47,6 @@ FIREBASE_VERSION = "b" * 32
 SECRET_VERSIONS = {
     deploy.AZURE_KEY_SECRET_NAME: AZURE_KEY_VERSION,
     deploy.FIREBASE_SECRET_NAME: FIREBASE_VERSION,
-    deploy.LIVEKIT_API_KEY_SECRET_NAME: "c" * 32,
-    deploy.LIVEKIT_API_SECRET_SECRET_NAME: "d" * 32,
-    deploy.VOICE_V2_SIGNING_SECRET_NAME: "e" * 32,
-    deploy.DEEPGRAM_API_KEY_SECRET_NAME: "f" * 32,
-    deploy.GROQ_API_KEY_SECRET_NAME: "1" * 32,
-    deploy.ELEVENLABS_API_KEY_SECRET_NAME: "2" * 32,
 }
 
 
@@ -98,15 +84,7 @@ def _write_inputs(tmp_path: Path) -> tuple[Path, Path]:
                 f"AZURE_OPENAI_API_KEY={AZURE_KEY}",
                 "AZURE_OPENAI_ENDPOINT=https://murmur-resource.services.ai.azure.com",
                 "AZURE_OPENAI_DEPLOYMENT=murmur-gpt-oss-120b",
-                "VOICE_RUNTIME=livekit_v2",
-                f"LIVEKIT_URL={LIVEKIT_URL}",
-                f"LIVEKIT_API_KEY={LIVEKIT_API_KEY}",
-                f"LIVEKIT_API_SECRET={LIVEKIT_API_SECRET}",
-                f"VOICE_V2_SIGNING_SECRET={VOICE_V2_SIGNING_SECRET}",
-                f"DEEPGRAM_KEY={DEEPGRAM_KEY}",
-                f"GROQ_API_KEY={GROQ_API_KEY}",
-                f"ELEVENLABS_API_KEY={ELEVENLABS_API_KEY}",
-                f"ELEVENLABS_VOICE_ID={ELEVENLABS_VOICE_ID}",
+                "VOICE_RUNTIME=websocket_v1",
                 "FIREBASE_PROJECT_ID=firebase-project",
                 f"FIREBASE_RUNTIME_SERVICE_ACCOUNT_PATH={runtime_account}",
                 f"FIREBASE_DOMAIN_ADMIN_SERVICE_ACCOUNT_PATH={domain_admin_account}",
@@ -189,26 +167,8 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
                 },
                 {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
                 {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
-                {"name": "VOICE_RUNTIME", "value": "livekit_v2"},
-                {"name": "LIVEKIT_URL", "value": LIVEKIT_URL},
-                {"name": "LIVEKIT_API_KEY", "secretRef": deploy.LIVEKIT_API_KEY_SECRET_NAME},
-                {
-                    "name": "LIVEKIT_API_SECRET",
-                    "secretRef": deploy.LIVEKIT_API_SECRET_SECRET_NAME,
-                },
-                {
-                    "name": "VOICE_V2_SIGNING_SECRET",
-                    "secretRef": deploy.VOICE_V2_SIGNING_SECRET_NAME,
-                },
-                {"name": "VOICE_V2_PROFILE_ID", "value": "livekit-agents-cascade-v1"},
-                {
-                    "name": "VOICE_V2_WORKER_NAME",
-                    "value": (
-                        f"murmur-voice-v2-{SHA[:8]}-"
-                        f"{SECRET_VERSIONS[deploy.VOICE_V2_SIGNING_SECRET_NAME][:8]}"
-                    ),
-                },
-                {"name": "VOICE_V2_MAX_ACTIVE_CALLS", "value": "1"},
+                {"name": "ALLOWED_CORS_ORIGINS", "value": FRONTEND_URL},
+                {"name": "VOICE_RUNTIME", "value": "websocket_v1"},
             )
         )
         secrets = [
@@ -223,59 +183,12 @@ def _container_app(*, backend: bool, inline_secret: bool = False) -> dict[str, o
             }
             for index, secret_name in enumerate(deploy.ACTIVE_SECRET_NAMES)
         ]
-        worker_env = [
-            {"name": "MURMUR_RELEASE_SHA", "value": SHA},
-            {"name": "MURMUR_DATA_DIR", "value": "/home/murmur/data"},
-            {"name": "MURMUR_SQLITE_JOURNAL_MODE", "value": "WAL"},
-            {"name": "VOICE_RUNTIME", "value": "livekit_v2"},
-            {"name": "LIVEKIT_URL", "value": LIVEKIT_URL},
-            {"name": "LIVEKIT_API_KEY", "secretRef": deploy.LIVEKIT_API_KEY_SECRET_NAME},
-            {
-                "name": "LIVEKIT_API_SECRET",
-                "secretRef": deploy.LIVEKIT_API_SECRET_SECRET_NAME,
-            },
-            {
-                "name": "VOICE_V2_SIGNING_SECRET",
-                "secretRef": deploy.VOICE_V2_SIGNING_SECRET_NAME,
-            },
-            {"name": "VOICE_V2_PROFILE_ID", "value": "livekit-agents-cascade-v1"},
-            {
-                "name": "VOICE_V2_WORKER_NAME",
-                "value": (
-                    f"murmur-voice-v2-{SHA[:8]}-"
-                    f"{SECRET_VERSIONS[deploy.VOICE_V2_SIGNING_SECRET_NAME][:8]}"
-                ),
-            },
-            {"name": "VOICE_V2_PROVIDER_PROBE_TIMEOUT_SECONDS", "value": "4"},
-            {"name": "VOICE_V2_DRAIN_TIMEOUT_SECONDS", "value": "540"},
-            {"name": "DEEPGRAM_KEY", "secretRef": deploy.DEEPGRAM_API_KEY_SECRET_NAME},
-            {"name": "GROQ_API_KEY", "secretRef": deploy.GROQ_API_KEY_SECRET_NAME},
-            {
-                "name": "ELEVENLABS_API_KEY",
-                "secretRef": deploy.ELEVENLABS_API_KEY_SECRET_NAME,
-            },
-            {"name": "ELEVENLABS_VOICE_ID", "value": ELEVENLABS_VOICE_ID},
-        ]
-        worker_probes = [
-            {"type": "Startup", "httpGet": {"path": "/", "port": 8082}},
-            {"type": "Liveness", "httpGet": {"path": "/", "port": 8081}},
-            {"type": "Readiness", "httpGet": {"path": "/", "port": 8082}},
-        ]
         containers = [
             {
                 "name": "api",
                 "image": f"murmurregistry.azurecr.io/{name}@{DIGEST}",
                 "env": env,
                 "probes": probes,
-                "volumeMounts": mounts,
-            },
-            {
-                "name": "voice-worker",
-                "image": f"murmurregistry.azurecr.io/{name}@{DIGEST}",
-                "command": ["python", "-m", "livekit.agents", "start"],
-                "args": ["--log-level", "INFO", "backend/murmur/voice/worker.py"],
-                "env": worker_env,
-                "probes": worker_probes,
                 "volumeMounts": mounts,
             },
         ]
@@ -357,10 +270,8 @@ def test_load_deployment_inputs_validates_projects_without_printing_secrets(
     inputs = deploy.load_deployment_inputs(backend, frontend)
 
     assert inputs.azure_openai_key == AZURE_KEY
-    assert inputs.livekit_url == LIVEKIT_URL
-    assert inputs.livekit_api_key == LIVEKIT_API_KEY
-    assert inputs.voice_v2_signing_secret == VOICE_V2_SIGNING_SECRET
-    assert inputs.elevenlabs_voice_id == ELEVENLABS_VOICE_ID
+    assert inputs.azure_openai_endpoint == "https://murmur-resource.services.ai.azure.com"
+    assert inputs.azure_openai_deployment == "murmur-gpt-oss-120b"
     assert inputs.firebase_project_id == "firebase-project"
     assert json.loads(inputs.firebase_runtime_json_bytes())["private_key"] == RUNTIME_PRIVATE_KEY
     assert (
@@ -374,96 +285,12 @@ def test_load_deployment_inputs_validates_projects_without_printing_secrets(
     assert AZURE_KEY not in repr(inputs)
     assert PRIVATE_KEY not in repr(inputs)
     assert RUNTIME_PRIVATE_KEY not in repr(inputs)
-    for secret in (
-        LIVEKIT_API_KEY,
-        LIVEKIT_API_SECRET,
-        VOICE_V2_SIGNING_SECRET,
-        DEEPGRAM_KEY,
-        GROQ_API_KEY,
-        ELEVENLABS_API_KEY,
-    ):
-        assert secret not in repr(inputs)
-
-
-def test_load_deployment_inputs_generates_unprinted_signing_secret_when_absent(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    backend, frontend = _write_inputs(tmp_path)
-    backend.write_text(
-        "\n".join(
-            line
-            for line in backend.read_text(encoding="utf-8").splitlines()
-            if not line.startswith("VOICE_V2_SIGNING_SECRET=")
-        ),
-        encoding="utf-8",
-    )
-    generated = "generated-signing-secret-must-not-escape-000000000000000000"
-    monkeypatch.setattr(deploy.secrets, "token_urlsafe", lambda _length: generated)
-
-    inputs = deploy.load_deployment_inputs(backend, frontend)
-
-    assert inputs.voice_v2_signing_secret == generated
-    assert len(inputs.voice_v2_signing_secret.encode("utf-8")) >= 32
-    output = capsys.readouterr()
-    assert generated not in output.out
-    assert generated not in output.err
-    assert generated not in repr(inputs)
-
-
-def test_load_deployment_inputs_rejects_short_configured_signing_secret(
-    tmp_path: Path,
-) -> None:
-    backend, frontend = _write_inputs(tmp_path)
-    backend.write_text(
-        backend.read_text(encoding="utf-8").replace(
-            f"VOICE_V2_SIGNING_SECRET={VOICE_V2_SIGNING_SECRET}",
-            "VOICE_V2_SIGNING_SECRET=too-short",
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(deploy.DeploymentRefusal, match="at least 32 bytes"):
-        deploy.load_deployment_inputs(backend, frontend)
-
-
-@pytest.mark.parametrize(
-    "url",
-    (
-        "ws://murmur-example.livekit.cloud",
-        "https://murmur-example.livekit.cloud",
-        "wss://user:password@murmur-example.livekit.cloud",
-        "wss://murmur-example.livekit.cloud/path",
-        "wss://murmur-example.livekit.cloud?token=secret",
-        "wss://murmur-example.livekit.cloud#fragment",
-    ),
-)
-def test_load_deployment_inputs_requires_secure_livekit_origin(tmp_path: Path, url: str) -> None:
-    backend, frontend = _write_inputs(tmp_path)
-    backend.write_text(
-        backend.read_text(encoding="utf-8").replace(
-            f"LIVEKIT_URL={LIVEKIT_URL}", f"LIVEKIT_URL={url}"
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(deploy.DeploymentRefusal, match="secure WebSocket origin"):
-        deploy.load_deployment_inputs(backend, frontend)
-
-
-def test_voice_worker_name_isolated_across_same_sha_rollouts() -> None:
-    first = deploy._voice_v2_worker_name(SHA, "a" * 32)
-    second = deploy._voice_v2_worker_name(SHA, "b" * 32)
-
-    assert first == f"murmur-voice-v2-{SHA[:8]}-{'a' * 8}"
-    assert second != first
 
 
 @pytest.mark.parametrize(
     ("filename", "old", "new", "message"),
     (
-        ("backend", "VOICE_RUNTIME=livekit_v2", "VOICE_RUNTIME=legacy", "VOICE_RUNTIME"),
+        ("backend", "VOICE_RUNTIME=websocket_v1", "VOICE_RUNTIME=legacy", "VOICE_RUNTIME"),
         (
             "frontend",
             "NEXT_PUBLIC_VOICE_RUNTIME=voice_v2",
@@ -1464,7 +1291,12 @@ def test_inspect_backend_validates_scale_probes_local_database_and_key_vault(
 ) -> None:
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: _container_app(backend=True))
 
-    inspected = deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+    inspected = deploy._inspect_app(
+        "murmur-pilot-rg",
+        "murmur-api",
+        backend=True,
+        expected_frontend_url=FRONTEND_URL,
+    )
 
     assert inspected.release_sha == SHA
     assert inspected.key_vault_name == "murmur-vault"
@@ -1492,7 +1324,12 @@ def test_inspect_app_refuses_scale_drift(
         deploy.DeploymentRefusal,
         match="always-on single-replica bounds",
     ):
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
 
 def test_inspect_backend_refuses_inline_secret(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1503,7 +1340,12 @@ def test_inspect_backend_refuses_inline_secret(monkeypatch: pytest.MonkeyPatch) 
     )
 
     with pytest.raises(deploy.DeploymentRefusal, match="inline credential") as raised:
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
     assert AZURE_KEY not in str(raised.value)
 
@@ -1519,7 +1361,12 @@ def test_inspect_backend_refuses_versionless_key_vault_reference(
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
 
     with pytest.raises(deploy.DeploymentRefusal, match="not version-pinned"):
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
 
 def test_inspect_backend_refuses_registry_credentials(
@@ -1531,7 +1378,12 @@ def test_inspect_backend_refuses_registry_credentials(
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
 
     with pytest.raises(deploy.DeploymentRefusal, match="identity-based ACR pull"):
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
 
 @pytest.mark.parametrize("backend", (True, False))
@@ -1547,6 +1399,7 @@ def test_inspect_app_refuses_identity_available_to_main_containers(
             "murmur-pilot-rg",
             "murmur-api" if backend else "murmur-web",
             backend=backend,
+            expected_frontend_url=FRONTEND_URL if backend else None,
         )
 
 
@@ -1562,51 +1415,63 @@ def test_inspect_backend_refuses_shared_database_path(
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
 
     with pytest.raises(deploy.DeploymentRefusal, match="MURMUR_DATA_DIR"):
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
 
 @pytest.mark.parametrize(
     ("mutation", "message"),
     (
-        ("missing-worker", "containers are outside"),
-        ("mismatched-image", "do not use the same image"),
-        ("wrong-command", "worker command"),
-        ("missing-mount", "does not mount shared data"),
-        ("wrong-probe", "registration probes are invalid"),
+        ("extra-container", "containers are outside"),
         ("legacy-runtime", "VOICE_RUNTIME"),
-        ("inline-worker-secret", "secretRef for DEEPGRAM_KEY"),
+        ("wrong-cors", "ALLOWED_CORS_ORIGINS"),
+        ("retired-env", "retired voice environment variables"),
+        ("retired-secret", "Key Vault references are outside"),
     ),
 )
-def test_inspect_backend_refuses_voice_worker_topology_drift(
+def test_inspect_backend_refuses_websocket_topology_drift(
     monkeypatch: pytest.MonkeyPatch, mutation: str, message: str
 ) -> None:
     app = _container_app(backend=True)
     template = app["properties"]["template"]  # type: ignore[index]
     containers = template["containers"]  # type: ignore[index]
     api = containers[0]  # type: ignore[index]
-    worker = containers[1]  # type: ignore[index]
-    if mutation == "missing-worker":
-        containers.pop()  # type: ignore[union-attr]
-    elif mutation == "mismatched-image":
-        worker["image"] = f"murmurregistry.azurecr.io/murmur-api@{FRONTEND_DIGEST}"  # type: ignore[index]
-    elif mutation == "wrong-command":
-        worker["command"] = ["python", "backend/murmur/voice/worker.py"]  # type: ignore[index]
-    elif mutation == "missing-mount":
-        worker["volumeMounts"] = []  # type: ignore[index]
-    elif mutation == "wrong-probe":
-        worker["probes"][0]["httpGet"]["port"] = 8080  # type: ignore[index]
+    if mutation == "extra-container":
+        containers.append({"name": "voice-worker"})  # type: ignore[union-attr]
     elif mutation == "legacy-runtime":
         next(item for item in api["env"] if item["name"] == "VOICE_RUNTIME")["value"] = (  # type: ignore[index]
             "legacy"
         )
+    elif mutation == "wrong-cors":
+        next(item for item in api["env"] if item["name"] == "ALLOWED_CORS_ORIGINS")[  # type: ignore[index]
+            "value"
+        ] = "https://wrong.example"
+    elif mutation == "retired-env":
+        api["env"].append({"name": "LIVEKIT_URL", "value": "wss://retired.invalid"})  # type: ignore[index]
     else:
-        deepgram = next(item for item in worker["env"] if item["name"] == "DEEPGRAM_KEY")  # type: ignore[index]
-        deepgram.pop("secretRef")
-        deepgram["value"] = DEEPGRAM_KEY
+        app["properties"]["configuration"]["secrets"].append(  # type: ignore[index]
+            {
+                "name": deploy.LIVEKIT_API_KEY_SECRET_NAME,
+                "keyVaultUrl": (
+                    "https://murmur-vault.vault.azure.net/secrets/"
+                    f"{deploy.LIVEKIT_API_KEY_SECRET_NAME}/{'c' * 32}"
+                ),
+                "identity": BACKEND_IDENTITY_ID,
+            }
+        )
     monkeypatch.setattr(deploy, "_run_json", lambda *args, **kwargs: app)
 
     with pytest.raises(deploy.DeploymentRefusal, match=message):
-        deploy._inspect_app("murmur-pilot-rg", "murmur-api", backend=True)
+        deploy._inspect_app(
+            "murmur-pilot-rg",
+            "murmur-api",
+            backend=True,
+            expected_frontend_url=FRONTEND_URL,
+        )
 
 
 def test_build_frontend_refuses_silent_legacy_runtime() -> None:
@@ -1828,8 +1693,21 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     )
     monkeypatch.setattr(
         deploy,
+        "_retire_backend_voice_secret_access",
+        lambda **_kwargs: calls.append(("voice-secret-access-retired", None)),
+    )
+    monkeypatch.setattr(
+        deploy,
         "_finalize_key_vault_secret_rotation",
         lambda **kwargs: calls.append(("finalize-secret", kwargs["secret_name"])),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "_retire_voice_key_vault_secrets",
+        lambda **_kwargs: (
+            calls.append(("voice-secrets-retired", None))
+            or {name: "disabled_recoverable" for name in deploy.RETIRED_VOICE_SECRET_NAMES}
+        ),
     )
     monkeypatch.setattr(
         deploy,
@@ -1855,7 +1733,10 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert labels.index("firebase-authority") < labels.index("group")
     assert labels.index("backend-build") < labels.index("frontend-build")
     assert labels.index("verify-live") < labels.index("old-revisions-inactive")
-    assert labels.index("old-revisions-inactive") < labels.index("finalize-secret")
+    assert labels.index("old-revisions-inactive") < labels.index("voice-secret-access-retired")
+    assert labels.index("voice-secret-access-retired") < labels.index("finalize-secret")
+    assert labels.index("finalize-secret") < labels.index("voice-secrets-retired")
+    assert labels.index("voice-secrets-retired") < labels.index("legacy-secret-retired")
     assert labels.index("finalize-secret") < labels.index("legacy-secret-retired")
     assert labels.count("finalize-secret") == len(deploy.ACTIVE_SECRET_NAMES)
     assert labels.count("kv-role") == 1
@@ -1873,20 +1754,10 @@ def test_deploy_orchestrates_backend_before_frontend_and_uses_bicep_urls(
     assert apps_parameters["frontendImage"].endswith(f"@{FRONTEND_DIGEST}")
     assert apps_parameters["azureOpenAiSecretVersion"] == AZURE_KEY_VERSION
     assert apps_parameters["firebaseRuntimeSecretVersion"] == FIREBASE_VERSION
-    assert apps_parameters["livekitUrl"] == LIVEKIT_URL
-    assert apps_parameters["elevenLabsVoiceId"] == ELEVENLABS_VOICE_ID
     for secret_name, parameter_name in deploy.SECRET_VERSION_PARAMETERS.items():
         assert apps_parameters[parameter_name] == SECRET_VERSIONS[secret_name]
     serialized_parameters = json.dumps(apps_parameters)
-    for secret in (
-        AZURE_KEY,
-        LIVEKIT_API_KEY,
-        LIVEKIT_API_SECRET,
-        VOICE_V2_SIGNING_SECRET,
-        DEEPGRAM_KEY,
-        GROQ_API_KEY,
-        ELEVENLABS_API_KEY,
-    ):
+    for secret in (AZURE_KEY, PRIVATE_KEY, RUNTIME_PRIVATE_KEY):
         assert secret not in serialized_parameters
     foundation_parameters = next(
         item[1]["parameters"]
@@ -1917,7 +1788,9 @@ def test_verify_live_performs_only_metadata_and_health_checks(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
     monkeypatch.setattr(
         deploy,
@@ -2128,7 +2001,9 @@ def test_verify_live_rejects_latest_revision_that_is_not_ready(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
     monkeypatch.setattr(deploy, "_verify_key_vault_metadata", lambda _vault: KEY_VAULT_ID)
     monkeypatch.setattr(
@@ -2169,7 +2044,9 @@ def test_verify_live_rejects_shared_frontend_and_backend_identity(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
 
     with pytest.raises(deploy.DeploymentRefusal, match="separate managed identities"):
@@ -2201,7 +2078,9 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
 
     with pytest.raises(deploy.DeploymentRefusal, match="foundation managed identity"):
@@ -2224,6 +2103,7 @@ def test_verify_live_rejects_unexpected_distinct_frontend_identity(
     "protected_secret",
     (
         *deploy.ACTIVE_SECRET_NAMES,
+        *deploy.RETIRED_VOICE_SECRET_NAMES,
         deploy.LEGACY_FIREBASE_SECRET_NAME,
     ),
 )
@@ -2270,7 +2150,11 @@ def test_frontend_key_vault_boundary_rejects_secret_read_role_at_each_secret_sco
             key_vault_id=KEY_VAULT_ID,
         )
 
-    ordered = (*deploy.ACTIVE_SECRET_NAMES, deploy.LEGACY_FIREBASE_SECRET_NAME)
+    ordered = (
+        *deploy.ACTIVE_SECRET_NAMES,
+        *deploy.RETIRED_VOICE_SECRET_NAMES,
+        deploy.LEGACY_FIREBASE_SECRET_NAME,
+    )
     assert observed_scopes == [
         f"{KEY_VAULT_ID}/secrets/{secret_name}"
         for secret_name in ordered[: ordered.index(protected_secret) + 1]
@@ -2285,7 +2169,13 @@ def test_backend_key_vault_boundary_requires_exact_secret_scopes(
     def fake_run_json(command: list[str], **_kwargs: Any) -> object:
         if command[1:4] == ["role", "assignment", "list"]:
             scope = command[command.index("--scope") + 1]
-            if scope.endswith(f"/secrets/{deploy.LEGACY_FIREBASE_SECRET_NAME}"):
+            if any(
+                scope.endswith(f"/secrets/{secret_name}")
+                for secret_name in (
+                    *deploy.RETIRED_VOICE_SECRET_NAMES,
+                    deploy.LEGACY_FIREBASE_SECRET_NAME,
+                )
+            ):
                 return []
             return [
                 {
@@ -2328,7 +2218,9 @@ def test_verify_live_rejects_stale_frontend_principal_output(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
     monkeypatch.setattr(
         deploy,
@@ -2362,7 +2254,9 @@ def test_verify_live_rejects_stale_key_vault_output(
     monkeypatch.setattr(
         deploy,
         "_inspect_app",
-        lambda _rg, _name, *, backend: backend_inspection if backend else frontend_inspection,
+        lambda _rg, _name, *, backend, **_kwargs: (
+            backend_inspection if backend else frontend_inspection
+        ),
     )
     monkeypatch.setattr(
         deploy,
