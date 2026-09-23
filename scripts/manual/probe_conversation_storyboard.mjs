@@ -18,6 +18,7 @@ import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { installStreamReadObserver } from "./probe_stream_observer.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const require = createRequire(resolve(root, "web/package.json"));
@@ -96,6 +97,21 @@ let browser;
 let page;
 let agent;
 const pendingResponses = [];
+async function captureStreams() {
+  const streams = await page.evaluate(() => globalThis.__murmurProbeStreams ?? []);
+  report.streams = streams.map(({ body, ...observation }) => {
+    observation.events = [];
+    for (const line of body.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      const event = JSON.parse(line.slice(6));
+      observation.events.push(event.type);
+      if (event.type === "storyboard_command") report.command = event.command;
+      if (event.type.endsWith("_completed")) observation.completion = event;
+      if (event.type.endsWith("_failed") || event.type === "error") observation.error = event;
+    }
+    return observation;
+  });
+}
 const headers = () => ({ Authorization: `Bearer ${identity.idToken}`, "Content-Type": "application/json" });
 try {
   progress("health_verified");
@@ -122,6 +138,7 @@ try {
   report.agentId = agent.id;
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1512, height: 982 }, reducedMotion: "no-preference" });
+  await context.addInitScript(installStreamReadObserver, apiUrl);
   // Seed a real, newly exchanged token in Firebase's normal persistence format.
   // Firebase accounts:lookup and every Murmur API request remain live.
   await context.addInitScript(({ origin, user }) => {
@@ -158,22 +175,6 @@ try {
     if (url.pathname === "/api/sessions" && response.request().method() === "POST") {
       pendingResponses.push(response.json().then((body) => { report.sessionId = body.id; }).catch(() => {}));
     }
-    if (url.pathname !== "/chat" && !url.pathname.endsWith("/storyboard/stream")) return;
-    pendingResponses.push((async () => {
-      const observation = { path: url.pathname, status: response.status(), events: [] };
-      report.streams.push(observation);
-      try {
-        const body = await response.text();
-        for (const line of body.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          const event = JSON.parse(line.slice(6));
-          observation.events.push(event.type);
-          if (event.type === "storyboard_command") report.command = event.command;
-          if (event.type.endsWith("_completed")) observation.completion = event;
-          if (event.type.endsWith("_failed") || event.type === "error") observation.error = event;
-        }
-      } catch { observation.readFailed = true; }
-    })());
   });
   await page.goto(`${webUrl}/session/${agent.id}`, { waitUntil: "domcontentloaded" });
   const input = page.getByPlaceholder("Type your message...");
@@ -200,6 +201,7 @@ try {
   }
   const countsBeforeReplay = { ...report.requests };
   await page.getByTestId("semantic-storyboard-replay").click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="semantic-storyboard-product"]')?.dataset.sessionStatus === "replaying", null, { timeout: 10_000 });
   await page.waitForFunction(() => document.querySelector('[data-testid="semantic-storyboard-product"]')?.dataset.sessionStatus === "paused", null, { timeout: 90_000 });
   assert.deepEqual(report.requests, countsBeforeReplay, "Replay made a provider request.");
   const replay = await board.evaluate((element) => ({ ...element.dataset }));
@@ -210,9 +212,14 @@ try {
   assert(await input.isEnabled(), "Normal chat did not remain usable.");
   report.closeLesson = "legacy_canvas_and_chat_restored";
   await Promise.all(pendingResponses);
+  await captureStreams();
   assert.deepEqual(report.requests, { chat: 1, reflex: 1, director: 1 });
   assert(report.command, "No live model-selected storyboard command was observed.");
-  assert(report.streams.every((s) => s.status === 200 && !s.readFailed && !s.error));
+  assert.equal(report.command.prompt, report.prompt);
+  assert.deepEqual(report.command.problemSpec, { v: 1, speedMps: 20, anglesDeg: [30, 60] });
+  assert.equal(report.streams.length, 3);
+  assert(report.streams.every((s) => s.status === 200 && !s.truncated && !s.error));
+  assert.equal(report.streams.filter((s) => s.completion?.type === "semantic_storyboard_scene_stream_completed").length, 2);
   const logs = await requestJson(`${apiUrl}/api/logs?limit=5`, { headers: headers() });
   report.modelLogs = logs.logs.filter((log) => log.session_id === report.sessionId).map((log) => ({
     provider: log.llm_provider, model: log.llm_model, tokensIn: log.tokens_in,
@@ -224,6 +231,7 @@ try {
   report.result = "failed";
   report.error = String(error.message).slice(0, 1500);
   if (page) {
+    await captureStreams().catch(() => { report.streamObservationFailed = true; });
     report.pageText = (await page.locator("body").innerText().catch(() => "")).slice(0, 5000);
     await page.screenshot({ path: resolve(output, "failure.png"), fullPage: true }).catch(() => {});
   }

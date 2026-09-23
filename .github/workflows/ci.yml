@@ -116,6 +116,9 @@ jobs:
       - name: Run verified scene browser proof
         run: npm run e2e:scene
 
+      - name: Verify cancelled-stream acceptance observation
+        run: node --test ../scripts/manual/probe_stream_observer.test.mjs
+
       - name: Upload scene proof artifacts
         if: always()
         uses: actions/upload-artifact@v6
