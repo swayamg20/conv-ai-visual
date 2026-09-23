@@ -105,6 +105,20 @@ def test_tool_schema_is_closed_and_uses_the_expected_name() -> None:
     }
 
 
+def test_tool_schema_avoids_gpt_oss_numeric_enum_default_rendering_failure() -> None:
+    properties = START_PROJECTILE_STORYBOARD_SCHEMA["function"]["parameters"]["properties"]
+    speed = properties["speedMps"]
+
+    # GPT-OSS concatenates enum defaults with text without serializing them.
+    # Keep the integer domain and server-side default, but omit this optional
+    # presentation metadata instead of changing the wire value to a string.
+    assert "default" not in speed
+    assert speed["type"] == "integer"
+    assert speed["enum"] == [20, 25, 30]
+    command = create_conversation_storyboard_command({"prompt": "Trace both flights."})
+    assert command.problem_spec.speed_mps == 20
+
+
 @pytest.mark.asyncio
 async def test_tool_runtime_publishes_one_typed_command() -> None:
     runtime = _StoryboardRuntime()

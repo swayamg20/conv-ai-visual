@@ -121,8 +121,9 @@ START_PROJECTILE_STORYBOARD_SCHEMA: Final[dict[str, object]] = {
                 "speedMps": {
                     "type": "integer",
                     "enum": [20, 25, 30],
-                    "default": 20,
-                    "description": "Shared launch speed in metres per second.",
+                    # GPT-OSS's tool template concatenates enum defaults as text.
+                    # Keep the default in the validated input model, not here.
+                    "description": "Shared launch speed in metres per second. Defaults to 20.",
                 },
                 "anglesDeg": {
                     "type": "array",
