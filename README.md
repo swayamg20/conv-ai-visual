@@ -4,6 +4,12 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 
 ![Murmur live canvas](docs/assets/screenshot1.png)
 
+## Try the current MVP
+
+[Open Murmur on Azure](https://murmur-web.delightfulbush-2412377d.centralindia.azurecontainerapps.io)
+
+The public MVP is currently chat-first. In a canvas-enabled physics-agent session, the conversational model can launch the verified Gate 1.8 lesson for same-speed, same-height, no-drag projectile comparisons. The model chooses the supported lesson and teaching direction; Murmur's compiler and verifier own the physics, geometry, animation, interruption, continuation, and zero-network replay. Arbitrary-topic generative animation and production conversational voice are not claimed by this deployment.
+
 ## What is implemented
 
 - Authenticated agent, resource, session, chat, voice, and observability APIs
@@ -15,6 +21,7 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 - Four-layer memory: short-term context, episodic summaries, Mem0 semantic memory, and an explicit user profile
 - A deterministic Scene Description Language (SDL) compiler and a Rough.js/GSAP SVG renderer
 - An authenticated `/canvas/generate` equation studio for 36 bounded completing-square problems, with compiler-verified checkpoint choreography, exact interruption and continuation, a zero-provider Visual Reflex path, an optional model-routed Director, and zero-network replay
+- A conversation-selected Gate 1.8 projectile storyboard that embeds the verified animated lesson in an ordinary owned chat session, with strict problem bounds and the existing canvas retained for unsupported turns
 - User-scoped logs, latency metrics, session history, and mastery data
 
 ## Runtime flow

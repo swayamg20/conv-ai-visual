@@ -152,6 +152,22 @@ The product page supports a closed family of 36 monic completing-square equation
 
 The browser advances the frontier only after a checkpoint is presented, so interruption and replay retain the exact visible prefix. Browser-observed presentation metrics begin at submit and settle only after the post-paint barrier; provider timing remains a separate server measurement. That frontier and those measurements are ephemeral and held in memory by the mounted browser runtime; they are not server-persisted proof across refreshes, devices, or sessions. Replay preflights and redraws accepted checkpoints without another network request. The authenticated raw `/api/live-scenes/stream` remains an explicit rollback path. The auth-free lab routes are excluded from OpenAPI and remain available only when the server is in development mode, `MURMUR_SCENE_LAB=1`, and the request originates from loopback.
 
+### Conversational projectile storyboard
+
+Canvas-enabled chat pipelines advertise `start_projectile_storyboard` only after the chat service installs a storyboard callback. The conversational model can select this tool for the closed same-speed, same-height, no-drag projectile-comparison domain; the tool returns only a validated prompt and supported problem specification.
+
+```text
+ordinary owned chat turn
+  -> model selects start_projectile_storyboard
+  -> validated storyboard_command on chat SSE
+  -> embedded Gate 1.8 runtime in the session workspace
+  -> POST /api/sessions/{session_id}/storyboard/stream
+  -> session + agent ownership checks before admission/provider work
+  -> verified checkpoint choreography and post-paint frontier
+```
+
+The legacy SVG canvas remains mounted while the storyboard is open, so unsupported turns continue through `teach_with_visuals` and closing the lesson returns to the prior canvas state. A new command replaces the mounted storyboard lifecycle. The public Azure acceptance surface is chat-first; voice pipelines without a storyboard delivery callback do not see this tool.
+
 ## Extension rules
 
 - Add HTTP behavior through a focused router and an application/domain service.
