@@ -28,6 +28,8 @@ export type SemanticStoryboardHeaderHook = () =>
 export interface SemanticStoryboardTransportOptions extends SemanticStoryboardSceneStreamRunInvocation {
   readonly apiUrl: string;
   readonly endpoint: SceneStreamEndpoint;
+  /** Bind product requests to an owned tutoring session when embedded in conversation. */
+  readonly sessionId?: string;
   readonly headers?: Readonly<Record<string, string>>;
   /** Resolved immediately before fetch so product auth tokens are never cached. */
   readonly getHeaders?: SemanticStoryboardHeaderHook;
@@ -43,6 +45,20 @@ const STREAM_PATHS: Readonly<Record<SceneStreamEndpoint, string>> = {
   product: "/api/live-scenes/choreography/stream",
   developmentLab: "/api/live-scenes/lab/choreography/stream",
 };
+
+function streamPath(options: Pick<SemanticStoryboardTransportOptions, "endpoint" | "sessionId">): string {
+  if (options.sessionId !== undefined) {
+    const sessionId = options.sessionId.trim();
+    if (!sessionId) {
+      throw new Error("sessionId must not be empty");
+    }
+    if (options.endpoint !== "product") {
+      throw new Error("sessionId is supported only by the product endpoint");
+    }
+    return `/api/sessions/${encodeURIComponent(sessionId)}/storyboard/stream`;
+  }
+  return STREAM_PATHS[options.endpoint];
+}
 
 /** Consume only the dedicated Gate 1.8 SSE lane through its strict decoder. */
 export async function consumeSemanticStoryboardSceneStreamResponse(
@@ -61,9 +77,9 @@ export async function runSemanticStoryboardSceneModelStream(
   options: SemanticStoryboardTransportOptions,
 ): Promise<void> {
   const request = decodeSemanticStoryboardRequestV1(options.request);
+  const endpointPath = streamPath(options);
   const liveHeaders = options.getHeaders ? await options.getHeaders() : {};
   const requestFetch = options.fetchImpl ?? fetch;
-  const endpointPath = STREAM_PATHS[options.endpoint];
   const response = await requestFetch(
     `${options.apiUrl.replace(/\/$/, "")}${endpointPath}`,
     {

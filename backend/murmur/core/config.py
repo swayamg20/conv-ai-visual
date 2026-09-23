@@ -254,6 +254,12 @@ Every explanation MUST use this tool. Each step has:
 - "highlight": Element ID(s) to emphasize (optional)
 - "clear": true to wipe the canvas (use for new topics)
 
+TOOL: start_projectile_storyboard
+For same-speed projectile comparisons that launch and land at the same height with no drag,
+use start_projectile_storyboard instead of teach_with_visuals. It renders the verified animated
+lesson itself. If the learner does not give values, use 20 m/s and 30°/60°. After calling it,
+briefly acknowledge the visual handoff and do not repeat a competing prose lesson.
+
 COMPONENTS (use the simplest that fits):
 - right_triangle: { sides: ["a", "b", "c"] }
 - equation: { latex: "c^2 = a^2 + b^2" }
@@ -349,6 +355,27 @@ EXAMPLE — "Explain the Pythagorean theorem":
     VOICE_V2_MAX_CONCURRENT_BOOTSTRAPS: str = os.getenv("VOICE_V2_MAX_CONCURRENT_BOOTSTRAPS", "100")
     VOICE_V2_MAX_ACTIVE_CALLS: str = os.getenv("VOICE_V2_MAX_ACTIVE_CALLS", "1")
     VOICE_V2_MAX_CALL_ASSIGNMENTS: str = os.getenv("VOICE_V2_MAX_CALL_ASSIGNMENTS", "10000")
+
+    # First-party browser-to-API WebSocket transport. Keep these values raw at
+    # import time so an inactive runtime cannot make legacy startup fail.
+    VOICE_WEBSOCKET_TICKET_TTL_SECONDS: str = os.getenv("VOICE_WEBSOCKET_TICKET_TTL_SECONDS", "15")
+    VOICE_WEBSOCKET_REPOSITORY_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_REPOSITORY_TIMEOUT_SECONDS", "2"
+    )
+    VOICE_WEBSOCKET_MAX_PENDING_TICKETS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_PENDING_TICKETS", "100"
+    )
+    VOICE_WEBSOCKET_MAX_ACTIVE_CALLS: str = os.getenv("VOICE_WEBSOCKET_MAX_ACTIVE_CALLS", "1")
+    VOICE_WEBSOCKET_MAX_CALL_ASSIGNMENTS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_CALL_ASSIGNMENTS", "10000"
+    )
+    VOICE_WEBSOCKET_MAX_SESSION_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_MAX_SESSION_SECONDS", "900"
+    )
+    VOICE_WEBSOCKET_HEARTBEAT_SECONDS: str = os.getenv("VOICE_WEBSOCKET_HEARTBEAT_SECONDS", "15")
+    VOICE_WEBSOCKET_SEND_TIMEOUT_SECONDS: str = os.getenv(
+        "VOICE_WEBSOCKET_SEND_TIMEOUT_SECONDS", "2"
+    )
 
     # TTS provider: "elevenlabs" (cloud, high quality) or "kokoro" (local ONNX, low latency)
     TTS_PROVIDER: str = os.getenv("TTS_PROVIDER", "elevenlabs")

@@ -7,12 +7,13 @@ import {
 import type { VoiceSessionPhase } from "./session-machine";
 
 describe("Voice V2 session view", () => {
-  it("keeps the canary default on legacy unless V2 is explicitly assigned", () => {
+  it("recognizes the explicit disabled boundary while preserving legacy defaults", () => {
     expect(resolveVoiceRuntimeAssignment(undefined)).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("legacy")).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("unexpected")).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("livekit_v2")).toBe("legacy");
     expect(resolveVoiceRuntimeAssignment("pipecat_smallwebrtc_v1")).toBe("legacy");
+    expect(resolveVoiceRuntimeAssignment("disabled")).toBe("disabled");
     expect(resolveVoiceRuntimeAssignment("voice_v2")).toBe("voice_v2");
   });
 

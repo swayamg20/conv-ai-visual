@@ -30,6 +30,7 @@ from murmur.tools.search import register_web_search_tool
 from murmur.voice import VoiceService
 from murmur.voice.bootstrap import VoiceBootstrapper
 from murmur.voice.livekit_control import create_default_voice_bootstrap_service
+from murmur.voice.websocket_ticket import create_default_websocket_voice_service
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,7 @@ def create_application(
     chat_admission: ChatAdmission | None = None,
     voice_service: VoiceService | None = None,
     voice_bootstrap_service: VoiceBootstrapper | None = None,
+    websocket_voice_service=None,
     scene_authoring_service: SceneAuthoringService | None = None,
     scene_authoring_admission: SceneAuthoringAdmission | None = None,
     scene_authoring_enabled: bool | None = None,
@@ -66,6 +68,7 @@ def create_application(
     )
     voice_service = voice_service or VoiceService(runtime)
     voice_bootstrap_service = voice_bootstrap_service or create_default_voice_bootstrap_service()
+    websocket_voice_service = websocket_voice_service or create_default_websocket_voice_service()
     if scene_authoring_service is None:
         scene_provider = config.MURMUR_SCENE_LLM_PROVIDER
         scene_model = config.MURMUR_SCENE_LLM_MODEL
@@ -116,6 +119,7 @@ def create_application(
             shutdown_results = await asyncio.gather(
                 runtime.shutdown(),
                 voice_bootstrap_service.aclose(),
+                websocket_voice_service.aclose(),
                 return_exceptions=True,
             )
             for result in shutdown_results:
@@ -132,6 +136,7 @@ def create_application(
     app.state.chat_admission = chat_admission
     app.state.voice_service = voice_service
     app.state.voice_bootstrap_service = voice_bootstrap_service
+    app.state.websocket_voice_service = websocket_voice_service
     app.state.scene_authoring_service = scene_authoring_service
     app.state.scene_authoring_admission = scene_authoring_admission
     app.state.scene_authoring_enabled = scene_authoring_enabled

@@ -43,12 +43,6 @@ var lockBlobName = 'azure-pilot.lock'
 var backendSecretNames = [
   'azure-openai-api-key'
   'firebase-runtime-service-account-json'
-  'livekit-api-key'
-  'livekit-api-secret'
-  'voice-v2-signing-secret'
-  'deepgram-api-key'
-  'groq-api-key'
-  'elevenlabs-api-key'
 ]
 
 var acrPullRoleDefinitionId = subscriptionResourceId(

@@ -160,6 +160,40 @@ function LegacyVoiceController({
   });
 }
 
+const disabledVoiceReason: VoiceUnavailableReason = Object.freeze({
+  code: "voice_canary_only",
+  message: "Voice is being validated and is not available in the product yet.",
+  retryable: false,
+});
+
+/** A fail-closed product boundary that initializes no browser media runtime. */
+function DisabledVoiceController({ children }: RuntimeLeafProps) {
+  return children({
+    runtime: "disabled",
+    isConnected: false,
+    isVoiceReady: false,
+    isConnecting: false,
+    canStartVoice: false,
+    terminal: true,
+    unavailableReason: disabledVoiceReason,
+    voiceState: "idle",
+    indicatorState: "idle",
+    statusLabel: "Voice unavailable · pilot validation in progress",
+    pipelineState: "idle",
+    isMicMuted: true,
+    isTTSEnabled: false,
+    audioPlaybackBlocked: false,
+    connect: async () => {
+      throw new Error(disabledVoiceReason.message);
+    },
+    disconnect: async () => undefined,
+    cancelConnection: async () => undefined,
+    toggleMicMute: () => undefined,
+    toggleTTS: () => undefined,
+    resumeAudio: async () => undefined,
+  });
+}
+
 function VoiceV2Controller({
   agentId,
   sessionId,
@@ -215,6 +249,9 @@ function VoiceV2Controller({
 
 /** Mounts exactly one media runtime, so Voice V2 never initializes legacy VAD. */
 export function SessionVoiceRuntimeController(props: ControllerProps) {
+  if (props.runtime === "disabled") {
+    return <DisabledVoiceController {...props} />;
+  }
   return props.runtime === "voice_v2" ? (
     <VoiceV2Controller {...props} />
   ) : (

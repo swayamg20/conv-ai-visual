@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 from murmur.canvas.animation import TEACH_WITH_VISUALS_SCHEMA
+from murmur.live_scene.conversation_storyboard import START_PROJECTILE_STORYBOARD_SCHEMA
 from murmur.persistence.repositories.tools import ToolRepo
 
 logger = logging.getLogger(__name__)
@@ -355,4 +356,4 @@ def register_canvas_tool() -> None:
     logger.info("Registered canvas_update tool in DB")
 
 
-ANIMATION_TOOLS = [TEACH_WITH_VISUALS_SCHEMA]
+ANIMATION_TOOLS = [TEACH_WITH_VISUALS_SCHEMA, START_PROJECTILE_STORYBOARD_SCHEMA]

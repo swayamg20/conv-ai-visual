@@ -11,7 +11,22 @@ const testState = vi.hoisted(() => ({
   endSession: vi.fn(),
   fetchAgent: vi.fn(),
   routerPush: vi.fn(),
+  chatOptions: {} as {
+    onSessionReady?: (sessionId: string) => void;
+    onStoryboardCommand?: (command: {
+      v: 1;
+      commandId: string;
+      protocol: "projectile_comparison_storyboard_v1";
+      problemSpec: {
+        v: 1;
+        speedMps: 20 | 25 | 30;
+        anglesDeg: readonly [30 | 45 | 60, 30 | 45 | 60];
+      };
+      prompt: string;
+    }) => void;
+  },
   voice: {} as Record<string, unknown>,
+  voiceRuntime: "voice_v2" as "disabled" | "voice_v2",
 }));
 
 vi.mock("next/navigation", () => ({
@@ -38,7 +53,7 @@ vi.mock("framer-motion", () => {
 vi.mock("gsap", () => ({ gsap: {} }));
 
 vi.mock("@/features/voice/session-view", () => ({
-  resolveVoiceRuntimeAssignment: () => "voice_v2",
+  resolveVoiceRuntimeAssignment: () => testState.voiceRuntime,
 }));
 
 vi.mock("@/features/voice/session-runtime-controller", () => ({
@@ -61,13 +76,15 @@ vi.mock("@/components/mode-toggle", () => ({
   ModeToggle: ({
     onChange,
     disabled,
+    voiceDisabled,
   }: {
     onChange: (mode: "voice" | "chat") => void;
     disabled?: boolean;
+    voiceDisabled?: boolean;
   }) => (
     <div>
-      <button disabled={disabled} onClick={() => onChange("voice")}>
-        Voice
+      <button disabled={disabled || voiceDisabled} onClick={() => onChange("voice")}>
+        {voiceDisabled ? "Voice unavailable" : "Voice"}
       </button>
       <button disabled={disabled} onClick={() => onChange("chat")}>
         Text
@@ -95,6 +112,28 @@ vi.mock("@/components/chat-interface", () => ({
 }));
 
 vi.mock("@/components/svg-canvas", () => ({ SVGCanvas: () => <div /> }));
+vi.mock("@/features/live-scene/conversation-storyboard-workspace", () => ({
+  ConversationStoryboardWorkspace: ({
+    activeStoryboard,
+    onCloseStoryboard,
+  }: {
+    activeStoryboard: {
+      command: { commandId: string; prompt: string };
+      sessionId: string;
+    } | null;
+    onCloseStoryboard: () => void;
+  }) => (
+    <div
+      data-testid="session-visual-workspace"
+      data-command-id={activeStoryboard?.command.commandId ?? "none"}
+      data-session-id={activeStoryboard?.sessionId ?? "none"}
+    >
+      {activeStoryboard ? (
+        <button onClick={onCloseStoryboard}>Close storyboard</button>
+      ) : null}
+    </div>
+  ),
+}));
 vi.mock("@/components/status-indicator", () => ({
   StatusIndicator: () => null,
 }));
@@ -113,12 +152,15 @@ vi.mock("@/components/murmur-doodles", () => ({
 }));
 
 vi.mock("@/hooks/use-chat", () => ({
-  useChat: () => ({
-    messages: [],
-    isLoading: false,
-    sendMessage: vi.fn(),
-    clearChat: vi.fn(),
-  }),
+  useChat: (options: typeof testState.chatOptions) => {
+    testState.chatOptions = options;
+    return {
+      messages: [],
+      isLoading: false,
+      sendMessage: vi.fn(),
+      clearChat: vi.fn(),
+    };
+  },
 }));
 
 vi.mock("@/lib/scene-kit", () => ({
@@ -201,6 +243,7 @@ describe("AgentSessionPage voice lifecycle", () => {
     testState.connect.mockReset().mockResolvedValue(undefined);
     testState.disconnect.mockReset().mockResolvedValue(undefined);
     testState.routerPush.mockReset();
+    testState.chatOptions = {};
     testState.endSession.mockReset().mockResolvedValue({
       id: "a4f4328e-185e-4c65-b3f7-101e04a37578",
       summary: "Gravity recap",
@@ -221,11 +264,102 @@ describe("AgentSessionPage voice lifecycle", () => {
       created_at: "2026-08-12T00:00:00Z",
       updated_at: "2026-08-12T00:00:00Z",
     });
+    testState.voiceRuntime = "voice_v2";
     testState.voice = voiceRuntime();
   });
 
   afterEach(() => {
     document.body.replaceChildren();
+  });
+
+  it("starts in chat and cannot enter voice when the product gate is disabled", async () => {
+    testState.voiceRuntime = "disabled";
+    testState.voice = voiceRuntime({
+      runtime: "disabled",
+      canStartVoice: false,
+      terminal: true,
+    });
+
+    const mounted = await mountPage();
+    const voiceButton = buttonWithText(mounted.container, "Voice unavailable");
+
+    expect(voiceButton.disabled).toBe(true);
+    expect(mounted.container.querySelector("[data-testid='chat-interface']")).not.toBeNull();
+    expect(mounted.container.querySelector("[data-testid='voice-orb']")).toBeNull();
+    voiceButton.click();
+    expect(testState.connect).not.toHaveBeenCalled();
+    expect(mounted.container.querySelector("[data-testid='chat-interface']")).not.toBeNull();
+
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("mounts a session-bound storyboard command and can return to the canvas", async () => {
+    testState.voiceRuntime = "disabled";
+    testState.voice = voiceRuntime({
+      runtime: "disabled",
+      canStartVoice: false,
+      terminal: true,
+    });
+    const mounted = await mountPage();
+    const command = {
+      v: 1 as const,
+      commandId: "0f2a1a6d-676b-4e49-9201-45841041a28d",
+      protocol: "projectile_comparison_storyboard_v1" as const,
+      problemSpec: {
+        v: 1 as const,
+        speedMps: 20 as const,
+        anglesDeg: [30, 60] as const,
+      },
+      prompt: "Explain projectile motion visually.",
+    };
+
+    await act(async () => {
+      testState.chatOptions.onStoryboardCommand?.(command);
+    });
+
+    const workspace = mounted.container.querySelector(
+      "[data-testid='session-visual-workspace']",
+    );
+    expect(workspace?.getAttribute("data-command-id")).toBe(command.commandId);
+    expect(workspace?.getAttribute("data-session-id")).toBe(
+      "a4f4328e-185e-4c65-b3f7-101e04a37578",
+    );
+
+    await act(async () => buttonWithText(mounted.container, "Close storyboard").click());
+    expect(workspace?.getAttribute("data-command-id")).toBe("none");
+
+    await act(async () => mounted.root.unmount());
+  });
+
+  it("uses the authoritative chat session for a first-turn storyboard", async () => {
+    testState.voiceRuntime = "disabled";
+    testState.voice = voiceRuntime({
+      runtime: "disabled",
+      canStartVoice: false,
+      terminal: true,
+    });
+    const mounted = await mountPage();
+
+    await act(async () => {
+      testState.chatOptions.onSessionReady?.(
+        "b8dd483e-820a-4fd6-aae2-44e160d4e7fd",
+      );
+      testState.chatOptions.onStoryboardCommand?.({
+        v: 1,
+        commandId: "47ec4d9b-13e7-48a4-8eb7-bb73efcaa74c",
+        protocol: "projectile_comparison_storyboard_v1",
+        problemSpec: { v: 1, speedMps: 25, anglesDeg: [30, 45] },
+        prompt: "Compare their arcs.",
+      });
+    });
+
+    expect(
+      mounted.container
+        .querySelector("[data-testid='session-visual-workspace']")
+        ?.getAttribute("data-session-id"),
+    ).toBe("b8dd483e-820a-4fd6-aae2-44e160d4e7fd");
+
+    await act(async () => mounted.root.unmount());
   });
 
   it("does not end the session during the Strict Mode effect probe", async () => {

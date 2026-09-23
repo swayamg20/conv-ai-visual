@@ -12,6 +12,7 @@ from murmur.api.routers import (
     resources,
     sessions,
     voice,
+    websocket_voice,
 )
 
 api_router = APIRouter()
@@ -24,5 +25,6 @@ api_router.include_router(observability.router)
 api_router.include_router(chat.router)
 api_router.include_router(live_scenes.router)
 api_router.include_router(voice.router)
+api_router.include_router(websocket_voice.router)
 
 __all__ = ["api_router"]

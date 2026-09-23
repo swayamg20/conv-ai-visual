@@ -5,6 +5,7 @@ from typing import Any, ClassVar
 
 from murmur.canvas.state import ANIMATION_TOOLS, CANVAS_TOOL_SCHEMA, CanvasState
 from murmur.core.config import config
+from murmur.live_scene.conversation_storyboard import CONVERSATION_STORYBOARD_TOOL_NAME
 from murmur.llm.base import LLMClient
 from murmur.llm.factory import create_llm_client
 from murmur.llm.tool_runtime import ToolConversationMixin
@@ -31,6 +32,7 @@ class LLMPipeline(ToolConversationMixin):
 
     MUTATING_TOOL_NAMES: ClassVar[set[str]] = {
         "canvas_update",
+        "start_projectile_storyboard",
         "teach_with_visuals",
     }
 
@@ -127,6 +129,7 @@ class LLMPipeline(ToolConversationMixin):
         self.canvas_state = CanvasState()
         self.canvas_callback: Callable[[list[dict]], Any] | None = None
         self.animation_callback: Callable[[dict], Any] | None = None
+        self.storyboard_callback: Callable[[dict], Any] | None = None
 
         # Call metrics (populated after each chat_with_tools_stream call)
         self._last_call_timing: dict | None = None
@@ -428,6 +431,10 @@ class LLMPipeline(ToolConversationMixin):
         """
         self.animation_callback = callback
 
+    def set_storyboard_callback(self, callback: Callable[[dict], Any]):
+        """Set the callback for validated conversational storyboard commands."""
+        self.storyboard_callback = callback
+
     def switch_provider(self, provider: str, api_key: str | None = None, model: str | None = None):
         """Hot-swap LLM provider for this pipeline. Used for model routing."""
         if provider == self.provider and model is None:
@@ -493,6 +500,11 @@ class LLMPipeline(ToolConversationMixin):
             existing_tool_names = {t.get("function", {}).get("name") for t in tools}
             for anim_tool in ANIMATION_TOOLS:
                 tool_name = anim_tool.get("function", {}).get("name")
+                if (
+                    tool_name == CONVERSATION_STORYBOARD_TOOL_NAME
+                    and self.storyboard_callback is None
+                ):
+                    continue
                 if tool_name and tool_name not in existing_tool_names:
                     tools.append(anim_tool)
                     logger.debug("Added animation tool: %s", tool_name)

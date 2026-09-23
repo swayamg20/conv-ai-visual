@@ -1,6 +1,6 @@
 import type { VoiceSessionPhase } from "./session-machine";
 
-export type VoiceRuntimeAssignment = "legacy" | "voice_v2";
+export type VoiceRuntimeAssignment = "disabled" | "legacy" | "voice_v2";
 export type VoiceViewPipelineState = "idle" | "listening" | "processing" | "speaking";
 export type VoiceViewOrbState =
   | "idle"
@@ -26,6 +26,7 @@ export interface VoiceSessionView {
 export function resolveVoiceRuntimeAssignment(
   value: string | undefined
 ): VoiceRuntimeAssignment {
+  if (value === "disabled") return "disabled";
   return value === "voice_v2" ? "voice_v2" : "legacy";
 }
 
