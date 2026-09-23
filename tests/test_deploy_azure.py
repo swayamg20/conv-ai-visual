@@ -7,6 +7,7 @@ import dataclasses
 import importlib.util
 import io
 import json
+import re
 import stat
 import subprocess
 import sys
@@ -16,6 +17,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from murmur.live_scene import (
+    SceneAdmissionError,
+    SceneAuthoringAdmission,
+    SceneProviderDispatchAdmission,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODULE_PATH = PROJECT_ROOT / "scripts" / "deploy_azure.py"
@@ -1557,6 +1563,42 @@ def test_bicep_keeps_frontend_identity_out_of_key_vault() -> None:
     assert "secrets:" not in frontend_app
     assert frontend_app.count("minReplicas: 1") == 1
     assert frontend_app.count("maxReplicas: 1") == 1
+
+
+@pytest.mark.asyncio
+async def test_bicep_admits_storyboard_startup_without_raising_paid_dispatch_limit() -> None:
+    apps = (PROJECT_ROOT / "infra/azure/apps.bicep").read_text(encoding="utf-8")
+    limits = {
+        name: int(value)
+        for name, value in re.findall(r"name: '(MURMUR_SCENE_[A-Z_]+)'\s+value: '(\d+)'", apps)
+    }
+    admission = SceneAuthoringAdmission(
+        global_limit=limits["MURMUR_SCENE_GLOBAL_CONCURRENCY"],
+        per_user_limit=limits["MURMUR_SCENE_PER_USER_CONCURRENCY"],
+        requests_per_minute=limits["MURMUR_SCENE_REQUESTS_PER_MINUTE"],
+        clock=lambda: 100.0,
+    )
+    assert limits["MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE"] == 1
+    provider = SceneProviderDispatchAdmission(
+        requests_per_minute=limits["MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE"],
+        clock=lambda: 100.0,
+    )
+
+    # The provider-free anchor must not consume the Director's HTTP allowance.
+    anchor = await admission.acquire("learner")
+    await anchor.aclose()
+    director = await admission.acquire("learner")
+    try:
+        await provider.acquire()
+        with pytest.raises(SceneAdmissionError) as paid_limit:
+            await provider.acquire()
+        assert paid_limit.value.code == "provider_rate_limited"
+    finally:
+        await director.aclose()
+
+    with pytest.raises(SceneAdmissionError) as request_limit:
+        await admission.acquire("learner")
+    assert request_limit.value.code == "rate_limited"
 
 
 def test_https_verification_refuses_empty_readiness_checks(

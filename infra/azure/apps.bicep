@@ -244,9 +244,10 @@ resource backend 'Microsoft.App/containerApps@2025-01-01' = {
               name: 'MURMUR_SCENE_PER_USER_CONCURRENCY'
               value: '1'
             }
+            // One provider-free anchor followed by one paid Director request.
             {
               name: 'MURMUR_SCENE_REQUESTS_PER_MINUTE'
-              value: '1'
+              value: '2'
             }
             {
               name: 'MURMUR_SCENE_PROVIDER_DISPATCHES_PER_MINUTE'
