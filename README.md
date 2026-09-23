@@ -10,6 +10,12 @@ Murmur is a voice-first AI tutor with a synchronized visual canvas. A learner sp
 
 The public MVP is currently chat-first. In a canvas-enabled physics-agent session, the conversational model can launch the verified Gate 1.8 lesson for same-speed, same-height, no-drag projectile comparisons. The model chooses the supported lesson and teaching direction; Murmur's compiler and verifier own the physics, geometry, animation, interruption, continuation, and zero-network replay. Arbitrary-topic generative animation and production conversational voice are not claimed by this deployment.
 
+To try the verified flow, sign in, create or open a canvas-enabled physics agent, and send this in Chat:
+
+> Explain projectile motion visually by comparing launches at 30 degrees and 60 degrees with the same speed of 20 m/s and no air resistance. Trace both flights, then show why their landing ranges are equal.
+
+The board starts automatically. Replay uses no model request; closing the visual lesson returns to the regular canvas. The pilot limits paid visual generation to one model dispatch per minute globally. Its temporary SQLite database is not durable across backend revision changes.
+
 ## What is implemented
 
 - Authenticated agent, resource, session, chat, voice, and observability APIs
