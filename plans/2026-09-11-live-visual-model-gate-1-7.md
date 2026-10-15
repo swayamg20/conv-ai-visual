@@ -57,9 +57,9 @@ The authored main lesson has six settled checkpoints: `setup`, `decompose_veloci
 - [x] Implement the deterministic projectile compiler and independently authored verifier across all nine problems, every resumable frontier, three detours, and every supported retarget.
 - [x] Add the focused Reflex/Director routing kernel and projectile service, then integrate it through the existing authenticated endpoint and the narrow `SceneAuthoringService` delegate.
 - [x] Add strict browser contracts, the curved path-trace executor, the projectile stream runtime, and an authenticated `/canvas/projectile` product surface with stable object identity.
-- [ ] Generate deterministic fixtures and qualify interruption, continuation, retargeting, replay, mute-first comprehension, responsive layout, reduced motion, and authenticated request behavior.
-- [ ] Add a separate Gate 1.7 artifact lifecycle and CI job, run the complete backend/frontend and earlier-gate regression matrix, inspect the normal-speed evidence, and record exact pushed-head CI results.
-- [ ] Obtain product-owner visual sign-off for the exact evidence commit before merge; merged-main CI remains a separate final delivery condition.
+- [x] 2026-09-12 21:25 IST: Qualified the exact pushed feature head `31e00da` with 22 of 22 accelerated browser cases, one of one normal-speed capture, two of two authenticated product-smoke cases, and all 24 interruption trials across the six required motion surfaces. The final artifact measured first-meaningful-visual p95 at 164.5 milliseconds, interruption-settlement p95 at 123.4 milliseconds, a 37,046.9-millisecond authored visual, a 40.20-second decoded video, and zero provider requests.
+- [x] 2026-09-12 21:25 IST: Exact-head CI run `34703016862` passed all eight jobs, including the separate `projectile_motion` lifecycle and the complete backend, frontend, browser, and earlier-gate matrix. Artifact `projectile-motion-34703016862-1` has archive SHA-256 `254076378882f5bfeac879bdd871cc4465823e081e98f62e9b11b2770c61bf26`; its independently matched internal `manifest.json`/`manifest.sha256` digest is `220829467bf52c73ceaf555712dbc3edbb0b8fd68b6c78f77da3b6e8aecfa405`.
+- [x] 2026-09-12 21:26 IST: Product owner Swam Gupta accepted the visual evidence from `94cd8f7` as clear, original, continuous, and visually useful. The later `c30f3c6` and `31e00da` commits changed only admission and bounded-history safety paths; the complete exact-head evidence reran after them. PR #36 merged as `01acc46`, and main-branch CI run `34703728462` passed all eight jobs.
 
 ## Surprises & Discoveries
 
@@ -124,7 +124,13 @@ The authored main lesson has six settled checkpoints: `setup`, `decompose_veloci
 
 ## Outcomes & Retrospective
 
-Implementation is in progress. At completion this section will record the exact branch SHA, test counts, fixture and artifact digests, first-visible and interruption percentiles, authored and observed duration, browser evidence paths, CI run, product-owner verdict, remaining limitations, and lessons for Gate 1.8's shared visual grammar. Until those facts exist, Gate 1.7 is not represented as shipped or accepted.
+Gate 1.7 shipped an authenticated projectile-motion studio whose deterministic compiler and independent verifier turn nine supported launch problems into a continuous, interruption-safe visual lesson. The board can advance, explain three clarification topics, retarget parameters in place, and Replay with zero network calls while preserving certified semantic state and stable browser object identity.
+
+The released feature head is `31e00daceaf5d9832d06341e4b7d036273d58049`; PR #36 merged it to `main` as `01acc4683c2420c580ebb77283ab2a2292e0b3a4`. Feature CI run `34703016862` and merged-main run `34703728462` each passed eight of eight jobs. The final feature artifact recorded 22 of 22 accelerated cases, one of one normal-speed capture, two of two authenticated product-smoke cases, 24 interruption trials, 164.5-millisecond first-meaningful-visual p95, 123.4-millisecond interruption-settlement p95, a 37,046.9-millisecond authored visual, a 40.20-second decoded video, and zero provider requests. Its internal manifest digest is `220829467bf52c73ceaf555712dbc3edbb0b8fd68b6c78f77da3b6e8aecfa405`.
+
+The final pre-landing review found and closed two P2 safety defects: legacy choreography admission could escape its intended protocol boundary, and one long but valid projectile journey could exhaust retained checkpoint history. The final review found no P0, P1, or P2 blocker. Local release qualification passed 6,736 backend tests and 1,133 frontend tests, plus Ruff, Ruff format, ESLint, type-check, and the production build.
+
+This gate deliberately remains a finite, no-drag projectile domain with gravity fixed at 10 metres per second squared, zero launch height, nine parameter combinations, and a 17-checkpoint retained-history envelope that requires Reset beyond the qualified journey. Its Director classifies a closed action and stage; it does not yet author the lesson with a live model, couple visuals to voice, or prove a universal animation language. Gate 1.8 should therefore move the model only into semantic-storyboard authorship while the trusted compiler continues to own facts, geometry, stable IDs, layout, timing, choreography, and verification.
 
 ## Context and Orientation
 
