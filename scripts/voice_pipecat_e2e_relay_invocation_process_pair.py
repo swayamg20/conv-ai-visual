@@ -19,18 +19,28 @@ from scripts.voice_pipecat_e2e_relay_invocation_process_pair_callback import (
     _new_inert_concrete_driver,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_process_pair_tools import (
+    _grant_matches_destination,
     _live_pair_capabilities_match,
     _new_concrete_tools,
+    _pair_publication_matches,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_process_pair_values import (
     _DESTINATION_TOKEN,
-    _GRANT_TOKEN,
+    _GRANT_FACTORY_TOKEN,
     _live_consumed_build_matches,
     _RelayConcreteInvocationGrant,
     _RelayConcreteInvocationPairDestination,
 )
+from scripts.voice_pipecat_e2e_relay_invocation_process_state import (
+    _process_owner_registries_are_empty,
+    _RelayProcessOwnerDestination,
+    _resolve_or_preown_process_owner,
+    _resolve_or_preown_process_roles,
+    _transactional_record_process_owner_matches,
+)
 from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
     _is_concrete_invocation_selection,
+    _RelayProcessRoleAuthority,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_values import (
     _STOP_TOKEN,
@@ -38,8 +48,7 @@ from scripts.voice_pipecat_e2e_relay_invocation_values import (
 )
 
 _FAILURE = "Relay concrete invocation pair is invalid"
-_MAX_RUNTIME_SECONDS = 60.0
-_MAX_CLEANUP_SECONDS = 60.0
+_MAX_RUNTIME_SECONDS = _MAX_CLEANUP_SECONDS = 60.0
 _ROLES = ("app", "web", "browser")
 _LOCK = threading.RLock()
 
@@ -68,7 +77,13 @@ def _resolve_or_preown_concrete_pair_destination(
         existing = _PAIR_ENTRIES.get(key)
         if _pair_record_has_shape(existing):
             pair_key = existing[0]._pair_key
-            if not _pair_record_matches(pair_key, existing, existing[3], values):
+            if not _pair_record_matches(
+                pair_key,
+                existing,
+                existing[3],
+                values,
+                require_process_owner=False,
+            ):
                 raise TypeError(_FAILURE)
             return existing[3]
         if type(existing) is _RelayConcreteInvocationPairDestination:
@@ -137,6 +152,7 @@ def _recover_concrete_pair_destination(
             entry,
             destination,
             completed,
+            require_process_owner=False,
         ):
             raise TypeError(_FAILURE)
         return destination
@@ -154,40 +170,71 @@ def _resolve_or_mint_concrete_invocation_pair(
         existing = _PAIR_ENTRIES.get(key)
         if not destination._matches(**values):
             raise TypeError(_FAILURE)
+        process_destination = destination._read_process_owner_destination()
+        if type(process_destination) is not _RelayProcessOwnerDestination:
+            raise TypeError(_FAILURE)
         if _pair_record_has_shape(existing):
             pair_key = existing[0]._pair_key
-            if not _pair_record_matches(pair_key, existing, destination, values):
+            record = existing
+            roles = existing[4]
+            if not _pair_record_matches(
+                pair_key,
+                existing,
+                destination,
+                values,
+                require_process_owner=False,
+            ):
                 raise TypeError(_FAILURE)
-            candidate = existing[:3]
         else:
             if existing is not destination or len(_PAIR_ENTRIES) != 1:
                 raise TypeError(_FAILURE)
-            pair_key = object()
-            grant = _RelayConcreteInvocationGrant(
-                _GRANT_TOKEN,
-                destination=destination,
-                pair_key=pair_key,
-                **values,  # type: ignore[arg-type]
+            pair_key, roles = _resolve_or_preown_process_roles(process_destination)
+            grant = destination._resolve_or_mint_process_grant(
+                _GRANT_FACTORY_TOKEN,
+                pair_key,
+                roles,
             )
             tools = _new_concrete_tools(build, values["epoch_clock"], pair_key)
             driver = _new_inert_concrete_driver(pair_key)
-            roles = tuple((role, object()) for role in _ROLES)
             record = (grant, driver, tools, destination, roles)
             _store_pair_entry(key, record)
-            if not _pair_record_matches(pair_key, record, destination, values):
+            if not _pair_record_matches(
+                pair_key,
+                record,
+                destination,
+                values,
+                require_process_owner=False,
+            ):
                 raise TypeError(_FAILURE)
-            candidate = record[:3]
+    _resolve_or_preown_process_owner(process_destination, record[0], roles)
+    with _LOCK:
+        if _PAIR_ENTRIES.get(key) is not record or not _pair_record_matches(
+            pair_key,
+            record,
+            destination,
+            values,
+        ):
+            raise TypeError(_FAILURE)
+        candidate = record[:3]
     error: BaseException | None = None
     try:
         destination._publish(*candidate)
     except BaseException as escaped:
         error = escaped
-    recovered = destination._read()
+    try:
+        recovered = destination._read()
+    except BaseException as escaped:
+        if error is None:
+            error = escaped
+        recovered = None
     if not (
         type(recovered) is tuple
         and len(recovered) == 3
         and all(recovered[index] is candidate[index] for index in range(3))
-        and _canonical_concrete_invocation_pair_matches(recovered[1], recovered[2])
+        and _transactional_canonical_concrete_invocation_pair_matches(
+            recovered[1],
+            recovered[2],
+        )
     ):
         if error is not None:
             raise error
@@ -199,22 +246,30 @@ def _resolve_or_mint_concrete_invocation_pair(
 
 def _canonical_concrete_invocation_pair_matches(driver: object, tools: object) -> bool:
     try:
-        pair_key = getattr(driver, "_pair_key", None)
-        with _LOCK:
-            record = _record_for_pair_key(pair_key)
-            return bool(
-                type(pair_key) is object
-                and type(driver) is RelayInvocationDriver
-                and type(tools) is RelayInvocationTools
-                and record is not None
-                and record[1] is driver
-                and record[2] is tools
-                and _pair_record_is_canonical(pair_key, record)
-                and _pair_publication_matches(record)
-                and _live_pair_capabilities_match(record)
-            )
+        return _transactional_canonical_concrete_invocation_pair_matches(driver, tools)
     except BaseException:
         return False
+
+
+def _transactional_canonical_concrete_invocation_pair_matches(
+    driver: object,
+    tools: object,
+) -> bool:
+    pair_key = getattr(driver, "_pair_key", None)
+    with _LOCK:
+        record = _record_for_pair_key(pair_key)
+        return bool(
+            type(pair_key) is object
+            and type(driver) is RelayInvocationDriver
+            and type(tools) is RelayInvocationTools
+            and record is not None
+            and record[1] is driver
+            and record[2] is tools
+            and _pair_record_is_canonical(pair_key, record)
+            and _pair_publication_matches(record)
+            and _live_pair_capabilities_match(record)
+            and _transactional_record_process_owner_matches(pair_key, record)
+        )
 
 
 def _concrete_invocation_pair_matches_inputs(
@@ -255,6 +310,7 @@ def _concrete_invocation_pair_member_matches(
                 and _pair_record_is_canonical(pair_key, record)
                 and _pair_publication_matches(record)
                 and _live_pair_capabilities_match(record)
+                and _transactional_record_process_owner_matches(pair_key, record)
             )
     except BaseException:
         return False
@@ -265,7 +321,7 @@ def _concrete_invocation_cleanup_contract(
     tools: object,
 ) -> tuple[object, float, Callable[[], float]] | None:
     try:
-        if not _canonical_concrete_invocation_pair_matches(driver, tools):
+        if not _transactional_canonical_concrete_invocation_pair_matches(driver, tools):
             return None
         pair_key = getattr(driver, "_pair_key", None)
         with _LOCK:
@@ -275,10 +331,13 @@ def _concrete_invocation_cleanup_contract(
                 or not _pair_record_is_canonical(pair_key, record)
                 or not _pair_publication_matches(record)
                 or not _live_pair_capabilities_match(record)
+                or not _transactional_record_process_owner_matches(pair_key, record)
             ):
                 return None
             grant = record[0]
             return (pair_key, grant._cleanup_timeout_seconds, grant._clock)
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return None
 
@@ -346,8 +405,11 @@ def _cleanup_record_matches(
             and _pair_record_is_canonical(pair_key, record)
             and _pair_publication_matches(record)
             and _live_pair_capabilities_match(record)
+            and _transactional_record_process_owner_matches(pair_key, record)
             and record[3]._owner_destination_matches(owner_destination)
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
 
@@ -372,6 +434,10 @@ def _bind_concrete_invocation_owner_destination(
             and _pair_record_is_canonical(getattr(driver, "_pair_key", None), record)
             and _pair_publication_matches(record)
             and _live_pair_capabilities_match(record)
+            and _transactional_record_process_owner_matches(
+                getattr(driver, "_pair_key", None),
+                record,
+            )
             and pair_destination._bind_owner_destination(owner_destination)
         )
 
@@ -432,6 +498,7 @@ def _bind_concrete_invocation_owner_destinations(
             and _pair_record_is_canonical(pair_key, record)
             and _pair_publication_matches(record)
             and _live_pair_capabilities_match(record)
+            and _transactional_record_process_owner_matches(pair_key, record)
             and pair_destination._bind_owner_graph(
                 (
                     owner_destination,
@@ -473,9 +540,12 @@ def _live_pair_destination(
                 and _pair_record_is_canonical(pair_key, record)
                 and _pair_publication_matches(record)
                 and _live_pair_capabilities_match(record)
+                and _transactional_record_process_owner_matches(pair_key, record)
             ):
                 return None
             return record[3]
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return None
 
@@ -488,26 +558,20 @@ def _concrete_invocation_pair_is_absent(build: object) -> bool:
     if type(build) is not _RelayLinuxExecutorBuiltEvidence:
         return False
     with _LOCK:
-        return not _PAIR_ENTRIES
+        pair_absent = not _PAIR_ENTRIES
+    return pair_absent and _process_owner_registries_are_empty()
 
 
 def _concrete_invocation_pair_registries_are_empty() -> bool:
     with _LOCK:
-        return not _PAIR_ENTRIES
+        return not _PAIR_ENTRIES and _process_owner_registries_are_empty()
 
 
 def _pair_inputs_have_shape(values: dict[str, object]) -> bool:
-    expected = {
-        "build",
-        "binding",
-        "selection",
-        "runtime_deadline",
-        "runtime_timeout_seconds",
-        "cleanup_timeout_seconds",
-        "clock",
-        "wait",
-        "epoch_clock",
-    }
+    expected = frozenset(
+        "build binding selection runtime_deadline runtime_timeout_seconds "
+        "cleanup_timeout_seconds clock wait epoch_clock".split()
+    )
     try:
         if set(values) != expected:
             return False
@@ -537,6 +601,8 @@ def _pair_record_matches(
     record: tuple[object, ...],
     destination: _RelayConcreteInvocationPairDestination,
     values: dict[str, object],
+    *,
+    require_process_owner: bool = True,
 ) -> bool:
     try:
         return bool(
@@ -545,7 +611,13 @@ def _pair_record_matches(
             and destination._phase_matches("live")
             and record[0]._matches(destination=destination, **values)
             and _live_pair_capabilities_match(record)
+            and (
+                not require_process_owner
+                or _transactional_record_process_owner_matches(pair_key, record)
+            )
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
 
@@ -579,32 +651,15 @@ def _pair_record_is_canonical(pair_key: object, record: object) -> bool:
                 type(entry) is tuple
                 and len(entry) == 2
                 and entry[0] == role
-                and type(entry[1]) is object
+                and type(entry[1]) is _RelayProcessRoleAuthority
+                and entry[1]._matches(pair_key, role)
                 for entry, role in zip(record[4], _ROLES, strict=True)
             )
             and len({entry[1] for entry in record[4]}) == len(_ROLES)
+            and record[3]._read_process_owner_destination() is not None
         )
-    except BaseException:
-        return False
-
-
-def _grant_matches_destination(
-    grant: _RelayConcreteInvocationGrant,
-    destination: _RelayConcreteInvocationPairDestination,
-) -> bool:
-    try:
-        return grant._matches(
-            build=destination._build,
-            binding=destination._binding,
-            selection=destination._selection,
-            destination=destination,
-            runtime_deadline=destination._runtime_deadline,
-            runtime_timeout_seconds=destination._runtime_timeout_seconds,
-            cleanup_timeout_seconds=destination._cleanup_timeout_seconds,
-            clock=destination._clock,
-            wait=destination._wait,
-            epoch_clock=destination._epoch_clock,
-        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
 
@@ -638,18 +693,6 @@ def _store_pair_entry(
 
 def _pop_pair_entry(key: object) -> None:
     _PAIR_ENTRIES.pop(key)
-
-
-def _pair_publication_matches(record: _PairRecord) -> bool:
-    try:
-        published = record[3]._read()
-        return bool(
-            type(published) is tuple
-            and len(published) == 3
-            and all(published[index] is record[index] for index in range(3))
-        )
-    except BaseException:
-        return False
 
 
 __all__: list[str] = []

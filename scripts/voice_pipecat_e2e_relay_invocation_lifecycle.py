@@ -34,6 +34,9 @@ from scripts.voice_pipecat_e2e_relay_invocation_driver import (
     _RelayInvocationOwnerDestination,
     _synthetic_invocation_pair_matches,
 )
+from scripts.voice_pipecat_e2e_relay_invocation_owner_foundation import (
+    _reconcile_invocation_owner_foundation,
+)
 from scripts.voice_pipecat_e2e_relay_invocation_owner_values import (
     _OWNER_TOKEN,
     RelayInvocationOwner,
@@ -139,6 +142,14 @@ def _construct_relay_invocation_owner(
     existing, ready, control = _read_invocation_owner_destination(
         owner_destination, run, driver, tools
     )
+    if type(existing) is RelayInvocationOwner and not ready:
+        _foundation_ready, foundation_control = _reconcile_invocation_owner_foundation(
+            existing,
+            driver,
+            tools,
+            owner_destination,
+        )
+        control = control or foundation_control
     existing = _recover_invocation_owner_publication(existing, ready, control, RelayInvocationOwner)
     if type(existing) is RelayInvocationOwner:
         return existing
@@ -196,6 +207,15 @@ def _construct_relay_invocation_owner(
     control = control or read_control
     if owner is None and type(published) is RelayInvocationOwner:
         owner = published
+    if type(owner) is RelayInvocationOwner and not ready:
+        foundation_ready, foundation_control = _reconcile_invocation_owner_foundation(
+            owner,
+            driver,
+            tools,
+            owner_destination,
+        )
+        control = control or foundation_control
+        failed = failed or not foundation_ready
     if ready and type(owner) is RelayInvocationOwner:
         run = driver = tools = published = None  # type: ignore[assignment]
         if control is not None:

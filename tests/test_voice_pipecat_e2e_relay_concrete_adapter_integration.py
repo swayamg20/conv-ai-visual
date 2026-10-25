@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
@@ -18,11 +19,13 @@ if str(PROJECT_ROOT) not in sys.path:
 import scripts.voice_pipecat_e2e_relay_invocation_cleanup as invocation_cleanup
 import scripts.voice_pipecat_e2e_relay_invocation_driver as invocation_driver
 import scripts.voice_pipecat_e2e_relay_invocation_lifecycle as invocation_lifecycle
+import scripts.voice_pipecat_e2e_relay_invocation_owner_foundation as owner_foundation
 import scripts.voice_pipecat_e2e_relay_invocation_owner_values as invocation_owner_values
 import scripts.voice_pipecat_e2e_relay_invocation_process_pair as process_pair
 import scripts.voice_pipecat_e2e_relay_invocation_process_pair_effects as pair_effects
 import scripts.voice_pipecat_e2e_relay_invocation_process_pair_retirement as pair_retirement
 import scripts.voice_pipecat_e2e_relay_invocation_process_pair_values as pair_values
+import scripts.voice_pipecat_e2e_relay_invocation_process_state as process_state
 import scripts.voice_pipecat_e2e_relay_invocation_process_values as process_values
 import scripts.voice_pipecat_e2e_relay_invocation_support as invocation_support
 from scripts.voice_pipecat_e2e_relay_invocation_values import RelayInvocationError
@@ -83,6 +86,7 @@ def _isolated_concrete_adapter_state(
         invocation_cleanup._REGISTRY,
         invocation_support._SECRET_RECORDS,
         process_pair._PAIR_ENTRIES,
+        process_state._PROCESS_OWNERS,
     )
     for mapping in mappings:
         mapping.clear()
@@ -183,13 +187,13 @@ def _finish_consumed_executor(evidence: object, monkeypatch: pytest.MonkeyPatch)
     )
 
 
-def _new_consumed_pair(
+def _new_consumed_pair_inputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     clock: Callable[[], float],
     sequence: int = 0,
-) -> tuple[object, object, object, object, dict[str, object]]:
+) -> tuple[object, dict[str, object]]:
     events: list[str] = []
     _executor, _destination, _built, binding = executor_fixture._consumed_running_executor(
         tmp_path,
@@ -214,6 +218,22 @@ def _new_consumed_pair(
         "epoch_clock": _epoch_clock,
     }
     pair_destination = process_pair._resolve_or_preown_concrete_pair_destination(**values)
+    return pair_destination, values
+
+
+def _new_consumed_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    clock: Callable[[], float],
+    sequence: int = 0,
+) -> tuple[object, object, object, object, dict[str, object]]:
+    pair_destination, values = _new_consumed_pair_inputs(
+        tmp_path,
+        monkeypatch,
+        clock=clock,
+        sequence=sequence,
+    )
     grant, driver, tools = process_pair._resolve_or_mint_concrete_invocation_pair(
         pair_destination,
         **values,
@@ -236,6 +256,7 @@ def _assert_fully_retired_owner(
     owner: object,
     owner_destination: object,
     pair_destination: object,
+    grant: object,
     driver: object,
     tools: object,
     authorities: tuple[object, ...],
@@ -261,12 +282,473 @@ def _assert_fully_retired_owner(
     assert pair_destination._preown_intended_roles == (False, False, False)
     assert pair_destination._preowned_roles == (False, False, False)
     assert pair_destination._stopped_roles == (False, False, False)
+    assert process_state._process_owner_total_absence(
+        pair_destination._read_process_owner_destination()
+    )
+    admission = pair_destination._process_grant_admission
+    assert (
+        type(admission) is tuple
+        and len(admission) == 6
+        and admission[0] == "sealed"
+        and admission[1] is pair_destination._read_process_owner_destination()
+        and type(admission[2]) is object
+        and type(admission[3]) is weakref.ReferenceType
+        and admission[3]() is grant
+        and type(admission[4]) is tuple
+        and len(admission[4]) == 3
+        and all(type(reference) is weakref.ReferenceType for reference in admission[4])
+        and type(admission[5]) is weakref.ReferenceType
+    )
     assert driver.concrete_adapter is False
     assert tools.concrete_adapter is False
     assert owner.concrete_adapter is False
     assert process_pair._concrete_invocation_pair_registries_are_empty()
     assert not invocation_cleanup._REGISTRY
     assert not invocation_support._SECRET_RECORDS
+
+
+def test_owner_foundation_preserves_first_control_across_graph_match_and_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    _grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    original_read = pair_values._RelayConcreteInvocationPairDestination._read
+    original_bind = owner_foundation._bind_concrete_invocation_owner_destinations
+    cuts: list[str] = []
+
+    def publication_read_then_interrupt(self):
+        if self is pair_destination and not cuts:
+            cuts.append("match")
+            raise KeyboardInterrupt("first graph control")
+        return original_read(self)
+
+    def bind_then_exit(*args):
+        assert original_bind(*args)
+        cuts.append("bind")
+        raise SystemExit(79)
+
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        publication_read_then_interrupt,
+    )
+    monkeypatch.setattr(
+        owner_foundation,
+        "_bind_concrete_invocation_owner_destinations",
+        bind_then_exit,
+    )
+
+    matched, control = owner_foundation._reconcile_concrete_owner_graph(
+        owner,
+        driver,
+        tools,
+        owner_destination,
+    )
+
+    assert matched is True
+    assert control == (KeyboardInterrupt, None)
+    assert cuts == ["match", "bind"]
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        original_read,
+    )
+    monkeypatch.setattr(
+        owner_foundation,
+        "_bind_concrete_invocation_owner_destinations",
+        original_bind,
+    )
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+
+
+def test_owner_foundation_rejects_crosswired_graph_tail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    _grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    original_read = pair_values._RelayConcreteInvocationPairDestination._read_retirement_state
+    original_bind = owner_foundation._bind_concrete_invocation_owner_destinations
+    bind_attempts = 0
+
+    def crosswired_read(self):
+        state = original_read(self)
+        if self is pair_destination:
+            graph = (*state[2][:-1], object())
+            return (*state[:2], graph, *state[3:])
+        return state
+
+    def observed_bind(*args):
+        nonlocal bind_attempts
+        bind_attempts += 1
+        return original_bind(*args)
+
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read_retirement_state",
+        crosswired_read,
+    )
+    monkeypatch.setattr(
+        owner_foundation,
+        "_bind_concrete_invocation_owner_destinations",
+        observed_bind,
+    )
+
+    matched, control = owner_foundation._reconcile_concrete_owner_graph(
+        owner,
+        driver,
+        tools,
+        owner_destination,
+    )
+
+    assert matched is False
+    assert control is None
+    assert bind_attempts == 2
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read_retirement_state",
+        original_read,
+    )
+    monkeypatch.setattr(
+        owner_foundation,
+        "_bind_concrete_invocation_owner_destinations",
+        original_bind,
+    )
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+
+
+@pytest.mark.parametrize("cut", ["outer", "registry", "graph"])
+@pytest.mark.parametrize("after_commit", [False, True], ids=["before", "after"])
+@pytest.mark.parametrize("control_kind", ["keyboard", "system-exit"])
+def test_owner_constructor_foundation_recovers_every_publication_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+    cut: str,
+    after_commit: bool,
+    control_kind: str,
+) -> None:
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    run = object.__new__(RelayProbeRun)
+    owner_destination = invocation_support._new_relay_invocation_owner_destination()
+    captured: dict[str, object] = {}
+    raised = False
+
+    def capture(candidate: object) -> None:
+        captured.setdefault("owner", candidate)
+        captured.setdefault("authorities", (candidate._app, candidate._web, candidate._browser))
+        captured.setdefault(
+            "starts",
+            (candidate._app_start, candidate._web_start, candidate._browser_start),
+        )
+        captured.setdefault(
+            "stops",
+            (candidate._app_stop, candidate._web_stop, candidate._browser_stop),
+        )
+
+    def interrupt() -> None:
+        nonlocal raised
+        assert not raised
+        raised = True
+        if control_kind == "keyboard":
+            raise KeyboardInterrupt("constructor foundation cut")
+        raise SystemExit(83)
+
+    original_outer = invocation_driver._RelayInvocationOwnerDestination._publish_owner
+    original_register = invocation_lifecycle._register_cleanup_owner
+    original_graph = invocation_owner_values._bind_concrete_invocation_owner_destinations
+
+    if cut == "outer":
+
+        def cut_outer(self, run_value, driver_value, tools_value, candidate):
+            capture(candidate)
+            if not after_commit:
+                interrupt()
+            original_outer(self, run_value, driver_value, tools_value, candidate)
+            interrupt()
+
+        monkeypatch.setattr(
+            invocation_driver._RelayInvocationOwnerDestination,
+            "_publish_owner",
+            cut_outer,
+        )
+    elif cut == "registry":
+
+        def cut_registry(authority, candidate):
+            capture(candidate)
+            if not after_commit:
+                interrupt()
+            original_register(authority, candidate)
+            interrupt()
+
+        monkeypatch.setattr(invocation_lifecycle, "_register_cleanup_owner", cut_registry)
+    else:
+
+        def cut_graph(*args):
+            capture(args[3])
+            if not after_commit:
+                interrupt()
+            assert original_graph(*args)
+            interrupt()
+
+        monkeypatch.setattr(
+            invocation_owner_values,
+            "_bind_concrete_invocation_owner_destinations",
+            cut_graph,
+        )
+
+    expected_control = KeyboardInterrupt if control_kind == "keyboard" else SystemExit
+    with pytest.raises(expected_control) as escaped:
+        invocation_lifecycle._new_relay_invocation_owner(
+            run,
+            driver=driver,
+            tools=tools,
+            destination=owner_destination,
+        )
+    assert raised
+    if control_kind == "system-exit":
+        assert escaped.value.code == 83
+    candidate = captured["owner"]
+
+    monkeypatch.setattr(
+        invocation_driver._RelayInvocationOwnerDestination,
+        "_publish_owner",
+        original_outer,
+    )
+    monkeypatch.setattr(invocation_lifecycle, "_register_cleanup_owner", original_register)
+    monkeypatch.setattr(
+        invocation_owner_values,
+        "_bind_concrete_invocation_owner_destinations",
+        original_graph,
+    )
+
+    if cut == "outer" and not after_commit:
+        assert owner_destination._record is None
+        assert candidate._cleanup_authority._key not in invocation_cleanup._REGISTRY
+        owner = invocation_lifecycle._new_relay_invocation_owner(
+            run,
+            driver=driver,
+            tools=tools,
+            destination=owner_destination,
+        )
+        assert owner is not candidate
+        authorities = (owner._app, owner._web, owner._browser)
+        starts = (owner._app_start, owner._web_start, owner._browser_start)
+        stops = (owner._app_stop, owner._web_stop, owner._browser_stop)
+    else:
+        owner = candidate
+        authorities = captured["authorities"]
+        starts = captured["starts"]
+        stops = captured["stops"]
+
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        authorities,
+        starts,
+        stops,
+    )
+
+
+@pytest.mark.parametrize("role_index,role", enumerate(("app", "web", "browser")))
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "intent-before-publish",
+        "publish-before-marker",
+        "marker-after",
+        "callback-after",
+        "publication-return-loss",
+    ],
+)
+@pytest.mark.parametrize("control_kind", ["keyboard", "system-exit"])
+def test_partial_role_preownership_cleanup_converges_at_every_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+    role_index: int,
+    role: str,
+    stage: str,
+    control_kind: str,
+) -> None:
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    run = object.__new__(RelayProbeRun)
+    owner_destination = invocation_support._new_relay_invocation_owner_destination()
+    captured: dict[str, object] = {}
+    raised = False
+    original_outer = invocation_driver._RelayInvocationOwnerDestination._publish_owner
+    original_publish = invocation_driver._RelayChildAuthorityDestination.publish
+    original_mark = pair_values._RelayConcreteInvocationPairDestination._mark_role_preowned
+    original_callback = pair_effects._inert_preown
+
+    def capture_outer(self, run_value, driver_value, tools_value, candidate):
+        original_outer(self, run_value, driver_value, tools_value, candidate)
+        captured.update(
+            owner=candidate,
+            authorities=(candidate._app, candidate._web, candidate._browser),
+            starts=(candidate._app_start, candidate._web_start, candidate._browser_start),
+            stops=(candidate._app_stop, candidate._web_stop, candidate._browser_stop),
+        )
+
+    def interrupt() -> None:
+        nonlocal raised
+        assert not raised
+        raised = True
+        if control_kind == "keyboard":
+            raise KeyboardInterrupt("partial preownership cut")
+        raise SystemExit(89)
+
+    def cut_publish(self, authority):
+        target = bool(captured and self is captured["authorities"][role_index])
+        if target and stage == "intent-before-publish" and not raised:
+            interrupt()
+        original_publish(self, authority)
+        if target and stage == "publication-return-loss" and not raised:
+            interrupt()
+
+    def cut_mark(self, current_role_index):
+        target = self is pair_destination and current_role_index == role_index
+        if target and stage == "publish-before-marker" and not raised:
+            interrupt()
+        committed = original_mark(self, current_role_index)
+        if target and stage == "marker-after" and not raised:
+            interrupt()
+        return committed
+
+    def cut_callback(pair_key, current_role, destination):
+        original_callback(pair_key, current_role, destination)
+        if current_role == role and stage == "callback-after" and not raised:
+            interrupt()
+
+    monkeypatch.setattr(
+        invocation_driver._RelayInvocationOwnerDestination,
+        "_publish_owner",
+        capture_outer,
+    )
+    monkeypatch.setattr(
+        invocation_driver._RelayChildAuthorityDestination,
+        "publish",
+        cut_publish,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_preowned",
+        cut_mark,
+    )
+    monkeypatch.setattr(pair_effects, "_inert_preown", cut_callback)
+
+    expected_control = KeyboardInterrupt if control_kind == "keyboard" else SystemExit
+    with pytest.raises(expected_control) as escaped:
+        invocation_lifecycle._new_relay_invocation_owner(
+            run,
+            driver=driver,
+            tools=tools,
+            destination=owner_destination,
+        )
+    assert raised
+    if control_kind == "system-exit":
+        assert escaped.value.code == 89
+
+    owner = captured["owner"]
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        captured["authorities"],
+        captured["starts"],
+        captured["stops"],
+    )
+
+
+def test_factory_record_rejects_forged_first_process_owner_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    pair_destination, values = _new_consumed_pair_inputs(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    original = process_pair._resolve_or_preown_process_owner
+    captured: dict[str, object] = {}
+
+    class Forged:
+        def __init__(self, pair_key: object) -> None:
+            self._pair_key = pair_key
+
+    def reject_forged_then_interrupt(destination, grant, roles):
+        captured.update(destination=destination, grant=grant, roles=roles)
+        forged = Forged(grant._pair_key)
+        with pytest.raises(TypeError, match="process owner is invalid"):
+            process_state._resolve_or_preown_process_owner(destination, forged, roles)
+        with pytest.raises(TypeError, match="process owner is invalid"):
+            process_state._RelayProcessOwner(
+                process_state._OWNER_TOKEN,
+                destination=destination,
+                grant=forged,
+                roles=roles,
+            )
+        assert process_state._PROCESS_OWNERS == {}
+        assert destination._read_owner() is None
+        raise OSError("synthetic process-owner boundary interruption")
+
+    monkeypatch.setattr(
+        process_pair,
+        "_resolve_or_preown_process_owner",
+        reject_forged_then_interrupt,
+    )
+    with pytest.raises(OSError, match="boundary interruption"):
+        process_pair._resolve_or_mint_concrete_invocation_pair(pair_destination, **values)
+
+    record = process_pair._PAIR_ENTRIES[values["build"].key]
+    assert record[0] is captured["grant"]
+    assert record[4] is captured["roles"]
+    monkeypatch.setattr(process_pair, "_resolve_or_preown_process_owner", original)
+    grant, driver, tools = process_pair._resolve_or_mint_concrete_invocation_pair(
+        pair_destination,
+        **values,
+    )
+    try:
+        assert grant is record[0]
+        assert process_state._process_owner_matches(
+            captured["destination"],
+            grant,
+            record[4],
+        )
+    finally:
+        process_pair._retire_concrete_invocation_pair(driver, tools)
+    assert process_pair._concrete_invocation_pair_registries_are_empty()
 
 
 def test_selector_consumed_pair_owner_cleanup_retires_and_scrubs_exact_graph(
@@ -287,6 +769,16 @@ def test_selector_consumed_pair_owner_cleanup_retires_and_scrubs_exact_graph(
     assert repr(driver) == "RelayInvocationDriver(concrete_adapter=True)"
     assert repr(tools) == "RelayInvocationTools(concrete_adapter=True)"
     assert len(process_pair._PAIR_ENTRIES) == 1
+    pair_record = process_pair._PAIR_ENTRIES[grant._build.key]
+    process_destination = pair_destination._read_process_owner_destination()
+    process_owner = process_destination._read_owner()
+    assert process_state._process_owner_matches(
+        process_destination,
+        grant,
+        pair_record[4],
+    )
+    assert process_owner._role_phases() == ("preowned", "preowned", "preowned")
+    assert tuple(role for role, _authority in pair_record[4]) == ("app", "web", "browser")
 
     owner, owner_destination = _new_owner(driver, tools)
     assert owner.concrete_adapter is True
@@ -365,6 +857,8 @@ def test_selector_consumed_pair_owner_cleanup_retires_and_scrubs_exact_graph(
     assert pair_destination._preown_intended_roles == (False, False, False)
     assert pair_destination._preowned_roles == (False, False, False)
     assert pair_destination._stopped_roles == (False, False, False)
+    assert process_owner._is_retired()
+    assert process_state._process_owner_total_absence(process_destination)
 
     assert driver.concrete_adapter is False
     assert tools.concrete_adapter is False
@@ -380,7 +874,780 @@ def test_selector_consumed_pair_owner_cleanup_retires_and_scrubs_exact_graph(
     assert not invocation_support._SECRET_RECORDS
 
 
-@pytest.mark.parametrize("cut", ["destination", "record", "publication"])
+def test_pair_effects_preserve_first_control_across_publication_and_markers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    authorities = (owner._app, owner._web, owner._browser)
+    starts = (owner._app_start, owner._web_start, owner._browser_start)
+    stops = (owner._app_stop, owner._web_stop, owner._browser_stop)
+    pair_key = grant._pair_key
+
+    original_authority_publish = invocation_driver._RelayChildAuthorityDestination.publish
+    original_mark_preowned = pair_values._RelayConcreteInvocationPairDestination._mark_role_preowned
+    preown_cuts: list[str] = []
+
+    def authority_publish_then_interrupt(self, authority):
+        original_authority_publish(self, authority)
+        if self is authorities[0] and not preown_cuts:
+            preown_cuts.append("publish")
+            raise KeyboardInterrupt("first preown control")
+
+    def preown_mark_then_exit(self, role_index):
+        committed = original_mark_preowned(self, role_index)
+        if self is pair_destination and role_index == 0 and len(preown_cuts) == 1:
+            preown_cuts.append("mark")
+            raise SystemExit(71)
+        return committed
+
+    monkeypatch.setattr(
+        invocation_driver._RelayChildAuthorityDestination,
+        "publish",
+        authority_publish_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_preowned",
+        preown_mark_then_exit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first preown control"):
+        pair_effects._inert_preown(pair_key, "app", authorities[0])
+    assert preown_cuts == ["publish", "mark"]
+
+    monkeypatch.setattr(
+        invocation_driver._RelayChildAuthorityDestination,
+        "publish",
+        original_authority_publish,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_preowned",
+        original_mark_preowned,
+    )
+    pair_effects._inert_preown(pair_key, "app", authorities[0])
+
+    stop_request = process_pair._resolve_or_mint_concrete_invocation_stop_request(
+        driver,
+        tools,
+        owner_destination,
+    )
+    assert stop_request is not None
+    original_stop_publish = invocation_driver._RelayChildStopDestination.publish
+    original_mark_stopped = pair_values._RelayConcreteInvocationPairDestination._mark_role_stopped
+    stop_cuts: list[str] = []
+
+    def stop_publish_then_interrupt(self, receipt):
+        original_stop_publish(self, receipt)
+        if self is stops[2] and not stop_cuts:
+            stop_cuts.append("publish")
+            raise KeyboardInterrupt("first stop control")
+
+    def stop_mark_then_exit(self, role_index):
+        committed = original_mark_stopped(self, role_index)
+        if self is pair_destination and role_index == 2 and len(stop_cuts) == 1:
+            stop_cuts.append("mark")
+            raise SystemExit(71)
+        return committed
+
+    monkeypatch.setattr(
+        invocation_driver._RelayChildStopDestination,
+        "publish",
+        stop_publish_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_stopped",
+        stop_mark_then_exit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first stop control"):
+        pair_effects._inert_stop(
+            pair_key,
+            authorities[2]._peek(),
+            stop_request,
+            stops[2],
+        )
+    assert stop_cuts == ["publish", "mark"]
+
+    monkeypatch.setattr(
+        invocation_driver._RelayChildStopDestination,
+        "publish",
+        original_stop_publish,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_stopped",
+        original_mark_stopped,
+    )
+    pair_effects._inert_stop(
+        pair_key,
+        authorities[2]._peek(),
+        stop_request,
+        stops[2],
+    )
+
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        authorities,
+        starts,
+        stops,
+    )
+
+
+def test_preown_post_publication_auth_cannot_replace_first_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    run = object.__new__(RelayProbeRun)
+    owner_destination = invocation_support._new_relay_invocation_owner_destination()
+    original_outer = invocation_driver._RelayInvocationOwnerDestination._publish_owner
+    original_publish = invocation_driver._RelayChildAuthorityDestination.publish
+    original_pair_read = pair_values._RelayConcreteInvocationPairDestination._read
+    captured: dict[str, object] = {}
+    cuts: list[str] = []
+
+    def capture_outer(self, run_value, driver_value, tools_value, candidate):
+        original_outer(self, run_value, driver_value, tools_value, candidate)
+        captured.update(
+            owner=candidate,
+            authorities=(candidate._app, candidate._web, candidate._browser),
+            starts=(candidate._app_start, candidate._web_start, candidate._browser_start),
+            stops=(candidate._app_stop, candidate._web_stop, candidate._browser_stop),
+        )
+
+    def publish_then_interrupt(self, authority):
+        original_publish(self, authority)
+        if captured and self is captured["authorities"][0] and not cuts:
+            cuts.append("publish")
+            raise KeyboardInterrupt("first preown auth control")
+
+    def pair_read_then_exit(self):
+        published = original_pair_read(self)
+        if self is pair_destination and cuts == ["publish"]:
+            cuts.append("auth")
+            raise SystemExit(107)
+        return published
+
+    monkeypatch.setattr(
+        invocation_driver._RelayInvocationOwnerDestination,
+        "_publish_owner",
+        capture_outer,
+    )
+    monkeypatch.setattr(
+        invocation_driver._RelayChildAuthorityDestination,
+        "publish",
+        publish_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        pair_read_then_exit,
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        invocation_lifecycle._new_relay_invocation_owner(
+            run,
+            driver=driver,
+            tools=tools,
+            destination=owner_destination,
+        )
+
+    assert cuts == ["publish", "auth"]
+    owner = captured["owner"]
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        captured["authorities"],
+        captured["starts"],
+        captured["stops"],
+    )
+
+
+def test_stop_post_publication_auth_cannot_replace_first_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    clock = _AdvancingClock()
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=clock,
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    authorities = (owner._app, owner._web, owner._browser)
+    starts = (owner._app_start, owner._web_start, owner._browser_start)
+    stops = (owner._app_stop, owner._web_stop, owner._browser_stop)
+    stop_request = process_pair._resolve_or_mint_concrete_invocation_stop_request(
+        driver,
+        tools,
+        owner_destination,
+    )
+    assert stop_request is not None
+    original_publish = invocation_driver._RelayChildStopDestination.publish
+    original_pair_read = pair_values._RelayConcreteInvocationPairDestination._read
+    cuts: list[str] = []
+
+    def publish_then_interrupt(self, stopped):
+        original_publish(self, stopped)
+        if self is stops[2] and not cuts:
+            cuts.append("publish")
+            raise KeyboardInterrupt("first stop auth control")
+
+    def pair_read_then_exit(self):
+        published = original_pair_read(self)
+        if self is pair_destination and cuts == ["publish"]:
+            cuts.append("auth")
+            raise SystemExit(109)
+        return published
+
+    monkeypatch.setattr(
+        invocation_driver._RelayChildStopDestination,
+        "publish",
+        publish_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        pair_read_then_exit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first stop auth control"):
+        pair_effects._inert_stop(
+            grant._pair_key,
+            authorities[2]._peek(),
+            stop_request,
+            stops[2],
+        )
+
+    assert cuts == ["publish", "auth"]
+    assert pair_destination._stopped_roles == (False, False, False)
+    monkeypatch.setattr(
+        invocation_driver._RelayChildStopDestination,
+        "publish",
+        original_publish,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        original_pair_read,
+    )
+    samples_before_replay = len(clock.samples)
+    pair_effects._inert_stop(
+        grant._pair_key,
+        authorities[2]._peek(),
+        stop_request,
+        stops[2],
+    )
+    assert len(clock.samples) == samples_before_replay
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        authorities,
+        starts,
+        stops,
+    )
+
+
+def test_preownership_reconciliation_observation_cannot_replace_first_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    authorities = (owner._app, owner._web, owner._browser)
+    starts = (owner._app_start, owner._web_start, owner._browser_start)
+    stops = (owner._app_stop, owner._web_stop, owner._browser_stop)
+    stop_request = process_pair._resolve_or_mint_concrete_invocation_stop_request(
+        driver,
+        tools,
+        owner_destination,
+    )
+    assert stop_request is not None
+    for role_index in (2, 1):
+        pair_effects._inert_stop(
+            grant._pair_key,
+            authorities[role_index]._peek(),
+            stop_request,
+            stops[role_index],
+        )
+    with pair_destination._lock:
+        pair_destination._preowned_roles = (False, True, True)
+    original_mark = pair_values._RelayConcreteInvocationPairDestination._mark_role_preowned
+    original_read = pair_values._RelayConcreteInvocationPairDestination._read_retirement_state
+    cuts: list[str] = []
+
+    def mark_then_interrupt(self, role_index):
+        committed = original_mark(self, role_index)
+        if self is pair_destination and role_index == 0 and not cuts:
+            cuts.append("mark")
+            raise KeyboardInterrupt("first reconciliation control")
+        return committed
+
+    def read_then_exit(self):
+        state = original_read(self)
+        if self is pair_destination and cuts == ["mark"]:
+            cuts.append("observe")
+            raise SystemExit(113)
+        return state
+
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_preowned",
+        mark_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read_retirement_state",
+        read_then_exit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first reconciliation control"):
+        pair_effects._inert_stop(
+            grant._pair_key,
+            authorities[0]._peek(),
+            stop_request,
+            stops[0],
+        )
+
+    assert cuts == ["mark", "observe"]
+    assert pair_destination._preowned_roles == (True, True, True)
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_mark_role_preowned",
+        original_mark,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read_retirement_state",
+        original_read,
+    )
+    pair_effects._inert_stop(
+        grant._pair_key,
+        authorities[0]._peek(),
+        stop_request,
+        stops[0],
+    )
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        authorities,
+        starts,
+        stops,
+    )
+
+
+def test_committed_process_stop_reconciles_after_cleanup_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invocation_runtime: None,
+) -> None:
+    clock = _AdvancingClock()
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=clock,
+    )
+    owner, owner_destination = _new_owner(driver, tools)
+    authorities = (owner._app, owner._web, owner._browser)
+    starts = (owner._app_start, owner._web_start, owner._browser_start)
+    stops = (owner._app_stop, owner._web_stop, owner._browser_stop)
+    stop_request = process_pair._resolve_or_mint_concrete_invocation_stop_request(
+        driver,
+        tools,
+        owner_destination,
+    )
+    assert stop_request is not None
+    original_commit = process_state._commit_process_snapshot
+    cuts: list[str] = []
+
+    def process_stop_then_interrupt(destination, snapshot):
+        original_commit(destination, snapshot)
+        if (
+            not cuts
+            and snapshot.phase == "owned"
+            and snapshot.role_phases == ("preowned", "preowned", "stopped")
+        ):
+            cuts.append("process-stop")
+            raise KeyboardInterrupt("process stop return loss")
+
+    monkeypatch.setattr(
+        process_state,
+        "_commit_process_snapshot",
+        process_stop_then_interrupt,
+    )
+    with pytest.raises(KeyboardInterrupt, match="process stop return loss"):
+        pair_effects._inert_stop(
+            grant._pair_key,
+            authorities[2]._peek(),
+            stop_request,
+            stops[2],
+        )
+
+    assert cuts == ["process-stop"]
+    with pytest.raises(TypeError):
+        stops[2]._read(owner._owner_token, "browser")
+    assert pair_destination._stopped_roles == (False, False, False)
+    monkeypatch.setattr(
+        process_state,
+        "_commit_process_snapshot",
+        original_commit,
+    )
+    for role_index in (1, 0):
+        pair_effects._inert_stop(
+            grant._pair_key,
+            authorities[role_index]._peek(),
+            stop_request,
+            stops[role_index],
+        )
+    assert pair_destination._stopped_roles == (True, True, False)
+    clock.value = stop_request.absolute_deadline + 1.0
+    samples_before_replay = len(clock.samples)
+
+    pair_effects._inert_stop(
+        grant._pair_key,
+        authorities[2]._peek(),
+        stop_request,
+        stops[2],
+    )
+    assert len(clock.samples) == samples_before_replay
+    receipt = stops[2]._read(owner._owner_token, "browser")
+    assert type(receipt) is invocation_driver._RelayChildStopReceipt
+    assert receipt._matches(owner._owner_token, "browser")
+    assert pair_destination._stopped_roles == (True, True, True)
+
+    invocation_lifecycle.cleanup_relay_invocation(owner)
+    _assert_fully_retired_owner(
+        owner,
+        owner_destination,
+        pair_destination,
+        grant,
+        driver,
+        tools,
+        authorities,
+        starts,
+        stops,
+    )
+
+
+def test_pair_post_owner_validation_preserves_transactional_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pair_destination, values = _new_consumed_pair_inputs(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    original = process_pair._transactional_record_process_owner_matches
+    cuts: list[str] = []
+
+    def interrupt_post_owner(pair_key, record):
+        if not cuts:
+            cuts.append("post-owner")
+            raise KeyboardInterrupt("post-owner validation control")
+        return original(pair_key, record)
+
+    monkeypatch.setattr(
+        process_pair,
+        "_transactional_record_process_owner_matches",
+        interrupt_post_owner,
+    )
+    with pytest.raises(KeyboardInterrupt, match="post-owner validation control"):
+        process_pair._resolve_or_mint_concrete_invocation_pair(
+            pair_destination,
+            **values,
+        )
+
+    assert cuts == ["post-owner"]
+    record = process_pair._PAIR_ENTRIES[values["build"].key]
+    assert record[3] is pair_destination
+    assert pair_destination._read() is None
+    monkeypatch.setattr(
+        process_pair,
+        "_transactional_record_process_owner_matches",
+        original,
+    )
+    grant, driver, tools = process_pair._resolve_or_mint_concrete_invocation_pair(
+        pair_destination,
+        **values,
+    )
+    assert (grant, driver, tools) == record[:3]
+    assert process_pair._retire_concrete_invocation_pair(driver, tools)
+
+
+def test_pair_post_owner_validation_preserves_role_observation_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pair_destination, values = _new_consumed_pair_inputs(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    process_destination = pair_destination._read_process_owner_destination()
+    original_resolve = process_pair._resolve_or_preown_process_owner
+    original_role_match = process_state._RelayProcessOwnerDestination._role_authority_matches
+    owner_resolved = False
+    cuts: list[str] = []
+
+    def observed_resolve(destination, grant, roles):
+        nonlocal owner_resolved
+        owner = original_resolve(destination, grant, roles)
+        owner_resolved = True
+        return owner
+
+    def interrupt_role_match(self, claim, pair_key, role, authority):
+        if self is process_destination and owner_resolved and not cuts:
+            cuts.append(role)
+            raise KeyboardInterrupt("role observation control")
+        return original_role_match(self, claim, pair_key, role, authority)
+
+    monkeypatch.setattr(
+        process_pair,
+        "_resolve_or_preown_process_owner",
+        observed_resolve,
+    )
+    monkeypatch.setattr(
+        process_state._RelayProcessOwnerDestination,
+        "_role_authority_matches",
+        interrupt_role_match,
+    )
+    with pytest.raises(KeyboardInterrupt, match="role observation control"):
+        process_pair._resolve_or_mint_concrete_invocation_pair(
+            pair_destination,
+            **values,
+        )
+
+    assert cuts == ["app"]
+    monkeypatch.setattr(
+        process_pair,
+        "_resolve_or_preown_process_owner",
+        original_resolve,
+    )
+    monkeypatch.setattr(
+        process_state._RelayProcessOwnerDestination,
+        "_role_authority_matches",
+        original_role_match,
+    )
+    grant, driver, tools = process_pair._resolve_or_mint_concrete_invocation_pair(
+        pair_destination,
+        **values,
+    )
+    assert process_state._process_owner_matches(
+        process_destination, grant, process_pair._PAIR_ENTRIES[values["build"].key][4]
+    )
+    assert process_pair._retire_concrete_invocation_pair(driver, tools)
+
+
+def test_pair_publication_observation_cannot_replace_first_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pair_destination, values = _new_consumed_pair_inputs(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    original_publish = pair_values._RelayConcreteInvocationPairDestination._publish
+    original_read = pair_values._RelayConcreteInvocationPairDestination._read
+    cuts: list[str] = []
+
+    def publish_then_interrupt(self, grant, driver, tools):
+        original_publish(self, grant, driver, tools)
+        if self is pair_destination and not cuts:
+            cuts.append("publish")
+            raise KeyboardInterrupt("first pair publication control")
+
+    def read_then_exit(self):
+        recovered = original_read(self)
+        if self is pair_destination and cuts == ["publish"]:
+            cuts.append("read")
+            raise SystemExit(97)
+        return recovered
+
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_publish",
+        publish_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        read_then_exit,
+    )
+    with pytest.raises(KeyboardInterrupt, match="first pair publication control"):
+        process_pair._resolve_or_mint_concrete_invocation_pair(
+            pair_destination,
+            **values,
+        )
+
+    assert cuts == ["publish", "read"]
+    record = process_pair._PAIR_ENTRIES[values["build"].key]
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_publish",
+        original_publish,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_read",
+        original_read,
+    )
+    grant, driver, tools = process_pair._resolve_or_mint_concrete_invocation_pair(
+        pair_destination,
+        **values,
+    )
+    assert (grant, driver, tools) == record[:3]
+    assert process_pair._retire_concrete_invocation_pair(driver, tools)
+
+
+@pytest.mark.parametrize("cut", ["begin", "clear"])
+def test_pair_retirement_observation_cannot_replace_first_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cut: str,
+) -> None:
+    _grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+        tmp_path,
+        monkeypatch,
+        clock=_AdvancingClock(),
+    )
+    original_begin = pair_values._RelayConcreteInvocationPairDestination._begin_retirement
+    original_begin_observation = (
+        pair_values._RelayConcreteInvocationPairDestination._retirement_in_progress
+    )
+    original_clear = pair_values._RelayConcreteInvocationPairDestination._clear
+    original_clear_observation = (
+        pair_values._RelayConcreteInvocationPairDestination._retirement_owner_matches
+    )
+    committed = False
+    observed = False
+    cuts: list[str] = []
+
+    def begin_then_interrupt(self, expected):
+        nonlocal committed
+        result = original_begin(self, expected)
+        if self is pair_destination and cut == "begin":
+            committed = True
+            cuts.append("begin")
+            raise KeyboardInterrupt("first pair retirement control")
+        return result
+
+    def begin_observation_then_exit(self, expected):
+        nonlocal observed
+        result = original_begin_observation(self, expected)
+        if self is pair_destination and cut == "begin" and committed and not observed:
+            observed = True
+            cuts.append("observe")
+            raise SystemExit(101)
+        return result
+
+    def clear_then_interrupt(self, expected, owner_destination):
+        nonlocal committed
+        result = original_clear(self, expected, owner_destination)
+        if self is pair_destination and cut == "clear":
+            committed = True
+            cuts.append("clear")
+            raise KeyboardInterrupt("first pair retirement control")
+        return result
+
+    def clear_observation_then_exit(self, owner_destination):
+        nonlocal observed
+        result = original_clear_observation(self, owner_destination)
+        if self is pair_destination and cut == "clear" and committed and not observed:
+            observed = True
+            cuts.append("observe")
+            raise SystemExit(103)
+        return result
+
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_begin_retirement",
+        begin_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_retirement_in_progress",
+        begin_observation_then_exit,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_clear",
+        clear_then_interrupt,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_retirement_owner_matches",
+        clear_observation_then_exit,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="first pair retirement control"):
+        process_pair._retire_concrete_invocation_pair(driver, tools)
+
+    assert cuts == [cut, "observe"]
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_begin_retirement",
+        original_begin,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_retirement_in_progress",
+        original_begin_observation,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_clear",
+        original_clear,
+    )
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_retirement_owner_matches",
+        original_clear_observation,
+    )
+    assert process_pair._retire_concrete_invocation_pair(driver, tools)
+    assert process_pair._concrete_invocation_pair_registries_are_empty()
+
+
+@pytest.mark.parametrize("cut", ["destination", "grant", "record", "publication"])
 def test_advancing_clock_replay_recovers_exact_pair_after_each_return_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -411,6 +1678,9 @@ def test_advancing_clock_replay_recovers_exact_pair_after_each_return_loss(
     committed: list[object] = []
     raised = False
     original_store = process_pair._store_pair_entry
+    original_grant = (
+        pair_values._RelayConcreteInvocationPairDestination._resolve_or_mint_process_grant
+    )
     original_publish = pair_values._RelayConcreteInvocationPairDestination._publish
 
     def store_then_lose(key, entry):
@@ -433,7 +1703,21 @@ def test_advancing_clock_replay_recovers_exact_pair_after_each_return_loss(
             committed.append((self, grant, driver, tools))
             raise OSError("synthetic publication return loss")
 
+    def grant_then_lose(self, token, pair_key, roles):
+        nonlocal raised
+        grant = original_grant(self, token, pair_key, roles)
+        if cut == "grant" and not raised:
+            raised = True
+            committed.append((self, grant, roles))
+            raise OSError("synthetic grant return loss")
+        return grant
+
     monkeypatch.setattr(process_pair, "_store_pair_entry", store_then_lose)
+    monkeypatch.setattr(
+        pair_values._RelayConcreteInvocationPairDestination,
+        "_resolve_or_mint_process_grant",
+        grant_then_lose,
+    )
     monkeypatch.setattr(
         pair_values._RelayConcreteInvocationPairDestination,
         "_publish",
@@ -474,6 +1758,8 @@ def test_advancing_clock_replay_recovers_exact_pair_after_each_return_loss(
         assert committed[0] is recovered_destination
     elif cut == "record":
         assert committed[0] is record
+    elif cut == "grant":
+        assert committed[0] == (recovered_destination, grant, record[4])
     else:
         assert committed[0] == (recovered_destination, grant, driver, tools)
     assert driver.concrete_adapter is True and tools.concrete_adapter is True
@@ -482,14 +1768,14 @@ def test_advancing_clock_replay_recovers_exact_pair_after_each_return_loss(
     assert process_pair._concrete_invocation_pair_registries_are_empty()
 
 
-@pytest.mark.parametrize("cut", ["begin", "clear", "scrub", "pop"])
+@pytest.mark.parametrize("cut", ["begin", "clear", "admission", "scrub", "pop"])
 def test_public_cleanup_authority_recovers_each_retirement_commit_return_loss(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     invocation_runtime: None,
     cut: str,
 ) -> None:
-    _grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
         tmp_path,
         monkeypatch,
         clock=_AdvancingClock(),
@@ -535,6 +1821,22 @@ def test_public_cleanup_authority_recovers_each_retirement_commit_return_loss(
             "_clear",
             clear_then_lose,
         )
+    elif cut == "admission":
+        original_seal = (
+            pair_values._RelayConcreteInvocationPairDestination._seal_process_grant_admission
+        )
+
+        def seal_then_lose(self, grant, roles):
+            committed = original_seal(self, grant, roles)
+            if committed:
+                lose_after_commit()
+            return committed
+
+        monkeypatch.setattr(
+            pair_values._RelayConcreteInvocationPairDestination,
+            "_seal_process_grant_admission",
+            seal_then_lose,
+        )
     elif cut == "scrub":
         original_scrub = pair_retirement._scrub_pair_capabilities
 
@@ -564,6 +1866,7 @@ def test_public_cleanup_authority_recovers_each_retirement_commit_return_loss(
         owner,
         owner_destination,
         pair_destination,
+        grant,
         driver,
         tools,
         authorities,
@@ -577,7 +1880,7 @@ def test_constructor_recovery_and_cleanup_obey_global_lock_order_without_deadloc
     monkeypatch: pytest.MonkeyPatch,
     invocation_runtime: None,
 ) -> None:
-    _grant, driver, tools, pair_destination, _values = _new_consumed_pair(
+    grant, driver, tools, pair_destination, _values = _new_consumed_pair(
         tmp_path,
         monkeypatch,
         clock=_AdvancingClock(),
@@ -686,6 +1989,7 @@ def test_constructor_recovery_and_cleanup_obey_global_lock_order_without_deadloc
         owner,
         owner_destination,
         pair_destination,
+        grant,
         driver,
         tools,
         authorities,

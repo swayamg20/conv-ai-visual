@@ -17,6 +17,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import scripts.voice_pipecat_e2e_relay_invocation_process_pair as invocation_process_pair
+import scripts.voice_pipecat_e2e_relay_invocation_process_state as invocation_process_state
 import scripts.voice_pipecat_e2e_relay_invocation_process_values as invocation_process_values
 import scripts.voice_pipecat_e2e_relay_linux_build_process_registry as process_registry
 import scripts.voice_pipecat_e2e_relay_linux_build_process_state as process_state
@@ -106,6 +107,7 @@ def _isolated_outer_state() -> None:
         executor_inner_state._INNER_TERMINALS,
         executor_inner_state._INNER_AUTHORITIES,
         invocation_process_pair._PAIR_ENTRIES,
+        invocation_process_state._PROCESS_OWNERS,
         relay_owner_state._REGISTRY,
     )
     for mapping in mappings:

@@ -13,6 +13,26 @@ from scripts.voice_pipecat_e2e_relay_invocation_process_pair_callback import (
 _FAILURE = "Relay concrete invocation pair is invalid"
 
 
+def _grant_matches_destination(grant: object, destination: object) -> bool:
+    try:
+        return grant._matches(
+            build=destination._build,
+            binding=destination._binding,
+            selection=destination._selection,
+            destination=destination,
+            runtime_deadline=destination._runtime_deadline,
+            runtime_timeout_seconds=destination._runtime_timeout_seconds,
+            cleanup_timeout_seconds=destination._cleanup_timeout_seconds,
+            clock=destination._clock,
+            wait=destination._wait,
+            epoch_clock=destination._epoch_clock,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
+
+
 def _new_concrete_tools(
     build: object,
     epoch_clock: object,
@@ -81,6 +101,24 @@ def _live_pair_capabilities_match(record: object) -> bool:
             and tools._playwright_cli == expected_playwright
             and tools._epoch_clock is grant._epoch_clock
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException:
+        return False
+
+
+def _pair_publication_matches(record: object) -> bool:
+    try:
+        if type(record) is not tuple or len(record) != 5:
+            return False
+        published = record[3]._read()
+        return bool(
+            type(published) is tuple
+            and len(published) == 3
+            and all(published[index] is record[index] for index in range(3))
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
 

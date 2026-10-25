@@ -122,6 +122,8 @@ def _retired_pair_matches(driver: object, tools: object) -> bool:
                 )
             )
         )
+    except (KeyboardInterrupt, SystemExit):
+        raise
     except BaseException:
         return False
 

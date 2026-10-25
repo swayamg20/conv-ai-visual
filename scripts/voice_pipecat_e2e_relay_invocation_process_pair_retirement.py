@@ -26,6 +26,12 @@ from scripts.voice_pipecat_e2e_relay_invocation_process_pair_callback import (
 from scripts.voice_pipecat_e2e_relay_invocation_process_pair_values import (
     _RelayConcreteInvocationPairDestination,
 )
+from scripts.voice_pipecat_e2e_relay_invocation_process_state import (
+    _process_owner_registries_are_empty,
+    _RelayProcessOwnerDestination,
+    _retire_childless_process_owner,
+    _transactional_record_process_owner_matches,
+)
 from scripts.voice_pipecat_e2e_relay_invocation_values import RelayStopRequest
 
 
@@ -42,7 +48,11 @@ def _retire_concrete_invocation_pair(
     with _LOCK:
         record = _record_for_pair_key(pair_key)
         if record is None:
-            return _retired_pair_matches(driver, tools) and not _PAIR_ENTRIES
+            return bool(
+                _retired_pair_matches(driver, tools)
+                and not _PAIR_ENTRIES
+                and _process_owner_registries_are_empty()
+            )
         if record[1] is not driver or record[2] is not tools:
             return False
         destination = record[3]
@@ -135,6 +145,7 @@ def _retire_pair_serialized(
                 and _pair_record_is_canonical(pair_key, record)
                 and _pair_publication_matches(record)
                 and _live_pair_capabilities_match(record)
+                and _transactional_record_process_owner_matches(pair_key, record)
             ):
                 return False
             state = destination._read_retirement_state()
@@ -168,7 +179,12 @@ def _retire_pair_serialized(
                     destination._begin_retirement(expected)
                 except BaseException as escaped:
                     error = escaped
-                in_progress = destination._retirement_in_progress(expected)
+                try:
+                    in_progress = destination._retirement_in_progress(expected)
+                except BaseException as escaped:
+                    if error is None:
+                        error = escaped
+                    in_progress = False
             if error is not None:
                 raise error
             if not in_progress:
@@ -187,7 +203,12 @@ def _retire_pair_serialized(
                 destination._clear(expected, owner_destination)
             except BaseException as escaped:
                 error = escaped
-            cleared = destination._retirement_owner_matches(owner_destination)
+            try:
+                cleared = destination._retirement_owner_matches(owner_destination)
+            except BaseException as escaped:
+                if error is None:
+                    error = escaped
+                cleared = False
         if error is not None:
             raise error
         if not cleared:
@@ -377,12 +398,31 @@ def _scrub_and_pop_retired_pair(
     driver: object,
     tools: object,
 ) -> bool:
+    process_destination = record[3]._read_process_owner_destination()
+    if (
+        type(process_destination) is not _RelayProcessOwnerDestination
+        or not _retire_childless_process_owner(
+            process_destination,
+            record[0],
+            record[4],
+        )
+        or not record[3]._seal_process_grant_admission(
+            record[0],
+            record[4],
+        )
+    ):
+        return False
     error: BaseException | None = None
     try:
         _scrub_pair_capabilities(driver, tools)
     except BaseException as escaped:
         error = escaped
-    scrubbed = _retired_pair_matches(driver, tools)
+    try:
+        scrubbed = _retired_pair_matches(driver, tools)
+    except BaseException as escaped:
+        if error is None:
+            error = escaped
+        scrubbed = False
     if error is not None:
         raise error
     if not scrubbed:
@@ -394,7 +434,16 @@ def _scrub_and_pop_retired_pair(
         _pop_pair_entry(build_key)
     except BaseException as escaped:
         error = escaped
-    complete = not _PAIR_ENTRIES and _retired_pair_matches(driver, tools)
+    try:
+        complete = bool(
+            not _PAIR_ENTRIES
+            and _retired_pair_matches(driver, tools)
+            and _process_owner_registries_are_empty()
+        )
+    except BaseException as escaped:
+        if error is None:
+            error = escaped
+        complete = False
     if error is not None:
         raise error
     return complete

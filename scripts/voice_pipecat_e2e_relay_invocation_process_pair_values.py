@@ -3,11 +3,21 @@
 from __future__ import annotations
 
 import threading
+import weakref
 from collections.abc import Callable
 
 from scripts.voice_pipecat_e2e_relay_invocation_driver import (
     RelayInvocationDriver,
     RelayInvocationTools,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_grant_admission_values import (
+    _process_grant_admission_has_shape,
+    _terminal_process_grant_admission_matches,
+)
+from scripts.voice_pipecat_e2e_relay_invocation_process_state import (
+    _new_process_owner_destination,
+    _RelayProcessOwner,
+    _RelayProcessOwnerDestination,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
     _is_concrete_invocation_selection,
@@ -16,25 +26,28 @@ from scripts.voice_pipecat_e2e_relay_invocation_process_values import (
 from scripts.voice_pipecat_e2e_relay_invocation_values import RelayStopRequest
 
 _DESTINATION_TOKEN = object()
-_GRANT_TOKEN = object()
+_GRANT_FACTORY_TOKEN = object()
+_GRANT_CONSTRUCTOR_TOKEN = object()
 _NO_OWNER_TOMBSTONE = object()
 _FAILURE = "Relay concrete invocation pair is invalid"
 
+_GRANT_VALUE_SLOTS = (
+    "_binding",
+    "_build",
+    "_cleanup_timeout_seconds",
+    "_clock",
+    "_destination",
+    "_epoch_clock",
+    "_pair_key",
+    "_runtime_deadline",
+    "_runtime_timeout_seconds",
+    "_selection",
+    "_wait",
+)
+
 
 class _RelayConcreteInvocationGrant:
-    __slots__ = (
-        "_binding",
-        "_build",
-        "_cleanup_timeout_seconds",
-        "_clock",
-        "_destination",
-        "_epoch_clock",
-        "_pair_key",
-        "_runtime_deadline",
-        "_runtime_timeout_seconds",
-        "_selection",
-        "_wait",
-    )
+    __slots__ = (*_GRANT_VALUE_SLOTS, "__weakref__")
 
     def __init__(
         self,
@@ -52,10 +65,10 @@ class _RelayConcreteInvocationGrant:
         wait: Callable[[float], None],
         epoch_clock: Callable[[], float],
     ) -> None:
-        if token is not _GRANT_TOKEN or type(pair_key) is not object:
+        if token is not _GRANT_CONSTRUCTOR_TOKEN or type(pair_key) is not object:
             raise TypeError(_FAILURE)
         values = locals().copy()
-        for name in self.__slots__:
+        for name in _GRANT_VALUE_SLOTS:
             object.__setattr__(self, name, values[name[1:]])
 
     def _matches(
@@ -122,6 +135,8 @@ class _RelayConcreteInvocationPairDestination:
         "_phase",
         "_preown_intended_roles",
         "_preowned_roles",
+        "_process_grant_admission",
+        "_process_owner_destination",
         "_record",
         "_retirement_owner_identity",
         "_retiring_record",
@@ -166,7 +181,11 @@ class _RelayConcreteInvocationPairDestination:
         self._phase = "live"
         self._preown_intended_roles = (False, False, False)
         self._preowned_roles = (False, False, False)
+        self._process_grant_admission: tuple[object, ...] | None = None
         self._stopped_roles = (False, False, False)
+        self._process_owner_destination: _RelayProcessOwnerDestination | None = (
+            _new_process_owner_destination()
+        )
         self._retirement_owner_identity: object | None = None
         self._retiring_record: tuple[object, object, object] | None = None
         self._record: (
@@ -269,6 +288,157 @@ class _RelayConcreteInvocationPairDestination:
         with self._lock:
             return self._owner_destination is destination
 
+    def _read_process_owner_destination(self) -> _RelayProcessOwnerDestination | None:
+        with self._lock:
+            return self._process_owner_destination
+
+    def _resolve_or_mint_process_grant(
+        self,
+        token: object,
+        pair_key: object,
+        roles: object,
+    ) -> _RelayConcreteInvocationGrant:
+        if token is not _GRANT_FACTORY_TOKEN or type(pair_key) is not object:
+            raise TypeError(_FAILURE)
+        with self._lock:
+            process_destination = self._process_owner_destination
+            if (
+                self._phase != "live"
+                or type(process_destination) is not _RelayProcessOwnerDestination
+            ):
+                raise TypeError(_FAILURE)
+            claim = process_destination._claim_for_roles(pair_key, roles)
+            if type(claim) is not object:
+                raise TypeError(_FAILURE)
+            admission = self._process_grant_admission
+            if admission is None:
+                grant = _RelayConcreteInvocationGrant(
+                    _GRANT_CONSTRUCTOR_TOKEN,
+                    build=self._build,
+                    binding=self._binding,
+                    selection=self._selection,
+                    destination=self,
+                    pair_key=pair_key,
+                    runtime_deadline=self._runtime_deadline,
+                    runtime_timeout_seconds=self._runtime_timeout_seconds,
+                    cleanup_timeout_seconds=self._cleanup_timeout_seconds,
+                    clock=self._clock,
+                    wait=self._wait,
+                    epoch_clock=self._epoch_clock,
+                )
+                admission = (process_destination, claim, pair_key, roles, grant, None)
+                self._process_grant_admission = admission
+            if not _process_grant_admission_has_shape(
+                admission,
+                self,
+                process_destination,
+                claim,
+                pair_key,
+                roles,
+            ):
+                raise TypeError(_FAILURE)
+            return admission[4]  # type: ignore[return-value]
+
+    def _resolve_or_admit_process_owner(
+        self,
+        process_destination: object,
+        claim: object,
+        grant: object,
+        roles: object,
+        *,
+        allow_dead_replacement: bool,
+    ) -> _RelayProcessOwner:
+        from scripts.voice_pipecat_e2e_relay_invocation_process_owner_admission import (
+            _resolve_or_admit_process_owner as resolve,
+        )
+
+        return resolve(
+            self,
+            process_destination,
+            claim,
+            grant,
+            roles,
+            allow_dead_replacement=allow_dead_replacement,
+        )
+
+    def _process_grant_admission_matches(
+        self,
+        process_destination: object,
+        claim: object,
+        grant: object,
+        roles: object,
+        *,
+        allow_terminal: bool = False,
+    ) -> bool:
+        with self._lock:
+            admission = self._process_grant_admission
+            pair_key = getattr(grant, "_pair_key", None)
+            return bool(
+                (
+                    _process_grant_admission_has_shape(
+                        admission,
+                        self,
+                        process_destination,
+                        claim,
+                        pair_key,
+                        roles,
+                    )
+                    and admission[4] is grant
+                )
+                or (
+                    allow_terminal
+                    and _terminal_process_grant_admission_matches(
+                        admission,
+                        self,
+                        process_destination,
+                        claim,
+                        grant,
+                        roles,
+                    )
+                )
+            )
+
+    def _seal_process_grant_admission(self, grant: object, roles: object) -> bool:
+        with self._lock:
+            process_destination = self._process_owner_destination
+            pair_key = getattr(grant, "_pair_key", None)
+            if type(process_destination) is not _RelayProcessOwnerDestination:
+                return False
+            claim = process_destination._claim_for_roles(pair_key, roles)
+            if type(claim) is not object or not process_destination._is_sealed_empty():
+                return False
+            admission = self._process_grant_admission
+            if _terminal_process_grant_admission_matches(
+                admission,
+                self,
+                process_destination,
+                claim,
+                grant,
+                roles,
+            ):
+                return True
+            if not (
+                _process_grant_admission_has_shape(
+                    admission,
+                    self,
+                    process_destination,
+                    claim,
+                    pair_key,
+                    roles,
+                )
+                and admission[4] is grant
+            ):
+                return False
+            self._process_grant_admission = (
+                "sealed",
+                process_destination,
+                claim,
+                weakref.ref(grant),
+                tuple(weakref.ref(authority) for _role, authority in roles),
+                admission[5],
+            )
+            return True
+
     def _read_owner_destination(self) -> object | None:
         with self._lock:
             return self._owner_destination
@@ -293,14 +463,12 @@ class _RelayConcreteInvocationPairDestination:
         with self._lock:
             if (
                 self._phase != "live"
-                or not graph
+                or type(graph) is not tuple
+                or len(graph) != 12
                 or self._owner_destination is not graph[0]
                 or type(owner_token) is not object
+                or graph[2] is not owner_token
             ):
-                return False
-            if self._owner_token is None:
-                self._owner_token = owner_token
-            elif self._owner_token is not owner_token:
                 return False
             if self._owner_graph is None:
                 self._owner_graph = graph
@@ -308,7 +476,7 @@ class _RelayConcreteInvocationPairDestination:
                 type(self._owner_graph) is tuple
                 and len(self._owner_graph) == len(graph)
                 and all(self._owner_graph[index] is graph[index] for index in range(len(graph)))
-                and self._owner_token is owner_token
+                and self._owner_graph[2] is owner_token
             )
 
     def _intend_role_preown(self, role_index: int) -> bool:
@@ -328,26 +496,31 @@ class _RelayConcreteInvocationPairDestination:
     ) -> bool:
         with self._lock:
             graph = self._owner_graph
+            owner_token = graph[2] if type(graph) is tuple and len(graph) == 12 else None
             authority_index = 3 + role_index
             stop_index = 9 + role_index
             return bool(
                 type(graph) is tuple
                 and len(graph) == 12
                 and 0 <= role_index < 3
-                and type(self._owner_token) is object
+                and type(owner_token) is object
                 and (
                     authority_destination is None or graph[authority_index] is authority_destination
                 )
                 and (stop_destination is None or graph[stop_index] is stop_destination)
                 and all(
-                    getattr(graph[9 + index], "_owner_token", None) is self._owner_token
+                    getattr(graph[9 + index], "_owner_token", None) is owner_token
                     for index in range(3)
                 )
             )
 
     def _mark_role_preowned(self, role_index: int) -> bool:
         with self._lock:
-            if self._phase not in {"live", "retiring"} or not 0 <= role_index < 3:
+            if (
+                self._phase not in {"live", "cleanup", "retiring"}
+                or not 0 <= role_index < 3
+                or not self._preown_intended_roles[role_index]
+            ):
                 return False
             values = list(self._preowned_roles)
             values[role_index] = True
@@ -359,6 +532,7 @@ class _RelayConcreteInvocationPairDestination:
             if (
                 self._phase not in {"cleanup", "retiring"}
                 or not 0 <= role_index < 3
+                or not self._preown_intended_roles[role_index]
                 or not self._preowned_roles[role_index]
             ):
                 return False
@@ -369,11 +543,13 @@ class _RelayConcreteInvocationPairDestination:
 
     def _read_retirement_state(self) -> tuple[object, ...]:
         with self._lock:
+            graph = self._owner_graph
+            owner_token = graph[2] if type(graph) is tuple and len(graph) == 12 else None
             return (
                 self._phase,
                 self._owner_destination,
-                self._owner_graph,
-                self._owner_token,
+                graph,
+                owner_token,
                 self._preown_intended_roles,
                 self._preowned_roles,
                 self._stopped_roles,
@@ -435,7 +611,8 @@ class _RelayConcreteInvocationPairDestination:
 
     def _read_owner_token(self) -> object | None:
         with self._lock:
-            return self._owner_token
+            graph = self._owner_graph
+            return graph[2] if type(graph) is tuple and len(graph) == 12 else None
 
     def __bool__(self) -> bool:
         return False
