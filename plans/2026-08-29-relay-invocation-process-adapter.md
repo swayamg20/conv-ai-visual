@@ -44,6 +44,8 @@ The observable development outcome is a fake-process integration that traverses 
 
 ## Surprises & Discoveries
 
+2026-10-26: The new uncommitted local seam initially registered a callback instead of the raw Popen and mutated the parent process umask. Both were corrected by reusing `registered_popen_factory` with child-only umask. Unsupported WNOWAIT must raise rather than share the `None` running observation. Unreadable or malformed `/proc` records cannot count as descendant absence. Fake-only local regression coverage plus existing lifecycle/integration coverage passes 125 strict tests. Two reviewer calls returned empty results; no independent review verdict exists for this draft, and concrete callbacks remain inert.
+
 The existing executor already creates the runtime deadline only after `_RelayLinuxExecutorBuiltEvidence` is confirmed consumed. However, the executor currently receives `RelayInvocationDriver` before that point and `_new_workspace_invocation_tools()` derives Next and Playwright paths with path arithmetic. A concrete adapter must therefore be selected by a sealed inert mode before consumption but created only from the exact live consumed evidence afterward. The factory must never be invoked on a pre-consume failure.
 
 The executor already performs intentional workspace preparation and a Next build before consumption, so “zero effects before consumption” cannot describe the whole private executor. The enforceable rule is narrower: the new concrete selection may exist, but it cannot call the concrete factory, create adapter-local state, mint nonces, or perform process/HTTP effects until the built lease is consumed. The public refusal retains the stronger global zero-effect rule.
