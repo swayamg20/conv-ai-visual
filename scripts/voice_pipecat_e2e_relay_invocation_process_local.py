@@ -218,13 +218,15 @@ class _RelayLoopbackTransport:
         if (
             type(port) is not int
             or not 0 < port < 65536
-            or method != "GET"
+            or method not in {"GET", "POST"}
             or type(path) is not str
             or not path.startswith("/")
             or path.startswith("//")
             or type(headers) is not dict
             or headers.get("Host") != f"127.0.0.1:{port}"
-            or body is not None
+            or (method == "GET") != (body is None)
+            or (method == "POST" and type(body) is not bytes)
+            or (method == "POST" and len(body) > _MAX_RESPONSE_BYTES)
             or type(timeout_seconds) is not float
             or not math.isfinite(timeout_seconds)
             or timeout_seconds <= 0.0

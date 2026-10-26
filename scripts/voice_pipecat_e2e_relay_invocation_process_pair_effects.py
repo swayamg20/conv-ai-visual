@@ -25,11 +25,33 @@ from scripts.voice_pipecat_e2e_relay_invocation_process_state import (
     _transactional_record_process_owner_matches,
 )
 from scripts.voice_pipecat_e2e_relay_invocation_values import (
+    RelayChildRequest,
+    RelayFinishRequest,
     RelayInvocationError,
     RelayStopRequest,
 )
 
 _FAILURE = "Relay concrete invocation pair is invalid"
+_NOT_ENABLED = "Relay concrete process adapter is not enabled"
+
+
+def _settlement_module():
+    from scripts.voice_pipecat_e2e_relay_invocation_process_lifecycle import (
+        _finish_started_role,
+        _intend_start,
+        _stop_started_role,
+    )
+
+    return _intend_start, _finish_started_role, _stop_started_role
+
+
+def _started_role_module():
+    from scripts.voice_pipecat_e2e_relay_invocation_process_lifecycle import (
+        _role_has_live_record,
+        _stop_started_role,
+    )
+
+    return _role_has_live_record, _stop_started_role
 
 
 def _inert_preown(
@@ -107,15 +129,128 @@ def _inert_preown(
             raise RelayInvocationError(_FAILURE)
 
 
-def _inert_forward(
+def _concrete_forward(
     pair_key: object,
     authority: object,
-    _request: object,
-    _destination: object,
+    request: object,
+    destination: object,
 ) -> None:
-    if _role_for_authority(pair_key, authority) is None:
+    role = _role_for_authority(pair_key, authority)
+    if role is None:
         raise RelayInvocationError(_FAILURE)
-    raise RelayInvocationError("Relay concrete process adapter is not enabled")
+    intend_start, finish_started, _stop_started = _settlement_module()
+    with _LOCK:
+        record = _record_for_pair_key(pair_key)
+        grant = record[0] if record is not None else None
+    if type(grant) is not _RelayConcreteInvocationGrant:
+        raise RelayInvocationError(_FAILURE)
+    clock = grant._clock
+    wait = grant._wait
+    if role == "browser" and type(request) is RelayFinishRequest:
+        deadline = request.absolute_deadline
+        if type(deadline) is not float:
+            raise RelayInvocationError(_FAILURE)
+        if not finish_started(pair_key, "browser", clock, wait, deadline):
+            raise RelayInvocationError(_FAILURE)
+        destination.publish({"status": "exited", "returncode": 0})
+        return
+    if type(request) is RelayChildRequest and request.role == role:
+        deadline = request.absolute_deadline
+        if deadline is None or type(deadline) is not float:
+            deadline = grant._runtime_deadline
+        if not intend_start(pair_key, role, request, clock, wait):
+            raise RelayInvocationError(_FAILURE)
+        destination.publish(True)
+        return
+    if role == "app":
+        _concrete_prebootstrap(pair_key, request, destination, grant, clock)
+        return
+    raise RelayInvocationError(_NOT_ENABLED)
+
+
+def _concrete_prebootstrap(
+    pair_key: object,
+    request: object,
+    destination: object,
+    grant: object,
+    clock: object,
+) -> None:
+    """One bounded direct-loopback prebootstrap through the exact request."""
+
+    from urllib.parse import urlparse
+
+    from scripts.voice_pipecat_e2e_relay_invocation_prebootstrap import (
+        RelayPrebootstrapRequest,
+    )
+    from scripts.voice_pipecat_e2e_relay_invocation_process_lifecycle import (
+        _role_has_live_record,
+    )
+    from scripts.voice_pipecat_e2e_relay_invocation_process_local import (
+        _new_loopback_transport,
+    )
+
+    if type(request) is not RelayPrebootstrapRequest or not _role_has_live_record(pair_key, "app"):
+        raise RelayInvocationError(_FAILURE)
+    parsed = urlparse(request.url)
+    if parsed.scheme != "http" or parsed.hostname != "127.0.0.1" or parsed.query or parsed.fragment:
+        raise RelayInvocationError(_FAILURE)
+    port = parsed.port
+    if type(port) is not int:
+        raise RelayInvocationError(_FAILURE)
+    remaining = grant._runtime_deadline - clock()
+    if type(remaining) is not float or not math.isfinite(remaining) or remaining <= 0.0:
+        raise RelayInvocationError(_FAILURE)
+    payload = _encode_prebootstrap_body(request)
+    transport = _new_loopback_transport("127.0.0.1")
+    status, _headers, body = transport.request(
+        port=port,
+        method="POST",
+        path=parsed.path,
+        headers={
+            "Host": f"127.0.0.1:{port}",
+            "Authorization": request.authorization,
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+        },
+        body=payload,
+        timeout_seconds=remaining,
+    )
+    if type(status) is not int or status != 200:
+        raise RelayInvocationError(_FAILURE)
+    if not _role_has_live_record(pair_key, "app"):
+        raise RelayInvocationError(_FAILURE)
+    destination.publish(_decode_prebootstrap_response(body))
+
+
+def _encode_prebootstrap_body(request: object) -> bytes:
+    import json
+
+    body = request.body
+    if type(body) is not dict or set(body) != {"session_id", "voice_call_id"}:
+        raise RelayInvocationError(_FAILURE)
+    try:
+        payload = json.dumps(body).encode("ascii")
+    except BaseException:
+        raise RelayInvocationError(_FAILURE) from None
+    return payload
+
+
+def _decode_prebootstrap_response(body: bytes) -> object:
+    import json
+
+    if type(body) is not bytes or not body:
+        raise RelayInvocationError(_FAILURE)
+    try:
+        value = json.loads(body)
+    except BaseException:
+        raise RelayInvocationError(_FAILURE) from None
+    if type(value) is not dict or set(value) != {
+        "schema_version",
+        "status",
+        "expires_at_epoch_seconds",
+    }:
+        raise RelayInvocationError(_FAILURE)
+    return value
 
 
 def _inert_stop(
@@ -157,6 +292,9 @@ def _inert_stop(
                 )
             )
             owner_token = pair_destination._read_owner_token() if canonical else None
+            live_role = bool(
+                request_bound and role is not None and _started_role_module()[0](pair_key, role)
+            )
         if (
             role is None
             or type(request) is not RelayStopRequest
@@ -166,6 +304,44 @@ def _inert_stop(
             or type(owner_token) is not object
             or not request_bound
         ):
+            raise RelayInvocationError(_FAILURE)
+    if live_role:
+        from scripts.voice_pipecat_e2e_relay_invocation_process_lifecycle import (
+            _stop_started_role,
+        )
+
+        if (
+            type(request.absolute_deadline) is not float
+            or not callable(grant._clock)
+            or not callable(grant._wait)
+            or not _stop_started_role(
+                pair_key,
+                role,
+                grant._clock,
+                grant._wait,
+                request.absolute_deadline,
+            )
+        ):
+            raise RelayInvocationError(_FAILURE)
+    with pair_destination._effect_lock:
+        with _LOCK:
+            current = _record_for_pair_key(pair_key)
+            canonical = bool(
+                current is not None
+                and current is record
+                and current[3] is pair_destination
+                and _pair_record_is_canonical(pair_key, current)
+                and _pair_publication_matches(current)
+                and _live_pair_capabilities_match(current)
+                and _transactional_record_process_owner_matches(pair_key, current)
+                and pair_destination._phase_matches("cleanup")
+                and pair_destination._stop_request_matches(request)
+                and pair_destination._owner_graph_role_matches(
+                    role_index,
+                    stop_destination=destination,
+                )
+            )
+        if not canonical:
             raise RelayInvocationError(_FAILURE)
         _reconcile_requested_preownership(
             pair_key,
@@ -179,6 +355,8 @@ def _inert_stop(
         )
         process_destination = pair_destination._read_process_owner_destination()
         process_roles = record[4]
+        if _started_role_module()[0](pair_key, role):
+            raise RelayInvocationError(_FAILURE)
         suffix = _uncommitted_absent_suffix(
             pair_destination,
             process_destination,

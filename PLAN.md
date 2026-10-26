@@ -23,9 +23,9 @@ of the admitted process-owner graph (which shipped as `f539265`).
 
 ## Task states
 
-- Tk-A: direct recon performed; delegated recon returned empty outputs.
-- Tk-B: local seam draft repaired; lifecycle, readiness contract, provenance binding and callback activation remain incomplete.
-- Tk-C: local seam regressions added and passed; lifecycle phase-cut/overlap coverage remains incomplete.
-- Tk-D: scoped Ruff checks and 125 strict local/lifecycle/integration tests passed. Two independent reviewer attempts returned empty outputs; review remains blocked. Full gates and landing remain pending.
+- Tk-A: done (direct recon; delegated recon returned empty outputs).
+- Tk-B: local seam + settlement engine + dispatch activation (start/finish/prebootstrap) + started-role stop settlement — done and gated. Readiness digest contract (per-role nonce health) and executor-level integration remain.
+- Tk-C: done for this slice — 11 settlement + 17 dispatch tests, fault matrix (RuntimeError/KeyboardInterrupt/SystemExit), test-leak fixed.
+- Tk-D: gates passed (266 focused `-W error`, 443 adjacent, 3,859 full repo, Ruff, caps). Self-review fixed one major lock-across-effects bug; independent reviewer attempts returned empty — that gate stays open.
 
 Explicit exclusions: anything Checkpoint 5 or Docker/TLS/Coturn-image qualification; public surface changes to `scripts/voice_pipecat_e2e_stack.py`; new bash/toml/env values not owned by this work.

@@ -33,7 +33,7 @@ class _RelayConcreteInvocationCallback:
 
     def __call__(self, *args: object) -> None:
         from scripts.voice_pipecat_e2e_relay_invocation_process_pair_effects import (
-            _inert_forward,
+            _concrete_forward,
             _inert_preown,
             _inert_stop,
         )
@@ -42,7 +42,7 @@ class _RelayConcreteInvocationCallback:
             _inert_preown(self._pair_key, args[0], args[1])
             return
         if self._operation in {"start", "prebootstrap", "finish"} and len(args) == 3:
-            _inert_forward(self._pair_key, args[0], args[1], args[2])
+            _concrete_forward(self._pair_key, args[0], args[1], args[2])
             return
         if self._operation == "stop" and len(args) == 3:
             _inert_stop(self._pair_key, args[0], args[1], args[2])

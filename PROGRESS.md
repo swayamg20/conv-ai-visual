@@ -8,9 +8,20 @@
 ## Completed this session
 
 - [x] PLAN.md / PROGRESS.md created.
-- [x] 2026-10-26: Repaired the unfinished local spawn seam to reuse `registered_popen_factory`, registering the raw child before initialization and setting the child-only `umask=0o077`. Removed the callback/list mismatch and process-wide umask mutation. Added positive PID checks, distinguished unavailable WNOWAIT from a running child, validated the observed PID, made reap nonblocking, and rejected unreadable/malformed `/proc` evidence. Loopback HTTP now verifies Host and peer and rejects redirects and oversized responses.
-- [x] 2026-10-26: Added fake-only regression tests for registration ordering, initialization return loss (ordinary/control exceptions), unavailable/wrong-PID WNOWAIT, invalid signal targets, unreadable process evidence, and HTTP response failures. Local + existing lifecycle + concrete integration suites: 125 passed with warnings as errors. Scoped Ruff lint/format passed. The adapter callbacks remain inert; this does not complete Checkpoint 2.
-- [ ] Independent review blocked: two reviewer Task calls completed with empty outputs, so neither supplied a verdict. Review must be rerun before accepting this slice.
+- [x] Local seam checkpoint pushed (`e0ea340`): registered spawn (child-only umask), fail-closed PID/WNOWAIT//proc checks, bounded POST-capable loopback transport.
+- [x] Settlement engine (`process_lifecycle.py`): intend/start/terminal-zero/stop/quarantine with TERM-grace KILL from stored timestamp; 11 fake-seam tests.
+- [x] Dispatch activation (`_concrete_forward` replacing `_inert_forward`): start / browser finish / app prebootstrap (bounded loopback POST, live-app gate both sides, exact-schema publish); 17 dispatch tests incl. fault matrix (RuntimeError/KeyboardInterrupt/SystemExit never publish).
+- [x] Stop path activation: started-role settled outside all locks term-then-kill, revalidated post-settlement before graph marking; unstarted path unchanged (68 integration tests still green).
+- [x] Fixed test monkeypatch leak (dispatch tests now restore patched attributes) and lock-across-effects bug found in self-review.
+- [x] Gates: 266 focused `-W error`, 443 adjacent, 3,859 full-repo tests, Ruff lint/format, `py_compile`, module caps <700, `git diff --check`.
+
+## Remaining tasks
+
+- [ ] Commit + push this settlement slice.
+- [ ] Readiness digest contract: per-role nonce health endpoints (app `/_e2e/health` extension + web force-dynamic route) and digest-bound readiness in dispatch.
+- [ ] Executor-level per-cut integration (fake local seams through the real outer executor) per Checkpoint 3.
+- [ ] Independent no-P0/P1 reviewer gate (three attempts returned empty; needs a working reviewer pass or explicit sign-off).
+- [ ] Checkpoints 3-4 per ExecPlan; Checkpoint 5 remains separately authorized.
 
 ## Remaining tasks
 
