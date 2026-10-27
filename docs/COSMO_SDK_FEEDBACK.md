@@ -6,7 +6,7 @@ Maintained as a working log at the user's request (2026-09-13). For each new fin
 
 | Finding | Current status |
 | --- | --- |
-| The lab uses a native speech model, while the user wants a generic STT -> text LLM -> TTS pipeline | Integration architecture mismatch, clarified 2026-09-17. Workspace discovery on 2026-10-27 verified the key and OpenAI availability, but catalog listing requires an acts-as-user token (HTTP 403). No runnable cascade is verified; a Gemini-only workspace claim is contradicted by the capability response. The native-audio prototype is not acceptance of this requirement. |
+| The lab uses a native speech model, while the user wants a generic STT -> text LLM -> TTS pipeline | Integration architecture mismatch, clarified 2026-09-17. Authenticated discovery on 2026-10-27 found an empty catalog and two additional native voice providers. Their editor and live validation contracts expose no separate STT or ordinary text LLM. The workspace presently offers no configurable STT -> ordinary text LLM -> TTS cascade. OpenAI availability remains true; this is not a Gemini-only workspace. |
 | Assistant answers before the user finishes | User-confirmed symptom. Synthetic pause checks pass but have not reproduced the original human failure. Timing adjustments are a workaround; the request is now for explicit turn-detector and interruption ownership. |
 | Assistant says it cannot show quadratics | Confirmed initial lab capability/prompt gap, addressed with `show_quadratic` and Murmur's renderer. Spoken and typed tool-to-render checks passed. |
 | User reports that Gemini cannot control graph generation | Reported 2026-09-19; the exact failing request is not yet identified. Confirmed local limitation: only new quadratic cards are exposed, with no edit/delete/layout/animation tools or connection to the full scene/reasoner. Do not label this a Gemini API limitation. |
@@ -54,13 +54,151 @@ Risks and acceptance: a default or guessed alias could still select a native mod
 
 Concrete feedback request, prepared locally and not sent: “Your architecture guide describes a modular STT -> LLM -> TTS pipeline selected via model/model_options. Could you share a working TypeScript agent configuration or catalog-agent setup using a regular text LLM, including the supported model ID and resolved STT/TTS providers? Can those stages be chosen independently, or can we supply our own text-LLM endpoint? Please include the available endpointing and per-response interruption/cancellation controls.”
 
-Current status: architecture and plan corrected; cascade configuration, implementation, and live acceptance remain pending. No native-model session was started or runtime setting changed during this follow-up.
+Current status, updated 2026-10-27: configuration discovery is complete for the available editor/API surfaces. The workspace presently offers no configurable STT -> ordinary text LLM -> TTS cascade. Integration and live acceptance require a new supported vendor contract. No new native inference session was started; the configuration-only temporary agent described below was deleted.
 
 ## Resolved model visibility
 
+### Authenticated native-provider contract, 2026-10-27
+
+**Verdict: neither Cosmo-native provider exposes the required cascade.** This is a definitive conclusion about this workspace's presently exposed editor and validated API contract, not a claim about every private backend implementation. PersonaPlex has a native voice configuration; Ultravox combines its speech model with selectable output voices, including external TTS. External TTS does not make Ultravox an independently selected STT -> ordinary text LLM -> TTS pipeline. No concrete ordinary text-LLM provider/model or STT provider/model can be selected in either branch.
+
+The preceding lane established authenticated Chrome **Profile 1** access by importing `cosmo.ai` cookies into gstack browse. Its authenticated `GET /api/v1/external/agents` returned **HTTP 200, `[]`**; dashboard workspace and library lists were also empty. Its capability response was **`{"openai_provider_available":true}`**. These supersede the earlier auth-blocked discovery below. Use `https://platform.askcosmo.ai`, not the unreachable `api.cosmo.ai`. Internal workspace requests use `x-cosmo-workspace-id: wk_f3770c2a` and the existing browser authentication. Never copy cookie, key, or token values into evidence.
+
+#### Editor controls and option schemas
+
+Inspected `/wk-1f507574/realtime-agents/new` and the same editor after a temporary save. The model menu has Auto, Gemini Live, OpenAI Realtime, OpenAI Realtime Mini, OpenAI GPT Live, Grok Voice, **Cosmo Voice Light** (`cosmo_voice_personaplex`), and **Cosmo Voice** (`cosmo_voice_ultravox`). There is no ordinary OpenAI text-model choice in this menu.
+
+| Surface | Observed controls / serialization |
+| --- | --- |
+| Agent identity | Display name, machine-safe handle, Create agent / Save; saved agents also expose Export code and Talk. |
+| Agent setup | One model/provider menu, voice picker, delivery style, system prompt and expanded prompt editor. Delivery choices are Default, Warm, Delivery, and Human; the selection supplies `voice.speaking_style`, not a stage provider. |
+| Opening / fixed speech | Assistant waits for user or speaks first, first-message text (`greeting`), silence-nudge text, seconds of silence (default 10), and max nudges (default 3). PersonaPlex disables the silence-nudge controls. Nudge configuration serializes as a `user.speech.timeout` hook with `say`, `max_count`, and `reset_mode: "on_user_speech"`. |
+| Advanced prompt guidance | Unclear audio, Pacing & brevity, Language pinning, Entity capture, Safety & escalation switches append prompt sections. |
+| Advanced model/audio | Max response tokens, Temperature, Max session duration (60–14400 seconds), Interruption sensitivity (default/low/high), End-of-turn delay (0–5 seconds), Background noise filter. Some generic controls remain visible even when their values are not serialized for the selected provider. |
+| I/O | Structured input fields with Form/JSON modes and Add field. This is `structured_input_fields`, not speech input/STT configuration. |
+| Skills / Tools / Logs | Add skill; End call switch and Add Tool; session logs. None supplies independent STT, ordinary text LLM, or TTS stages. |
+
+The served editor's option map in `/_next/static/chunks/35m2p4gke355q.js` explicitly owns the following provider knobs. Its `patchForModelChoice` sets `modelProvider`, resets `model` to `null`, and clears the voice on provider changes. Its configuration builder emits the **internal** `model_options` shape, unlike the newer public inline-session model block.
+
+| Provider | Editor-owned `model_options` properties | Live validation |
+| --- | --- | --- |
+| `cosmo_voice_personaplex` | `provider` only; no provider-specific knobs | `temperature`, `turn_endpoint_delay_seconds`, `model_id`, `stt`, `llm`, `tts`, `stt_provider`, `llm_provider`, `llm_model`, and `tts_provider` are `extra_forbidden`. |
+| `cosmo_voice_ultravox` | `provider`, nullable numeric `temperature`, nullable numeric `turn_endpoint_delay_seconds` | Non-numeric values fail `float_parsing`; `temperature: -1` fails `greater_than_equal` with `ge: 0`; delay `6` fails `less_than_equal` with `le: 5`. Editor input validation bounds temperature to 0–2 and delay to 0–5. The same stage/model keys above are `extra_forbidden`. |
+
+These are observed editor-owned fields plus live validation results, not a downloaded complete private OpenAPI schema. The public `docs/openapi/realtime.json` still omits both native providers from the inline `model` discriminated object, although session-record/usage provider enums include them. Its five public branches were recorded in the earlier table below.
+
+#### Voice catalog is real, but does not select a text LLM
+
+`GET /api/v1/realtime-playground/agents/voices?provider=<provider>` is sent when selecting a provider; both responses were HTTP 200. Voice response entries have `voice_id`, `name`, `description`, `gender`, `language_label`, `provider`, `ownership`, `external`, and `tunable`.
+
+PersonaPlex returns **18** voices, all `external: null`, `tunable: false`: `NATF0.pt`–`NATF3.pt`, `VARF0.pt`–`VARF4.pt`, `NATM0.pt`–`NATM3.pt`, `VARM0.pt`–`VARM4.pt`. Their provider is `cosmo_voice_personaplex`; descriptions distinguish natural/conversational and varied/expressive voices.
+
+Ultravox returns **195** voices, with provider labels `Inworld`, `Cartesia`, and `Eleven Labs`; **43** are marked tunable. The picker offers Provider default, language-grouped voices, and Tunable only. A tunable entry exposes a Tune voice button. Clicking it in this browser did not materialize additional controls, so no tuning mutation or successful tuning request is claimed. The returned `external` descriptors nevertheless expose exact TTS metadata:
+
+| Voice | Returned `external` descriptor |
+| --- | --- |
+| Jacqueline_v2 | `provider: "cartesia"`, `provider_voice_id: "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"`, `model: "sonic-3.5"`, `tunable_knobs: ["speed"]` |
+| Elise | `provider: "elevenlabs"`, `provider_voice_id: "EST9Ui6982FZPSi7gCHi"`, `model: "eleven_turbo_v2_5"`, `tunable_knobs: ["stability", "similarity_boost", "style", "use_speaker_boost", "speed"]` |
+| Carmen | `voice_id: "bb256405-fe57-45c1-9d7c-4599dd43471d"`, `provider: "Inworld"`, `ownership: "public"`, `external: null`, `tunable: false`. No concrete TTS model is reported for this entry. |
+
+These voice IDs are public catalog identifiers, not credentials. A TTS voice/model descriptor does not supply STT or regular text-LLM selection.
+
+#### Saved configuration evidence
+
+One temporary native agent, `contract-evidence`, was persisted during a create-request capture attempt: the first interception handled string fetch inputs but missed the platform client's `Request` object. A subsequent GET confirmed the PersonaPlex configuration below. The create body shape is independently visible in the served editor: `{"name": "contract-evidence", "display_name": "Cosmo contract evidence", "config": <config>, "workspace_id": null, "created_by": null}`. The create response/status was not captured; do not label it an intercepted or failed save.
+
+The same agent was updated through the editor to Ultravox. **The actual PATCH request and HTTP 200 response were captured**, and the response echoed the exact model/voice/options. Both configurations use the same surrounding fields:
+
+```json
+{
+  "instructions": "Configuration evidence only. Wait for the user.",
+  "model": null,
+  "model_options": {"provider": "cosmo_voice_personaplex"},
+  "voice": {"name": "NATF0.pt", "speaking_style": null},
+  "audio": {"output": true, "noise_cancellation": true},
+  "greeting": null,
+  "hooks": null,
+  "structured_input_fields": null,
+  "tool_ids": null,
+  "server_tools": null,
+  "skills": null,
+  "max_session_seconds": null
+}
+```
+
+The Ultravox `PATCH /api/v1/realtime-playground/agents/<temporary-agent-id>` body was `{"display_name":"Cosmo contract evidence","config":<the same surrounding fields>}`, with exactly these replacements:
+
+```json
+{
+  "model_options": {
+    "provider": "cosmo_voice_ultravox",
+    "temperature": 0.4,
+    "turn_endpoint_delay_seconds": 1.5
+  },
+  "voice": {
+    "name": "bb256405-fe57-45c1-9d7c-4599dd43471d",
+    "speaking_style": null
+  }
+}
+```
+
+Both the PersonaPlex GET and Ultravox PATCH response add `interruption_sensitivity: "default"`; the PATCH request omitted that default. Response metadata includes workspace/name/display name, IDs, ownership, timestamps, library flags, and `config`; private user/artifact IDs are intentionally omitted here. Neither response identifies an ordinary text-LLM model or separate STT engine. These saves prove configuration persistence, not inference or stage execution.
+
+#### Reflected validation and session-start payloads
+
+Two sets of deliberately invalid internal create requests used an empty handle so they could not create agents. One supplied `model_options: {"provider": <native-provider>, "temperature": "invalid", "turn_endpoint_delay_seconds": "invalid", "stt": {"provider":"probe"}, "llm": {"provider":"probe"}, "tts": {"provider":"probe"}}`. Both returned **HTTP 422**, reflecting the supplied body and errors:
+
+```text
+body.name: value_error (machine-safe handle required)
+body.config.model_options.cosmo_voice_personaplex.{temperature,turn_endpoint_delay_seconds,stt,llm,tts}:
+  extra_forbidden / Extra inputs are not permitted
+body.config.model_options.cosmo_voice_ultravox.{temperature,turn_endpoint_delay_seconds}:
+  float_parsing / Input should be a valid number
+body.config.model_options.cosmo_voice_ultravox.{stt,llm,tts}:
+  extra_forbidden / Extra inputs are not permitted
+```
+
+The second set established the numeric bounds and rejected the alternate flat stage/model keys listed above. Extra top-level stage keys in the **internal** config did not produce errors in that second response; no claim is made that internal config forbids every unknown field. Rejecting the provider-option fields, the editor's actual serialization, and the stricter public inline contract together establish the missing supported stage route.
+
+The editor's **Talk** button uses platform SDK **0.7.1**, while Murmur remains pinned to **0.6.0**. After both saved provider selections, a Request-aware fetch interceptor captured Talk before network dispatch. Both serialized the same catalog launch:
+
+```json
+{
+  "type": "session-config",
+  "sdk": {"name": "cosmo-ai", "version": "0.7.1"},
+  "agent": {"type": "catalog", "name": "contract-evidence", "tools": []},
+  "session": {"store_recording": true}
+}
+```
+
+`tools: []` above abbreviates the actual ride-along list, not the actual array: 11 client specs (`file_read`, `file_write`, `file_list`, `file_search`, `clipboard_read`, `clipboard_write`, `open_file`, `get_current_screen`, `end_session`, `cosmo_sdk_draw_box`, `cosmo_sdk_draw_point`) plus `web_search` and `examine_image`. Full client entries carry `kind`, `name`, `description`, and `parameters`. No tools executed. There were **no inline provider/stage overrides** in Talk; it launches the stored catalog configuration. `store_recording: true` was the platform request default, but interception prevented a session or recording. The synthetic interception response is not server acceptance or rejection evidence.
+
+The actual start endpoint is **`POST /api/v1/external/realtime/session/start`**. With the platform's existing start-scoped credential held only in browser memory, `POST /api/v1/external/sessions` returned **HTTP 405, `{"detail":"Method Not Allowed"}`**. It is not the start route. A deliberately invalid request to the actual start route returned **HTTP 422**:
+
+```json
+{
+  "type": "invalid-schema-probe",
+  "agent": {
+    "type": "inline",
+    "model": {"provider": "cosmo_voice_ultravox"},
+    "stt": {}, "llm": {}, "tts": {}
+  }
+}
+```
+
+The sanitized response was `error.type: "validation_error"`, with `body.type: literal_error` (must be `session-config`), `body.sdk: missing`, `body.agent.inline.model: union_tag_invalid` (only `gemini`, `openai`, `openai_mini`, `openai_live`, `grok` are valid object tags), and `body.agent.inline.{stt,llm,tts}: extra_forbidden`. Thus the public inline route supplies neither native option objects nor independent stages; the captured editor route for native agents is catalog launch. No arbitrary model-string alias was tested as a cascade.
+
+#### Cleanup, authentication distinction, and next dependency
+
+Deleted the sole temporary `contract-evidence` agent with **HTTP 200**. Fresh internal workspace-agent and library-agent GETs both returned **HTTP 200, `[]`**. The earlier authenticated external catalog **HTTP 200, `[]`** remains the lane-2 fact; cleanup did not reverify it with the same workspace-user credential. Reusing the platform Talk credential instead returned external-agents **HTTP 403** (acts-as-user required) and capabilities **HTTP 403** (missing `realtime:read`). Those are credential-scope refusals, not catalog or provider-availability changes. Plain-cookie requests to external start/sessions returned HTTP 401 before the existing Talk header was reused in-memory.
+
+No temporary token/key was minted in this continuation, and none needs revocation. The previous lane's leaked credential was already revoked according to its handoff. No cookie/key/token values were printed or written; the borrowed header was cleared from browser memory, and navigation removed the capture hooks. No new inference session, frontend wiring, or vendor contact occurred. Verification consisted of live HTTP status/body evidence, editor controls, served configuration-building source, the persisted config echoes, intercepted Talk payloads, and successful cleanup.
+
+**Next dependency:** a vendor-supported workspace-available cascade contract that names distinct STT, ordinary text LLM, and TTS stages. The architecture guide's generic cascade claim, OpenAI availability, and rich TTS catalog do not provide that contract. This lane ends with verified configuration evidence; the current native lab is not completion of the cascade requirement.
+
 ### Workspace configuration discovery, 2026-10-27
 
-**Status: blocked on workspace-user authentication, not evidence of a Gemini-only workspace.** The dedicated worktree's `.env` key was loaded in-process and used only as an HTTPS bearer credential. The key value was never emitted or saved in evidence. The following were real API requests, with no new inference session, token mint, agent mutation, or vendor message:
+**Historical first-pass status: blocked on workspace-user authentication, not evidence of a Gemini-only workspace.** The authenticated continuation above supersedes this blocker and its next-step recommendation. The dedicated worktree's `.env` key was loaded in-process and used only as an HTTPS bearer credential. The key value was never emitted or saved in evidence. The following were real API requests, with no new inference session, token mint, agent mutation, or vendor message:
 
 | Request | Result | Exact finding |
 | --- | --- | --- |
