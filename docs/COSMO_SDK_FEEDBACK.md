@@ -6,7 +6,7 @@ Maintained as a working log at the user's request (2026-09-13). For each new fin
 
 | Finding | Current status |
 | --- | --- |
-| The lab uses a native speech model, while the user wants a generic STT -> text LLM -> TTS pipeline | Integration architecture mismatch, clarified 2026-09-17. Cosmo documents modular pipeline support, but a working non-native model configuration or catalog agent remains unverified. The native-audio prototype is not acceptance of this requirement. |
+| The lab uses a native speech model, while the user wants a generic STT -> text LLM -> TTS pipeline | Integration architecture mismatch, clarified 2026-09-17. Workspace discovery on 2026-10-27 verified the key and OpenAI availability, but catalog listing requires an acts-as-user token (HTTP 403). No runnable cascade is verified; a Gemini-only workspace claim is contradicted by the capability response. The native-audio prototype is not acceptance of this requirement. |
 | Assistant answers before the user finishes | User-confirmed symptom. Synthetic pause checks pass but have not reproduced the original human failure. Timing adjustments are a workaround; the request is now for explicit turn-detector and interruption ownership. |
 | Assistant says it cannot show quadratics | Confirmed initial lab capability/prompt gap, addressed with `show_quadratic` and Murmur's renderer. Spoken and typed tool-to-render checks passed. |
 | User reports that Gemini cannot control graph generation | Reported 2026-09-19; the exact failing request is not yet identified. Confirmed local limitation: only new quadratic cards are exposed, with no edit/delete/layout/animation tools or connection to the full scene/reasoner. Do not label this a Gemini API limitation. |
@@ -57,6 +57,42 @@ Concrete feedback request, prepared locally and not sent: “Your architecture g
 Current status: architecture and plan corrected; cascade configuration, implementation, and live acceptance remain pending. No native-model session was started or runtime setting changed during this follow-up.
 
 ## Resolved model visibility
+
+### Workspace configuration discovery, 2026-10-27
+
+**Status: blocked on workspace-user authentication, not evidence of a Gemini-only workspace.** The dedicated worktree's `.env` key was loaded in-process and used only as an HTTPS bearer credential. The key value was never emitted or saved in evidence. The following were real API requests, with no new inference session, token mint, agent mutation, or vendor message:
+
+| Request | Result | Exact finding |
+| --- | --- | --- |
+| `GET https://platform.askcosmo.ai/api/v1/external/realtime/verify` | HTTP 200 | `credential: "api_key"`, `can_start_sessions: true`, `realtime_voice_available: true`. Relevant granted scopes: `realtime:start`, `realtime:read`, `realtime:logs`, `user_tokens:mint`. These scopes do not grant workspace-user catalog CRUD. |
+| `GET https://platform.askcosmo.ai/api/v1/external/agents` | HTTP 403 | `{"error":{"type":"api_error","message":"This endpoint requires an acts-as-user access token"}}`. This is a credential-kind refusal, not an empty catalog. No workspace or built-in catalog handles were obtained. |
+| `GET https://platform.askcosmo.ai/api/v1/external/sessions/capabilities` | HTTP 200 | `{"openai_provider_available":true}`. The current schema describes this as permission to select `openai`, `openai_mini`, and `openai_live`; it does not enumerate concrete model IDs or establish a cascaded inference route. |
+
+The gstack browser had no authenticated Cosmo session: opening the dashboard path `/developer` redirected through `/select-workspace?tried_workspace=developer` to `/login`. A domain-scoped `cookie-import-browser chrome --domain platform.askcosmo.ai` imported zero cookies. No login code or broader cookie import was requested. The saved agents guide already states that `/api/v1/external/agents` authenticates as a workspace user rather than a realtime key; the live 403 confirms that distinction. Minting an external end-user token is not documented as granting workspace-user CRUD, so it was not used as an authorization substitute.
+
+Re-read all four requested saved pages: `var/cosmo-home-2026-09-17.html`, `var/cosmo-reference-doc.html`, `var/cosmo-architecture-2026-09-17.html`, and `var/cosmo-agents-doc.html`. The home advertises pipelined STT -> LLM -> TTS, but its provider examples use only `model: "gemini"` and `model: "openai"`. The architecture guide claims cascade selection through `model`/`model_options` without a runnable ID. The agents guide shows only illustrative `support-triage`, explains the reserved `cosmo-` library prefix, and supplies no cascade handle. None of those examples proves an agent is available in this workspace.
+
+Downloaded the current public [OpenAPI document](https://platform.askcosmo.ai/docs/openapi/realtime.json), linked by the [API explorer](https://platform.askcosmo.ai/docs/reference/api/explorer). It differs from the September SDK 0.6.0 contract: `InlineAgentConfig.model` now accepts a string or a discriminated provider block. Its `additionalProperties: false` object has **no `model_options` field**. This is current published schema evidence, not a live rejection test of the pinned SDK; compatibility of its old serialized request remains unverified after this discovery. Do not copy the newer wire shape into the pinned SDK without a version-specific adapter review.
+
+The model-block properties in that exact document are:
+
+| Schema / `provider` | Properties in addition to the required `provider` | Documented inference meaning |
+| --- | --- | --- |
+| `GeminiModel` / `gemini` | `model_id`, `cosmo_vad`, `end_of_speech_sensitivity`, `include_thoughts`, `max_output_tokens`, `prefix_padding_ms`, `silence_duration_ms`, `temperature`, `thinking_level`, `tool_response_overrides`, `tool_response_policy`, `turn_detection` | Gemini realtime; no distinct STT, ordinary text LLM, or TTS selection. |
+| `OpenAIModel` / `openai` | `model_id`, `eagerness`, `prefix_padding_ms`, `silence_duration_ms`, `turn_detection` | OpenAI Realtime; no separate stage selector. |
+| `OpenAIMiniModel` / `openai_mini` | `model_id` | OpenAI Realtime mini tier. |
+| `OpenAILiveModel` / `openai_live` | `model_id`, `delegation`, `max_output_tokens`, `parallel_tool_calls`, `reasoning_effort`, `responses_instructions`, `responses_model`, `service_tier`, `tool_choice`, `verbosity` | GPT Live full-duplex voice with delegated Responses work. `responses_model` selects delegated reasoning/tool work, not replacement of the native voice model with an STT -> text LLM -> TTS pipeline. |
+| `GrokModel` / `grok` | `model_id`, `idle_timeout_ms`, `prefix_padding_ms`, `reasoning_effort`, `silence_duration_ms`, `speed`, `turn_detection` | xAI Grok Voice. Public schema presence does not establish workspace entitlement. |
+
+All five model objects forbid extra properties and require `provider`. Their optional `model_id` fields are strings; the document supplies no concrete model-ID allowlist. `VoiceConfig` forbids extra properties and exposes only `name` (maximum 128 characters) and `speaking_style` (maximum 8192 characters). There are no separate STT provider/model or ordinary text-LLM provider/model fields on the inline agent. `CatalogAgentConfig` requires `type: "catalog"` and `name`; accepted ride-alongs are `inputs`, `tools`, and `voice`, with stored `model` unavailable as an override.
+
+The document also defines `TtsProvider` with enum `elevenlabs | cartesia` and `TtsVoice` with required `provider` and `voice_id`, optional `model`, `similarity_boost`, `speed`, `stability`, `style`, and `use_speaker_boost`. Its description explicitly says “External TTS providers a speech-to-speech model can render.” `VoiceConfig` does not reference `TtsVoice`, and none of the five published model blocks exposes it as a stage field. These schemas therefore do not supply a runnable cascaded request or establish ElevenLabs/Cartesia access for this workspace. No STT schema or cascade provider branch was found.
+
+**Concrete model IDs:** the only resolved lab model ID remains the historical usage result `gemini-3.1-flash-live-preview` below. No fresh inference was started and no separate STT, text-LLM, or TTS model ID was resolved in this discovery. Provider aliases and model-block discriminators are not concrete model IDs. In particular, neither `openai_live.responses_model` nor native speech plus external TTS satisfies the requested architecture.
+
+Local, ignored evidence is `var/cosmo-discovery-2026-10-27.json` (sanitized API results; SHA-256 `188a6e21e180b4ecab041f73234b7ee5ef9718d157ee83dd783743f1955b1070`) and `var/cosmo-openapi-2026-10-27.json` (public schema; SHA-256 `7c9e7965bbe0d6ce942cbcdd3d44d14ad2050daaea91a2de56ce022e28b29650`). The tables above preserve the relevant evidence in versioned documentation without relying on ignored artifacts.
+
+Next dependency: an authenticated workspace-user dashboard session or supported acts-as-user token, then catalog enumeration and inspection of stored stage configuration. A vendor-documented cascade selector with its options and resolved stage identities would also unblock the configuration question. Until then the result is **no usable cascade discovered with available credentials**, not **workspace only offers native Gemini Live**. Cascade implementation and acceptance remain pending.
 
 On 2026-09-13, read the usage records for two completed lab probe sessions through the documented `GET /api/v1/external/sessions/{id}/usage` endpoint, authenticated as the probe user. Both returned HTTP 200, `usage_status: recorded`, `provider: gemini`, and `model: gemini-3.1-flash-live-preview`. These are observed session resolutions, not a guarantee about future workspace defaults. Our agent selects Gemini options but leaves the concrete `model` and `voice` unset.
 

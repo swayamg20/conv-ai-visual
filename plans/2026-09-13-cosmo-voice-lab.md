@@ -10,8 +10,12 @@ The user has authorized integration and experimentation using their available Co
 
 ## Progress
 
+- [x] 2026-10-27: Snapshotted all 31 named lab files as `feat: add cosmo voice lab` (`d34d525` before rebase, `15da840` after). Fetched and rebased over 104 main commits onto `origin/main` at `3aa4b4246b38dcf996d02e2f44a4a206628e47ae`. Resolved the one additive router conflict by retaining health, WebSocket voice, and Cosmo registrations.
+- [x] 2026-10-27: Rebased gates pass: `uv run pytest tests/test_cosmo_voice.py` (20), scoped backend Ruff, scoped web ESLint, `npm run test -- src/features/cosmo` (36), full `npm run typecheck`, and `npm run build`, after `npm ci` in the dedicated web directory.
+- [x] 2026-10-27: Re-read the four saved API pages and queried the real API using the dedicated worktree key without emitting it. Credential verification and provider capabilities return HTTP 200; `openai_provider_available: true`. Recorded exact schemas and sanitized evidence in `docs/COSMO_SDK_FEEDBACK.md`.
+- [ ] 2026-10-27: Catalog discovery is blocked: `GET /api/v1/external/agents` returns HTTP 403, “This endpoint requires an acts-as-user access token.” The browser redirects to login; the Cosmo-domain Chrome cookie import found zero cookies. Obtain an authenticated workspace-user session/token or a supported cascade selector. This refusal is not an empty catalog, and the OpenAI capability result rules out claiming Gemini-only access.
 - [x] 2026-09-17: Corrected the target to separate STT, regular text LLM, and TTS. Re-read the existing Murmur cascade profiles and current Cosmo architecture/session-start docs; recorded the distinction between claimed cascade support and the missing runnable configuration in `docs/COSMO_SDK_FEEDBACK.md`.
-- [ ] Obtain a documented, workspace-available Cosmo cascade model configuration or catalog agent handle. The architecture guide claims support through `model` and `model_options`, but no concrete non-native selector or independently configurable stage contract was found in the public SDK/docs/source review. Workspace dashboard access was unavailable in this session; asked the user which pipeline settings or agent name are visible there.
+- [ ] Obtain a documented, workspace-available Cosmo cascade model configuration or catalog agent handle. The architecture guide claims support through `model` and `model_options`, but no concrete non-native selector or independently configurable stage contract was found. The 2026-10-27 public schema instead nests provider knobs in `model` and exposes only realtime/native voice branches; workspace catalog inspection remains credential-blocked.
 - [ ] Configure and validate the actual STT -> text LLM -> TTS path, including resolved stage identities, no native-audio fallback, tool/render receipts, deliberate pauses, and interruption/cancellation. Do not count the earlier Gemini Live probes toward this acceptance.
 - [x] 2026-09-13: Audited actual turn-detector/interruption ownership against installed SDK 0.6.0 and current public upstream `f448c5d0654f92865e8592aebed7de00b8725c78`. Assessed existing Silero/Smart Turn components and documented the exact capability table and maintainer request in `docs/COSMO_SDK_FEEDBACK.md`.
 - [ ] Application-owned Cosmo turn admission and response cancellation remain unimplemented: public configuration offers no automatic-endpoint disable mode, and public session/protocol APIs offer no per-response cancellation, audio clearing, or unheard-context truncation. Obtain a supported provider contract before making local detectors authoritative. No further timer adjustment or playback-only substitute was made for this request.
@@ -32,6 +36,8 @@ The user has authorized integration and experimentation using their available Co
 - [x] 2026-09-13 03:07 IST: Final production browser build passed the typed-input live probe again, including assistant confirmation, zero open peers, zero microphone captures, zero browser exceptions, and desktop/mobile screenshots. Live artifacts are under ignored `var/cosmo-smoke/text/` and `var/cosmo-smoke/microphone/`.
 
 ## Surprises & Discoveries
+
+2026-10-27: The real workspace capability response is `{"openai_provider_available":true}`. A claim that this workspace offers only native Gemini Live would be false. Catalog listing requires a different credential kind: the `.env` API key successfully verifies and can read capabilities but receives an acts-as-user requirement at `/api/v1/external/agents`. No authenticated browser session or Cosmo-domain Chrome cookies were available. The current public OpenAPI schema defines `model` as a string or a provider block (`gemini`, `openai`, `openai_mini`, `openai_live`, `grok`), removes the old inline `model_options` field, and provides no separate STT/text-LLM/TTS selector. `openai_live.responses_model` delegates work from a native voice model; the ElevenLabs/Cartesia TTS schemas describe speech-to-speech rendering and are not exposed by the inline voice/model blocks. Neither is a proven cascade. Exact option property lists, evidence hashes, and auth results are retained in `docs/COSMO_SDK_FEEDBACK.md`. This is published schema drift, not a verified live compatibility failure of SDK 0.6.0.
 
 2026-09-17: Cosmo's [architecture guide](https://platform.askcosmo.ai/docs/architecture) explicitly describes modular STT -> LLM -> TTS selected via `model` and `model_options`. However, the [session-start contract](https://platform.askcosmo.ai/docs/reference/api/session-start) and installed SDK 0.6.0 expose realtime provider options and voice name/style without separate STT/LLM/TTS configuration. `model` is an arbitrary string, so that absence does not prove the backend cannot route to a cascade. A concrete model selector or configured catalog agent remains missing. Text-only output, custom microphone input, and a regular LLM called as a background tool do not establish the requested replacement pipeline.
 
@@ -63,6 +69,8 @@ SDK 0.6.0 supports `onSession`, which is required for events emitted before `sta
 
 ## Decision Log
 
+2026-10-27: Preserve the lab in a commit before rebasing, retaining both main's new routers and the isolated Cosmo registration. Stop configuration discovery at the unresolved workspace-user credential refusal after verifying the key, reading capabilities and schemas, and checking browser auth. Do not interpret HTTP 403 as no agents, infer Gemini-only availability, guess cascade aliases, mint an external-user token as a workspace-admin substitute, or start further native inference. Document the remaining dependency and preserve the green rebased milestone.
+
 2026-09-17, Codex, following the user's correction: The accepted target is a cascaded pipeline with a regular text LLM. Treat native-audio lab results as historical prototype evidence. Stop extending or probing the native model path as the solution to this request. Verify Cosmo's supported non-native selector before changing `web/src/features/cosmo/contracts.ts` or `sdk.ts`; do not invent a `pipeline`, `stt`, or `tts` request field, guess model aliases, or substitute text-only Gemini Live. The direct Murmur cascade is an existing alternative if Cosmo cannot expose the required route, not an unannounced replacement for the Cosmo experiment.
 
 2026-09-13, Codex: Treat speech-start detection, semantic turn completion, and response cancellation as separate responsibilities. Reuse Murmur's existing detector components only behind one call/turn owner and a provider adapter that can honor those decisions. Current Cosmo permits caller-owned capture/playback and a manual end signal but does not expose exclusive manual turn mode or response cancellation. Record the capability gap and a concrete maintainer request locally; do not invent unsupported wire messages, contact the vendor without authorization, or present local muting as a fully cancelled provider response.
@@ -88,6 +96,8 @@ SDK 0.6.0 supports `onSession`, which is required for events emitted before `sta
 
 ## Outcomes & Retrospective
 
+2026-10-27: The earlier uncommitted lab is now safely snapshotted and rebased over all 104 intervening main commits. Its provider-free backend and frontend lab gates, full frontend typecheck, and production build pass on the rebased tree. Configuration discovery reached a real auth blocker: the available API key cannot enumerate catalog agents, and browser workspace-user authentication is unavailable. Public schema review found no runnable cascade contract; the workspace explicitly reports OpenAI provider availability, so a Gemini-only conclusion is unsupported. The requested STT -> ordinary text LLM -> TTS integration remains unimplemented and unqualified. No new inference session or runtime/provider setting change occurred. Resume with workspace-user authentication or a documented cascade configuration; the exact findings are in `docs/COSMO_SDK_FEEDBACK.md`.
+
 2026-09-17: The architecture correction and capability audit are recorded; the requested cascade has not been implemented or live-tested through Cosmo. No runtime or credential changes, new inference sessions, or vendor messages were made during this follow-up. The current lab still contains the earlier Gemini Live configuration. Its historical pass results do not satisfy the revised acceptance criteria. The next dependency is a supported Cosmo cascade configuration or catalog agent with identifiable stages.
 
 The earlier turn-control request also remains relevant: the user wants actual detector and interruption handling owned by Murmur. Feasibility work is complete and source-backed, but that ownership is not implemented in the native Cosmo path. The reviewed public SDK/server contract lacks the required handoff and cancellation controls. The existing detector components, integration design, concrete API request, and eventual acceptance cases are documented in `docs/COSMO_SDK_FEEDBACK.md`.
@@ -98,7 +108,7 @@ The follow-up now renders quadratic equations through Murmur's real graph render
 
 The earlier strict synthetic turn probe passed a 1.230-second unfinished-sentence pause without assistant text or decoded audio, retained the complete request and interruption, and obeyed the replacement request. Old decoded speech stopped about 1.441 seconds after the interruption started, followed by 3.960 seconds of quiet during the remainder of the injected speech. This is one controlled browser-audio observation, not a calibrated latency result or proof of all human interruption cases. Two quadratic probes (spoken and typed) rendered a real curve; the complete typed explanation correctly reported roots 2 and 3 and vertex (2.5, −0.25). Every successful final probe closed all peers and captured microphone tracks with no browser errors. Earlier false visibility claims and planning prose remain documented model-reliability risks; the foreground tool and explicit thought-summary setting are mitigations, not an absolute output guarantee.
 
-The isolated lab, authenticated credential broker, SDK adapter, thought board, hidden-input setup helper, tests, and operator documentation are implemented and validated locally. Real Cosmo sessions succeeded with typed input and synthetic microphone speech: actual transcription, tool-to-render behavior, assistant confirmation, received audio, and clean teardown. The final production build is running at `http://localhost:3013/labs/cosmo`, backed by port 8013. No changes have been committed, pushed, merged, or deployed; other agents' worktrees remain separate. This is evidence for the managed voice and client-tool integration, not qualification of human conversational quality or the main canvas/reasoner path.
+Historical 2026-09-13 outcome: the isolated lab, authenticated credential broker, SDK adapter, thought board, hidden-input setup helper, tests, and operator documentation were implemented and validated locally. Real Cosmo sessions succeeded with typed input and synthetic microphone speech: actual transcription, tool-to-render behavior, assistant confirmation, received audio, and clean teardown. That production build was running at `http://localhost:3013/labs/cosmo`, backed by port 8013. At that time no changes had been committed, pushed, merged, or deployed. The 2026-10-27 snapshot/rebase supersedes the uncommitted status; earlier server availability was not reverified. This is evidence for the managed voice and client-tool integration, not qualification of human conversational quality or the main canvas/reasoner path.
 
 ## Context and Orientation
 
@@ -136,6 +146,21 @@ Backend checks use the locked project environment:
     uv sync --locked --extra dev
     uv run ruff check backend/murmur/voice/cosmo.py backend/murmur/api/routers/cosmo_voice.py tests/test_cosmo_voice.py
     uv run pytest tests/test_cosmo_voice.py
+
+The post-rebase gates actually run on 2026-10-27 were, from this worktree root:
+
+    uv run pytest tests/test_cosmo_voice.py
+    uv run ruff check backend/murmur/voice/cosmo.py backend/murmur/api/routers/cosmo_voice.py tests/test_cosmo_voice.py
+
+From this worktree's `web/` directory:
+
+    npm ci
+    npx eslint src/features/cosmo src/app/labs/cosmo scripts/cosmo-turn-probe.mjs scripts/cosmo-voice-smoke.mjs --max-warnings=0
+    npm run test -- src/features/cosmo
+    npm run typecheck
+    npm run build
+
+These pass with 20 backend and 36 frontend lab tests. Lint and unit tests were scoped to the lab; typecheck and build covered the frontend. No new live inference/browser lab acceptance is claimed. Public schema and sanitized discovery responses are in ignored `var/cosmo-openapi-2026-10-27.json` and `var/cosmo-discovery-2026-10-27.json`, with versioned extracts and SHA-256 hashes in the SDK feedback memo.
 
 Local configuration sets `MURMUR_COSMO_ENABLED=true`, a server-only `COSMO_API_KEY` with `user_tokens:mint`, and Firebase configuration. The experiment uses its own local database and dedicated ports 8013 and 3013, with `ALLOWED_CORS_ORIGINS=http://localhost:3013` and `NEXT_PUBLIC_API_URL=http://localhost:8013`. The frontend environment is local and ignored. Provider keys are never printed, committed, or copied into public frontend variables.
 
