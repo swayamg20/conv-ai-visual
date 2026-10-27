@@ -170,6 +170,7 @@ Read [the current architecture](docs/ARCHITECTURE.md) before changing a cross-la
 - [Database](docs/DATABASE.md)
 - [Tools](docs/TOOLS.md)
 - [Development guide](docs/DEVELOPMENT.md)
+- [Cosmo voice experiment](docs/COSMO_VOICE_LAB.md)
 - [Product vision](docs/VISION.md)
 - [Design language](docs/DESIGN_LANGUAGE.md)
 

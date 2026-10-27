@@ -1,0 +1,204 @@
+# Cosmo SDK feedback from the Murmur voice lab
+
+Maintained as a working log at the user's request (2026-09-13). For each new finding, record the observed behavior and impact, reproduction or evidence, tested version, likely owner, current workaround or resolution, and a concrete SDK suggestion when applicable. Keep user reports, confirmed integration bugs, verified public API gaps, and unproven hypotheses distinct. Update outcomes without erasing the earlier evidence; omit credentials and raw private session data.
+
+## Experience issues being tracked
+
+| Finding | Current status |
+| --- | --- |
+| The lab uses a native speech model, while the user wants a generic STT -> text LLM -> TTS pipeline | Integration architecture mismatch, clarified 2026-09-17. Cosmo documents modular pipeline support, but a working non-native model configuration or catalog agent remains unverified. The native-audio prototype is not acceptance of this requirement. |
+| Assistant answers before the user finishes | User-confirmed symptom. Synthetic pause checks pass but have not reproduced the original human failure. Timing adjustments are a workaround; the request is now for explicit turn-detector and interruption ownership. |
+| Assistant says it cannot show quadratics | Confirmed initial lab capability/prompt gap, addressed with `show_quadratic` and Murmur's renderer. Spoken and typed tool-to-render checks passed. |
+| User reports that Gemini cannot control graph generation | Reported 2026-09-19; the exact failing request is not yet identified. Confirmed local limitation: only new quadratic cards are exposed, with no edit/delete/layout/animation tools or connection to the full scene/reasoner. Do not label this a Gemini API limitation. |
+| Assistant claims a graph is visible without rendering it | Observed in an early live attempt. Foreground render receipts and stronger capability instructions added; later checks passed. Continued model-compliance verification remains necessary. |
+| Planning-style prose appears in the assistant transcript | Observed in an early live attempt. Thought summaries explicitly disabled; this does not prove that every spoken response is free of such prose. |
+| Interrupted speech disappears or earlier text repeats | Confirmed local transcript grouping bug, fixed and verified with a real wire replay, regression tests, and live interruption checks. |
+
+Detailed run evidence and current lab behavior are in [COSMO_VOICE_LAB.md](COSMO_VOICE_LAB.md). The source-backed SDK findings and requested controls follow below.
+
+## Review context
+
+Internal notes, 2026-09-13. Reviewed the installed TypeScript `cosmo-ai@0.6.0`, source hash `d1b2d189924819e44b07588563b86e36709d271cbd4f2233cac190dca877be26`. These are integration findings, not published issues. The side review used local, provider-free reproductions and official source; it did not read credentials or open live sessions. One live HTTP observation below came from the main integration agent.
+
+Human-session follow-up: the user clarified that the primary issue is the assistant answering before they finish a sentence. SDK research confirmed that interruption sensitivity and endpoint patience are separate and correctly serialize with Gemini `cosmo_vad` or OpenAI `semantic_vad`. The lab now exposes both controls and receives raw speech markers through one async iterator. A useful future diagnostic addition would be an effective turn-detector configuration in `ready`, with a timestamped endpoint decision/reason. Current raw speech markers have neither timestamps nor turn IDs, and docs do not publish numeric Gemini runtime defaults. The probe now records the allowlisted outgoing settings; that proves what the client requested, not a server echo of effective settings. This is a feedback suggestion arising from the investigation, not a confirmed cause of the user's early replies.
+
+## Graph control in the current lab
+
+On 2026-09-19, traced the actual tool path: `controller.ts` creates a call-scoped `ThoughtBoard` and passes only `board.tools()` to `sdk.ts`, which registers them on the Cosmo agent. `thought-board.ts` exposes `show_quadratic`, `pin_thought`, and `read_thoughts`. The quadratic tool accepts bounded numeric coefficients and creates a new card; `quadratic.ts` computes the points, roots, and vertex, and `quadratic-card.tsx` calls `SVGCanvas.renderFunctionPlot`. The tool returns success only after the matching SVG curve and presentation frames are observed.
+
+This is a small creation tool, not full graph control. There is no tool for updating a selected graph by ID, removing it, changing axes/style/layout, animating it, or creating other plot/diagram types. The prompt also explicitly says other diagram types are unavailable. Each new call creates a new temporary board, and the full Murmur scene/reasoner path is not connected to this adapter. These are confirmed integration boundaries; they explain why those operations are unavailable, but do not establish the cause of an unspecified failed request to create a supported quadratic.
+
+Gemini Live supports [function calling](https://ai.google.dev/gemini-api/docs/live-api/tools), including the previously observed Gemini 3.1 Flash Live model. Re-read the saved synthetic probe in `var/cosmo-smoke/quadratic/result.json`: it records a real Cosmo session, typed input, `show_quadratic rendered with Murmur SVGCanvas`, and no page errors. The corresponding allowlisted wire trace contains the `show_quadratic` tool call. This is historical evidence that the complete tool-to-render route can work, not a new live test or proof that the current human failure is fixed.
+
+For a failed creation request, distinguish no tool call, rejected arguments, failed handler, absent render receipt, and a stale or ended call before assigning a cause. The current user report does not distinguish those cases. Earlier observed false visibility claims remain a separate model-compliance issue; the successful historical probe does not erase them.
+
+The integration direction is to connect Murmur's existing scene commands and current scene state through explicit tools, with stable object IDs, validation, render receipts, and stale-operation handling. Choosing a regular text LLM in the requested STT -> LLM -> TTS architecture does not by itself supply those missing tools. The user's cascaded-pipeline preference remains unchanged. This follow-up inspected code and saved evidence and updated the log; it did not change runtime code or start a native-audio session.
+
+## Cascaded pipeline requirement
+
+On 2026-09-17, the user clarified that they want separate STT, a regular text LLM, and TTS rather than Gemini Live or another native speech-to-speech model. This changes the integration target. Streaming conversation and WebRTC remain appropriate transport choices; selecting a normal text model for reasoning is the important boundary.
+
+The main review inspected Murmur's existing cascade implementations and the official architecture/session-start docs. The bounded SDK side review checked the current public source and generated schemas. No private workspace configuration, credentials, live inference, or vendor contact was used for this audit. A paper review was unnecessary because the unresolved question is Cosmo's current callable configuration.
+
+| Evidence | Conclusion and limit |
+| --- | --- |
+| [Architecture guide](https://platform.askcosmo.ai/docs/architecture), checked 2026-09-17, says native speech or modular STT -> LLM -> TTS is selected per agent via `model` and `model_options`. | Vendor-documented support for a cascade. It does not name a runnable cascade model ID or demonstrate its stage configuration. |
+| [Session-start reference](https://platform.askcosmo.ai/docs/reference/api/session-start) and [TypeScript types](https://platform.askcosmo.ai/docs/reference/typescript/types) expose `model`, four realtime provider option branches, and voice name/style. | No independent STT or TTS provider/model fields were found. `model` accepts a string, so the absence of a typed cascade branch is not proof that a server-selected cascade is impossible. |
+| [Catalog agents](https://platform.askcosmo.ai/docs/concepts/agents#catalog-agents) launch stored workspace configuration. | A dashboard-configured cascade could be a valid route, but no such agent or available setting was verified in this account. Browser access was unavailable; the user was asked which pipeline settings or agent name appear there. |
+| Installed SDK `cosmo-ai@0.6.0` and public source at `f448c5d0654f92865e8592aebed7de00b8725c78`. | The source review found no runnable public cascade example or supported non-native model selector. Arbitrary test model strings do not establish supported runtime values. |
+| Local `backend/murmur/voice/provider_profiles/livekit_cascade.py` and `pipecat_cascade.py`. | Murmur already has separate Deepgram `nova-3`, Groq `openai/gpt-oss-120b`, and ElevenLabs `eleven_flash_v2_5` components. These are existing local alternatives, not claims about Cosmo's model availability or fresh live validation. |
+
+Recommendation: retain the cascaded architecture as the requirement and integrate Cosmo through its documented non-native model configuration or an explicitly configured catalog agent once that contract is available. Reuse Murmur's existing stage boundaries. The other viable option is Murmur's direct-provider cascade; it is not a Cosmo-backed configuration and has not been substituted silently. Native audio, disabling only native audio output, and calling a text LLM as a background tool do not satisfy the requested architecture.
+
+Risks and acceptance: a default or guessed alias could still select a native model; the three resolved stage identities must therefore be observable and unsupported selections must fail without native fallback. Separation alone does not fix premature endpointing. Validate mid-thought pauses, resumed speech cancelling pending completion, interruption stopping generation and queued TTS, correct canvas render receipts, and stale-result cleanup. Measure endpointing, text generation, synthesis, and device playout separately.
+
+Concrete feedback request, prepared locally and not sent: “Your architecture guide describes a modular STT -> LLM -> TTS pipeline selected via model/model_options. Could you share a working TypeScript agent configuration or catalog-agent setup using a regular text LLM, including the supported model ID and resolved STT/TTS providers? Can those stages be chosen independently, or can we supply our own text-LLM endpoint? Please include the available endpointing and per-response interruption/cancellation controls.”
+
+Current status: architecture and plan corrected; cascade configuration, implementation, and live acceptance remain pending. No native-model session was started or runtime setting changed during this follow-up.
+
+## Resolved model visibility
+
+On 2026-09-13, read the usage records for two completed lab probe sessions through the documented `GET /api/v1/external/sessions/{id}/usage` endpoint, authenticated as the probe user. Both returned HTTP 200, `usage_status: recorded`, `provider: gemini`, and `model: gemini-3.1-flash-live-preview`. These are observed session resolutions, not a guarantee about future workspace defaults. Our agent selects Gemini options but leaves the concrete `model` and `voice` unset.
+
+Google describes that model as [audio-to-audio with native audio output](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-live-preview). Cosmo's public [transcript contract](https://platform.askcosmo.ai/docs/concepts/transcripts) does not identify a separate transcription engine, and the usage schema does not report one or the resolved voice. Do not infer Deepgram, Whisper, or ElevenLabs from generic STT/TTS event names.
+
+SDK suggestion: expose resolved model, voice, and effective turn-detector settings at session readiness, plus transcription provenance when a separate engine is used. The existing usage API already provides model/provider visibility; the proposed addition makes the remaining configuration observable during a live experiment. This is an observability request, not a confirmed defect or explanation for early replies.
+
+## Application-owned turn detection and interruption
+
+The user's next request is to own turn detection and interruption in Murmur, beyond tuning a silence window. Checked the installed `cosmo-ai@0.6.0` and current public upstream commit `f448c5d0654f92865e8592aebed7de00b8725c78` on 2026-09-13; that upstream package remains 0.6.0. This section is a reviewable integration request, not a claim that application-owned control is implemented.
+
+Murmur has an existing Silero-backed speech detector in `web/src/hooks/use-vad.ts` and a native-audio Smart Turn analyzer in `backend/murmur/voice/smart_turn.py`. The desired flow is shared microphone capture, fast speech-start detection, semantic/acoustic completion checks during gaps, one committed user turn, and response-generation ownership. Speech resumption must invalidate pending completion checks. An interruption must stop local playback immediately, cancel the matching provider response, discard its queued audio, and reconcile the unheard assistant portion before a replacement response is admitted. A stopped microphone, expired call, or late classifier result must not commit a turn in a different call.
+
+| Required boundary | Verified Cosmo public support |
+| --- | --- |
+| Own one input capture | `publishMicrophone: false`, readiness, then `startAudioStream(MediaStream)`; retain local capture ownership and publish a clone/derived stream so SDK teardown cannot destroy the detector's capture unexpectedly. |
+| Own playback | `attachAudioElement()` accepts a host-owned audio element. Muting it is local playback containment, not provider response cancellation. |
+| Commit a user turn | `sendActivityEnd()` emits `activity-end`. Its existence does not disable automatic endpointing. |
+| Disable automatic endpointing | No exposed manual/none option in current Gemini or OpenAI model options. Omission retains defaults. |
+| Cancel one response and acknowledge it | No public cancel/interrupt response method or outbound protocol variant. `end()` closes the whole session. |
+| Clear queued audio and reconcile unheard context | No public per-response clear/truncate contract. `setOutputBlocked()` describes autoplay state only. |
+
+The source boundaries are [model configuration](https://github.com/socratic-ai/cosmo-ai/blob/f448c5d0654f92865e8592aebed7de00b8725c78/typescript/src/core/agent.ts#L146), [session methods](https://github.com/socratic-ai/cosmo-ai/blob/f448c5d0654f92865e8592aebed7de00b8725c78/typescript/src/core/session.ts), [the outbound message union](https://github.com/socratic-ai/cosmo-ai/blob/f448c5d0654f92865e8592aebed7de00b8725c78/typescript/src/transport/envelope.ts#L60), and [custom audio publication](https://github.com/socratic-ai/cosmo-ai/blob/f448c5d0654f92865e8592aebed7de00b8725c78/typescript/src/transport/livekit_transport.ts#L415). The [turn-taking guide](https://platform.askcosmo.ai/docs/concepts/turn-taking) describes mute plus `activity-end` for push-to-talk, but does not explain exclusive manual endpointing during an open input interval. This is a contract/documentation gap; it is not proof that the backend can never support manual control. The [wire guide](https://platform.askcosmo.ai/docs/reference/wire-protocol) says unknown client message types are silently dropped, so delivery of an invented control message would prove nothing.
+
+A concrete maintainer request, prepared locally and not sent: “Can the external realtime API expose a supported mode that disables automatic user-turn completion while audio continues streaming, with explicit activity-start/activity-end acknowledgements? We also need interruption of one identified assistant response, a terminal cancellation acknowledgement, output-buffer clearing, and a way to truncate its context to the audio actually played. Which of these are already supported server-side, and what is the documented TypeScript contract?”
+
+Acceptance for an eventual adapter: silence may exceed the provider's usual endpoint window without starting a response until the host commits; an incomplete semantic decision holds while resumed speech invalidates it; genuine interruption stops playback, reaches terminal provider cancellation, and cannot replay old audio or complete old tools; a brief false detection follows a documented recovery policy; turn IDs and playback progress keep unheard context out of the next response; end/unmount closes capture, VAD/model work, and provider resources. Timers remain bounded fallbacks, not the semantic decision itself.
+
+No local playback-only shim was added as a substitute for this ownership contract, and the running lab still uses Cosmo's managed semantic detector. The existing legacy Smart Turn session is not a drop-in adapter: it expects Deepgram callbacks, and its fallback/inference work needs explicit cancellation when new speech arrives. A supported provider handoff is required before wiring it as the authority for this Cosmo path.
+
+## Other SDK findings
+
+| Priority | Finding | Classification | Confidence |
+| --- | --- | --- | --- |
+| 1 | Ending during the start POST can leave a late room and microphone unowned | SDK correctness bug | High; reproduced with mocked browser/media dependencies |
+| 2 | Plain tool specs bypass the builder's schema check despite documented equivalence | Documentation inconsistency and SDK preflight gap | High; reproduced locally; main integration saw HTTP 422 |
+| 3 | Observer sessions report microphone permission as requesting/granted | SDK state bug | High; reproduced with the public transport factory |
+| 4 | Background jobs cannot observe session closure through their job handle | Feature request | High for the missing API; benefit grounded in our board workflow |
+
+**1. Make cancellation during startup prevent late connection and media acquisition.**
+
+Murmur has an End action while connecting. If the application takes the early `onSession` handle and calls `end()` while the session-start POST is pending, the SDK reports a disconnected session. A successful late response nevertheless creates a room, connects, and enables the microphone. `start()` then rejects, but a second `end()` does not disconnect that room.
+
+The installed `dist/chunk-UHC3AJPJ.mjs` explains the sequence: `_connectInner` awaits the POST and proceeds without a cancellation check (871–905); `LiveKitTransport.disconnect` returns while neither room nor audio element exists (1152–1154); `SessionEngine.teardown` clears its transport reference (3483–3486); the cancelled `start` catch skips another teardown (2555–2564), and shutdown is latched (2679–2682). The POST has no abort signal or timeout (1407–1411). [Official transport source](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/transport/livekit_transport.ts) and [session engine source](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/session_engine.ts).
+
+Reproduction used the installed session engine and exact installed transport class, with networking, LiveKit, DOM, and wire helpers stubbed. Hold fetch's successful response, start with `publishMicrophone: true`, capture the session in `onSession`, await its `end()` after fetch begins, release fetch, await the rejected start, then call `end()` again. Observe the Room and microphone spies:
+
+```text
+fetch (signalPresent=false)
+end resolved (state=disconnected)
+release delayed successful POST response
+Room.connect
+setMicrophoneEnabled(true)
+publishData
+start rejected: NotReadyError: Session was ended before start completed.
+second end resolved
+Room.disconnect calls: 0
+```
+
+Suggested behavior: add `start({ signal })`, pass cancellation into auth/start fetch, check a cancellation latch after each setup await, and release any late-created transport resources before start settles. `end()`/`close()` during setup should establish the same guarantee. Test deferred POST, room join, and microphone acquisition separately; none may publish media after cancellation completes. A timeout must perform cleanup, not merely reject a raced promise.
+
+Local handling is in [sdk.ts](../web/src/features/cosmo/sdk.ts): take the session in `onSession`, but defer its first `end()` until `start()` settles. This preserves the transport owner for cleanup. It does **not** provide immediate cancellation: a pending request can delay End, and microphone acquisition may occur briefly before deferred cleanup. The UI must stay ending until cleanup completes. The reproduction proves SDK control flow, not actual browser hardware behavior.
+
+**2. Run the same dialect check for plain specs and builder-created tools.**
+
+Our initial `pin_thought` and `read_thoughts` definitions used `additionalProperties: false`. That schema is invalid for Cosmo's restricted dialect: the installed README explicitly excludes strict objects (184–190). The SDK builder rejects it locally. We should use the supported dialect rather than request server acceptance of the original schema.
+
+The gap is consistency: the README says raw parameters still receive a construction-time dialect check and describes the plain spec-object form as equivalent (197–200). In practice `client.agent({ tools: [spec] })` accepts the same invalid schema. `RealtimeAgent.start` passes plain parameters through `toWireTool`; the builder's `checkSchemaDialect` runs only through `tool()` (`dist/tool.mjs`, 49–57). Both public spec types expose `parameters: Record<string, unknown>` (`dist/realtime_client-DGwiayLq.d.mts`, 1266–1289). [Official README](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/README.md) and [tool builder](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/tool/index.ts).
+
+Minimal provider-free reproduction, run from `web/` with Node ESM:
+
+```js
+import { RealtimeClient } from 'cosmo-ai';
+import { tool } from 'cosmo-ai/tool';
+const spec = {
+  kind: 'client', name: 'read_thoughts', description: 'Read visible thoughts',
+  parameters: { type: 'object', properties: {}, additionalProperties: false },
+  handler: async () => ({ thoughts: [] }),
+};
+new RealtimeClient({ getAuthHeaders: () => ({}) }).agent({ tools: [spec] }); // accepts
+tool(spec); // throws ToolSchemaError: forbidden_key
+```
+
+The main integration agent separately observed session/start HTTP 422, `invalid_tool_config`, naming `additionalProperties` on both tools. That live rejection was reported to this review, not independently replayed here. It failed before a call opened.
+
+Suggested behavior: validate plain client specs at agent construction or start, with tool name and schema path, and document exactly which validation belongs to the builder. Clarify the README's equivalence claim and explain that invalid tool configuration can reject startup with HTTP 422 rather than appear in `ready.rejectedTools`. Local workaround: remove the unsupported keyword and construct raw-parameter specs through `tool({...})` to get preflight checks without adding a schema dependency.
+
+**3. Preserve truthful microphone state when `publishMicrophone` is false.**
+
+With `publishMicrophone: false`, a transport reporting no input stream, and no permission/media calls, the SDK emits `unknown → requesting → granted`; its snapshot ends at `mediaState.mic === 'granted'`. This was reproduced using `RealtimeClient({ getAuthHeaders: () => ({}), transportFactory })`, a no-op connected transport, and an `onSession` media listener. `SessionEngine.start` unconditionally writes the requesting and granted states (`dist/chunk-UHC3AJPJ.mjs`, 2506–2507 and 2558–2559), while `LiveKitTransport` skips microphone publication when false (901–906). [Official engine source](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/session_engine.ts).
+
+Impact: consumers cannot derive microphone permission or publication truth from the snapshot in observer/text sessions. Suggested behavior: represent an unpublished/disabled microphone explicitly, or separate permission from publication state; do not claim permission was granted when it was never requested. Add an observer-session state test. Murmur already masks this with the requested microphone option in [controller.ts](../web/src/features/cosmo/controller.ts), so this is not blocking the lab.
+
+**4. Give background jobs a cooperative cancellation signal.**
+
+The background primitive is useful: `pin_thought` acknowledges immediately and completes only after our browser render receipt. The SDK correctly drops a terminal result after session closure. However, `ClientToolJobSink.close()` only sets a closed flag, and `ClientToolJob` exposes no `AbortSignal` (`dist/chunk-XFE2FGB3.mjs`, 259–286 and 293–360; public job type at `dist/realtime_client-DGwiayLq.d.mts`, 567–620). Handler work continues. This is documented behavior, not a violation of the current contract. [Official job source](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/client_tool_jobs.ts).
+
+Suggested API: `job.signal`, aborted on session termination, plus explicit host cancellation by job ID with an ended/superseded reason. Handlers could pass it into fetch, reasoning tasks, or render waits. Do not cancel every job on ordinary speech interruption: background work intentionally survives continued conversation. Cancellation can stop cooperative work but cannot undo a completed external effect.
+
+Local workaround exists in [thought-board.ts](../web/src/features/cosmo/thought-board.ts): call-scoped cancellation rejects pending render waits and blocks stale completion. A future reasoner/canvas adapter still needs task ownership and explicit supersession checks even if the SDK adds a signal.
+
+**Already supported; do not ask Cosmo to add these again.** `start({ onSession })` installs listeners before connection begins; only `ready` and `lifecycle` replay to late event listeners. The async iterator buffers early wire events separately. Our adapter now uses `onSession`, so losing the greeting through late listener registration was an integration issue. The SDK also provides `waitUntilReady()`, `transportFactory` for provider-free tests, typed session-start errors, and browser-safe minted-token support. Keep feedback focused on the findings above. [Agent API](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/agent.ts).
+
+**Follow-up: confirmed transcript grouping discrepancy under interruption.**
+
+Classification: documentation inconsistency that led to a local integration bug; the SDK already exports a reducer that handles the observed sequence. Confidence is high: the main integration captured an allowlisted live wire trace, and this side review replayed all 42 events from the failing run through the installed SDK with a fake transport and no provider calls. The table below records that failing sequence; the earlier visible symptom remains in [failure-transcript.json](../var/cosmo-smoke/turn-taking/failure-transcript.json). [wire-events.json](../var/cosmo-smoke/turn-taking/wire-events.json) is overwritten by each probe and now contains the latest run, not an immutable copy of the original failure.
+
+The normalized event type tells consumers to coalesce by `(turnId, role)` (`dist/core/events.d.mts`, 19–30), matching the [transcript concepts page](https://platform.askcosmo.ai/docs/concepts/transcripts). However, the engine has one shared `currentTurnId`, advances it on either role's `turn-complete`, and sets `append` from the immediately preceding transcript role (`dist/chunk-UHC3AJPJ.mjs`, 3111–3122, 3151–3163, 3173–3183). Those fields cannot reliably identify a speaker's complete utterance during overlapping speech.
+
+The SDK's own reducer documentation explicitly warns against both `(turnId, role)` grouping and the `append` hint. It selects the most recent still-open bubble for the event's role; a final closes that bubble, and the next same-role event opens a new one. See installed `dist/core/transcript_reducer.d.mts`, 12–19, and `dist/core/transcript_fold.d.mts`, 4–19; [official reducer](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/transcript_reducer.ts) and [fold contract](https://github.com/socratic-ai/cosmo-ai/blob/typescript/v0.6.0/typescript/src/core/transcript_fold.ts).
+
+The saved live sequence explains the failure without assuming a stale upstream transcript. Times are the probe's local receipt clock; T1/T2 are illustrative labels assigned during replay, not IDs present on the wire:
+
+| Receipt time | Wire event | Normalized result and pre-fix UI effect |
+| --- | --- | --- |
+| 16175.4 ms | USER nonfinal: “A dragon who learns algebra. Take about a minute to tell the whole story.” | T1; opens user bubble. |
+| 20555.0 ms | ASSISTANT `turn-complete` | Advances the shared ID to T2. |
+| 20656.4 ms | USER cumulative final of that same text | T2; our old reducer creates a duplicate finalized user bubble. |
+| 27627.2 ms | USER nonfinal: “Wait, stop the story. I changed my mind. Just say banana and nothing else.” | Still T2; our old reducer drops this because its T2 user bubble was finalized. |
+
+Replaying the full capture into the pre-fix reducer exactly reproduced duplicate continuation text and the missing interruption. Replaying into `reduceTranscript` from `cosmo-ai/core/transcript_reducer` preserved one continuation bubble and the complete interruption, followed by the assistant's “banana.” Minimal normalized reproduction:
+
+```js
+import { reduceTranscript } from 'cosmo-ai/core/transcript_reducer';
+const continuation = 'A dragon who learns algebra. Take about a minute to tell the whole story.';
+const interruption = 'Wait, stop the story. I changed my mind. Just say banana and nothing else.';
+const events = [
+  { id: 'p', turnId: 'T1', role: 'user', text: continuation, isFinal: false, append: false },
+  { id: 'f', turnId: 'T2', role: 'user', text: continuation, isFinal: true, append: false },
+  { id: 'i', turnId: 'T2', role: 'user', text: interruption, isFinal: false, append: true },
+];
+const items = events.reduce((items, event) => reduceTranscript(items, event, 80), []);
+// Expected text: [continuation, interruption].
+// The old role:turnId grouping produced [continuation, continuation].
+```
+
+Suggested SDK/documentation change: reconcile the normalized event comments and concepts page with the exported reducer, explain that a speaker's final may cross another speaker's turn boundary, and point custom UIs to the shared folding helper. A new server-correlated utterance ID could make ownership explicit in a future protocol, but no SDK feature is required for the demonstrated local fix. Local mitigation: use the helper or equivalent grouping, keep append-nonfinal/replace-final text semantics, and preserve distinct finalized segments. Do not discard every nonfinal that reuses a finalized `turnId`.
+
+Evidence limit: the earlier prefix “Please tell me a long story about” does not appear anywhere in the saved wire transcript. The grouping fix cannot restore text never received. Its absence is **not** established as a Cosmo/server bug; the main integration is investigating fixture publication, capture readiness, and greeting overlap. The raw trace also contains no final for the interruption before capture stops, so preserving its nonfinal words matters. A thought pause may span distinct transcription segments; preserving all received words is a better probe assertion than requiring one UI bubble.
+
+Follow-up: after requiring a completed greeting plus quiet decoded audio before injecting speech, the live probe received the prefix and continuation, retained both correctly, and preserved the interruption. This supports treating the earlier missing prefix as an inconclusive fixture-startup observation rather than a reported SDK defect. It does not establish exactly why the earlier prefix was absent.
+
+**Thought-summary setting and transcript boundaries.** `modelOptions: { provider: 'gemini', includeThoughts: false, ... }` is supported and serializes to `include_thoughts: false`. The type describes it as controlling streamed thought summaries, with an unspecified server default when omitted (`dist/realtime_client-DGwiayLq.d.mts`, 1350–1354; serialization at `dist/chunk-UHC3AJPJ.mjs`, 471–472). It is appropriate for a lab that does not display those summaries. [Type reference](https://platform.askcosmo.ai/docs/reference/typescript/types).
+
+The official transcript contract separates `model-text`—which can contain unspoken planning or function-call narration—from `transcript`, intended to represent audio transcription. Murmur subscribes only to `transcript` for its conversation UI. Disabling thought summaries is not a proven fix for planning prose that is already emitted as `transcript` or spoken aloud; distinguish wire channel, recorded audio, and UI content before attributing that behavior. [Transcript channel guidance](https://platform.askcosmo.ai/docs/concepts/transcripts).

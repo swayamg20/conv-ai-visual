@@ -108,6 +108,10 @@ def _provider_model(
 class Config:
     """Application configuration."""
 
+    # Isolated managed-voice experiment; the workspace key is server-only.
+    MURMUR_COSMO_ENABLED: bool = os.getenv("MURMUR_COSMO_ENABLED", "false").lower() == "true"
+    COSMO_API_KEY: str = os.getenv("COSMO_API_KEY", "")
+
     # Provider selection — Groq default for fast inference (~80ms TTFT)
     LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "groq")
 

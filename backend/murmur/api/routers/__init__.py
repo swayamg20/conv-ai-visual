@@ -6,6 +6,7 @@ from murmur.api.routers import (
     agents,
     auth,
     chat,
+    cosmo_voice,
     health,
     live_scenes,
     observability,
@@ -26,5 +27,6 @@ api_router.include_router(chat.router)
 api_router.include_router(live_scenes.router)
 api_router.include_router(voice.router)
 api_router.include_router(websocket_voice.router)
+api_router.include_router(cosmo_voice.router)
 
 __all__ = ["api_router"]
