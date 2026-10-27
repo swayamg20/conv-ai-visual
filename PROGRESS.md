@@ -15,12 +15,19 @@
 - [x] Fixed test monkeypatch leak (dispatch tests now restore patched attributes) and lock-across-effects bug found in self-review.
 - [x] Gates: 266 focused `-W error`, 443 adjacent, 3,859 full-repo tests, Ruff lint/format, `py_compile`, module caps <700, `git diff --check`.
 
+## Completed earlier this session
+
+- [x] Settlement slice committed + pushed (`4594478`).
+- [x] Readiness digest contract: guarded app nonce env (64-hex, relay-only) + `process_ready_digest` on `/_e2e/health`; web `/_ready` force-dynamic route mirroring the same domain-separated digest; `process_readiness.py` polls per-role loopback endpoints with exact-digest and live-child gating; foreign 200s/missing nonce/dead child/expired deadline never publish.
+- [x] Gates: 278 focused `-W error`, 3,871 full-repo, web 298 vitest + typecheck + lint + build, Ruff, module caps.
+- [x] Parallel Cosmo lane spawned detached (see var/opencode-sessions/cosmo-lane.log): snapshotted the lab (`15da840` on `codex/cosmo-voice-lab`), rebasing onto main, then workspace cascade discovery.
+
 ## Remaining tasks
 
-- [ ] Commit + push this settlement slice.
-- [ ] Readiness digest contract: per-role nonce health endpoints (app `/_e2e/health` extension + web force-dynamic route) and digest-bound readiness in dispatch.
-- [ ] Executor-level per-cut integration (fake local seams through the real outer executor) per Checkpoint 3.
-- [ ] Independent no-P0/P1 reviewer gate (three attempts returned empty; needs a working reviewer pass or explicit sign-off).
+- [ ] Commit + push the readiness slice (staged below).
+- [ ] Cosmo lane: monitor to completion (rebase + discovery + docs).
+- [ ] Executor-level per-cut integration (fake local seams through the real outer executor) — Checkpoint 3.
+- [ ] Independent no-P0/P1 reviewer gate (subagent empty so far; retry or user sign-off).
 - [ ] Checkpoints 3-4 per ExecPlan; Checkpoint 5 remains separately authorized.
 
 ## Remaining tasks

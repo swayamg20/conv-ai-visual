@@ -63,6 +63,17 @@ def _isolated_records(monkeypatch):
 def _wire(monkeypatch, grant_instance=_Grant()):
     outcomes: dict[str, list[bool | BaseException]] = {}
 
+    def wait_role_ready(pair_key, role, request, grant, deadline):
+        result = outcomes.get("ready", [True])
+        raise_or_return = result.pop(0) if result else True
+        if isinstance(raise_or_return, BaseException):
+            raise raise_or_return
+        return raise_or_return
+
+    import scripts.voice_pipecat_e2e_relay_invocation_process_pair_effects as fx
+
+    monkeypatch.setattr(fx, "_readiness_module", lambda: wait_role_ready)
+
     def intend_start(pair_key, role, request, clock, wait):
         result = outcomes.get("start", [True])
         raise_or_return = result.pop(0) if result else True
@@ -286,3 +297,37 @@ def test_prebootstrap_requires_a_live_app_child(monkeypatch):
     with pytest.raises(RelayInvocationError):
         effects._concrete_forward(pair_key, object(), _PrebootstrapRequest(), destination)
     assert destination.published == []
+
+
+def test_start_readiness_failure_never_publishes(monkeypatch):
+    pair_key, _grant = _bind_role(monkeypatch, role="web")
+    outcomes, _wired = _wire(monkeypatch)
+    outcomes["ready"] = [False]
+    destination = _Destination()
+    with pytest.raises(RelayInvocationError):
+        effects._concrete_forward(pair_key, object(), _request("web"), destination)
+    assert destination.published == []
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [RuntimeError("readiness"), KeyboardInterrupt(), SystemExit(71)],
+)
+def test_start_readiness_control_escape_never_publishes(monkeypatch, failure):
+    pair_key, _grant = _bind_role(monkeypatch, role="web")
+    outcomes, _wired = _wire(monkeypatch)
+    outcomes["ready"] = [failure]
+    destination = _Destination()
+    with pytest.raises(BaseException) as caught:
+        effects._concrete_forward(pair_key, object(), _request("web"), destination)
+    assert type(caught.value) is type(failure)
+    assert destination.published == []
+
+
+def test_browser_start_has_no_readiness_gate(monkeypatch):
+    pair_key, _grant = _bind_role(monkeypatch, role="browser")
+    outcomes, _wired = _wire(monkeypatch)
+    outcomes["ready"] = [False]
+    destination = _Destination()
+    effects._concrete_forward(pair_key, object(), _request("browser"), destination)
+    assert destination.published == [True]

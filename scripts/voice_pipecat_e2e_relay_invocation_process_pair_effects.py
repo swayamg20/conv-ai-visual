@@ -45,6 +45,14 @@ def _settlement_module():
     return _intend_start, _finish_started_role, _stop_started_role
 
 
+def _readiness_module():
+    from scripts.voice_pipecat_e2e_relay_invocation_process_readiness import (
+        _wait_role_ready,
+    )
+
+    return _wait_role_ready
+
+
 def _started_role_module():
     from scripts.voice_pipecat_e2e_relay_invocation_process_lifecycle import (
         _role_has_live_record,
@@ -159,6 +167,10 @@ def _concrete_forward(
         if deadline is None or type(deadline) is not float:
             deadline = grant._runtime_deadline
         if not intend_start(pair_key, role, request, clock, wait):
+            raise RelayInvocationError(_FAILURE)
+        if role in {"app", "web"} and not _readiness_module()(
+            pair_key, role, request, grant, deadline
+        ):
             raise RelayInvocationError(_FAILURE)
         destination.publish(True)
         return

@@ -8,6 +8,7 @@ transport, pipeline, repositories, and cleanup owners remain in the path.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import uuid
@@ -33,6 +34,9 @@ _PROFILE_ID = "pipecat-fake-rtc-v1"
 _RUNTIME = "pipecat_smallwebrtc_v1"
 _AUTHORIZATION = "Bearer voice-e2e"
 _EXPECTED_CALL_ID_ENV = "MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID"
+_PROCESS_READY_NONCE_ENV = "MURMUR_PIPECAT_E2E_PROCESS_READY_NONCE"
+_PROCESS_READY_DOMAIN = b"murmur-relay-process-ready:v1:"
+_PROCESS_READY_NONCE_HEX_LENGTH = 64
 _ALLOWED_CORS_ORIGINS = {
     "http://127.0.0.1:3100",
     "http://localhost:3100",
@@ -83,6 +87,7 @@ class _GuardedEnvironment:
         repr=False,
     )
     expected_voice_call_id: str | None = field(default=None, repr=False)
+    process_ready_digest: str | None = field(default=None, repr=False)
 
 
 def _require_guarded_environment() -> _GuardedEnvironment:
@@ -182,14 +187,29 @@ def _require_guarded_environment() -> _GuardedEnvironment:
     if network is PipecatE2ENetworkMode.DIRECT:
         if any(name in os.environ for name in relay_names):
             raise RuntimeError("direct Pipecat E2E does not accept relay material")
+        if os.getenv(_PROCESS_READY_NONCE_ENV) is not None:
+            raise RuntimeError("direct Pipecat E2E does not accept process material")
         return _GuardedEnvironment(network=network)
 
     expected_run_dir = database_path.parent
     config_value = os.getenv("MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE")
     certificate_value = os.getenv("SSL_CERT_FILE")
     expected_voice_call_id = os.getenv(_EXPECTED_CALL_ID_ENV)
+    process_ready_nonce = os.getenv(_PROCESS_READY_NONCE_ENV)
     if config_value is None or certificate_value is None or expected_voice_call_id is None:
         raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
+    process_ready_digest = None
+    if process_ready_nonce is not None:
+        if len(process_ready_nonce) != _PROCESS_READY_NONCE_HEX_LENGTH or any(
+            character not in "0123456789abcdef" for character in process_ready_nonce
+        ):
+            raise RuntimeError("relay-tls Pipecat E2E process identity is unavailable")
+        process_ready_digest = (
+            hashlib.sha256(_PROCESS_READY_DOMAIN + process_ready_nonce.encode("ascii"))
+            .hexdigest()
+            .lower()
+        )
+        process_ready_nonce = None
     try:
         parsed_call_id = uuid.UUID(expected_voice_call_id)
     except (AttributeError, ValueError):
@@ -210,6 +230,7 @@ def _require_guarded_environment() -> _GuardedEnvironment:
         network=network,
         coturn_configuration=receipt,
         expected_voice_call_id=expected_voice_call_id,
+        process_ready_digest=process_ready_digest,
     )
 
 
@@ -403,6 +424,8 @@ async def e2e_health() -> dict[str, object]:
         ),
         "cost": "unmeasured",
     }
+    if _guarded_environment.process_ready_digest is not None:
+        health["process_ready_digest"] = _guarded_environment.process_ready_digest
     if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
         health.update(
             {
