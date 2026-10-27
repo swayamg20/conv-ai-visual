@@ -59,8 +59,8 @@ def test_spawn_initialization_loss_retains_exact_raw_child(monkeypatch, failure)
 
 def test_unavailable_waitid_is_distinct_from_running(monkeypatch):
     monkeypatch.setattr(local.os, "waitid", None, raising=False)
-    with pytest.raises(RuntimeError):
-        local._observe_terminal_unreaped(123)
+    observation = local._observe_terminal_unreaped(123)
+    assert observation is local._UNAVAILABLE
 
 
 def test_waitid_checks_exact_pid_without_reaping(monkeypatch):
@@ -86,6 +86,7 @@ def test_invalid_pid_never_reaches_signal(monkeypatch, pid):
 
 
 def test_proc_permission_failure_is_not_absence(monkeypatch):
+    monkeypatch.setattr(local.os.path, "isdir", lambda path: True)
     monkeypatch.setattr(local.os, "listdir", lambda _: ["123"])
 
     def unreadable(*_args, **_kwargs):
@@ -97,6 +98,11 @@ def test_proc_permission_failure_is_not_absence(monkeypatch):
     monkeypatch.setattr("builtins.open", lambda *_: io.BytesIO(b"malformed"))
     with pytest.raises(RuntimeError):
         local._live_group_members(123)
+
+
+def test_missing_proc_returns_unavailable_not_error(monkeypatch):
+    monkeypatch.setattr(local.os.path, "isdir", lambda path: False)
+    assert local._live_group_members(123) is local._UNAVAILABLE
 
 
 @pytest.mark.parametrize("status,payload", [(302, b"redirect"), (200, b"x" * 65537)])

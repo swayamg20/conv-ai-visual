@@ -287,3 +287,40 @@ def test_deadline_is_inclusive_and_clock_failure_quarantines(monkeypatch):
             return math.nan
 
     assert not settlement._stop_started_role(key, "app", BrokenClock(), _Wait(), 60.0)
+
+
+def test_unavailable_waitid_quarantines_finish_without_raising(monkeypatch):
+    key = object()
+    _spawn_fakes(monkeypatch)
+    settlement._intend_start(key, "browser", _request("browser"), _Clock(), _Wait())
+
+    import scripts.voice_pipecat_e2e_relay_invocation_process_local as local_mod
+
+    monkeypatch.setattr(
+        settlement, "_observe_terminal_unreaped", lambda pid: local_mod._UNAVAILABLE
+    )
+    monkeypatch.setattr(settlement, "_reap_once", lambda pid: (0, None))
+    monkeypatch.setattr(settlement, "_group_exists", lambda pgid: True)
+    assert not settlement._finish_started_role(key, "browser", _Clock(), _Wait(), _NOW + 10.0)
+    record = settlement._RECORDS[(key, "browser")]
+    assert record[3] is True
+
+
+def test_absent_proc_membership_quarantines_finish_without_raising(monkeypatch):
+    key = object()
+    _spawn_fakes(monkeypatch)
+    settlement._intend_start(key, "browser", _request("browser"), _Clock(), _Wait())
+
+    import scripts.voice_pipecat_e2e_relay_invocation_process_local as local_mod
+
+    observation = type("Result", (), {"si_pid": 4242})
+    monkeypatch.setattr(settlement, "_observe_terminal_unreaped", lambda pid: observation)
+    monkeypatch.setattr(settlement, "_terminal_status_is_zero", lambda result: True)
+    monkeypatch.setattr(settlement, "_live_group_members", lambda pgid: local_mod._UNAVAILABLE)
+    monkeypatch.setattr(settlement, "_reap_once", lambda pid: (0, None))
+    monkeypatch.setattr(settlement, "_group_exists", lambda pgid: False)
+    wait = _Wait()
+    clock = _Clock()
+    assert not settlement._finish_started_role(key, "browser", clock, wait, _NOW + 10.0)
+    record = settlement._RECORDS[(key, "browser")]
+    assert record[3] is True

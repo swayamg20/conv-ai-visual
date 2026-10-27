@@ -16,6 +16,7 @@ __all__: list[str] = []
 
 _FAILURE = "Relay concrete process local effect is invalid"
 _MAX_RESPONSE_BYTES = 65536
+_UNAVAILABLE = object()
 
 
 def _spawn_checkpoint(_stage: str) -> None:
@@ -112,7 +113,7 @@ def _observe_terminal_unreaped(pid: int) -> object:
     waitid_result = getattr(os, "waitidResult", None)
     _require_pid(pid)
     if not callable(waitid) or waitid_result is None:
-        raise RuntimeError(_FAILURE)
+        return _UNAVAILABLE
     result = waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
     if result is None:
         return None
@@ -153,7 +154,12 @@ def _live_group_members(pgid: int) -> object:
     """Snapshot live members of one process group while the leader anchors it."""
 
     _require_pid(pgid)
-    directory = os.listdir("/proc")
+    if not os.path.isdir("/proc"):
+        return _UNAVAILABLE
+    try:
+        directory = os.listdir("/proc")
+    except OSError:
+        return _UNAVAILABLE
     if type(directory) is not list:
         raise RuntimeError(_FAILURE)
     members: list[int] = []

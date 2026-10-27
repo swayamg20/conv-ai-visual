@@ -15,6 +15,7 @@ import signal
 import threading
 
 from scripts.voice_pipecat_e2e_relay_invocation_process_local import (
+    _UNAVAILABLE,
     _group_exists,
     _live_group_members,
     _members_include_only,
@@ -100,11 +101,15 @@ def _settle_terminal_zero(record: list, clock, wait, deadline: float) -> bool:
         if current is None or _alive_identity(record[0], record[1]) is None:
             return _quarantine(record)
         observation = _observe_terminal_unreaped(record[0])
+        if observation is _UNAVAILABLE:
+            return _quarantine(record)
         if observation is None or not _terminal_status_is_zero(observation):
             wait(_TICK_SECONDS)
             continue
         _spawn_checkpoint("terminal-zero-unreaped")
         members = _live_group_members(record[1])
+        if members is _UNAVAILABLE:
+            return _quarantine(record)
         if type(members) is not list or not _members_include_only(members, record[0]):
             return _quarantine(record)
         _spawn_checkpoint("live-descendants-absent")
