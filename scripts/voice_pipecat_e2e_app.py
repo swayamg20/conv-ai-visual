@@ -8,22 +8,22 @@ transport, pipeline, repositories, and cleanup owners remain in the path.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from scripts.voice_pipecat_e2e_coturn import (
     COTURN_TOPOLOGY_STATUS,
-    COTURN_TURNS_URL,
+    CoturnConfigurationReceipt,
     CoturnContractError,
     PipecatE2ENetworkMode,
-    derive_turn_rest_credentials,
     parse_network_mode,
-    read_private_coturn_configuration,
+    read_private_coturn_configuration_receipt,
     validate_turn_tls_ca_file,
 )
 
@@ -33,6 +33,10 @@ _SIGNALING_PATH = "/api/voice/pipecat/signal"
 _PROFILE_ID = "pipecat-fake-rtc-v1"
 _RUNTIME = "pipecat_smallwebrtc_v1"
 _AUTHORIZATION = "Bearer voice-e2e"
+_EXPECTED_CALL_ID_ENV = "MURMUR_PIPECAT_E2E_EXPECTED_CALL_ID"
+_PROCESS_READY_NONCE_ENV = "MURMUR_PIPECAT_E2E_PROCESS_READY_NONCE"
+_PROCESS_READY_DOMAIN = b"murmur-relay-process-ready:v1:"
+_PROCESS_READY_NONCE_HEX_LENGTH = 64
 _ALLOWED_CORS_ORIGINS = {
     "http://127.0.0.1:3100",
     "http://localhost:3100",
@@ -78,7 +82,12 @@ _FORBIDDEN_CREDENTIAL_SUFFIXES = (
 @dataclass(frozen=True)
 class _GuardedEnvironment:
     network: PipecatE2ENetworkMode
-    turn_static_auth_secret: str | None = field(default=None, repr=False)
+    coturn_configuration: CoturnConfigurationReceipt | None = field(
+        default=None,
+        repr=False,
+    )
+    expected_voice_call_id: str | None = field(default=None, repr=False)
+    process_ready_digest: str | None = field(default=None, repr=False)
 
 
 def _require_guarded_environment() -> _GuardedEnvironment:
@@ -150,6 +159,7 @@ def _require_guarded_environment() -> _GuardedEnvironment:
     except CoturnContractError:
         raise RuntimeError("Pipecat E2E app network mode is invalid") from None
     relay_names = {
+        _EXPECTED_CALL_ID_ENV,
         "MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE",
         "SSL_CERT_FILE",
     }
@@ -177,17 +187,39 @@ def _require_guarded_environment() -> _GuardedEnvironment:
     if network is PipecatE2ENetworkMode.DIRECT:
         if any(name in os.environ for name in relay_names):
             raise RuntimeError("direct Pipecat E2E does not accept relay material")
+        if os.getenv(_PROCESS_READY_NONCE_ENV) is not None:
+            raise RuntimeError("direct Pipecat E2E does not accept process material")
         return _GuardedEnvironment(network=network)
 
     expected_run_dir = database_path.parent
     config_value = os.getenv("MURMUR_PIPECAT_E2E_COTURN_CONFIG_FILE")
     certificate_value = os.getenv("SSL_CERT_FILE")
-    if config_value is None or certificate_value is None:
+    expected_voice_call_id = os.getenv(_EXPECTED_CALL_ID_ENV)
+    process_ready_nonce = os.getenv(_PROCESS_READY_NONCE_ENV)
+    if config_value is None or certificate_value is None or expected_voice_call_id is None:
         raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
+    process_ready_digest = None
+    if process_ready_nonce is not None:
+        if len(process_ready_nonce) != _PROCESS_READY_NONCE_HEX_LENGTH or any(
+            character not in "0123456789abcdef" for character in process_ready_nonce
+        ):
+            raise RuntimeError("relay-tls Pipecat E2E process identity is unavailable")
+        process_ready_digest = (
+            hashlib.sha256(_PROCESS_READY_DOMAIN + process_ready_nonce.encode("ascii"))
+            .hexdigest()
+            .lower()
+        )
+        process_ready_nonce = None
+    try:
+        parsed_call_id = uuid.UUID(expected_voice_call_id)
+    except (AttributeError, ValueError):
+        raise RuntimeError("relay-tls Pipecat E2E call identity is unavailable") from None
+    if parsed_call_id.version != 4 or str(parsed_call_id) != expected_voice_call_id:
+        raise RuntimeError("relay-tls Pipecat E2E call identity is unavailable")
     try:
         configuration = Path(config_value)
         certificate = Path(certificate_value)
-        secret = read_private_coturn_configuration(
+        receipt = read_private_coturn_configuration_receipt(
             configuration,
             expected_run_dir=expected_run_dir,
         )
@@ -196,11 +228,14 @@ def _require_guarded_environment() -> _GuardedEnvironment:
         raise RuntimeError("relay-tls Pipecat E2E material is unavailable") from None
     return _GuardedEnvironment(
         network=network,
-        turn_static_auth_secret=secret,
+        coturn_configuration=receipt,
+        expected_voice_call_id=expected_voice_call_id,
+        process_ready_digest=process_ready_digest,
     )
 
 
 _guarded_environment = _require_guarded_environment()
+
 
 from fastapi import HTTPException, Request  # noqa: E402
 from murmur.api.pipecat_schemas import PipecatSessionRequest  # noqa: E402
@@ -219,14 +254,18 @@ from murmur.voice.pipecat_fake_rtc import (  # noqa: E402
     build_pipecat_fake_rtc_provider_from_environment,
     summarize_pipecat_fake_evidence,
 )
-from murmur.voice.pipecat_ice import PipecatIceLease, PipecatIceServer  # noqa: E402
 from murmur.voice.pipecat_signaling import (  # noqa: E402
     PipecatReservationState,
     PipecatSignalingNotFound,
     PipecatSignalingSettings,
 )
-from murmur.voice.runtime_contracts import VoiceCallClaims  # noqa: E402
 from sqlmodel import Session, SQLModel  # noqa: E402
+
+from scripts.voice_pipecat_e2e_relay_identity import (  # noqa: E402
+    RelayTlsIceLeaseIssuer,
+    create_relay_prebootstrap_handler,
+    require_aioice_gateway,
+)
 
 E2E_USER_ID = "voice-e2e-user"
 E2E_USER_EMAIL = "voice-e2e@localhost.invalid"
@@ -234,29 +273,23 @@ E2E_AGENT_ID = "90bd1253-90a6-459a-bf37-365bc3039a76"
 E2E_SESSION_ID = "a4f4328e-185e-4c65-b3f7-101e04a37578"
 
 
-@dataclass(frozen=True)
-class _RelayTlsIceLeaseIssuer:
-    static_auth_secret: str = field(repr=False)
-
-    async def issue(self, claims: VoiceCallClaims) -> PipecatIceLease:
-        credentials = derive_turn_rest_credentials(
-            static_auth_secret=self.static_auth_secret,
-            voice_call_id=claims.voice_call_id,
-            expires_at=claims.expires_at,
-            now=datetime.now(UTC),
-        )
-        return PipecatIceLease(
-            claims=claims,
-            provider_id="e2e-coturn-rest-v1",
-            expires_at=claims.expires_at,
-            ice_servers=(
-                PipecatIceServer(
-                    urls=(COTURN_TURNS_URL,),
-                    username=credentials.username,
-                    credential=credentials.credential,
-                ),
-            ),
-        )
+def _build_ice_lease_issuer(
+    guarded: _GuardedEnvironment,
+) -> tuple[RelayTlsIceLeaseIssuer | None, bool]:
+    if guarded.network is PipecatE2ENetworkMode.DIRECT:
+        return None, False
+    configuration = guarded.coturn_configuration
+    expected_voice_call_id = guarded.expected_voice_call_id
+    if configuration is None or expected_voice_call_id is None:
+        raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
+    require_aioice_gateway(configuration.topology)
+    return (
+        RelayTlsIceLeaseIssuer(
+            configuration.static_auth_secret,
+            expected_voice_call_id,
+        ),
+        True,
+    )
 
 
 def _seed_owned_scope() -> None:
@@ -341,15 +374,9 @@ def _composition_settings() -> PipecatCompositionSettings:
     )
 
 
-_provider = build_pipecat_fake_rtc_provider_from_environment()
 _evidence_path = Path(os.environ[EVIDENCE_PATH_ENV]).resolve()
-_ice_lease_issuer = None
-if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
-    if _guarded_environment.turn_static_auth_secret is None:
-        raise RuntimeError("relay-tls Pipecat E2E material is unavailable")
-    _ice_lease_issuer = _RelayTlsIceLeaseIssuer(
-        _guarded_environment.turn_static_auth_secret,
-    )
+_ice_lease_issuer, _relay_topology_bound = _build_ice_lease_issuer(_guarded_environment)
+_provider = build_pipecat_fake_rtc_provider_from_environment()
 _composition = create_pipecat_composition(
     _composition_settings(),
     profile_provider=_provider,
@@ -360,6 +387,25 @@ app = create_app(
     authenticator=_e2e_authenticator,
     database_initializer=_seed_owned_scope,
 )
+
+
+if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
+    expected_voice_call_id = _guarded_environment.expected_voice_call_id
+    if expected_voice_call_id is None:
+        raise RuntimeError("relay-tls Pipecat E2E call identity is unavailable")
+    _e2e_relay_prebootstrap = create_relay_prebootstrap_handler(
+        composition=_composition,
+        expected_voice_call_id=expected_voice_call_id,
+        user_id=E2E_USER_ID,
+        session_id=E2E_SESSION_ID,
+    )
+    expected_voice_call_id = None
+    app.add_api_route(
+        "/_e2e/pipecat/prebootstrap",
+        _e2e_relay_prebootstrap,
+        methods=["POST"],
+        include_in_schema=False,
+    )
 
 
 @app.get("/_e2e/health", include_in_schema=False)
@@ -378,11 +424,16 @@ async def e2e_health() -> dict[str, object]:
         ),
         "cost": "unmeasured",
     }
+    if _guarded_environment.process_ready_digest is not None:
+        health["process_ready_digest"] = _guarded_environment.process_ready_digest
     if _guarded_environment.network is PipecatE2ENetworkMode.RELAY_TLS:
         health.update(
             {
                 "qualification": "unavailable",
                 "topology_status": COTURN_TOPOLOGY_STATUS,
+                "config_topology_bound": _relay_topology_bound,
+                "aioice_gateway_gatherable": _relay_topology_bound,
+                "aioice_container_absent": _relay_topology_bound,
             }
         )
     return health

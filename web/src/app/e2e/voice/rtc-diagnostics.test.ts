@@ -6,9 +6,12 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  emptyBrowserRtcEvidence,
   installBrowserRtcDiagnostics,
+  isCanonicalPrivateIpv4,
   observeBrowserMediaTrack,
   parseBrowserRtcNetworkMode,
+  RELAY_GATEWAY_ATTESTATION_GLOBAL,
   summarizeRtcPeerConnections,
 } from "./rtc-diagnostics";
 
@@ -27,10 +30,11 @@ interface ConstructorObservation {
 }
 
 function constructorHarness(
-  configurationReader?: (configuration: RTCConfiguration) => RTCConfiguration
+  configurationReader?: (configuration: RTCConfiguration) => RTCConfiguration,
+  stats: readonly Record<string, unknown>[] = []
 ) {
   const observations: ConstructorObservation[] = [];
-  const state = { closeCount: 0 };
+  const state = { closeCount: 0, statsReadCount: 0 };
   class NativePeerConnection {
     readonly connectionState = "connected";
     readonly iceConnectionState = "connected";
@@ -43,7 +47,8 @@ function constructorHarness(
     }
 
     async getStats(): Promise<RTCStatsReport> {
-      return new Map() as unknown as RTCStatsReport;
+      state.statsReadCount += 1;
+      return report(stats);
     }
 
     getSenders(): RTCRtpSender[] {
@@ -70,6 +75,41 @@ function constructorHarness(
 function report(records: readonly Record<string, unknown>[]): RTCStatsReport {
   const values = new Map(records.map((record) => [String(record.id), record]));
   return values as unknown as RTCStatsReport;
+}
+
+function relayStats(gatewayIpv4: string): readonly Record<string, unknown>[] {
+  return [
+    {
+      id: "transport-1",
+      type: "transport",
+      selectedCandidatePairId: "pair-1",
+    },
+    {
+      id: "pair-1",
+      type: "candidate-pair",
+      state: "succeeded",
+      nominated: true,
+      localCandidateId: "local-1",
+      remoteCandidateId: "remote-1",
+      bytesSent: 12_345,
+      bytesReceived: 54_321,
+    },
+    {
+      id: "local-1",
+      type: "local-candidate",
+      candidateType: "relay",
+      protocol: "udp",
+      relayProtocol: "tls",
+      address: "127.0.0.1",
+    },
+    {
+      id: "remote-1",
+      type: "remote-candidate",
+      candidateType: "host",
+      protocol: "udp",
+      address: gatewayIpv4,
+    },
+  ];
 }
 
 function peer(
@@ -116,6 +156,26 @@ describe("RTC diagnostics", () => {
     expect(target.RTCPeerConnection).toBeDefined();
   });
 
+  it("accepts only canonical RFC1918 gateway addresses", () => {
+    for (const value of ["10.0.0.1", "172.16.0.1", "172.31.255.254", "192.168.4.1"]) {
+      expect(isCanonicalPrivateIpv4(value)).toBe(true);
+    }
+    for (const value of [
+      "",
+      "10.0.0.0",
+      "10.0.0.255",
+      "10.00.0.1",
+      "172.15.0.1",
+      "172.32.0.1",
+      "192.169.0.1",
+      "203.0.113.1",
+      "256.0.0.1",
+      null,
+    ]) {
+      expect(isCanonicalPrivateIpv4(value)).toBe(false);
+    }
+  });
+
   it("locks the pinned SmallWebRTC constructor to its one iceServers config", () => {
     const packageValue = JSON.parse(
       readFileSync(smallWebRtcPackagePath, "utf8")
@@ -143,6 +203,9 @@ describe("RTC diagnostics", () => {
       bundlePolicy: "max-bundle" as RTCBundlePolicy,
     });
     const diagnostics = installBrowserRtcDiagnostics("direct", target);
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+    ).toBeUndefined();
     const capturingConstructor = target.RTCPeerConnection;
 
     const connection = Reflect.construct(target.RTCPeerConnection, [config]);
@@ -152,9 +215,9 @@ describe("RTC diagnostics", () => {
     expect(observations[0]?.argumentsList).toHaveLength(1);
     expect(observations[0]?.argumentsList[0]).toBe(config);
     expect(observations[0]?.newTarget).toBe(capturingConstructor);
-    await expect(diagnostics.read()).resolves.toMatchObject({
-      peer_connection_count: 1,
-    });
+    const evidence = await diagnostics.read();
+    expect(evidence).toMatchObject({ peer_connection_count: 1 });
+    expect(Object.keys(evidence)).not.toContain("relay_policy_attested");
 
     diagnostics.restore();
     expect(target.RTCPeerConnection).toBe(native);
@@ -186,6 +249,7 @@ describe("RTC diagnostics", () => {
     );
     await expect(diagnostics.read()).resolves.toMatchObject({
       peer_connection_count: 1,
+      relay_policy_attested: true,
     });
 
     diagnostics.restore();
@@ -255,9 +319,175 @@ describe("RTC diagnostics", () => {
       expect(state.closeCount).toBe(1);
       await expect(diagnostics.read()).resolves.toMatchObject({
         peer_connection_count: 0,
+        relay_policy_attested: false,
       });
       diagnostics.restore();
     }
+  });
+
+  it("attests relay policy only for exactly one native-checked peer", async () => {
+    const { target } = constructorHarness();
+    const diagnostics = installBrowserRtcDiagnostics("relay-tls", target);
+
+    await expect(diagnostics.read()).resolves.toEqual({
+      ...emptyBrowserRtcEvidence(),
+      relay_policy_attested: false,
+    });
+    new target.RTCPeerConnection({ iceServers: [] });
+    await expect(diagnostics.read()).resolves.toMatchObject({
+      peer_connection_count: 1,
+      relay_policy_attested: true,
+    });
+    new target.RTCPeerConnection({ iceServers: [] });
+    await expect(diagnostics.read()).resolves.toMatchObject({
+      peer_connection_count: 2,
+      relay_policy_attested: false,
+    });
+
+    diagnostics.restore();
+  });
+
+  it("attests the live selected remote gateway without serializing its address", async () => {
+    const gatewayIpv4 = "172.28.0.1";
+    const stats = [...relayStats(gatewayIpv4)];
+    const { state, target } = constructorHarness(undefined, stats);
+    const diagnostics = installBrowserRtcDiagnostics("relay-tls", target);
+    new target.RTCPeerConnection({ iceServers: [] });
+
+    const descriptor = Object.getOwnPropertyDescriptor(
+      target,
+      RELAY_GATEWAY_ATTESTATION_GLOBAL
+    );
+    expect(descriptor).toMatchObject({
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+    expect(Object.keys(target)).not.toContain(RELAY_GATEWAY_ATTESTATION_GLOBAL);
+    const attest = descriptor?.value as (
+      expectedGatewayIpv4: string
+    ) => Promise<boolean>;
+    expect(typeof attest).toBe("function");
+
+    await expect(attest("172.28.00.1")).resolves.toBe(false);
+    expect(state.statsReadCount).toBe(0);
+    await expect(attest("172.28.0.2")).resolves.toBe(false);
+    await expect(attest(gatewayIpv4)).resolves.toBe(true);
+    const evidence = await diagnostics.read();
+    expect(JSON.stringify(evidence)).not.toContain(gatewayIpv4);
+    stats.push({
+      id: "transport-2",
+      type: "transport",
+      selectedCandidatePairId: "pair-2",
+    });
+    await expect(attest(gatewayIpv4)).resolves.toBe(false);
+
+    diagnostics.restore();
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+    ).toBeUndefined();
+    await expect(attest(gatewayIpv4)).resolves.toBe(false);
+    diagnostics.restore();
+    expect(target.RTCPeerConnection).toBeDefined();
+  });
+
+  it("rejects a preowned gateway API before replacing the native constructor", () => {
+    const { native, target } = constructorHarness();
+    const preowned = () => Promise.resolve(true);
+    Object.defineProperty(target, RELAY_GATEWAY_ATTESTATION_GLOBAL, {
+      configurable: true,
+      value: preowned,
+    });
+
+    expect(() => installBrowserRtcDiagnostics("relay-tls", target)).toThrow(
+      "Relay RTC gateway attestation API is incompatible"
+    );
+    expect(target.RTCPeerConnection).toBe(native);
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+        ?.value
+    ).toBe(preowned);
+    Reflect.deleteProperty(target, RELAY_GATEWAY_ATTESTATION_GLOBAL);
+  });
+
+  it("rolls back the constructor when the gateway API cannot be installed", () => {
+    const { native, target } = constructorHarness();
+    const rejectingTarget = new Proxy(target, {
+      defineProperty(owner, property, descriptor) {
+        return property === RELAY_GATEWAY_ATTESTATION_GLOBAL
+          ? false
+          : Reflect.defineProperty(owner, property, descriptor);
+      },
+    });
+
+    expect(() =>
+      installBrowserRtcDiagnostics("relay-tls", rejectingTarget)
+    ).toThrow("Relay RTC gateway attestation API is incompatible");
+    expect(target.RTCPeerConnection).toBe(native);
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+    ).toBeUndefined();
+  });
+
+  it("revokes its owned API without deleting a hostile replacement", async () => {
+    const gatewayIpv4 = "10.44.0.1";
+    const { native, target } = constructorHarness(undefined, relayStats(gatewayIpv4));
+    const diagnostics = installBrowserRtcDiagnostics("relay-tls", target);
+    new target.RTCPeerConnection({ iceServers: [] });
+    const owned = Object.getOwnPropertyDescriptor(
+      target,
+      RELAY_GATEWAY_ATTESTATION_GLOBAL
+    )?.value as (expectedGatewayIpv4: string) => Promise<boolean>;
+    await expect(owned(gatewayIpv4)).resolves.toBe(true);
+
+    const hostileReplacement = () => Promise.resolve(true);
+    Object.defineProperty(target, RELAY_GATEWAY_ATTESTATION_GLOBAL, {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: hostileReplacement,
+    });
+    diagnostics.restore();
+
+    expect(target.RTCPeerConnection).toBe(native);
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+        ?.value
+    ).toBe(hostileReplacement);
+    await expect(owned(gatewayIpv4)).resolves.toBe(false);
+    diagnostics.restore();
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+        ?.value
+    ).toBe(hostileReplacement);
+    Reflect.deleteProperty(target, RELAY_GATEWAY_ATTESTATION_GLOBAL);
+  });
+
+  it("cannot finish a gateway attestation after lifecycle revocation", async () => {
+    const gatewayIpv4 = "192.168.44.1";
+    const { target } = constructorHarness();
+    const diagnostics = installBrowserRtcDiagnostics("relay-tls", target);
+    const connection = new target.RTCPeerConnection({ iceServers: [] });
+    let resolveStats: ((value: RTCStatsReport) => void) | undefined;
+    Object.defineProperty(connection, "getStats", {
+      value: () =>
+        new Promise<RTCStatsReport>((resolve) => {
+          resolveStats = resolve;
+        }),
+    });
+    const attest = Object.getOwnPropertyDescriptor(
+      target,
+      RELAY_GATEWAY_ATTESTATION_GLOBAL
+    )?.value as (expectedGatewayIpv4: string) => Promise<boolean>;
+
+    const pending = attest(gatewayIpv4);
+    diagnostics.restore();
+    expect(resolveStats).toBeDefined();
+    resolveStats?.(report(relayStats(gatewayIpv4)));
+    await expect(pending).resolves.toBe(false);
+    expect(
+      Object.getOwnPropertyDescriptor(target, RELAY_GATEWAY_ATTESTATION_GLOBAL)
+    ).toBeUndefined();
   });
 
   it("preserves the first disabled observation when the same track is enabled", () => {
